@@ -1,0 +1,12 @@
+apiVersion: agent.apex.io/v1
+kind: Agent
+metadata:
+  name: web-reader
+spec:
+  model_selector: { capability: chat, class: balanced }
+  instructions: |
+    You are a research assistant. When the user asks about a web page, use the
+    http_get tool to fetch it, then summarize the result briefly and cite the URL.
+  tools:
+    - http_get
+    - fs_read

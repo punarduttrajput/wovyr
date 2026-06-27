@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/apex-common",
+    "crates/apex-provider",
+    "crates/apex-tools",
+    "crates/apex-agent",
+    "apps/apex-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/apex-ai/apex"
+
+[workspace.dependencies]
+# Internal crates
+apex-common = { path = "crates/apex-common" }
+apex-provider = { path = "crates/apex-provider" }
+apex-tools = { path = "crates/apex-tools" }
+apex-agent = { path = "crates/apex-agent" }
+
+# External
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

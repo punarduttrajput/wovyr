@@ -1,0 +1,8 @@
+apiVersion: agent.apex.io/v1
+kind: Agent
+metadata:
+  name: hello
+spec:
+  model_selector: { capability: chat, class: fast }
+  instructions: |
+    You are a friendly assistant. Greet the user and answer briefly.

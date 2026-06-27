@@ -1,0 +1,160 @@
+<!--
+File: docs/12-deployment/terraform.md
+Document ID: DEP-005
+-->
+
+# Terraform
+
+**Document ID:** DEP-005  
+**File Path:** `docs/12-deployment/terraform.md`  
+**Version:** 1.0.0  
+**Status:** Draft  
+**Owner:** Platform Operations Team  
+**Last Updated:** 2026-06-27
+
+---
+
+# 1. Purpose
+
+This document describes provisioning the **cloud infrastructure** for the Apex AI Platform with Terraform — the Kubernetes cluster, managed datastores, networking, and secrets that the [Helm](helm.md) release runs on.
+
+---
+
+# 2. Scope
+
+Terraform provisions the *infrastructure*; Helm deploys the *application*. The
+boundary:
+
+```text
+Terraform                         Helm
+─────────                         ────
+K8s cluster + node pools          Apex services
+Managed PostgreSQL                (consumes DB URL)
+Managed Redis                     (consumes Redis URL)
+Qdrant (managed/self-hosted)      Memory Engine config
+NATS / managed messaging          Event bus config
+Object storage bucket             Artifacts/archives
+DNS, TLS certs, ingress LB        Ingress
+Secrets manager + IAM             Secret references
+```
+
+---
+
+# 3. Module Structure
+
+```text
+infra/
+├── main.tf
+├── variables.tf
+├── outputs.tf
+└── modules/
+    ├── network/        # VPC, subnets, security groups
+    ├── kubernetes/     # cluster + node pools (incl. untrusted pool)
+    ├── postgres/       # managed PostgreSQL (primary + replica)
+    ├── redis/          # managed Redis
+    ├── qdrant/         # Qdrant cluster
+    ├── messaging/      # NATS / managed equivalent
+    ├── objectstore/    # S3-compatible bucket
+    └── secrets/        # secrets manager + IAM bindings
+```
+
+The provider is cloud-agnostic in shape; concrete modules target a specific cloud
+(AWS/GCP/Azure).
+
+---
+
+# 4. Node Pools
+
+The cluster module provisions separate pools matching the
+[tool-worker isolation](kubernetes.md#6-tool-worker-isolation) model:
+
+| Pool | Purpose | Notes |
+|------|---------|-------|
+| `system` | Control-plane services | General compute |
+| `services` | Stateless platform services | Autoscaled |
+| `untrusted` | Tool Runtime untrusted workers | Tainted; gVisor/Kata; isolated |
+| `gpu` (optional) | ML/heavy tools | GPU nodes |
+
+---
+
+# 5. Example (excerpt)
+
+```hcl
+module "kubernetes" {
+  source       = "./modules/kubernetes"
+  cluster_name = "apex-prod"
+  node_pools = {
+    services  = { min = 3, max = 30, machine = "standard-4" }
+    untrusted = { min = 1, max = 30, machine = "standard-4", taint = "apex.io/untrusted", runtime = "gvisor" }
+  }
+}
+
+module "postgres" {
+  source     = "./modules/postgres"
+  ha         = true
+  storage_gb = 200
+}
+
+output "db_url"    { value = module.postgres.connection_url, sensitive = true }
+output "bucket"    { value = module.objectstore.name }
+```
+
+Sensitive outputs (DB URL, keys) are written to the secrets manager and surfaced to
+Helm as [secret references](helm.md#5-secrets), never as plaintext values.
+
+---
+
+# 6. State & Workflow
+
+```bash
+terraform init      # remote backend (versioned, locked state)
+terraform plan -var-file=prod.tfvars
+terraform apply  -var-file=prod.tfvars
+```
+
+- Use a **remote, locked backend** for state.
+- Maintain per-environment var files (`dev.tfvars`, `prod.tfvars`).
+- Drive via CI with plan review before apply.
+
+---
+
+# 7. Secrets & IAM
+
+- A secrets manager (cloud-native or Vault) stores DB credentials, provider keys,
+  and signing keys.
+- Workloads receive scoped IAM identities (e.g. IRSA/workload identity) to read
+  only their secrets and object-store prefixes — least privilege.
+
+---
+
+# 8. Backups & DR
+
+- Managed PostgreSQL: automated backups + PITR; cross-region replica for DR.
+- Object storage: versioning + lifecycle rules.
+- Qdrant/Redis are rebuildable
+  ([Memory storage §9](../06-memory-engine/storage-architecture.md#9-reindex--recovery)),
+  reducing DR scope to the system of record.
+
+---
+
+# 9. Hand-off to Helm
+
+After `apply`, Terraform outputs feed the
+[Helm values](helm.md#4-values-excerpt) (cluster credentials, backend URLs as
+secret refs, bucket name), completing infra → application deployment.
+
+---
+
+# 10. Related Documents
+
+- [`12-deployment/helm.md`](helm.md)
+- [`12-deployment/kubernetes.md`](kubernetes.md)
+- [`02-architecture/deployment-architecture.md`](../02-architecture/deployment-architecture.md)
+
+---
+
+# 11. Revision History
+
+| Version | Date | Description |
+|---------|------|-------------|
+| 1.0.0 | 2026-06-27 | Initial Terraform deployment guide |

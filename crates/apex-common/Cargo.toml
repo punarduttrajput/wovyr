@@ -1,0 +1,13 @@
+[package]
+name = "apex-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Shared types, errors, and primitives for the Apex AI Platform."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

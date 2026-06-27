@@ -1,0 +1,252 @@
+//! The agent run loop.
+//!
+//! Implements the core loop from the
+//! [Agent Runtime spec §14](../../docs/03-workflow-engine/agent-runtime.md):
+//! the model is called; if it requests tools, they are executed and their results
+//! fed back; this repeats until the model returns a final answer or a step budget
+//! is exhausted.
+
+use crate::definition::AgentDefinition;
+use crate::events::{RunEvent, RunEventSink};
+use apex_common::{Error, Result, Usage};
+use apex_provider::{ChatRequest, Gateway, Message, ToolSpec};
+use apex_tools::{ToolContext, ToolRegistry, ToolRequest};
+use serde_json::Value;
+
+/// Default cap on model/tool iterations to prevent runaway loops.
+const DEFAULT_MAX_STEPS: usize = 8;
+
+/// Options for a single agent run.
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    /// Run input as JSON. An object with a string `message` field is used as the
+    /// user turn; otherwise the raw JSON is passed through.
+    pub input: Value,
+    /// Maximum model/tool iterations.
+    pub max_steps: usize,
+}
+
+impl RunOptions {
+    /// Construct options with the default step budget.
+    pub fn new(input: Value) -> Self {
+        Self {
+            input,
+            max_steps: DEFAULT_MAX_STEPS,
+        }
+    }
+}
+
+/// The result of an agent run.
+#[derive(Debug, Clone)]
+pub struct AgentOutput {
+    /// Final assistant text.
+    pub text: String,
+    /// Cumulative token/cost usage across all model calls.
+    pub usage: Usage,
+    /// Number of model calls made.
+    pub steps: usize,
+}
+
+/// Extract the user-facing prompt from the run input.
+fn user_prompt(input: &Value) -> String {
+    match input {
+        Value::Object(map) => match map.get("message").and_then(Value::as_str) {
+            Some(s) => s.to_string(),
+            None => input.to_string(),
+        },
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Build the tool specs advertised to the model from the agent's allowed tools.
+///
+/// Fails closed: an agent referencing a tool that isn't registered is a
+/// configuration error rather than a silently-dropped capability.
+fn resolve_tools(def: &AgentDefinition, registry: &ToolRegistry) -> Result<Vec<ToolSpec>> {
+    let mut specs = Vec::new();
+    for id in &def.spec.tools {
+        let tool = registry
+            .get(id)
+            .ok_or_else(|| Error::config(format!("agent references unknown tool `{id}`")))?;
+        let meta = tool.metadata();
+        specs.push(ToolSpec {
+            name: meta.id,
+            description: meta.description,
+            parameters: tool.input_schema(),
+        });
+    }
+    Ok(specs)
+}
+
+/// Run an agent to completion against the given gateway and tool registry.
+pub async fn run_agent(
+    def: &AgentDefinition,
+    gateway: &Gateway,
+    registry: &ToolRegistry,
+    opts: RunOptions,
+    sink: &mut dyn RunEventSink,
+) -> Result<AgentOutput> {
+    let model = gateway.resolve_model(def.spec.model.as_deref(), &def.selector());
+    let provider = gateway.provider_name().to_string();
+    sink.emit(RunEvent::Start {
+        model: &model,
+        provider: &provider,
+    });
+
+    let tools = resolve_tools(def, registry)?;
+
+    let mut messages = vec![
+        Message::system(def.spec.instructions.clone()),
+        Message::user(user_prompt(&opts.input)),
+    ];
+
+    let mut usage = Usage::default();
+    let mut final_text = String::new();
+    let mut steps = 0usize;
+
+    for step in 0..opts.max_steps {
+        let mut request = ChatRequest::new(model.clone(), messages.clone());
+        request.temperature = def.spec.temperature;
+        request.max_tokens = def.spec.max_tokens;
+        request.tools = tools.clone();
+
+        let response = gateway.chat(request).await?;
+        usage.add(response.usage);
+        steps += 1;
+
+        // No tool calls → the model produced a final answer.
+        if response.message.tool_calls.is_empty() {
+            final_text = response.message.content.clone().unwrap_or_default();
+            sink.emit(RunEvent::Delta { text: &final_text });
+            break;
+        }
+
+        // Record the assistant's tool-calling turn, then execute each call.
+        let tool_calls = response.message.tool_calls.clone();
+        messages.push(response.message);
+
+        for (idx, call) in tool_calls.iter().enumerate() {
+            sink.emit(RunEvent::ToolCall {
+                name: &call.name,
+                arguments: &call.arguments,
+            });
+
+            let result_text = execute_tool_call(def, registry, &model, step, idx, call, sink).await;
+
+            messages.push(Message::tool_result(&call.id, &call.name, result_text));
+        }
+    }
+
+    if steps == opts.max_steps && final_text.is_empty() {
+        return Err(Error::Runtime(format!(
+            "agent did not finish within {} steps",
+            opts.max_steps
+        )));
+    }
+
+    sink.emit(RunEvent::Done { usage });
+    Ok(AgentOutput {
+        text: final_text,
+        usage,
+        steps,
+    })
+}
+
+/// Execute a single tool call and return a string result suitable to feed back to
+/// the model. Errors are returned (not propagated) so the model can react to them.
+async fn execute_tool_call(
+    def: &AgentDefinition,
+    registry: &ToolRegistry,
+    model: &str,
+    step: usize,
+    idx: usize,
+    call: &apex_provider::ToolCall,
+    sink: &mut dyn RunEventSink,
+) -> String {
+    let _ = model;
+    let tool = match registry.get(&call.name) {
+        Some(t) => t,
+        None => {
+            sink.emit(RunEvent::ToolResult {
+                name: &call.name,
+                ok: false,
+            });
+            return format!("error: tool `{}` is not available", call.name);
+        }
+    };
+
+    let parameters: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+    // Deterministic execution id: no clocks or randomness in core logic.
+    let ctx = ToolContext {
+        execution_id: format!("{}-s{step}-t{idx}", def.metadata.name),
+        agent_id: def.metadata.name.clone(),
+        workdir: ".".to_string(),
+    };
+
+    match tool.execute(&ctx, ToolRequest::new(parameters)).await {
+        Ok(resp) => {
+            sink.emit(RunEvent::ToolResult {
+                name: &call.name,
+                ok: resp.success,
+            });
+            resp.payload.to_string()
+        }
+        Err(e) => {
+            sink.emit(RunEvent::ToolResult {
+                name: &call.name,
+                ok: false,
+            });
+            format!("error: {e}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::NullSink;
+    use apex_provider::{Gateway, MockProvider};
+    use serde_json::json;
+
+    fn hello_def() -> AgentDefinition {
+        AgentDefinition::from_yaml(
+            "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn runs_to_completion_with_mock() {
+        let def = hello_def();
+        let gw = Gateway::new(Box::new(MockProvider::new()));
+        let reg = ToolRegistry::with_builtins();
+        let out = run_agent(
+            &def,
+            &gw,
+            &reg,
+            RunOptions::new(json!({"message": "hi there"})),
+            &mut NullSink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.steps, 1);
+        assert!(out.text.contains("hi there"));
+        assert!(out.usage.total_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_config_error() {
+        let def = AgentDefinition::from_yaml(
+            "metadata:\n  name: x\nspec:\n  instructions: hi\n  tools: [does_not_exist]\n",
+        )
+        .unwrap();
+        let gw = Gateway::new(Box::new(MockProvider::new()));
+        let reg = ToolRegistry::with_builtins();
+        let err = run_agent(&def, &gw, &reg, RunOptions::new(json!("hi")), &mut NullSink)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+}
