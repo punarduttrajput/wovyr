@@ -24,7 +24,11 @@ pub enum RunEvent<'a> {
 }
 
 /// Receiver of [`RunEvent`]s.
-pub trait RunEventSink {
+///
+/// `Send` is required because the run loop holds a sink across `.await` points;
+/// keeping it `Send` lets `run_agent` be driven from `Send` futures (e.g. an
+/// Axum request handler in [`apex-server`]).
+pub trait RunEventSink: Send {
     /// Handle one event. Implementations should be cheap and non-blocking.
     fn emit(&mut self, event: RunEvent<'_>);
 }

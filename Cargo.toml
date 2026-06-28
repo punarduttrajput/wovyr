@@ -5,6 +5,10 @@ members = [
     "crates/apex-provider",
     "crates/apex-tools",
     "crates/apex-agent",
+    "crates/apex-workflow",
+    "crates/apex-memory",
+    "crates/apex-telemetry",
+    "crates/apex-server",
     "apps/apex-cli",
 ]
 
@@ -21,9 +25,14 @@ apex-common = { path = "crates/apex-common" }
 apex-provider = { path = "crates/apex-provider" }
 apex-tools = { path = "crates/apex-tools" }
 apex-agent = { path = "crates/apex-agent" }
+apex-workflow = { path = "crates/apex-workflow" }
+apex-memory = { path = "crates/apex-memory" }
+apex-telemetry = { path = "crates/apex-telemetry" }
+apex-server = { path = "crates/apex-server" }
 
 # External
 tokio = { version = "1", features = ["full"] }
+axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

@@ -1,0 +1,21 @@
+apiVersion: workflow.apex.io/v1
+kind: Workflow
+metadata:
+  name: greet-and-fetch
+  version: 1.0.0
+spec:
+  retry:
+    maxAttempts: 3
+    strategy: exponential
+    initialDelayMs: 200
+    maxDelayMs: 5000
+  activities:
+    - id: greet
+      type: function
+      inputs: { message: "starting workflow" }
+    - id: echo
+      type: tool
+      name: echo
+      inputs: { note: "hello from a workflow activity" }
+  transitions:
+    - { from: greet, to: echo }

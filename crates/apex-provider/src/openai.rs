@@ -7,6 +7,7 @@
 //! The base URL and key come from the environment, keeping credentials out of
 //! code ([coding standards §9](../../docs/19-implementation-guide/coding-standards.md)).
 
+use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
 use crate::provider::AIProvider;
 use crate::types::{ChatRequest, ChatResponse, Message, Role, ToolCall};
 use apex_common::{Error, Result, Usage};
@@ -145,13 +146,92 @@ impl AIProvider for OpenAiProvider {
                 .pointer("/error/message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            return Err(Error::provider(format!(
-                "provider returned {status}: {msg}"
-            )));
+            return Err(classify_http_error(status.as_u16(), msg));
         }
 
         parse_response(&payload, &request.model)
     }
+
+    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
+        let body = json!({ "model": request.model, "input": request.input });
+        let url = format!("{}/embeddings", self.base_url);
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::provider(format!("request to {url} failed: {e}")))?;
+
+        let status = resp.status();
+        let payload: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::provider(format!("decoding response failed: {e}")))?;
+
+        if !status.is_success() {
+            let msg = payload
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(classify_http_error(status.as_u16(), msg));
+        }
+
+        parse_embeddings(&payload, &request.model)
+    }
+}
+
+/// Map an HTTP error status to the right error kind for the resilience layer:
+/// 429 and 5xx are transient ([`Error::Provider`], retry/failover); other 4xx are
+/// permanent client errors ([`Error::Invalid`])
+/// ([resilience §8](../../docs/05-llm-gateway/resilience.md)).
+fn classify_http_error(status: u16, msg: &str) -> Error {
+    if status == 429 || status >= 500 {
+        Error::provider(format!("provider returned {status}: {msg}"))
+    } else {
+        Error::invalid(format!("provider returned {status}: {msg}"))
+    }
+}
+
+/// Parse an OpenAI-shaped embeddings payload into an [`EmbeddingResponse`].
+fn parse_embeddings(payload: &Value, requested_model: &str) -> Result<EmbeddingResponse> {
+    let data = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::provider("embeddings response had no data array"))?;
+
+    let vectors = data
+        .iter()
+        .map(|item| {
+            item.get("embedding")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|n| n.as_f64().map(|f| f as f32))
+                        .collect()
+                })
+                .ok_or_else(|| Error::provider("embeddings item had no embedding array"))
+        })
+        .collect::<Result<Vec<Vec<f32>>>>()?;
+
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(requested_model)
+        .to_string();
+
+    let prompt_tokens = payload
+        .pointer("/usage/prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+
+    Ok(EmbeddingResponse {
+        model,
+        vectors,
+        usage: Usage::new(prompt_tokens, 0, 0.0),
+    })
 }
 
 /// Parse an OpenAI-shaped completion payload into a [`ChatResponse`].
@@ -267,5 +347,52 @@ mod tests {
         assert_eq!(r.finish_reason, "tool_calls");
         assert_eq!(r.message.tool_calls.len(), 1);
         assert_eq!(r.message.tool_calls[0].name, "echo");
+    }
+
+    #[test]
+    fn encodes_assistant_tool_call_with_null_content() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "echo".to_string(),
+                arguments: "{\"x\":1}".to_string(),
+            }],
+            tool_call_id: None,
+            name: None,
+        };
+        let v = OpenAiProvider::encode_message(&msg);
+        assert_eq!(v["role"], "assistant");
+        assert!(v["content"].is_null());
+        assert_eq!(v["tool_calls"][0]["type"], "function");
+        assert_eq!(v["tool_calls"][0]["function"]["name"], "echo");
+    }
+
+    #[test]
+    fn encodes_tool_result_message() {
+        let msg = Message::tool_result("call_1", "echo", "{\"ok\":true}");
+        let v = OpenAiProvider::encode_message(&msg);
+        assert_eq!(v["role"], "tool");
+        assert_eq!(v["tool_call_id"], "call_1");
+        assert_eq!(v["name"], "echo");
+        assert_eq!(v["content"], "{\"ok\":true}");
+    }
+
+    #[test]
+    fn parses_embeddings() {
+        let payload = json!({
+            "model": "text-embedding-3-small",
+            "data": [
+                { "embedding": [0.1, 0.2, 0.3] },
+                { "embedding": [0.4, 0.5, 0.6] }
+            ],
+            "usage": { "prompt_tokens": 7 }
+        });
+        let r = parse_embeddings(&payload, "requested").unwrap();
+        assert_eq!(r.model, "text-embedding-3-small");
+        assert_eq!(r.vectors.len(), 2);
+        assert_eq!(r.vectors[0], vec![0.1f32, 0.2, 0.3]);
+        assert_eq!(r.usage.prompt_tokens, 7);
     }
 }

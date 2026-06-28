@@ -1,0 +1,12 @@
+[package]
+name = "apex-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Observability baseline: a Prometheus metrics registry and structured logging."
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["json"] }

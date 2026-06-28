@@ -1,7 +1,7 @@
 # Task runner for the Apex AI Platform.
 # See docs/19-implementation-guide/build-system.md.
 
-.PHONY: build test lint fmt run-hello clean
+.PHONY: build test lint fmt run-hello docker-build docker-run-hello clean
 
 build:
 	cargo build --workspace
@@ -20,6 +20,16 @@ fmt:
 # OPENAI_API_KEY is set). See docs/16-examples/hello-agent.md.
 run-hello:
 	cargo run -p apex-cli -- agents run --local \
+		-f examples/agents/hello.yaml \
+		--input '{"message":"Hi, who are you?"}' --stream
+
+# Build the single-binary dev image (see deployment/docker/Dockerfile).
+docker-build:
+	docker build -f deployment/docker/Dockerfile -t apex:dev .
+
+# Run the hello agent inside the dev image (offline mock provider).
+docker-run-hello: docker-build
+	docker run --rm apex:dev agents run --local \
 		-f examples/agents/hello.yaml \
 		--input '{"message":"Hi, who are you?"}' --stream
 

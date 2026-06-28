@@ -1,0 +1,12 @@
+apiVersion: agent.apex.io/v1
+kind: Agent
+metadata:
+  name: shell-runner
+spec:
+  model_selector: { capability: chat, class: balanced }
+  instructions: |
+    You are an automation assistant. Use the shell tool to run commands the user
+    asks for, then report the output. Only run safe, read-only commands.
+  tools:
+    - shell
+    - fs_read

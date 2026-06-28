@@ -1,0 +1,27 @@
+apiVersion: workflow.apex.io/v1
+kind: Workflow
+metadata:
+  name: saga-order
+  version: 1.0.0
+spec:
+  # A saga: if `ship` fails, the engine rolls back completed steps in reverse
+  # order by running their `compensate` handlers (refund, then release).
+  activities:
+    - id: reserve
+      type: function
+      inputs: { item: widget }
+      compensate: release
+    - id: charge
+      type: function
+      inputs: { amount: 4200 }
+      compensate: refund
+    - id: ship
+      type: function
+      inputs: { carrier: acme }
+    - id: release
+      type: function
+    - id: refund
+      type: function
+  transitions:
+    - { from: reserve, to: charge }
+    - { from: charge, to: ship }

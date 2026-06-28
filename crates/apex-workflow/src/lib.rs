@@ -1,0 +1,31 @@
+//! Durable workflow engine.
+//!
+//! Implements the v0.2 core of the
+//! [Workflow Engine](../../docs/03-workflow-engine/overview.md): workflows are
+//! executed as **durable, event-sourced state machines**
+//! ([execution model](../../docs/03-workflow-engine/execution-model.md)). Progress
+//! survives process restarts via [checkpointing](../../docs/03-workflow-engine/checkpointing-specification.md),
+//! and transient activity failures are recovered by the
+//! [retry engine](../../docs/03-workflow-engine/retry-engine.md).
+//!
+//! v0.2 slice scope: a [`Definition`] (YAML DSL) compiled and validated into a DAG,
+//! a deterministic scheduler ([`Engine`]) that runs ready activities, per-activity
+//! retry, and durable [`store`]s (in-memory + file). Activity work is pluggable via
+//! the [`ActivityExecutor`] trait. **Deferred:** compensation, parallel/distributed
+//! workers, waiting states (timer/human/event), and Postgres-backed persistence.
+
+mod definition;
+mod engine;
+mod event;
+mod executor;
+mod retry;
+mod state;
+mod store;
+
+pub use definition::{ActivityDef, Definition};
+pub use engine::{Engine, ExecutionState, RunOutcome};
+pub use event::WorkflowEvent;
+pub use executor::{ActivityContext, ActivityError, ActivityExecutor, ClosureExecutor};
+pub use retry::{RetryPolicy, RetryStrategy};
+pub use state::{ActivityState, WorkflowState};
+pub use store::{CheckpointStore, EventLog, FileStore, InMemoryStore};

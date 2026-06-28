@@ -1,19 +1,18 @@
 [package]
-name = "apex-provider"
+name = "apex-memory"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Provider SDK and LLM gateway: a vendor-neutral chat interface for the Apex AI Platform."
+description = "Memory engine: durable storage with hybrid (vector + keyword) retrieval and ranking."
 
 [dependencies]
 apex-common.workspace = true
+apex-provider.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 async-trait.workspace = true
-reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

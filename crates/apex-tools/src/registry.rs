@@ -27,6 +27,7 @@ impl ToolRegistry {
         r.register(Arc::new(crate::builtin::EchoTool));
         r.register(Arc::new(crate::builtin::FsReadTool));
         r.register(Arc::new(crate::builtin::HttpGetTool::new()));
+        r.register(Arc::new(crate::builtin::ShellTool));
         r
     }
 
@@ -62,6 +63,7 @@ mod tests {
         assert!(r.contains("echo"));
         assert!(r.contains("fs_read"));
         assert!(r.contains("http_get"));
-        assert_eq!(r.ids().len(), 3);
+        assert!(r.contains("shell"));
+        assert_eq!(r.ids().len(), 4);
     }
 }

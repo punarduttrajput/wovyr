@@ -1,7 +1,8 @@
 //! The core provider trait.
 
+use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
 use crate::types::{ChatRequest, ChatResponse};
-use apex_common::Result;
+use apex_common::{Error, Result};
 use async_trait::async_trait;
 
 /// A vendor-neutral LLM provider.
@@ -17,4 +18,15 @@ pub trait AIProvider: Send + Sync {
 
     /// Execute a chat completion, returning the assistant message and usage.
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse>;
+
+    /// Embed one or more texts.
+    ///
+    /// Defaults to an "unsupported" error so providers that only do chat need not
+    /// implement it; embedding-capable providers override this.
+    async fn embed(&self, _request: EmbeddingRequest) -> Result<EmbeddingResponse> {
+        Err(Error::provider(format!(
+            "provider `{}` does not support embeddings",
+            self.name()
+        )))
+    }
 }

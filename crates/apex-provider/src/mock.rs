@@ -6,6 +6,7 @@
 //! gives tests a deterministic model. Determinism is a coding-standard
 //! requirement ([§7](../../docs/19-implementation-guide/coding-standards.md)).
 
+use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
 use crate::provider::AIProvider;
 use crate::types::{ChatRequest, ChatResponse, Message, Role};
 use apex_common::{Result, Usage};
@@ -13,6 +14,9 @@ use async_trait::async_trait;
 
 /// Rough $/token figure used only to populate the cost field for mock runs.
 const MOCK_USD_PER_TOKEN: f64 = 0.000_000_5;
+
+/// Dimensionality of mock embedding vectors.
+const MOCK_EMBED_DIM: usize = 16;
 
 /// A provider that synthesizes a plausible reply without any network call.
 #[derive(Debug, Default, Clone)]
@@ -85,6 +89,41 @@ impl AIProvider for MockProvider {
             finish_reason: "stop".to_string(),
         })
     }
+
+    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
+        let vectors: Vec<Vec<f32>> = request.input.iter().map(|t| mock_embedding(t)).collect();
+        let prompt_tokens = request
+            .input
+            .iter()
+            .map(|t| estimate_tokens(t))
+            .sum::<u32>();
+        let cost = prompt_tokens as f64 * MOCK_USD_PER_TOKEN;
+        Ok(EmbeddingResponse {
+            model: request.model,
+            vectors,
+            usage: Usage::new(prompt_tokens, 0, cost),
+        })
+    }
+}
+
+/// Produce a deterministic, unit-length pseudo-embedding for `text`.
+///
+/// Not semantically meaningful — it only needs to be stable (same text → same
+/// vector) and distinct enough for tests. Real semantics come from a model
+/// provider; this keeps embedding-dependent code testable offline.
+fn mock_embedding(text: &str) -> Vec<f32> {
+    let mut v = vec![0.0f32; MOCK_EMBED_DIM];
+    for (j, byte) in text.bytes().enumerate() {
+        let idx = j % MOCK_EMBED_DIM;
+        v[idx] += ((byte as f32) * (idx as f32 + 1.0)).sin();
+    }
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in &mut v {
+            *x /= norm;
+        }
+    }
+    v
 }
 
 #[cfg(test)]
@@ -108,5 +147,24 @@ mod tests {
         assert!(a.message.content.unwrap().contains("hi there"));
         assert!(a.usage.total_tokens > 0);
         assert_eq!(a.finish_reason, "stop");
+    }
+
+    #[tokio::test]
+    async fn embeds_deterministically() {
+        use crate::embeddings::cosine_similarity;
+
+        let p = MockProvider::new();
+        let req = EmbeddingRequest::new("mock-embed", vec!["alpha".into(), "beta".into()]);
+        let a = p.embed(req.clone()).await.unwrap();
+        let b = p.embed(req).await.unwrap();
+
+        assert_eq!(a.vectors.len(), 2);
+        assert_eq!(a.vectors[0].len(), MOCK_EMBED_DIM);
+        // Deterministic: same input → identical vectors.
+        assert_eq!(a.vectors, b.vectors);
+        // Each vector is unit length, so self-similarity is ~1.
+        assert!((cosine_similarity(&a.vectors[0], &a.vectors[0]) - 1.0).abs() < 1e-5);
+        // Distinct inputs generally produce distinct vectors.
+        assert_ne!(a.vectors[0], a.vectors[1]);
     }
 }

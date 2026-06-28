@@ -319,9 +319,13 @@ The documentation is organized into the following sections:
 
 Current Phase
 
-v0.1 Foundations — in progress. The first runnable vertical slice exists: a Cargo
-workspace with an agent runtime, LLM gateway (mock + OpenAI-compatible), tool
-runtime (`echo`/`fs_read`/`http_get`), and the `apex` CLI.
+v0.1 Foundations complete; **v0.2 (durability) in progress**. A Cargo workspace
+implements: an agent runtime, an LLM gateway (chat + embeddings, mock +
+OpenAI-compatible), a tool runtime (`echo`/`fs_read`/`http_get`/`shell` over a
+native-process sandbox), a **durable workflow engine** (event-sourced DAG with
+checkpointing, retry, resume, and saga **compensation**), a **memory engine**
+(hybrid vector + keyword retrieval with ranking), a single-node HTTP server, and the
+`apex` CLI (`login`/`dev`/`agents run`/`workflows run`/`memory`).
 
 Current Version
 
@@ -339,6 +343,21 @@ cargo test --workspace
 cargo run -p apex-cli -- agents run --local \
   -f examples/agents/hello.yaml \
   --input '{"message":"Hi, who are you?"}' --stream
+
+# Or run against a single-node server:
+cargo run -p apex-cli -- dev &                       # start the server
+cargo run -p apex-cli -- agents run --server http://127.0.0.1:8080 \
+  -f examples/agents/hello.yaml --input '{"message":"Hi"}'
+
+# Run a durable workflow (event-sourced DAG with checkpoints + retry):
+cargo run -p apex-cli -- workflows run --local -f examples/workflows/greet-and-fetch.yaml
+
+# Saga rollback: a failing step triggers reverse-order compensation:
+cargo run -p apex-cli -- workflows run --local -f examples/workflows/saga-order.yaml
+
+# Store and query memory (hybrid retrieval, persisted under ~/.apex/memory):
+cargo run -p apex-cli -- memory put --namespace kb --content "Refund window is 30 days." --importance 0.9
+cargo run -p apex-cli -- memory query "refund policy" --namespace kb
 ```
 
 See [`docs/16-examples/hello-agent.md`](docs/16-examples/hello-agent.md) and

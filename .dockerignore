@@ -1,0 +1,8 @@
+# Keep the build context small and the image clean.
+/target
+.git
+.github
+docs
+*.md
+.env
+*.local

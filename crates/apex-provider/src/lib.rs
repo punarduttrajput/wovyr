@@ -9,14 +9,20 @@
 //! and an OpenAI-compatible [`OpenAiProvider`]. Routing is handled by the
 //! [`Gateway`], which resolves a [`ModelSelector`] to a concrete model.
 
+mod embeddings;
 mod gateway;
 mod mock;
 mod openai;
 mod provider;
+mod resilience;
 mod types;
 
+pub use embeddings::{EmbeddingRequest, EmbeddingResponse, cosine_similarity};
 pub use gateway::{Gateway, ModelSelector};
 pub use mock::MockProvider;
 pub use openai::OpenAiProvider;
 pub use provider::AIProvider;
+pub use resilience::{
+    BreakerConfig, CacheConfig, CacheMode, CircuitBreaker, CostEvent, CostObserver, RetryConfig,
+};
 pub use types::{ChatRequest, ChatResponse, Message, Role, ToolCall, ToolSpec};

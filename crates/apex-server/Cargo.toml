@@ -1,21 +1,24 @@
 [package]
-name = "apex-agent"
+name = "apex-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Agent definition and minimal agent run loop for the Apex AI Platform."
+description = "Single-node HTTP server exposing the Apex Platform API (v0.1: agent runs)."
 
 [dependencies]
 apex-common.workspace = true
 apex-provider.workspace = true
 apex-tools.workspace = true
+apex-agent.workspace = true
+apex-telemetry.workspace = true
+axum.workspace = true
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-async-trait.workspace = true
+tower = { version = "0.5", features = ["util"] }
