@@ -26,11 +26,23 @@ struct Inner {
     histograms: BTreeMap<String, BTreeMap<String, Hist>>,
 }
 
+/// An OpenMetrics exemplar: a sample value tagged with the trace it came from, so a
+/// latency bucket links back to a representative trace
+/// ([metrics §8](../../docs/14-observability/metrics.md)).
+#[derive(Clone)]
+struct Exemplar {
+    trace_id: String,
+    value: f64,
+    timestamp_s: f64,
+}
+
 struct Hist {
     /// Upper bounds; the implicit final bucket is `+Inf`.
     bounds: Vec<f64>,
     /// Per-bucket counts (length `bounds.len() + 1`; last is `+Inf`).
     counts: Vec<u64>,
+    /// Most recent exemplar per bucket (same length as `counts`).
+    exemplars: Vec<Option<Exemplar>>,
     sum: f64,
     count: u64,
 }
@@ -40,12 +52,13 @@ impl Hist {
         Self {
             bounds: bounds.to_vec(),
             counts: vec![0; bounds.len() + 1],
+            exemplars: vec![None; bounds.len() + 1],
             sum: 0.0,
             count: 0,
         }
     }
 
-    fn observe(&mut self, value: f64) {
+    fn observe(&mut self, value: f64, exemplar: Option<Exemplar>) {
         let idx = self
             .bounds
             .iter()
@@ -54,6 +67,10 @@ impl Hist {
         self.counts[idx] += 1;
         self.sum += value;
         self.count += 1;
+        // Keep the latest exemplar for the bucket this sample fell into.
+        if exemplar.is_some() {
+            self.exemplars[idx] = exemplar;
+        }
     }
 }
 
@@ -80,8 +97,26 @@ impl Metrics {
         self.counter_add(name, labels, 1.0);
     }
 
-    /// Observe a value into a histogram (using the default seconds buckets).
+    /// Observe a value into a histogram (using the default seconds buckets),
+    /// attaching a trace exemplar from the current span when one is active.
     pub fn histogram_observe(&self, name: &str, labels: &[(&str, &str)], value: f64) {
+        self.histogram_observe_with_trace(name, labels, value, current_trace_id().as_deref());
+    }
+
+    /// Like [`Self::histogram_observe`] but with an explicit `trace_id` exemplar
+    /// (`None` records no exemplar). Used when the caller knows the trace context.
+    pub fn histogram_observe_with_trace(
+        &self,
+        name: &str,
+        labels: &[(&str, &str)],
+        value: f64,
+        trace_id: Option<&str>,
+    ) {
+        let exemplar = trace_id.map(|tid| Exemplar {
+            trace_id: tid.to_string(),
+            value,
+            timestamp_s: unix_seconds(),
+        });
         let key = render_labels(labels);
         let mut inner = self.inner.lock().expect("metrics mutex poisoned");
         inner
@@ -90,7 +125,7 @@ impl Metrics {
             .or_default()
             .entry(key)
             .or_insert_with(|| Hist::new(DEFAULT_SECONDS_BUCKETS))
-            .observe(value);
+            .observe(value, exemplar);
     }
 
     /// Render the registry in Prometheus text exposition format.
@@ -128,6 +163,82 @@ impl Metrics {
 
         out
     }
+
+    /// Render in **OpenMetrics** text format — like [`Self::render_prometheus`] but
+    /// histogram bucket lines carry trace **exemplars** and the body ends with the
+    /// required `# EOF` ([metrics §8](../../docs/14-observability/metrics.md)). Serve
+    /// with content type `application/openmetrics-text`.
+    pub fn render_openmetrics(&self) -> String {
+        let inner = self.inner.lock().expect("metrics mutex poisoned");
+        let mut out = String::new();
+
+        for (name, series) in &inner.counters {
+            out.push_str(&format!("# TYPE {name} counter\n"));
+            for (labels, value) in series {
+                out.push_str(&format!("{name}{labels} {}\n", trim_float(*value)));
+            }
+        }
+
+        for (name, series) in &inner.histograms {
+            out.push_str(&format!("# TYPE {name} histogram\n"));
+            for (labels, hist) in series {
+                let mut cumulative = 0u64;
+                for i in 0..=hist.bounds.len() {
+                    cumulative += hist.counts[i];
+                    let le = if i < hist.bounds.len() {
+                        trim_float(hist.bounds[i])
+                    } else {
+                        "+Inf".to_string()
+                    };
+                    let line = format!(
+                        "{name}_bucket{} {cumulative}",
+                        with_label(labels, "le", &le)
+                    );
+                    out.push_str(&line);
+                    if let Some(ex) = &hist.exemplars[i] {
+                        // OpenMetrics exemplar: ` # {trace_id="…"} <value> <timestamp>`.
+                        out.push_str(&format!(
+                            " # {{trace_id=\"{}\"}} {} {}",
+                            escape(&ex.trace_id),
+                            trim_float(ex.value),
+                            trim_float(ex.timestamp_s)
+                        ));
+                    }
+                    out.push('\n');
+                }
+                out.push_str(&format!("{name}_sum{labels} {}\n", trim_float(hist.sum)));
+                out.push_str(&format!("{name}_count{labels} {}\n", hist.count));
+            }
+        }
+
+        out.push_str("# EOF\n");
+        out
+    }
+}
+
+/// Current span's trace id (32-hex) when OTLP tracing is active, else `None`.
+#[cfg(feature = "otlp")]
+fn current_trace_id() -> Option<String> {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let context = tracing::Span::current().context();
+    let span = context.span();
+    let sc = span.span_context();
+    sc.is_valid().then(|| sc.trace_id().to_string())
+}
+
+#[cfg(not(feature = "otlp"))]
+fn current_trace_id() -> Option<String> {
+    None
+}
+
+/// Seconds since the Unix epoch (for exemplar timestamps).
+fn unix_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Render a label set as `{k="v",k2="v2"}` (sorted by key), or `""` if empty.
@@ -224,5 +335,45 @@ mod tests {
         let m2 = m.clone();
         m2.counter_add("apex_llm_cost_usd_total", &[("model", "x")], 0.5);
         assert!(m.render_prometheus().contains("apex_llm_cost_usd_total"));
+    }
+
+    #[test]
+    fn openmetrics_attaches_exemplar_to_the_observed_bucket() {
+        let m = Metrics::new();
+        m.histogram_observe_with_trace(
+            "apex_api_request_duration_seconds",
+            &[("route", "run")],
+            0.03,
+            Some("abc123def456"),
+        );
+        let out = m.render_openmetrics();
+
+        // The exemplar rides the bucket the sample fell into (0.05), not earlier ones.
+        let bucket_line = out
+            .lines()
+            .find(|l| l.contains(r#"le="0.05""#))
+            .expect("0.05 bucket line");
+        assert!(
+            bucket_line.contains(r#"# {trace_id="abc123def456"} 0.03"#),
+            "exemplar missing on observed bucket: {bucket_line}"
+        );
+        // An earlier (empty) bucket carries no exemplar.
+        let empty_bucket = out
+            .lines()
+            .find(|l| l.contains(r#"le="0.025""#))
+            .expect("0.025 bucket line");
+        assert!(!empty_bucket.contains("trace_id"), "got: {empty_bucket}");
+        // OpenMetrics requires the EOF terminator.
+        assert!(out.trim_end().ends_with("# EOF"), "got:\n{out}");
+    }
+
+    #[test]
+    fn no_exemplar_without_trace_context() {
+        let m = Metrics::new();
+        m.histogram_observe_with_trace("apex_api_request_duration_seconds", &[], 0.03, None);
+        let out = m.render_openmetrics();
+        assert!(!out.contains("trace_id"), "no trace → no exemplar:\n{out}");
+        // Classic Prometheus render is unchanged (no exemplars, no EOF).
+        assert!(!m.render_prometheus().contains("# EOF"));
     }
 }

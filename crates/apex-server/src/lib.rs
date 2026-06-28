@@ -19,7 +19,7 @@ use apex_tools::ToolRegistry;
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -97,9 +97,33 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Prometheus metrics endpoint ([metrics §2](../../docs/14-observability/metrics.md)).
-async fn metrics_handler(State(state): State<Arc<AppState>>) -> String {
-    state.metrics.render_prometheus()
+/// Metrics endpoint ([metrics §2](../../docs/14-observability/metrics.md)). Serves
+/// **OpenMetrics** (with trace exemplars) when the scraper accepts it, else classic
+/// Prometheus text.
+async fn metrics_handler(headers: HeaderMap, State(state): State<Arc<AppState>>) -> Response {
+    let accept = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if accept.contains("application/openmetrics-text") {
+        (
+            [(
+                header::CONTENT_TYPE,
+                "application/openmetrics-text; version=1.0.0; charset=utf-8",
+            )],
+            state.metrics.render_openmetrics(),
+        )
+            .into_response()
+    } else {
+        (
+            [(
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
+            state.metrics.render_prometheus(),
+        )
+            .into_response()
+    }
 }
 
 /// Bind to `addr` and serve until the process is stopped.
@@ -129,7 +153,9 @@ struct RunRequest {
     input: Value,
 }
 
-/// Run an agent, recording RED golden-signal metrics for the route.
+/// Run an agent, recording RED golden-signal metrics for the route. Instrumented so
+/// the request runs under a trace whose id becomes the latency exemplar.
+#[tracing::instrument(name = "api.agents_run", skip_all)]
 async fn run_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RunRequest>,
@@ -335,6 +361,38 @@ mod tests {
         assert!(text.contains("apex_api_request_duration_seconds_count"));
         // The mock provider reports a cost, so an LLM cost metric is present.
         assert!(text.contains("apex_llm_cost_usd_total"), "metrics:\n{text}");
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_serves_openmetrics_when_accepted() {
+        let state = Arc::new(AppState::from_env());
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("accept", "application/openmetrics-text")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            ct.contains("application/openmetrics-text"),
+            "content-type was {ct}"
+        );
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            text.trim_end().ends_with("# EOF"),
+            "OpenMetrics body:\n{text}"
+        );
     }
 
     #[tokio::test]
