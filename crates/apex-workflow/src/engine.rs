@@ -125,13 +125,28 @@ impl Engine {
         }
     }
 
-    /// Start a new execution of `def` with id `execution_id` and JSON `input`.
+    /// Start a new execution of `def` with id `execution_id` and JSON `input`, and
+    /// drive it to completion (or its first suspend point).
     pub async fn run(
         &self,
         def: &Definition,
         execution_id: &str,
         input: Value,
     ) -> Result<(RunOutcome, ExecutionState)> {
+        let state = self.start(def, execution_id, input).await?;
+        self.drive(def, state).await
+    }
+
+    /// Create and durably checkpoint a new execution **without** running any
+    /// activities. Returns the initial state. Used by distributed workers: the
+    /// submitter calls `start` then enqueues the execution for a worker to drive via
+    /// [`resume`](Self::resume).
+    pub async fn start(
+        &self,
+        def: &Definition,
+        execution_id: &str,
+        input: Value,
+    ) -> Result<ExecutionState> {
         let mut variables = def.spec.variables.clone();
         // Expose the run input both as a nested `input` object (so guards can use
         // `input.field`) and flattened at the top level (back-compat).
@@ -183,8 +198,7 @@ impl Engine {
         )
         .await?;
         self.checkpoint(&mut state).await?;
-
-        self.drive(def, state).await
+        Ok(state)
     }
 
     /// Resume a previously-started execution from its latest checkpoint.

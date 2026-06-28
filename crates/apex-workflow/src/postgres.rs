@@ -10,9 +10,11 @@
 
 use crate::engine::ExecutionState;
 use crate::event::WorkflowEvent;
+use crate::queue::WorkQueue;
 use crate::store::{CheckpointStore, EventLog};
 use apex_common::{Error, Result};
 use async_trait::async_trait;
+use std::time::Duration;
 
 fn pg_err(context: &str, e: impl std::fmt::Display) -> Error {
     Error::provider(format!("postgres {context}: {e}"))
@@ -53,6 +55,11 @@ impl PostgresStore {
                  CREATE TABLE IF NOT EXISTS workflow_checkpoints (
                      execution_id TEXT PRIMARY KEY,
                      snapshot     TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS workflow_queue (
+                     execution_id TEXT PRIMARY KEY,
+                     leased_by    TEXT,
+                     leased_until TIMESTAMPTZ
                  );",
             )
             .await
@@ -130,5 +137,69 @@ impl CheckpointStore for PostgresStore {
             Some(row) => Ok(Some(serde_json::from_str(row.get::<_, &str>("snapshot"))?)),
             None => Ok(None),
         }
+    }
+}
+
+#[async_trait]
+impl WorkQueue for PostgresStore {
+    async fn enqueue(&self, execution_id: &str) -> Result<()> {
+        self.client
+            .execute(
+                "INSERT INTO workflow_queue (execution_id) VALUES ($1)
+                 ON CONFLICT (execution_id) DO NOTHING",
+                &[&execution_id],
+            )
+            .await
+            .map_err(|e| pg_err("enqueue", e))?;
+        Ok(())
+    }
+
+    async fn lease(&self, worker: &str, ttl: Duration) -> Result<Option<String>> {
+        // Atomically claim one ready row; `SKIP LOCKED` lets concurrent workers take
+        // disjoint executions without blocking each other.
+        let secs = ttl.as_secs_f64();
+        let row = self
+            .client
+            .query_opt(
+                "WITH picked AS (
+                     SELECT execution_id FROM workflow_queue
+                     WHERE leased_by IS NULL OR leased_until < now()
+                     ORDER BY execution_id
+                     FOR UPDATE SKIP LOCKED
+                     LIMIT 1
+                 )
+                 UPDATE workflow_queue q
+                 SET leased_by = $1, leased_until = now() + make_interval(secs => $2)
+                 FROM picked WHERE q.execution_id = picked.execution_id
+                 RETURNING q.execution_id",
+                &[&worker, &secs],
+            )
+            .await
+            .map_err(|e| pg_err("lease", e))?;
+        Ok(row.map(|r| r.get::<_, String>("execution_id")))
+    }
+
+    async fn renew(&self, execution_id: &str, worker: &str, ttl: Duration) -> Result<()> {
+        let secs = ttl.as_secs_f64();
+        self.client
+            .execute(
+                "UPDATE workflow_queue SET leased_until = now() + make_interval(secs => $3)
+                 WHERE execution_id = $1 AND leased_by = $2",
+                &[&execution_id, &worker, &secs],
+            )
+            .await
+            .map_err(|e| pg_err("renew lease", e))?;
+        Ok(())
+    }
+
+    async fn remove(&self, execution_id: &str) -> Result<()> {
+        self.client
+            .execute(
+                "DELETE FROM workflow_queue WHERE execution_id = $1",
+                &[&execution_id],
+            )
+            .await
+            .map_err(|e| pg_err("remove from queue", e))?;
+        Ok(())
     }
 }

@@ -19,8 +19,8 @@
 #![cfg(feature = "postgres")]
 
 use apex_workflow::{
-    ActivityError, ActivityState, CheckpointStore, ClosureExecutor, Definition, Engine, EventLog,
-    PostgresStore, RunOutcome,
+    ActivityError, ActivityState, CheckpointStore, ClosureExecutor, Definition, DefinitionResolver,
+    Engine, EventLog, PostgresStore, RunOutcome, WorkQueue, Worker, WorkflowState,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -146,4 +146,96 @@ async fn event_log_appends_sequentially_and_checkpoint_upserts() {
         .expect("a checkpoint was saved");
     assert_eq!(latest.execution_id, exec_id);
     assert_eq!(latest.activities["c"].state, ActivityState::Completed);
+}
+
+/// A counting executor for the linear a→b→c workflow (3 activities).
+fn counting_abc(runs: Arc<AtomicUsize>) -> ClosureExecutor {
+    let mut ex = ClosureExecutor::new();
+    for id in ["a", "b", "c"] {
+        let runs = runs.clone();
+        ex = ex.on(id, move |_| {
+            let runs = runs.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            }
+        });
+    }
+    ex
+}
+
+#[tokio::test]
+async fn distributed_workers_over_postgres_process_each_exactly_once() {
+    let Some(store1) = store().await else { return };
+    // A second, independent connection — the realistic two-node setup.
+    let url = std::env::var("APEX_WORKFLOW_POSTGRES_URL").unwrap();
+    let store2 = match PostgresStore::connect(&url).await {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            eprintln!("skipping: second postgres connection failed: {e}");
+            return;
+        }
+    };
+
+    const N: usize = 8;
+    let def = linear_abc();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let n = nonce();
+    let ids: Vec<String> = (0..N).map(|i| format!("wf-pg-dist-{n}-{i}")).collect();
+
+    // Submit N executions: durably start (no activities run) + enqueue.
+    let submitter = Engine::new(
+        store1.clone() as Arc<dyn EventLog>,
+        store1.clone() as Arc<dyn CheckpointStore>,
+        Arc::new(counting_abc(runs.clone())),
+    );
+    for id in &ids {
+        submitter.start(&def, id, json!({})).await.unwrap();
+        WorkQueue::enqueue(store1.as_ref(), id).await.unwrap();
+    }
+
+    let resolver: DefinitionResolver = {
+        let def = def.clone();
+        Arc::new(move |name: &str| (name == "durable-pg").then(|| def.clone()))
+    };
+    let worker = |id: &str, store: Arc<PostgresStore>| {
+        Worker::new(
+            id,
+            Engine::new(
+                store.clone() as Arc<dyn EventLog>,
+                store.clone() as Arc<dyn CheckpointStore>,
+                Arc::new(counting_abc(runs.clone())),
+            ),
+            store.clone() as Arc<dyn WorkQueue>,
+            store.clone() as Arc<dyn CheckpointStore>,
+            resolver.clone(),
+        )
+    };
+    let w1 = worker("w1", store1.clone());
+    let w2 = worker("w2", store2.clone());
+
+    // Both workers drain concurrently; FOR UPDATE SKIP LOCKED keeps leases disjoint.
+    let (n1, n2) = tokio::join!(w1.run_until_idle(), w2.run_until_idle());
+    let processed = n1.unwrap() + n2.unwrap();
+
+    assert_eq!(
+        processed, N,
+        "each execution leased + driven by exactly one worker"
+    );
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        N * 3,
+        "3 activities per workflow, none run twice"
+    );
+    for id in &ids {
+        let st = CheckpointStore::latest(store1.as_ref(), id)
+            .await
+            .unwrap()
+            .expect("checkpoint");
+        assert_eq!(
+            st.status,
+            WorkflowState::Completed,
+            "{id} should be completed"
+        );
+    }
 }
