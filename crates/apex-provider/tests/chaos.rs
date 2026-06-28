@@ -193,6 +193,7 @@ async fn cache_shields_against_provider_outage() {
         .with_cache(CacheConfig {
             mode: CacheMode::Exact,
             ttl_ms: 60_000,
+            ..CacheConfig::default()
         });
 
     let first = gw.chat(req()).await.unwrap();

@@ -55,6 +55,9 @@ pub enum CacheMode {
     Off,
     /// Lookup/store on an exact normalized-request hash.
     Exact,
+    /// Exact lookup first, then by embedding similarity; store in both on a miss
+    /// ([caching §4](../../docs/05-llm-gateway/caching.md)).
+    Semantic,
 }
 
 /// Cache configuration.
@@ -64,6 +67,9 @@ pub struct CacheConfig {
     pub mode: CacheMode,
     /// Entry time-to-live in milliseconds.
     pub ttl_ms: u64,
+    /// Minimum cosine similarity for a semantic hit (a higher value trades hit
+    /// rate for safety; ignored unless `mode` is `Semantic`).
+    pub similarity_threshold: f32,
 }
 
 impl Default for CacheConfig {
@@ -71,6 +77,7 @@ impl Default for CacheConfig {
         Self {
             mode: CacheMode::Off,
             ttl_ms: 3_600_000,
+            similarity_threshold: 0.95,
         }
     }
 }
@@ -401,6 +408,15 @@ impl BreakerKv for InMemoryKv {
 
 /// A cached chat response with its insertion time.
 pub(crate) struct CacheEntry {
+    pub response: ChatResponse,
+    pub created_ms: u64,
+}
+
+/// A semantic-cache entry: the response plus the request embedding and a
+/// param-compatibility key it may be served for ([caching §4](../../docs/05-llm-gateway/caching.md)).
+pub(crate) struct SemanticEntry {
+    pub embedding: Vec<f32>,
+    pub param_key: String,
     pub response: ChatResponse,
     pub created_ms: u64,
 }
