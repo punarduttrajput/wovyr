@@ -240,12 +240,24 @@ async fn execute_tool_call(
     };
 
     let parameters: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
-    // Deterministic execution id: no clocks or randomness in core logic.
+    // Deterministic execution id: no clocks or randomness in core logic. The agent's
+    // declared `permissions` (if any) form the grant set enforced against each tool;
+    // absent → unrestricted (back-compat).
     let ctx = ToolContext {
         execution_id: format!("{}-s{step}-t{idx}", def.metadata.name),
         agent_id: def.metadata.name.clone(),
         workdir: ".".to_string(),
+        granted_permissions: def.spec.permissions.clone(),
     };
+
+    // Fail closed: a tool requiring a permission the agent wasn't granted is denied.
+    if let Err(e) = apex_tools::check_permissions(&tool.metadata().permissions, &ctx) {
+        sink.emit(RunEvent::ToolResult {
+            name: &call.name,
+            ok: false,
+        });
+        return format!("error: {e}");
+    }
 
     match tool.execute(&ctx, ToolRequest::new(parameters)).await {
         Ok(resp) => {

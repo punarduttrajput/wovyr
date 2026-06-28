@@ -20,7 +20,8 @@ pub struct ToolMetadata {
     pub category: String,
     /// Human/model-readable description, advertised to the model.
     pub description: String,
-    /// Permissions the tool requires (declared, not yet enforced in v0.1).
+    /// Permissions the tool requires, enforced against the caller's grants by
+    /// [`check_permissions`] / [`ToolRegistry::execute`](crate::ToolRegistry::execute).
     pub permissions: Vec<String>,
 }
 
@@ -61,6 +62,10 @@ pub struct ToolContext {
     pub agent_id: String,
     /// Base directory tools may operate within.
     pub workdir: String,
+    /// Permissions granted to the caller. `None` means **unrestricted** (no policy);
+    /// `Some(set)` enforces that a tool's declared permissions are a subset of it
+    /// ([spec §47](../../docs/04-agent-framework/tool-framework.md)).
+    pub granted_permissions: Option<Vec<String>>,
 }
 
 /// Parameters passed to a tool, as a validated-at-the-boundary JSON value.
@@ -122,6 +127,28 @@ impl fmt::Display for ToolError {
 }
 
 impl std::error::Error for ToolError {}
+
+/// Enforce that every permission a tool `required` is granted by `ctx`. Returns
+/// [`ToolError::PermissionDenied`] (fail-closed) listing the missing permissions, or
+/// `Ok(())` when the context is unrestricted or grants them all.
+pub fn check_permissions(required: &[String], ctx: &ToolContext) -> Result<(), ToolError> {
+    let Some(granted) = &ctx.granted_permissions else {
+        return Ok(()); // unrestricted: no permission policy in force
+    };
+    let missing: Vec<&str> = required
+        .iter()
+        .filter(|p| !granted.contains(p))
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(ToolError::PermissionDenied(format!(
+            "tool requires ungranted permission(s): {}",
+            missing.join(", ")
+        )))
+    }
+}
 
 /// A capability an agent can invoke.
 ///

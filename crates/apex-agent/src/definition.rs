@@ -53,6 +53,11 @@ pub struct Spec {
     /// Tool ids this agent is allowed to call (must exist in the registry).
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Permissions granted to this agent, enforced against each tool's declared
+    /// permissions ([tool framework §47](../../docs/04-agent-framework/tool-framework.md)).
+    /// Absent → unrestricted; `[]` → grant nothing (deny permissioned tools).
+    #[serde(default)]
+    pub permissions: Option<Vec<String>>,
     /// Memory/retrieval configuration. When enabled, the runtime grounds the prompt
     /// in retrieved context ([RAG agent](../../docs/16-examples/rag-agent.md)).
     #[serde(default)]

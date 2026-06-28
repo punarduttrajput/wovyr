@@ -36,4 +36,6 @@ pub use sandbox::{
     SandboxManager, TrustClass, select_backend,
 };
 pub use scheduler::FairScheduler;
-pub use tool::{Tool, ToolContext, ToolError, ToolMetadata, ToolRequest, ToolResponse};
+pub use tool::{
+    Tool, ToolContext, ToolError, ToolMetadata, ToolRequest, ToolResponse, check_permissions,
+};

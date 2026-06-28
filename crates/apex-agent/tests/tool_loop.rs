@@ -174,3 +174,75 @@ async fn run_loop_terminates_on_step_budget() {
         .unwrap_err();
     assert!(matches!(err, apex_common::Error::Runtime(_)));
 }
+
+#[tokio::test]
+async fn agent_denies_tool_requiring_an_ungranted_permission() {
+    // A provider that requests `shell` (declares `shell.execute`), then answers.
+    struct RequestsShell;
+    #[async_trait]
+    impl AIProvider for RequestsShell {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+            if let Some(tool_msg) = request.messages.iter().rev().find(|m| m.role == Role::Tool) {
+                let observed = tool_msg.content.clone().unwrap_or_default();
+                return Ok(ChatResponse {
+                    message: Message::assistant(format!("done: {observed}")),
+                    model: request.model,
+                    usage: Usage::new(1, 1, 0.0),
+                    finish_reason: "stop".to_string(),
+                });
+            }
+            Ok(ChatResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "c1".to_string(),
+                        name: "shell".to_string(),
+                        arguments: json!({ "command": "echo hi" }).to_string(),
+                    }],
+                    tool_call_id: None,
+                    name: None,
+                },
+                model: request.model,
+                usage: Usage::new(1, 0, 0.0),
+                finish_reason: "tool_calls".to_string(),
+            })
+        }
+    }
+
+    // The agent is granted only `net.egress`, so `shell` (needs `shell.execute`) is denied.
+    let def = AgentDefinition::from_yaml(
+        "metadata:\n  name: restricted\nspec:\n  instructions: x\n  tools: [shell]\n  permissions: [net.egress]\n",
+    )
+    .unwrap();
+    let gateway = Gateway::new(Box::new(RequestsShell));
+    let registry = ToolRegistry::with_builtins();
+
+    let mut capture = Capture::default();
+    let out = run_agent(
+        &def,
+        &gateway,
+        &registry,
+        RunOptions::new(json!({})),
+        &mut capture,
+    )
+    .await
+    .unwrap();
+
+    // The tool was denied (not executed) and the model received the denial.
+    assert!(
+        capture
+            .events
+            .contains(&"toolresult:shell:false".to_string()),
+        "expected a denied tool result, got {:?}",
+        capture.events
+    );
+    assert!(
+        out.text.contains("permission denied"),
+        "model should see the permission denial, got: {}",
+        out.text
+    );
+}
