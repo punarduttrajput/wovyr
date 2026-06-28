@@ -8,8 +8,8 @@
 //! constructed commands actually isolate and enforce.
 
 use apex_tools::{
-    CommandOutcome, ContainerSandbox, NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend,
-    SandboxCommand, SandboxManager, SandboxPool,
+    CommandOutcome, ContainerSandbox, FirecrackerConfig, FirecrackerSandbox, NetworkPolicy,
+    ResourceLimits, Sandbox, SandboxBackend, SandboxCommand, SandboxManager, SandboxPool,
 };
 use std::time::Duration;
 
@@ -127,6 +127,43 @@ async fn gvisor_runs_under_runsc_kernel() {
     assert!(
         out.stdout.contains("gVisor"),
         "expected gVisor sentry banner in dmesg, got: {}",
+        out.stdout
+    );
+}
+
+#[tokio::test]
+async fn firecracker_microvm_runs_command_and_returns_output() {
+    // Needs KVM + the firecracker binary (capability) and a guest kernel + rootfs
+    // (carrying the apex guest agent as /init), supplied via env.
+    if !has(SandboxBackend::Firecracker).await {
+        return;
+    }
+    let (Ok(kernel), Ok(rootfs)) = (
+        std::env::var("APEX_FC_KERNEL"),
+        std::env::var("APEX_FC_ROOTFS"),
+    ) else {
+        eprintln!("skipping: APEX_FC_KERNEL / APEX_FC_ROOTFS not set");
+        return;
+    };
+
+    let limits = ResourceLimits {
+        timeout: Duration::from_secs(30),
+        ..ResourceLimits::default()
+    };
+    let config = FirecrackerConfig::from_limits(&kernel, &rootfs, &limits);
+    let sb = FirecrackerSandbox::with_config(config);
+
+    let mut c = cmd(
+        "sh",
+        &["-c", "echo apex_microvm_ok; cat /etc/alpine-release"],
+    );
+    c.limits.timeout = Duration::from_secs(30);
+    let out = sb.execute(&c).await.expect("microVM execution");
+
+    assert_eq!(out.exit_code, Some(0), "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("apex_microvm_ok"),
+        "expected command output from inside the guest, got: {:?}",
         out.stdout
     );
 }
