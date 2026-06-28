@@ -21,6 +21,8 @@ mod definition;
 mod engine;
 mod event;
 mod executor;
+#[cfg(feature = "postgres")]
+mod postgres;
 mod retry;
 mod state;
 mod store;
@@ -29,6 +31,8 @@ pub use definition::{ActivityDef, Definition};
 pub use engine::{Engine, ExecutionState, RunOutcome};
 pub use event::WorkflowEvent;
 pub use executor::{ActivityContext, ActivityError, ActivityExecutor, ClosureExecutor};
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresStore;
 pub use retry::{RetryPolicy, RetryStrategy};
 pub use state::{ActivityState, WorkflowState};
 pub use store::{CheckpointStore, EventLog, FileStore, InMemoryStore};

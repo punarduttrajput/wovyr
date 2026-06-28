@@ -7,6 +7,11 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Durable workflow engine: DSL, event-sourced state machine, checkpointing, and retry."
 
+[features]
+# Postgres-backed durable event log + checkpoint store, for cross-process/node
+# durable resume. Off by default (pulls tokio-postgres).
+postgres = ["dep:tokio-postgres"]
+
 [dependencies]
 apex-common.workspace = true
 serde.workspace = true
@@ -15,6 +20,7 @@ serde_yaml.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tokio-postgres = { version = "0.7", optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
