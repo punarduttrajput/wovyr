@@ -17,12 +17,14 @@
 //! gated by an agent's explicit allowed-tools list.
 
 mod builtin;
+mod egress;
 mod pool;
 mod registry;
 mod sandbox;
 mod tool;
 
 pub use builtin::{EchoTool, FsReadTool, HttpGetTool, ShellTool};
+pub use egress::EgressProxy;
 pub use pool::{AutoscalePolicy, PooledSandbox, SandboxFactory, SandboxPool};
 pub use registry::ToolRegistry;
 #[cfg(feature = "wasi")]

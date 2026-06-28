@@ -132,6 +132,31 @@ async fn gvisor_runs_under_runsc_kernel() {
 }
 
 #[tokio::test]
+async fn egress_proxy_denies_non_allowlisted_host_from_container() {
+    if !has(SandboxBackend::Container).await {
+        return;
+    }
+    // Default-deny with a single allow-listed host → the sandbox starts an egress
+    // proxy and routes the container through it via HTTPS_PROXY.
+    let policy = NetworkPolicy {
+        default_deny: true,
+        outbound_allow: vec!["example.com".to_string()],
+    };
+    let sb = ContainerSandbox::docker(IMAGE).with_network(policy);
+
+    // Inside the container: extract the proxy port from HTTPS_PROXY and CONNECT to a
+    // host that is NOT allow-listed; the proxy must refuse it with 403 (no TLS needed).
+    let script = r#"p=${HTTPS_PROXY##*:}; printf 'CONNECT 10.255.255.1:443 HTTP/1.1\r\n\r\n' | nc -w 3 host.docker.internal "$p" | head -1"#;
+    let out = run(&sb, &cmd("sh", &["-c", script])).await;
+    assert!(
+        out.stdout.contains("403"),
+        "proxy should deny a non-allow-listed host; stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+}
+
+#[tokio::test]
 async fn firecracker_microvm_runs_command_and_returns_output() {
     // Needs KVM + the firecracker binary (capability) and a guest kernel + rootfs
     // (carrying the apex guest agent as /init), supplied via env.

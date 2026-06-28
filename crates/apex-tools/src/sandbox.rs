@@ -141,8 +141,9 @@ impl Default for ResourceLimits {
 
 /// Declarative egress policy ([security §5](../../docs/07-tool-runtime/security-isolation.md)).
 /// Default is deny-all; the container/gVisor backends enforce a full deny with
-/// `--network none`. Per-host allow-listing requires an egress proxy and is not yet
-/// enforced — a non-empty allow-list currently grants bridged egress.
+/// `--network none`. A non-empty allow-list is enforced through an
+/// [`EgressProxy`](crate::EgressProxy): the workload reaches only allow-listed hosts
+/// over HTTPS (`CONNECT`), via `HTTPS_PROXY`.
 #[derive(Clone, Debug)]
 pub struct NetworkPolicy {
     /// Deny all egress unless explicitly allowed.
@@ -173,6 +174,12 @@ impl NetworkPolicy {
     /// condition under which a backend uses a fully isolated network namespace.
     pub fn denies_all(&self) -> bool {
         self.default_deny && self.outbound_allow.is_empty()
+    }
+
+    /// Whether this policy requires an [`EgressProxy`](crate::EgressProxy): default-deny
+    /// with a non-empty allow-list (specific hosts permitted, all others blocked).
+    pub fn needs_proxy(&self) -> bool {
+        self.default_deny && !self.outbound_allow.is_empty()
     }
 }
 
@@ -516,15 +523,22 @@ impl ContainerSandbox {
     }
 
     /// The full argv used to launch the container, including the wrapped command.
-    /// Pure and deterministic — the basis for the backend's unit tests.
-    pub fn argv(&self, cmd: &SandboxCommand) -> Vec<String> {
+    /// Pure and deterministic — the basis for the backend's unit tests. When the
+    /// policy needs an egress proxy, `proxy_port` injects the `HTTPS_PROXY` wiring.
+    pub fn argv_with_proxy(&self, cmd: &SandboxCommand, proxy_port: Option<u16>) -> Vec<String> {
         container_argv(
             &self.runtime,
             self.runtime_class.as_deref(),
             &self.image,
             cmd,
             &self.network,
+            proxy_port,
         )
+    }
+
+    /// The launch argv without an egress proxy (full deny or full bridge).
+    pub fn argv(&self, cmd: &SandboxCommand) -> Vec<String> {
+        self.argv_with_proxy(cmd, None)
     }
 }
 
@@ -535,7 +549,19 @@ impl Sandbox for ContainerSandbox {
     }
 
     async fn execute(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
-        let argv = self.argv(cmd);
+        // A non-empty allow-list is enforced by an egress proxy the container routes
+        // through; the proxy lives for the duration of the run.
+        let proxy = if self.network.needs_proxy() {
+            Some(
+                crate::egress::EgressProxy::start(self.network.clone())
+                    .await
+                    .map_err(|e| SandboxError::Internal(format!("egress proxy: {e}")))?,
+            )
+        } else {
+            None
+        };
+
+        let argv = self.argv_with_proxy(cmd, proxy.as_ref().map(|p| p.port()));
         let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
         // The container runtime enforces the inner cgroup limits; the outer native
         // run only arms the wall-clock timeout and output cap and is spawned from
@@ -545,9 +571,11 @@ impl Sandbox for ContainerSandbox {
             max_output_bytes: cmd.limits.max_output_bytes,
             ..ResourceLimits::default()
         };
-        NativeSandbox::with_limits(outer)
+        let result = NativeSandbox::with_limits(outer)
             .run(&argv[0], &args, ".")
-            .await
+            .await;
+        drop(proxy);
+        result
     }
 }
 
@@ -558,6 +586,7 @@ fn container_argv(
     image: &str,
     cmd: &SandboxCommand,
     network: &NetworkPolicy,
+    proxy_port: Option<u16>,
 ) -> Vec<String> {
     let mut a: Vec<String> = vec![runtime.to_string(), "run".into(), "--rm".into()];
     if let Some(rc) = runtime_class {
@@ -573,6 +602,16 @@ fn container_argv(
         }
         .into(),
     );
+    // Route egress through the host proxy: reach the host via its gateway and point
+    // the standard proxy env vars at it. Only allow-listed hosts will be tunneled.
+    if let Some(port) = proxy_port {
+        a.push("--add-host".into());
+        a.push("host.docker.internal:host-gateway".into());
+        for var in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
+            a.push("-e".into());
+            a.push(format!("{var}=http://host.docker.internal:{port}"));
+        }
+    }
     if let Some(bytes) = cmd.limits.memory_bytes {
         a.push("--memory".into());
         a.push(bytes.to_string());
@@ -1350,6 +1389,35 @@ mod tests {
         assert!(p.allows_host("api.example.com"));
         assert!(!p.allows_host("evil.example.com"));
         assert!(!p.denies_all());
+        // A non-empty allow-list needs the egress proxy; deny-all and allow-all do not.
+        assert!(p.needs_proxy());
+        assert!(!NetworkPolicy::default().needs_proxy());
+        let open = NetworkPolicy {
+            default_deny: false,
+            outbound_allow: vec![],
+        };
+        assert!(!open.needs_proxy());
+    }
+
+    #[test]
+    fn container_argv_wires_egress_proxy() {
+        let sb = ContainerSandbox::docker("alpine:3.20").with_network(NetworkPolicy {
+            default_deny: true,
+            outbound_allow: vec!["api.example.com".to_string()],
+        });
+        let argv = sb.argv_with_proxy(&sample_cmd(), Some(8080)).join(" ");
+        // Allow-list → bridge networking + host-gateway + proxy env pointing at the proxy.
+        assert!(argv.contains("--network bridge"), "{argv}");
+        assert!(
+            argv.contains("--add-host host.docker.internal:host-gateway"),
+            "{argv}"
+        );
+        assert!(
+            argv.contains("HTTPS_PROXY=http://host.docker.internal:8080"),
+            "{argv}"
+        );
+        // Without a proxy port, no proxy wiring is emitted.
+        assert!(!sb.argv(&sample_cmd()).join(" ").contains("HTTPS_PROXY"));
     }
 
     #[test]
