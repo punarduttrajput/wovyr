@@ -52,9 +52,29 @@ pub struct MemoryRecord {
     /// Free-form tags for metadata filtering.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Content-derived access scopes a reader must hold to see this record
+    /// ([ranking §8](../../docs/06-memory-engine/ranking.md)). Empty = public.
+    #[serde(default)]
+    pub required_scopes: Vec<String>,
     /// Monotonic insertion sequence (assigned by the store; used for recency).
     #[serde(default)]
     pub seq: u64,
+}
+
+/// The reader's access context for an ABAC policy pass: the scopes a principal
+/// holds ([ranking §8](../../docs/06-memory-engine/ranking.md)). A record is
+/// visible only if every one of its `required_scopes` is granted here.
+#[derive(Debug, Clone, Default)]
+pub struct AccessContext {
+    /// Scopes the principal is granted.
+    pub grants: Vec<String>,
+}
+
+impl AccessContext {
+    /// An access context granting `grants`.
+    pub fn new(grants: Vec<String>) -> Self {
+        Self { grants }
+    }
 }
 
 /// Which retrieval method to use ([retrieval §2](../../docs/06-memory-engine/retrieval.md)).
@@ -113,6 +133,10 @@ pub struct MemoryQuery {
     /// `0.0` ranks by pure relevance (default), higher values trade relevance for
     /// less redundancy among the returned memories.
     pub diversity: f32,
+    /// Reader access context for ABAC filtering ([ranking §8](../../docs/06-memory-engine/ranking.md)).
+    /// `None` grants nothing, so any scope-protected record is hidden (fail-closed);
+    /// public records (no required scopes) are always visible.
+    pub access: Option<AccessContext>,
 }
 
 impl MemoryQuery {
@@ -127,6 +151,7 @@ impl MemoryQuery {
             min_importance: 0.0,
             weights: RankingWeights::default(),
             diversity: 0.0,
+            access: None,
         }
     }
 }

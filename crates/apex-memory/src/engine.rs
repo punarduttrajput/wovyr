@@ -25,7 +25,7 @@ impl MemoryEngine {
         Self { gateway, store }
     }
 
-    /// Embed `content` and store it as a memory; returns the new record id.
+    /// Embed `content` and store it as a (public) memory; returns the new record id.
     pub async fn remember(
         &self,
         namespace: impl Into<String>,
@@ -33,6 +33,29 @@ impl MemoryEngine {
         memory_type: MemoryType,
         importance: f32,
         tags: Vec<String>,
+    ) -> Result<String> {
+        self.remember_scoped(
+            namespace,
+            content,
+            memory_type,
+            importance,
+            tags,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Like [`Self::remember`], but the record is gated behind `required_scopes`: a
+    /// query may only retrieve it if its access context grants all of them
+    /// ([ranking §8](../../docs/06-memory-engine/ranking.md)).
+    pub async fn remember_scoped(
+        &self,
+        namespace: impl Into<String>,
+        content: impl Into<String>,
+        memory_type: MemoryType,
+        importance: f32,
+        tags: Vec<String>,
+        required_scopes: Vec<String>,
     ) -> Result<String> {
         let content = content.into();
         let embedding = self.embed(&content).await?;
@@ -44,6 +67,7 @@ impl MemoryEngine {
             memory_type,
             importance: importance.clamp(0.0, 1.0),
             tags,
+            required_scopes,
             seq: 0,
         };
         self.store.put(record).await
@@ -207,10 +231,29 @@ fn reciprocal_rank_fusion(lists: &[Vec<String>]) -> HashMap<String, f32> {
     fused
 }
 
-/// Whether a record passes the query's metadata filters (importance + tags).
+/// Whether a record passes the query's metadata filters (importance + tags) and the
+/// ABAC access policy.
 fn passes_filters(r: &MemoryRecord, q: &MemoryQuery) -> bool {
     r.importance >= q.min_importance
         && (q.tags.is_empty() || q.tags.iter().any(|t| r.tags.contains(t)))
+        && abac_allows(r, q)
+}
+
+/// ABAC policy pass ([ranking §8](../../docs/06-memory-engine/ranking.md)): a record
+/// is visible only if the query's access context grants **every** scope the record
+/// requires. Public records (no required scopes) always pass; a protected record with
+/// no access context is denied (fail-closed).
+fn abac_allows(r: &MemoryRecord, q: &MemoryQuery) -> bool {
+    if r.required_scopes.is_empty() {
+        return true;
+    }
+    match &q.access {
+        Some(ctx) => r
+            .required_scopes
+            .iter()
+            .all(|scope| ctx.grants.contains(scope)),
+        None => false,
+    }
 }
 
 /// Apply the weighted ranker (relevance + recency + importance) to `records` and
@@ -427,6 +470,7 @@ mod tests {
             memory_type: MemoryType::Semantic, // recency_decay == 1.0 (no decay)
             importance: 0.0,
             tags: Vec::new(),
+            required_scopes: Vec::new(),
             seq: 0,
         }
     }
@@ -506,5 +550,78 @@ mod tests {
         q.diversity = 0.6;
         let diversified = rank(records, &relevance, &q);
         assert_eq!(ids(&diversified), vec!["a", "c"]);
+    }
+
+    // --- ABAC access filtering -----------------------------------------------
+
+    use crate::record::AccessContext;
+
+    /// Seed one public memory and one gated behind the `pii` scope.
+    async fn seed_abac(eng: &MemoryEngine) {
+        eng.remember(
+            "kb",
+            "office is in Berlin",
+            MemoryType::Semantic,
+            0.5,
+            vec![],
+        )
+        .await
+        .unwrap();
+        eng.remember_scoped(
+            "kb",
+            "customer SSN is 123",
+            MemoryType::Semantic,
+            0.9,
+            vec![],
+            vec!["pii".to_string()],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn abac_hides_protected_records_without_grants() {
+        let eng = engine();
+        seed_abac(&eng).await;
+
+        // No access context → the pii-gated record is invisible (fail-closed).
+        let mut q = MemoryQuery::new("customer");
+        q.namespace = Some("kb".into());
+        let results = eng.query(&q).await.unwrap();
+        assert!(
+            results.iter().all(|r| !r.record.content.contains("SSN")),
+            "protected record must not surface without grants"
+        );
+        // The public record is still retrievable.
+        assert!(results.iter().any(|r| r.record.content.contains("Berlin")));
+    }
+
+    #[tokio::test]
+    async fn abac_reveals_protected_records_with_matching_grant() {
+        let eng = engine();
+        seed_abac(&eng).await;
+
+        let mut q = MemoryQuery::new("customer SSN");
+        q.namespace = Some("kb".into());
+        q.access = Some(AccessContext::new(vec!["pii".to_string()]));
+        let results = eng.query(&q).await.unwrap();
+        assert!(
+            results.iter().any(|r| r.record.content.contains("SSN")),
+            "granting `pii` must reveal the protected record"
+        );
+    }
+
+    #[test]
+    fn abac_requires_all_scopes() {
+        // A record requiring two scopes is denied unless the context grants both.
+        let mut r = rec("x", vec![1.0]);
+        r.required_scopes = vec!["pii".into(), "legal".into()];
+
+        let mut q = MemoryQuery::new("x");
+        q.access = Some(AccessContext::new(vec!["pii".into()]));
+        assert!(!abac_allows(&r, &q), "missing `legal` scope must deny");
+
+        q.access = Some(AccessContext::new(vec!["pii".into(), "legal".into()]));
+        assert!(abac_allows(&r, &q), "both scopes granted must allow");
     }
 }

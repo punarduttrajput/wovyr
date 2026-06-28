@@ -174,6 +174,10 @@ enum MemoryCommand {
         /// Tags for metadata filtering (repeatable).
         #[arg(long = "tag")]
         tags: Vec<String>,
+
+        /// Access scope a reader must be granted to retrieve this memory (repeatable).
+        #[arg(long = "require-scope")]
+        require_scopes: Vec<String>,
     },
 
     /// Query memories by relevance.
@@ -192,6 +196,10 @@ enum MemoryCommand {
         /// Result diversification via MMR in [0,1] (0 = pure relevance).
         #[arg(long, default_value_t = 0.0)]
         diversity: f32,
+
+        /// Access scope the reader holds, for ABAC filtering (repeatable).
+        #[arg(long = "grant")]
+        grants: Vec<String>,
     },
 }
 
@@ -246,13 +254,15 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 content,
                 importance,
                 tags,
-            } => memory::put_cmd(&namespace, &content, importance, tags).await,
+                require_scopes,
+            } => memory::put_cmd(&namespace, &content, importance, tags, require_scopes).await,
             MemoryCommand::Query {
                 query,
                 namespace,
                 limit,
                 diversity,
-            } => memory::query_cmd(&query, namespace, limit, diversity).await,
+                grants,
+            } => memory::query_cmd(&query, namespace, limit, diversity, grants).await,
         },
     }
 }

@@ -85,6 +85,7 @@ fn rec(ns: &str, content: &str, embedding: Vec<f32>) -> MemoryRecord {
         memory_type: MemoryType::Semantic,
         importance: 0.5,
         tags: Vec::new(),
+        required_scopes: Vec::new(),
         seq: 0,
     }
 }
@@ -125,6 +126,24 @@ async fn postgres_put_get_and_namespace_filter() {
     let ids_a: Vec<&str> = in_a.iter().map(|r| r.id.as_str()).collect();
     assert!(ids_a.contains(&id1.as_str()) && ids_a.contains(&id2.as_str()));
     assert!(!ids_a.contains(&id_other.as_str()));
+}
+
+#[tokio::test]
+async fn postgres_round_trips_required_scopes_for_abac() {
+    let Some(store) = pg().await else { return };
+    let ns = format!("it-pg-abac-{}", nonce());
+
+    let mut scoped = rec(&ns, "pii protected", vec![0.1, 0.2, 0.3]);
+    scoped.required_scopes = vec!["pii".to_string(), "legal".to_string()];
+    let id = store.put(scoped).await.unwrap();
+
+    // The ABAC scopes must survive the Postgres TEXT[] round-trip so the engine can
+    // enforce them after fetch.
+    let fetched = store.get(&[id]).await.unwrap();
+    assert_eq!(fetched.len(), 1);
+    let mut scopes = fetched[0].required_scopes.clone();
+    scopes.sort();
+    assert_eq!(scopes, vec!["legal".to_string(), "pii".to_string()]);
 }
 
 #[tokio::test]

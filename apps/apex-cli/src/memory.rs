@@ -108,10 +108,18 @@ pub async fn put_cmd(
     content: &str,
     importance: f32,
     tags: Vec<String>,
+    require_scopes: Vec<String>,
 ) -> apex_common::Result<()> {
     let id = engine()
         .await?
-        .remember(namespace, content, MemoryType::Semantic, importance, tags)
+        .remember_scoped(
+            namespace,
+            content,
+            MemoryType::Semantic,
+            importance,
+            tags,
+            require_scopes,
+        )
         .await?;
     println!("stored {id}");
     Ok(())
@@ -123,11 +131,15 @@ pub async fn query_cmd(
     namespace: Option<String>,
     limit: usize,
     diversity: f32,
+    grants: Vec<String>,
 ) -> apex_common::Result<()> {
     let mut query = MemoryQuery::new(text);
     query.namespace = namespace;
     query.limit = limit;
     query.diversity = diversity;
+    if !grants.is_empty() {
+        query.access = Some(apex_memory::AccessContext::new(grants));
+    }
 
     let results = engine().await?.query(&query).await?;
     if results.is_empty() {

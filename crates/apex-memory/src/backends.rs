@@ -76,15 +76,19 @@ impl PostgresStore {
             .batch_execute(
                 "CREATE SEQUENCE IF NOT EXISTS memory_seq;
                  CREATE TABLE IF NOT EXISTS memory_records (
-                     id          TEXT PRIMARY KEY,
-                     namespace   TEXT NOT NULL,
-                     content     TEXT NOT NULL,
-                     embedding   REAL[] NOT NULL,
-                     memory_type TEXT NOT NULL,
-                     importance  REAL NOT NULL,
-                     tags        TEXT[] NOT NULL,
-                     seq         BIGINT NOT NULL
+                     id              TEXT PRIMARY KEY,
+                     namespace       TEXT NOT NULL,
+                     content         TEXT NOT NULL,
+                     embedding       REAL[] NOT NULL,
+                     memory_type     TEXT NOT NULL,
+                     importance      REAL NOT NULL,
+                     tags            TEXT[] NOT NULL,
+                     required_scopes TEXT[] NOT NULL DEFAULT '{}',
+                     seq             BIGINT NOT NULL
                  );
+                 -- Backfill the ABAC column on databases created before it existed.
+                 ALTER TABLE memory_records
+                     ADD COLUMN IF NOT EXISTS required_scopes TEXT[] NOT NULL DEFAULT '{}';
                  CREATE INDEX IF NOT EXISTS memory_records_ns ON memory_records (namespace);
                  CREATE INDEX IF NOT EXISTS memory_records_fts
                      ON memory_records USING GIN (to_tsvector('english', content));",
@@ -103,6 +107,7 @@ impl PostgresStore {
             memory_type: mt_from_str(&row.get::<_, String>("memory_type")),
             importance: row.get("importance"),
             tags: row.get("tags"),
+            required_scopes: row.get("required_scopes"),
             seq: row.get::<_, i64>("seq") as u64,
         }
     }
@@ -121,8 +126,8 @@ impl MemoryStore for PostgresStore {
         self.client
             .execute(
                 "INSERT INTO memory_records
-                   (id, namespace, content, embedding, memory_type, importance, tags, seq)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                   (id, namespace, content, embedding, memory_type, importance, tags, required_scopes, seq)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 &[
                     &id,
                     &record.namespace,
@@ -131,6 +136,7 @@ impl MemoryStore for PostgresStore {
                     &mt_to_str(record.memory_type),
                     &record.importance,
                     &record.tags,
+                    &record.required_scopes,
                     &seq,
                 ],
             )
