@@ -23,7 +23,7 @@ mod sandbox;
 mod tool;
 
 pub use builtin::{EchoTool, FsReadTool, HttpGetTool, ShellTool};
-pub use pool::{PooledSandbox, SandboxFactory, SandboxPool};
+pub use pool::{AutoscalePolicy, PooledSandbox, SandboxFactory, SandboxPool};
 pub use registry::ToolRegistry;
 #[cfg(feature = "wasi")]
 pub use sandbox::WasiSandbox;

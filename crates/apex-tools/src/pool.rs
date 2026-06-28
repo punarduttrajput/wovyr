@@ -20,13 +20,38 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 /// Builds a fresh sandbox instance for the pool.
 pub type SandboxFactory = Box<dyn Fn() -> Box<dyn Sandbox> + Send + Sync>;
 
+/// How the warm (idle) set is sized as demand changes ([sandbox runtime](../../docs/07-tool-runtime/sandbox-runtime.md)).
+/// The pool keeps the idle count within `[min_warm, max_warm]` (both bounded by the
+/// pool's `max_size`): it refills toward `min_warm` so checkouts hit a warm instance,
+/// and evicts above `max_warm` so an idle pool doesn't hoard resources.
+#[derive(Clone, Copy, Debug)]
+pub struct AutoscalePolicy {
+    /// Minimum warm instances to keep ready (refilled by [`SandboxPool::autoscale`]).
+    pub min_warm: usize,
+    /// Maximum warm instances to keep idle (excess is evicted).
+    pub max_warm: usize,
+}
+
+impl AutoscalePolicy {
+    /// A policy keeping the warm set within `[min_warm, max_warm]`.
+    pub fn new(min_warm: usize, max_warm: usize) -> Self {
+        Self {
+            min_warm,
+            max_warm: max_warm.max(min_warm),
+        }
+    }
+}
+
 struct PoolInner {
     idle: Mutex<Vec<Box<dyn Sandbox>>>,
     factory: SandboxFactory,
     permits: Arc<Semaphore>,
     max_size: usize,
+    min_warm: usize,
+    max_warm: usize,
     created: AtomicUsize,
     reused: AtomicUsize,
+    evicted: AtomicUsize,
 }
 
 /// A bounded pool of reusable sandbox instances.
@@ -37,11 +62,39 @@ pub struct SandboxPool {
 
 impl SandboxPool {
     /// Build a pool holding at most `max_size` instances, pre-warming `warm_count`
-    /// of them (clamped to `max_size`). `factory` constructs a fresh sandbox.
+    /// of them (clamped to `max_size`). No autoscaling: the idle set is bounded only
+    /// by `max_size`. `factory` constructs a fresh sandbox.
     pub fn new(max_size: usize, warm_count: usize, factory: SandboxFactory) -> Self {
         let max_size = max_size.max(1);
-        let warm_count = warm_count.min(max_size);
+        Self::build(
+            max_size,
+            warm_count,
+            AutoscalePolicy::new(0, max_size),
+            factory,
+        )
+    }
 
+    /// Build an **autoscaling** pool: the warm set is kept within the policy's
+    /// `[min_warm, max_warm]` (each clamped to `max_size`), pre-warming `min_warm`.
+    /// Call [`Self::autoscale`] to refill/evict toward those bounds as load shifts.
+    pub fn with_autoscaling(
+        max_size: usize,
+        factory: SandboxFactory,
+        policy: AutoscalePolicy,
+    ) -> Self {
+        let max_size = max_size.max(1);
+        let policy =
+            AutoscalePolicy::new(policy.min_warm.min(max_size), policy.max_warm.min(max_size));
+        Self::build(max_size, policy.min_warm, policy, factory)
+    }
+
+    fn build(
+        max_size: usize,
+        warm_count: usize,
+        policy: AutoscalePolicy,
+        factory: SandboxFactory,
+    ) -> Self {
+        let warm_count = warm_count.min(max_size);
         let mut idle: Vec<Box<dyn Sandbox>> = Vec::with_capacity(warm_count);
         for _ in 0..warm_count {
             idle.push(factory());
@@ -52,11 +105,35 @@ impl SandboxPool {
             factory,
             permits: Arc::new(Semaphore::new(max_size)),
             max_size,
+            min_warm: policy.min_warm,
+            max_warm: policy.max_warm,
             created: AtomicUsize::new(warm_count),
             reused: AtomicUsize::new(0),
+            evicted: AtomicUsize::new(0),
         };
         Self {
             inner: Arc::new(inner),
+        }
+    }
+
+    /// Resize the warm set toward the policy bounds, given current demand: evict idle
+    /// instances above `max_warm`, and refill toward `min_warm` (never letting total
+    /// instances, idle + in-use, exceed `max_size`). Deterministic — driven by the
+    /// caller, not a background timer.
+    pub fn autoscale(&self) {
+        let headroom = self.inner.max_size.saturating_sub(self.in_use());
+        let mut idle = self.inner.idle.lock().expect("pool mutex poisoned");
+
+        // Shrink: drop idle instances beyond the warm ceiling.
+        while idle.len() > self.inner.max_warm {
+            idle.pop();
+            self.inner.evicted.fetch_add(1, Ordering::Relaxed);
+        }
+        // Grow: warm up toward min_warm, capped by remaining capacity.
+        let target = self.inner.min_warm.min(headroom);
+        while idle.len() < target {
+            idle.push((self.inner.factory)());
+            self.inner.created.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -126,6 +203,11 @@ impl SandboxPool {
     pub fn reused(&self) -> usize {
         self.inner.reused.load(Ordering::Relaxed)
     }
+
+    /// Number of warm instances evicted by autoscaling (returns over `max_warm`).
+    pub fn evicted(&self) -> usize {
+        self.inner.evicted.load(Ordering::Relaxed)
+    }
 }
 
 /// A checked-out sandbox. Executes like a [`Sandbox`] and returns itself to the pool
@@ -156,9 +238,12 @@ impl Drop for PooledSandbox {
     fn drop(&mut self) {
         if let Some(sandbox) = self.sandbox.take() {
             let mut idle = self.inner.idle.lock().expect("pool mutex poisoned");
-            // Keep the instance warm for reuse, but never exceed the pool's bound.
-            if idle.len() < self.inner.max_size {
+            // Keep the instance warm for reuse, up to the autoscaling ceiling;
+            // beyond it, evict (shrink the pool back toward its target).
+            if idle.len() < self.inner.max_warm {
                 idle.push(sandbox);
+            } else {
+                self.inner.evicted.fetch_add(1, Ordering::Relaxed);
             }
         }
         // `_permit` drops here, freeing the slot for a waiting `acquire`.
@@ -241,5 +326,55 @@ mod tests {
         let out = sb.execute(&echo()).await.unwrap();
         assert_eq!(out.exit_code, Some(0));
         assert!(out.stdout.contains("hi"));
+    }
+
+    #[test]
+    fn autoscaling_prewarms_min_warm() {
+        let pool = SandboxPool::with_autoscaling(4, native_factory(), AutoscalePolicy::new(2, 3));
+        assert_eq!(pool.idle(), 2, "pre-warms min_warm instances");
+        assert_eq!(pool.created(), 2);
+    }
+
+    #[tokio::test]
+    async fn autoscale_refills_warm_set_under_load() {
+        let pool = SandboxPool::with_autoscaling(4, native_factory(), AutoscalePolicy::new(2, 4));
+        // Check out both warm instances and hold them.
+        let _a = pool.acquire().await.unwrap();
+        let _b = pool.acquire().await.unwrap();
+        assert_eq!(pool.idle(), 0, "warm set depleted by checkouts");
+        assert_eq!(pool.in_use(), 2);
+
+        // Autoscale refills toward min_warm using the remaining capacity (4 - 2 = 2).
+        pool.autoscale();
+        assert_eq!(pool.idle(), 2, "warm set refilled under load");
+        assert_eq!(pool.created(), 4);
+    }
+
+    #[tokio::test]
+    async fn autoscale_never_over_provisions_past_max_size() {
+        let pool = SandboxPool::with_autoscaling(2, native_factory(), AutoscalePolicy::new(2, 2));
+        let _a = pool.acquire().await.unwrap();
+        let _b = pool.acquire().await.unwrap();
+        // No headroom (in_use == max_size) → autoscale must not build more.
+        pool.autoscale();
+        assert_eq!(pool.idle(), 0, "no over-provisioning beyond max_size");
+        assert_eq!(pool.in_use(), 2);
+    }
+
+    #[tokio::test]
+    async fn returns_beyond_max_warm_are_evicted() {
+        // No pre-warm; a low warm ceiling so excess returns shrink the pool.
+        let pool = SandboxPool::with_autoscaling(4, native_factory(), AutoscalePolicy::new(0, 2));
+        let a = pool.acquire().await.unwrap();
+        let b = pool.acquire().await.unwrap();
+        let c = pool.acquire().await.unwrap();
+        assert_eq!(pool.created(), 3);
+
+        drop(a);
+        drop(b);
+        drop(c);
+        // Only max_warm (2) kept idle; the third return was evicted.
+        assert_eq!(pool.idle(), 2, "warm set capped at max_warm");
+        assert_eq!(pool.evicted(), 1);
     }
 }
