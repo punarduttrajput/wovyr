@@ -6,15 +6,64 @@
 //! [Memory API](../../docs/09-api/memory.md) `put`/`query` verbs.
 
 use crate::config;
-use apex_memory::{FileStore, MemoryEngine, MemoryQuery, MemoryType};
-use apex_provider::Gateway;
+use apex_agent::{ContextRetriever, MemorySpec, RetrievedContext};
+use apex_memory::{FileStore, MemoryEngine, MemoryQuery, MemoryType, RetrievalStrategy};
+use async_trait::async_trait;
 use std::sync::Arc;
+
+use apex_provider::Gateway;
 
 /// Build a memory engine backed by `~/.apex/memory`.
 fn engine() -> apex_common::Result<MemoryEngine> {
     let dir = config::config_dir()?.join("memory");
     let store = FileStore::new(dir)?;
     Ok(MemoryEngine::new(Gateway::from_env(), Arc::new(store)))
+}
+
+/// Adapts the local [`MemoryEngine`] to the agent runtime's [`ContextRetriever`],
+/// so `apex agents run` can ground answers in `~/.apex/memory`.
+pub struct EngineRetriever {
+    engine: MemoryEngine,
+}
+
+impl EngineRetriever {
+    /// Open a retriever over the local memory store.
+    pub fn open() -> apex_common::Result<Self> {
+        Ok(Self { engine: engine()? })
+    }
+}
+
+#[async_trait]
+impl ContextRetriever for EngineRetriever {
+    async fn retrieve(
+        &self,
+        query: &str,
+        spec: &MemorySpec,
+    ) -> apex_common::Result<Vec<RetrievedContext>> {
+        let mut q = MemoryQuery::new(query);
+        q.namespace = spec.namespace.clone();
+        q.tags = spec.tags.clone();
+        if let Some(limit) = spec.retrieval.limit {
+            q.limit = limit;
+        }
+        if let Some(strategy) = &spec.retrieval.strategy {
+            q.strategy = match strategy.to_lowercase().as_str() {
+                "vector" => RetrievalStrategy::Vector,
+                "keyword" => RetrievalStrategy::Keyword,
+                _ => RetrievalStrategy::Hybrid,
+            };
+        }
+
+        let results = self.engine.query(&q).await?;
+        Ok(results
+            .into_iter()
+            .map(|r| RetrievedContext {
+                source: r.record.id,
+                content: r.record.content,
+                score: r.score,
+            })
+            .collect())
+    }
 }
 
 /// `apex memory put` — store a memory.

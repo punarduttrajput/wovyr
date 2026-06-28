@@ -12,8 +12,10 @@
 
 mod definition;
 mod events;
+mod memory;
 mod runtime;
 
-pub use definition::AgentDefinition;
+pub use definition::{AgentDefinition, MemorySpec, Retrieval};
 pub use events::{NullSink, RunEvent, RunEventSink};
-pub use runtime::{AgentOutput, RunOptions, run_agent};
+pub use memory::{ContextRetriever, RetrievedContext};
+pub use runtime::{AgentOutput, RunOptions, run_agent, run_agent_with_memory};

@@ -19,7 +19,7 @@ mod memory;
 mod stream;
 mod workflow;
 
-use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent};
+use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent, run_agent_with_memory};
 use apex_provider::Gateway;
 use apex_tools::ToolRegistry;
 use clap::{Parser, Subcommand};
@@ -288,11 +288,25 @@ async fn run_local(file: &str, input: Value, stream: bool) -> apex_common::Resul
     let registry = ToolRegistry::with_builtins();
     let opts = RunOptions::new(input);
 
+    // Open a memory retriever only when the agent enables it (RAG agents).
+    let retriever = match &def.spec.memory {
+        Some(m) if m.enabled => Some(memory::EngineRetriever::open()?),
+        _ => None,
+    };
+
     if stream {
         let mut sink = StreamSink::new();
-        run_agent(&def, &gateway, &registry, opts, &mut sink).await?;
+        match &retriever {
+            Some(r) => run_agent_with_memory(&def, &gateway, &registry, opts, r, &mut sink).await?,
+            None => run_agent(&def, &gateway, &registry, opts, &mut sink).await?,
+        };
     } else {
-        let out = run_agent(&def, &gateway, &registry, opts, &mut NullSink).await?;
+        let out = match &retriever {
+            Some(r) => {
+                run_agent_with_memory(&def, &gateway, &registry, opts, r, &mut NullSink).await?
+            }
+            None => run_agent(&def, &gateway, &registry, opts, &mut NullSink).await?,
+        };
         println!("{}", out.text);
         eprintln!(
             "usage: tokens={}, cost_usd={:.6}",

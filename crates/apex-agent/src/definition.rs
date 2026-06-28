@@ -53,6 +53,38 @@ pub struct Spec {
     /// Tool ids this agent is allowed to call (must exist in the registry).
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Memory/retrieval configuration. When enabled, the runtime grounds the prompt
+    /// in retrieved context ([RAG agent](../../docs/16-examples/rag-agent.md)).
+    #[serde(default)]
+    pub memory: Option<MemorySpec>,
+}
+
+/// Memory retrieval configuration for an agent.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MemorySpec {
+    /// Whether retrieval-augmented grounding is on.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Memory namespace (knowledge base) to retrieve from.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Retrieval tuning (strategy, result cap).
+    #[serde(default)]
+    pub retrieval: Retrieval,
+    /// Only retrieve records carrying at least one of these tags (no filter if empty).
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Retrieval tuning knobs ([retrieval spec](../../docs/06-memory-engine/retrieval.md)).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Retrieval {
+    /// `hybrid` (default), `vector`, or `keyword`. Interpreted by the retriever.
+    #[serde(default)]
+    pub strategy: Option<String>,
+    /// Maximum memories to inject (defaults to a small budget in the retriever).
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 impl AgentDefinition {

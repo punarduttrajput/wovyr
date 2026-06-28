@@ -1,0 +1,18 @@
+apiVersion: agent.apex.io/v1
+kind: Agent
+metadata:
+  name: docs-bot
+spec:
+  model_selector: { capability: chat, class: balanced }
+  instructions: |
+    You answer questions about our product from a knowledge base.
+    Use ONLY the "Retrieved knowledge" provided in the prompt, and cite the
+    source id in brackets, e.g. [<id>]. If the answer is not in the retrieved
+    knowledge, reply that you don't know — do not guess.
+  # Retrieval-augmented grounding: the runtime retrieves from the `product-kb`
+  # namespace and injects the top matches before the model call.
+  # See examples/agents/docs-bot.md for the seed + run walkthrough.
+  memory:
+    enabled: true
+    namespace: product-kb
+    retrieval: { strategy: hybrid, limit: 4 }

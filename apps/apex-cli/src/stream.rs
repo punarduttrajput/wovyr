@@ -33,6 +33,9 @@ impl RunEventSink for StreamSink {
             RunEvent::Start { model, provider } => {
                 println!("start  · model: {model} (provider: {provider})");
             }
+            RunEvent::MemoryRetrieved { source, score } => {
+                println!("memory · [{source}] (score: {score:.3})");
+            }
             RunEvent::Delta { text } => {
                 println!("delta  · {text:?}");
             }

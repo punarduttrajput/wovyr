@@ -8,6 +8,7 @@
 
 use crate::definition::AgentDefinition;
 use crate::events::{RunEvent, RunEventSink};
+use crate::memory::{ContextRetriever, RetrievedContext};
 use apex_common::{Error, Result, Usage};
 use apex_provider::{ChatRequest, Gateway, Message, ToolSpec};
 use apex_tools::{ToolContext, ToolRegistry, ToolRequest};
@@ -59,6 +60,21 @@ fn user_prompt(input: &Value) -> String {
     }
 }
 
+/// Format retrieved memories into a grounding block for the system prompt. With no
+/// hits, the model is told the knowledge base had nothing — so a well-instructed
+/// agent answers "I don't know" rather than hallucinating.
+fn format_context(hits: &[RetrievedContext]) -> String {
+    if hits.is_empty() {
+        return "Retrieved knowledge: (none found in the knowledge base)".to_string();
+    }
+    let mut block =
+        String::from("Retrieved knowledge (answer using only this; cite the source):\n");
+    for hit in hits {
+        block.push_str(&format!("[{}] {}\n", hit.source, hit.content));
+    }
+    block
+}
+
 /// Build the tool specs advertised to the model from the agent's allowed tools.
 ///
 /// Fails closed: an agent referencing a tool that isn't registered is a
@@ -87,6 +103,31 @@ pub async fn run_agent(
     opts: RunOptions,
     sink: &mut dyn RunEventSink,
 ) -> Result<AgentOutput> {
+    run_agent_inner(def, gateway, registry, opts, None, sink).await
+}
+
+/// Run an agent with retrieval-augmented grounding: when the agent enables memory,
+/// `retriever` supplies context that is injected before the model call
+/// ([RAG agent](../../docs/16-examples/rag-agent.md)).
+pub async fn run_agent_with_memory(
+    def: &AgentDefinition,
+    gateway: &Gateway,
+    registry: &ToolRegistry,
+    opts: RunOptions,
+    retriever: &dyn ContextRetriever,
+    sink: &mut dyn RunEventSink,
+) -> Result<AgentOutput> {
+    run_agent_inner(def, gateway, registry, opts, Some(retriever), sink).await
+}
+
+async fn run_agent_inner(
+    def: &AgentDefinition,
+    gateway: &Gateway,
+    registry: &ToolRegistry,
+    opts: RunOptions,
+    retriever: Option<&dyn ContextRetriever>,
+    sink: &mut dyn RunEventSink,
+) -> Result<AgentOutput> {
     let model = gateway.resolve_model(def.spec.model.as_deref(), &def.selector());
     let provider = gateway.provider_name().to_string();
     sink.emit(RunEvent::Start {
@@ -96,10 +137,27 @@ pub async fn run_agent(
 
     let tools = resolve_tools(def, registry)?;
 
-    let mut messages = vec![
-        Message::system(def.spec.instructions.clone()),
-        Message::user(user_prompt(&opts.input)),
-    ];
+    let prompt = user_prompt(&opts.input);
+    let mut messages = vec![Message::system(def.spec.instructions.clone())];
+
+    // Retrieval-augmented grounding: if the agent enables memory and a retriever is
+    // available, fetch relevant context and inject it as a system message before the
+    // user turn. Each hit is surfaced as an event so the trace shows what grounded
+    // the answer.
+    if let (Some(mem), Some(retriever)) = (&def.spec.memory, retriever)
+        && mem.enabled
+    {
+        let hits = retriever.retrieve(&prompt, mem).await?;
+        for hit in &hits {
+            sink.emit(RunEvent::MemoryRetrieved {
+                source: &hit.source,
+                score: hit.score,
+            });
+        }
+        messages.push(Message::system(format_context(&hits)));
+    }
+
+    messages.push(Message::user(prompt));
 
     let mut usage = Usage::default();
     let mut final_text = String::new();
@@ -248,5 +306,110 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    // ---- retrieval-augmented grounding ----------------------------------------
+
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A retriever that records what it was asked and returns canned hits.
+    #[derive(Default)]
+    struct FakeRetriever {
+        hits: Vec<RetrievedContext>,
+        seen_query: Mutex<Option<String>>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ContextRetriever for FakeRetriever {
+        async fn retrieve(
+            &self,
+            query: &str,
+            _spec: &crate::definition::MemorySpec,
+        ) -> Result<Vec<RetrievedContext>> {
+            *self.seen_query.lock().unwrap() = Some(query.to_string());
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.hits.clone())
+        }
+    }
+
+    /// Captures the sources of `MemoryRetrieved` events.
+    #[derive(Default)]
+    struct EventCapture {
+        memories: Vec<String>,
+    }
+
+    impl RunEventSink for EventCapture {
+        fn emit(&mut self, event: RunEvent<'_>) {
+            if let RunEvent::MemoryRetrieved { source, .. } = event {
+                self.memories.push(source.to_string());
+            }
+        }
+    }
+
+    fn rag_def() -> AgentDefinition {
+        AgentDefinition::from_yaml(
+            "metadata:\n  name: rag\nspec:\n  instructions: Answer from memory.\n  memory:\n    enabled: true\n    namespace: kb\n",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn memory_enabled_retrieves_injects_and_emits_event() {
+        let def = rag_def();
+        let gw = Gateway::new(Box::new(MockProvider::new()));
+        let reg = ToolRegistry::with_builtins();
+        let retriever = FakeRetriever {
+            hits: vec![RetrievedContext {
+                source: "doc-1".into(),
+                content: "Refunds take 14 days.".into(),
+                score: 0.91,
+            }],
+            ..Default::default()
+        };
+        let mut sink = EventCapture::default();
+
+        run_agent_with_memory(
+            &def,
+            &gw,
+            &reg,
+            RunOptions::new(json!({"message": "how long do refunds take"})),
+            &retriever,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        // The retriever saw the user prompt, and the hit surfaced in the trace.
+        assert_eq!(retriever.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            retriever.seen_query.lock().unwrap().as_deref(),
+            Some("how long do refunds take")
+        );
+        assert_eq!(sink.memories, vec!["doc-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn memory_disabled_skips_retrieval() {
+        // hello_def has no `memory` block, so retrieval must not run even if a
+        // retriever is supplied.
+        let def = hello_def();
+        let gw = Gateway::new(Box::new(MockProvider::new()));
+        let reg = ToolRegistry::with_builtins();
+        let retriever = FakeRetriever::default();
+
+        run_agent_with_memory(
+            &def,
+            &gw,
+            &reg,
+            RunOptions::new(json!({"message": "hi"})),
+            &retriever,
+            &mut NullSink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(retriever.calls.load(Ordering::SeqCst), 0);
     }
 }

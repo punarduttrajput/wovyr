@@ -13,6 +13,9 @@ use apex_common::Usage;
 pub enum RunEvent<'a> {
     /// Run started; resolved model and provider are known.
     Start { model: &'a str, provider: &'a str },
+    /// A memory was retrieved and injected as grounding context (one per result),
+    /// exposing the source and score for the trace.
+    MemoryRetrieved { source: &'a str, score: f32 },
     /// A chunk of assistant text. v0.1 emits the full message as one delta.
     Delta { text: &'a str },
     /// The model requested a tool call.
