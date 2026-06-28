@@ -116,6 +116,16 @@ impl Gateway {
         self
     }
 
+    /// Override the circuit-breaker configuration (applied to every provider).
+    pub fn with_breaker(mut self, cfg: BreakerConfig) -> Self {
+        self.breakers = self
+            .providers
+            .iter()
+            .map(|_| CircuitBreaker::new(cfg))
+            .collect();
+        self
+    }
+
     /// Override the cache configuration.
     pub fn with_cache(mut self, cache_cfg: CacheConfig) -> Self {
         self.cache_cfg = cache_cfg;
