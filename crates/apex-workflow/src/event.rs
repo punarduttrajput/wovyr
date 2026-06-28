@@ -31,6 +31,8 @@ pub enum WorkflowEvent {
     ActivityStarted { id: String, attempt: u32 },
     /// An activity completed with `output`.
     ActivityCompleted { id: String, output: Value },
+    /// An activity was skipped: every inbound branch was disabled by a guard.
+    ActivitySkipped { id: String },
     /// An activity attempt failed and will be retried after `delay_ms`.
     ActivityRetried {
         id: String,

@@ -3,8 +3,8 @@
 //! activities ([recovery model](../../../docs/03-workflow-engine/execution-model.md#16-recovery-model)).
 
 use apex_workflow::{
-    ActivityError, CheckpointStore, ClosureExecutor, Definition, Engine, EventLog, FileStore,
-    InMemoryStore, RunOutcome,
+    ActivityError, ActivityState, CheckpointStore, ClosureExecutor, Definition, Engine, EventLog,
+    FileStore, InMemoryStore, RunOutcome,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -241,5 +241,102 @@ async fn durable_resume_does_not_reexecute_completed_activities() {
         1,
         "completed activity re-executed!"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn conditional_branch_takes_one_edge_and_skips_the_other() {
+    // triage routes to `refund` or `reply` by the ticket intent.
+    let def = Definition::from_yaml(
+        "metadata:\n  name: branch\nspec:\n  activities:\n    - {id: triage, type: function}\n    - {id: refund, type: function}\n    - {id: reply, type: function}\n  transitions:\n    - {from: triage, to: refund, when: \"input.intent == 'refund'\"}\n    - {from: triage, to: reply, when: \"input.intent != 'refund'\"}\n",
+    )
+    .unwrap();
+
+    let ran = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut executor = ClosureExecutor::new();
+    for id in ["triage", "refund", "reply"] {
+        let ran = ran.clone();
+        executor = executor.on(id, move |ctx| {
+            let ran = ran.clone();
+            async move {
+                ran.lock().unwrap().push(ctx.id.clone());
+                Ok(Value::Null)
+            }
+        });
+    }
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, state) = engine
+        .run(&def, "wf-branch-1", json!({"intent": "refund"}))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, RunOutcome::Completed);
+    assert_eq!(state.activities["refund"].state, ActivityState::Completed);
+    assert_eq!(state.activities["reply"].state, ActivityState::Skipped);
+    let ran = ran.lock().unwrap().clone();
+    assert_eq!(
+        ran,
+        vec!["triage", "refund"],
+        "the reply branch must not run"
+    );
+}
+
+#[tokio::test]
+async fn human_task_suspends_and_resumes_durably() {
+    // start -> approve (human) -> finish. `approve` interrupts until a decision is
+    // injected into the durable checkpoint, modelling human-in-the-loop approval.
+    let def = Definition::from_yaml(
+        "metadata:\n  name: approval\nspec:\n  activities:\n    - {id: start, type: function}\n    - {id: approve, type: human}\n    - {id: finish, type: function}\n  transitions:\n    - {from: start, to: approve}\n    - {from: approve, to: finish}\n",
+    )
+    .unwrap();
+
+    fn executor() -> ClosureExecutor {
+        ClosureExecutor::new()
+            .on("start", |_| async { Ok(json!({"ok": true})) })
+            .on("approve", |ctx| async move {
+                match ctx.variables.get("decision") {
+                    Some(d) => Ok(d.clone()),
+                    None => Err(ActivityError::Interrupted("awaiting approval".into())),
+                }
+            })
+            .on("finish", |_| async { Ok(json!({"sent": true})) })
+    }
+
+    let dir = std::env::temp_dir().join(format!("apex-wf-human-{}", std::process::id()));
+    let store = FileStore::new(&dir).unwrap();
+    let exec_id = "wf-approval-1";
+
+    // First run suspends on the human task.
+    {
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store.clone());
+        let engine = Engine::new(events, checkpoints, Arc::new(executor()));
+        let (outcome, state) = engine.run(&def, exec_id, json!({})).await.unwrap();
+        assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+        assert_eq!(state.activities["start"].state, ActivityState::Completed);
+        assert_ne!(state.activities["finish"].state, ActivityState::Completed);
+    }
+
+    // A human approves: inject the decision into the durable checkpoint.
+    {
+        let mut cp = store.latest(exec_id).await.unwrap().unwrap();
+        cp.variables
+            .insert("decision".to_string(), json!("approved"));
+        store.save(&cp).await.unwrap();
+    }
+
+    // A fresh engine (simulating a restart) resumes and completes.
+    {
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store.clone());
+        let engine = Engine::new(events, checkpoints, Arc::new(executor()));
+        let (outcome, state) = engine.resume(&def, exec_id).await.unwrap();
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert_eq!(state.activities["approve"].state, ActivityState::Completed);
+        assert_eq!(state.activities["finish"].state, ActivityState::Completed);
+        assert_eq!(state.variables.get("approve"), Some(&json!("approved")));
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }

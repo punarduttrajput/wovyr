@@ -80,6 +80,9 @@ pub enum ActivityState {
     Failed,
     /// Waiting for a retry.
     Retrying,
+    /// Not executed: every inbound branch was disabled by a guard
+    /// ([conditional branching §11](../../docs/03-workflow-engine/workflow-dsl.md#11-conditional-branching)).
+    Skipped,
 }
 
 impl ActivityState {
@@ -96,6 +99,8 @@ impl ActivityState {
                 | (Running, Failed)
                 | (Failed, Retrying)
                 | (Retrying, Scheduled)
+                | (Created, Skipped)
+                | (Ready, Skipped)
         )
     }
 }

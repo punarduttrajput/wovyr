@@ -129,6 +129,29 @@ enum WorkflowsCommand {
         /// Use the embedded local runtime (the only supported mode in v0.2).
         #[arg(long)]
         local: bool,
+
+        /// Execution id (defaults to `wf-<workflow-name>`). Use to resume/approve.
+        #[arg(long)]
+        id: Option<String>,
+    },
+
+    /// Approve a suspended human task and resume the execution.
+    Approve {
+        /// Path to the workflow YAML definition.
+        #[arg(short = 'f', long = "file")]
+        file: String,
+
+        /// Execution id reported by `workflows run`.
+        #[arg(long)]
+        id: String,
+
+        /// The human activity id to decide.
+        #[arg(long)]
+        task: String,
+
+        /// The decision to record (e.g. approved / rejected).
+        #[arg(long, default_value = "approved")]
+        decision: String,
     },
 }
 
@@ -200,9 +223,18 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
         },
         Command::Workflows { command } => match command {
             WorkflowsCommand::Validate { file } => workflow::validate_cmd(&file),
-            WorkflowsCommand::Run { file, input, local } => {
-                workflow::run_cmd(&file, &input, local).await
-            }
+            WorkflowsCommand::Run {
+                file,
+                input,
+                local,
+                id,
+            } => workflow::run_cmd(&file, &input, local, id).await,
+            WorkflowsCommand::Approve {
+                file,
+                id,
+                task,
+                decision,
+            } => workflow::approve_cmd(&file, &id, &task, &decision).await,
         },
         Command::Memory { command } => match command {
             MemoryCommand::Put {

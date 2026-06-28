@@ -1,31 +1,39 @@
-//! `apex workflows` commands: validate and locally run a workflow.
+//! `apex workflows` commands: validate, run, and approve workflows locally.
 //!
-//! Bridges the [workflow engine](apex_workflow) to the platform's
-//! [tool runtime](apex_tools) via a [`PlatformExecutor`] that maps workflow
-//! activities onto tool invocations. v0.2 supports `tool` and `function`
-//! activities locally; `ai`/`http`/`human`/`event`/`timer` and remote/durable
-//! execution arrive in later slices.
+//! Bridges the [workflow engine](apex_workflow) to the platform via a
+//! [`PlatformExecutor`] that maps activities onto the [tool runtime](apex_tools)
+//! (`tool`), the [LLM gateway](apex_provider) (`ai`), pass-throughs (`function`),
+//! and a human-in-the-loop suspend (`human`). Executions persist to a
+//! [`FileStore`](apex_workflow::FileStore) under `~/.apex/workflows`, so a `human`
+//! task can suspend durably and be resumed by `approve` — the customer-support
+//! example ([docs](../../docs/16-examples/customer-support.md)).
 
+use crate::config;
+use apex_provider::{ChatRequest, Gateway, Message, ModelSelector};
 use apex_tools::{ToolContext, ToolError, ToolRegistry, ToolRequest};
 use apex_workflow::{
-    ActivityContext, ActivityError, ActivityExecutor, CheckpointStore, Definition, Engine,
-    EventLog, InMemoryStore, RunOutcome,
+    ActivityContext, ActivityError, ActivityExecutor, ActivityState, CheckpointStore, Definition,
+    Engine, EventLog, FileStore, RunOutcome,
 };
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// Executes workflow activities against the built-in tool registry.
+/// Executes workflow activities against the platform's tool runtime and gateway.
 struct PlatformExecutor {
     registry: ToolRegistry,
+    gateway: Gateway,
 }
 
 #[async_trait]
 impl ActivityExecutor for PlatformExecutor {
     async fn execute(&self, ctx: &ActivityContext) -> Result<Value, ActivityError> {
+        // Resolve `${path}` references in the inputs against the live variables.
+        let inputs = resolve_templates(&ctx.inputs, ctx);
+
         match ctx.activity_type.as_str() {
-            // `function` activities are pass-throughs in v0.2: echo their inputs.
-            "function" => Ok(ctx.inputs.clone()),
+            // `function` activities are pass-throughs: echo their (resolved) inputs.
+            "function" => Ok(inputs),
 
             // `tool` activities invoke a registered tool by name.
             "tool" => {
@@ -42,15 +50,14 @@ impl ActivityExecutor for PlatformExecutor {
                     agent_id: "workflow".to_string(),
                     workdir: ".".to_string(),
                 };
-                let params = if ctx.inputs.is_null() {
+                let params = if inputs.is_null() {
                     Value::Object(Default::default())
                 } else {
-                    ctx.inputs.clone()
+                    inputs
                 };
 
                 match tool.execute(&tool_ctx, ToolRequest::new(params)).await {
                     Ok(resp) => Ok(resp.payload),
-                    // Classify tool errors for the retry engine.
                     Err(ToolError::Validation(m)) | Err(ToolError::PermissionDenied(m)) => {
                         Err(ActivityError::Permanent(m))
                     }
@@ -60,11 +67,137 @@ impl ActivityExecutor for PlatformExecutor {
                 }
             }
 
+            // `ai` activities call the model: `prompt` is the system instruction and
+            // `text`/`message` the user turn.
+            "ai" => {
+                let system = inputs
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("You are a helpful support assistant. Draft a concise reply.");
+                let user = inputs
+                    .get("text")
+                    .or_else(|| inputs.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+
+                let model = self.gateway.resolve_model(None, &ModelSelector::default());
+                let request =
+                    ChatRequest::new(model, vec![Message::system(system), Message::user(user)]);
+                match self.gateway.chat(request).await {
+                    Ok(resp) => Ok(json!({ "reply": resp.message.content.unwrap_or_default() })),
+                    Err(e) => Err(ActivityError::Retryable(e.to_string())),
+                }
+            }
+
+            // `human` activities suspend until a decision is injected (see `approve`).
+            "human" => match ctx.variables.get(&ctx.id) {
+                Some(decision) => Ok(decision.clone()),
+                None => {
+                    let who = inputs
+                        .get("assignee")
+                        .and_then(Value::as_str)
+                        .unwrap_or("a reviewer");
+                    Err(ActivityError::Interrupted(format!(
+                        "awaiting approval from {who}"
+                    )))
+                }
+            },
+
             other => Err(ActivityError::Permanent(format!(
-                "unsupported activity type `{other}` in v0.2 local runner"
+                "unsupported activity type `{other}` in the local runner"
             ))),
         }
     }
+}
+
+/// Recursively replace `${path}` placeholders in string inputs with the resolved
+/// workflow variable. A string that is exactly `${path}` adopts the value's JSON
+/// type; embedded placeholders are stringified.
+fn resolve_templates(value: &Value, ctx: &ActivityContext) -> Value {
+    match value {
+        Value::String(s) => substitute(s, ctx),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|v| resolve_templates(v, ctx)).collect())
+        }
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), resolve_templates(v, ctx)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn substitute(s: &str, ctx: &ActivityContext) -> Value {
+    let trimmed = s.trim();
+    if let Some(path) = trimmed
+        .strip_prefix("${")
+        .and_then(|r| r.strip_suffix('}'))
+        .filter(|_| trimmed.starts_with("${") && trimmed.ends_with('}'))
+    {
+        return lookup(path.trim(), ctx);
+    }
+    // Replace any embedded ${...} occurrences with their stringified values.
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        if let Some(end) = after.find('}') {
+            let val = lookup(after[..end].trim(), ctx);
+            out.push_str(&value_to_string(&val));
+            rest = &after[end + 1..];
+        } else {
+            out.push_str(&rest[start..]);
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    Value::String(out)
+}
+
+/// Resolve a dotted path against the activity's variables.
+fn lookup(path: &str, ctx: &ActivityContext) -> Value {
+    let mut parts = path.split('.');
+    let Some(head) = parts.next() else {
+        return Value::Null;
+    };
+    let Some(mut current) = ctx.variables.get(head).cloned() else {
+        return Value::Null;
+    };
+    for part in parts {
+        match current.get(part) {
+            Some(v) => current = v.clone(),
+            None => return Value::Null,
+        }
+    }
+    current
+}
+
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// A durable engine over `~/.apex/workflows`, plus the platform executor.
+fn engine() -> apex_common::Result<Engine> {
+    let dir = config::config_dir()?.join("workflows");
+    let store = FileStore::new(dir)?;
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let executor = Arc::new(PlatformExecutor {
+        registry: ToolRegistry::with_builtins(),
+        gateway: Gateway::from_env(),
+    });
+    Ok(Engine::new(events, checkpoints, executor))
+}
+
+/// Durable checkpoint store at `~/.apex/workflows` (for decision injection).
+fn checkpoint_store() -> apex_common::Result<FileStore> {
+    FileStore::new(config::config_dir()?.join("workflows"))
 }
 
 /// `apex workflows validate -f <file>` — compile and validate a definition.
@@ -79,31 +212,74 @@ pub fn validate_cmd(file: &str) -> apex_common::Result<()> {
     Ok(())
 }
 
-/// `apex workflows run --local -f <file> --input <json>` — run a workflow with the
-/// embedded engine and the tool-backed executor.
-pub async fn run_cmd(file: &str, input: &str, local: bool) -> apex_common::Result<()> {
+/// `apex workflows run --local -f <file> --input <json> [--id <id>]`.
+pub async fn run_cmd(
+    file: &str,
+    input: &str,
+    local: bool,
+    id: Option<String>,
+) -> apex_common::Result<()> {
     if !local {
         return Err(apex_common::Error::config(
-            "v0.2 supports local workflow runs only; pass --local",
+            "the workflow runner supports local execution only; pass --local",
         ));
     }
 
     let def = Definition::from_file(file)?;
     let input_value: Value =
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
+    let exec_id = id.unwrap_or_else(|| format!("wf-{}", def.metadata.name));
 
-    let store = InMemoryStore::new();
-    let events: Arc<dyn EventLog> = Arc::new(store.clone());
-    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
-    let executor = Arc::new(PlatformExecutor {
-        registry: ToolRegistry::with_builtins(),
-    });
-    let engine = Engine::new(events, checkpoints, executor);
+    let (outcome, state) = engine()?.run(&def, &exec_id, input_value).await?;
+    report(&def, &exec_id, &outcome, &state);
 
-    let exec_id = format!("wf-{}-local", def.metadata.name);
-    let (outcome, state) = engine.run(&def, &exec_id, input_value).await?;
+    if let RunOutcome::Failed(_) = outcome {
+        return Err(apex_common::Error::Runtime("workflow failed".into()));
+    }
+    Ok(())
+}
 
-    match &outcome {
+/// `apex workflows approve -f <file> --id <id> --task <activity> [--decision approved]`
+/// — inject a human decision into the durable checkpoint and resume.
+pub async fn approve_cmd(
+    file: &str,
+    id: &str,
+    task: &str,
+    decision: &str,
+) -> apex_common::Result<()> {
+    let def = Definition::from_file(file)?;
+
+    let store = checkpoint_store()?;
+    let mut snapshot = store.latest(id).await?.ok_or_else(|| {
+        apex_common::Error::NotFound(format!("no execution `{id}`; run the workflow first"))
+    })?;
+
+    // Record the decision under the human activity's id; the executor reads it on
+    // resume and a downstream guard (e.g. `${task}.decision == 'approved'`) routes.
+    snapshot.variables.insert(
+        task.to_string(),
+        json!({ "decision": decision, "approved": decision == "approved" }),
+    );
+    store.save(&snapshot).await?;
+    println!("recorded decision '{decision}' for task '{task}' on execution '{id}'");
+
+    let (outcome, state) = engine()?.resume(&def, id).await?;
+    report(&def, id, &outcome, &state);
+
+    if let RunOutcome::Failed(_) = outcome {
+        return Err(apex_common::Error::Runtime("workflow failed".into()));
+    }
+    Ok(())
+}
+
+/// Print the outcome, per-activity states, and any pending human task.
+fn report(
+    def: &Definition,
+    exec_id: &str,
+    outcome: &RunOutcome,
+    state: &apex_workflow::ExecutionState,
+) {
+    match outcome {
         RunOutcome::Completed => println!("workflow '{}' completed", def.metadata.name),
         RunOutcome::Compensated(msg) => {
             println!(
@@ -113,7 +289,7 @@ pub async fn run_cmd(file: &str, input: &str, local: bool) -> apex_common::Resul
         }
         RunOutcome::Failed(msg) => println!("workflow '{}' failed: {msg}", def.metadata.name),
         RunOutcome::Interrupted(msg) => {
-            println!("workflow '{}' interrupted: {msg}", def.metadata.name)
+            println!("workflow '{}' suspended: {msg}", def.metadata.name)
         }
     }
     for activity in &def.spec.activities {
@@ -121,8 +297,17 @@ pub async fn run_cmd(file: &str, input: &str, local: bool) -> apex_common::Resul
         println!("  {:<16} {:?}", activity.id, record.state);
     }
 
-    if let RunOutcome::Failed(_) = outcome {
-        return Err(apex_common::Error::Runtime("workflow failed".into()));
+    if let RunOutcome::Interrupted(_) = outcome {
+        // Surface pending human tasks and how to approve them.
+        for activity in &def.spec.activities {
+            if activity.activity_type == "human"
+                && state.activities[&activity.id].state == ActivityState::Ready
+            {
+                println!(
+                    "\nto resume: apex workflows approve -f <file> --id {exec_id} --task {} --decision approved",
+                    activity.id
+                );
+            }
+        }
     }
-    Ok(())
 }

@@ -1,0 +1,50 @@
+apiVersion: workflow.apex.io/v1
+kind: Workflow
+metadata:
+  name: support-triage
+  version: 1.0.0
+spec:
+  # Triage a support ticket, then branch on intent/amount:
+  #   refund & amount > 100  → human approval → issue refund
+  #   refund & amount <= 100 → issue refund directly
+  #   otherwise              → draft an AI reply → send email
+  # `issueRefund` declares compensation so a later failure rolls the refund back.
+  activities:
+    - id: triage
+      type: function
+      inputs: { ticket: "${input.ticketId}", intent: "${input.intent}" }
+
+    - id: approve
+      type: human
+      inputs: { assignee: support-lead }
+
+    - id: issueRefund
+      type: tool
+      name: echo
+      inputs: { action: refund, customerId: "${input.customerId}", amount: "${input.amount}" }
+      compensate: reverseRefund
+
+    - id: reverseRefund
+      type: tool
+      name: echo
+      inputs: { action: reverse_refund, customerId: "${input.customerId}" }
+
+    - id: draftReply
+      type: ai
+      inputs:
+        prompt: "You are a support agent. Draft a short, friendly reply to the customer."
+        text: "${input.message}"
+
+    - id: sendEmail
+      type: tool
+      name: echo
+      inputs: { action: send_email, to: "${input.customerId}", body: "${draftReply.reply}" }
+
+  transitions:
+    # High-value refunds need a human; small refunds are issued directly.
+    - { from: triage, to: approve, when: "input.intent == 'refund' && input.amount > 100" }
+    - { from: triage, to: issueRefund, when: "input.intent == 'refund' && input.amount <= 100" }
+    - { from: approve, to: issueRefund, when: "approve.decision == 'approved'" }
+    # Non-refund tickets get an AI-drafted reply.
+    - { from: triage, to: draftReply, when: "input.intent != 'refund'" }
+    - { from: draftReply, to: sendEmail }

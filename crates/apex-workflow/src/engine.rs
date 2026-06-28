@@ -92,6 +92,17 @@ enum Step {
     Interrupted(String),
 }
 
+/// Classification of an inbound edge during scheduling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    /// Source completed and the guard holds — this edge enables the target.
+    Live,
+    /// Source settled but the edge cannot fire (guard false, or source skipped/failed).
+    Dead,
+    /// Source not yet settled — the edge's fate is undecided.
+    Pending,
+}
+
 /// The durable workflow engine.
 #[derive(Clone)]
 pub struct Engine {
@@ -122,6 +133,9 @@ impl Engine {
         input: Value,
     ) -> Result<(RunOutcome, ExecutionState)> {
         let mut variables = def.spec.variables.clone();
+        // Expose the run input both as a nested `input` object (so guards can use
+        // `input.field`) and flattened at the top level (back-compat).
+        variables.insert("input".to_string(), input.clone());
         if let Value::Object(map) = input {
             variables.extend(map);
         }
@@ -210,6 +224,10 @@ impl Engine {
         mut state: ExecutionState,
     ) -> Result<(RunOutcome, ExecutionState)> {
         loop {
+            // Disable branches whose guards excluded every inbound edge, so they
+            // neither block completion nor get scheduled.
+            self.apply_skips(def, &mut state).await?;
+
             if self.forward_complete(def, &state) {
                 self.transition(
                     &mut state,
@@ -248,19 +266,25 @@ impl Engine {
     }
 
     /// Whether every *forward* activity (excluding compensation handlers) has
-    /// completed.
+    /// settled — completed or skipped (a skipped branch needs no execution).
     fn forward_complete(&self, def: &Definition, state: &ExecutionState) -> bool {
         let handlers = def.compensation_targets();
         def.spec
             .activities
             .iter()
             .filter(|a| !handlers.contains(&a.id))
-            .all(|a| state.activities[&a.id].state == ActivityState::Completed)
+            .all(|a| {
+                matches!(
+                    state.activities[&a.id].state,
+                    ActivityState::Completed | ActivityState::Skipped
+                )
+            })
     }
 
-    /// Pick the first activity (in declaration order) that is ready to run:
-    /// not yet completed/failed, with every predecessor completed. Compensation
-    /// handlers are excluded — they run only during rollback.
+    /// Pick the first activity (in declaration order) that is ready to run: it is
+    /// not yet settled, none of its inbound edges are still undecided, and at least
+    /// one inbound edge is *live* (an entry node with no edges is always ready).
+    /// Compensation handlers are excluded — they run only during rollback.
     fn next_ready(&self, def: &Definition, state: &ExecutionState) -> Option<String> {
         let handlers = def.compensation_targets();
         for a in &def.spec.activities {
@@ -275,18 +299,84 @@ impl Engine {
             if !runnable {
                 continue;
             }
-            let deps_done = def.predecessors(&a.id).iter().all(|p| {
-                state
-                    .activities
-                    .get(p)
-                    .map(|r| r.state == ActivityState::Completed)
-                    .unwrap_or(false)
-            });
-            if deps_done {
+            let inbound = def.inbound(&a.id);
+            if inbound.is_empty() {
+                return Some(a.id.clone()); // entry node
+            }
+            let edges: Vec<Edge> = inbound
+                .iter()
+                .map(|t| self.classify_edge(t, state))
+                .collect();
+            let any_pending = edges.contains(&Edge::Pending);
+            let any_live = edges.contains(&Edge::Live);
+            if !any_pending && any_live {
                 return Some(a.id.clone());
             }
         }
         None
+    }
+
+    /// Mark activities whose inbound edges are all *decided and dead* as `Skipped`,
+    /// to a fixpoint (skipping one node deadens its outbound edges, possibly
+    /// skipping more). Entry nodes are never skipped.
+    async fn apply_skips(&self, def: &Definition, state: &mut ExecutionState) -> Result<()> {
+        let handlers = def.compensation_targets();
+        loop {
+            let mut to_skip = None;
+            for a in &def.spec.activities {
+                if handlers.contains(&a.id) {
+                    continue;
+                }
+                let runnable = matches!(
+                    state.activities[&a.id].state,
+                    ActivityState::Created | ActivityState::Ready | ActivityState::Retrying
+                );
+                if !runnable {
+                    continue;
+                }
+                let inbound = def.inbound(&a.id);
+                if inbound.is_empty() {
+                    continue; // entry nodes always run
+                }
+                let edges: Vec<Edge> = inbound
+                    .iter()
+                    .map(|t| self.classify_edge(t, state))
+                    .collect();
+                // Decided (no pending) and no live edge → this branch is dead.
+                if edges.iter().all(|e| *e == Edge::Dead) {
+                    to_skip = Some(a.id.clone());
+                    break;
+                }
+            }
+            match to_skip {
+                Some(id) => {
+                    if let Some(record) = state.activities.get_mut(&id) {
+                        record.state = ActivityState::Skipped;
+                    }
+                    self.emit(state, WorkflowEvent::ActivitySkipped { id })
+                        .await?;
+                    self.checkpoint(state).await?;
+                }
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// Classify an inbound edge given the source activity's state and the edge's
+    /// guard, evaluated against the current variables.
+    fn classify_edge(&self, t: &crate::definition::Transition, state: &ExecutionState) -> Edge {
+        match state.activities.get(&t.from).map(|r| r.state) {
+            Some(ActivityState::Completed) => {
+                let guard = t.when.as_deref().unwrap_or("");
+                if crate::condition::evaluate(guard, &state.variables).unwrap_or(false) {
+                    Edge::Live
+                } else {
+                    Edge::Dead
+                }
+            }
+            Some(ActivityState::Skipped) | Some(ActivityState::Failed) => Edge::Dead,
+            _ => Edge::Pending,
+        }
     }
 
     /// Execute a single activity with retry, persisting progress as it goes.

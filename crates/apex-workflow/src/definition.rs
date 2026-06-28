@@ -89,6 +89,11 @@ pub struct Transition {
     pub from: String,
     /// Destination activity id.
     pub to: String,
+    /// Optional guard expression ([conditional branching §11](../../docs/03-workflow-engine/workflow-dsl.md#11-conditional-branching)).
+    /// The edge is only followed when the guard evaluates true against the current
+    /// workflow variables; an absent guard is always followed.
+    #[serde(default)]
+    pub when: Option<String>,
 }
 
 impl Definition {
@@ -129,6 +134,15 @@ impl Definition {
             .iter()
             .filter(|t| t.to == id)
             .map(|t| t.from.clone())
+            .collect()
+    }
+
+    /// The transitions entering `id` (its inbound edges).
+    pub fn inbound(&self, id: &str) -> Vec<&Transition> {
+        self.spec
+            .transitions
+            .iter()
+            .filter(|t| t.to == id)
             .collect()
     }
 
