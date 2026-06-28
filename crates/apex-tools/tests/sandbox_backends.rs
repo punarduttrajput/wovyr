@@ -9,7 +9,7 @@
 
 use apex_tools::{
     CommandOutcome, ContainerSandbox, NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend,
-    SandboxCommand, SandboxManager,
+    SandboxCommand, SandboxManager, SandboxPool,
 };
 use std::time::Duration;
 
@@ -129,4 +129,34 @@ async fn gvisor_runs_under_runsc_kernel() {
         "expected gVisor sentry banner in dmesg, got: {}",
         out.stdout
     );
+}
+
+#[tokio::test]
+async fn warm_pool_executes_and_reuses_container_sandboxes() {
+    if !has(SandboxBackend::Container).await {
+        return;
+    }
+    // A pool of pre-warmed container sandboxes; checkouts reuse warm instances.
+    let pool = SandboxPool::new(
+        2,
+        2,
+        Box::new(|| Box::new(ContainerSandbox::docker(IMAGE)) as Box<dyn Sandbox>),
+    );
+    assert_eq!(pool.idle(), 2, "two container sandboxes pre-warmed");
+
+    {
+        let sb = pool.acquire().await.expect("acquire");
+        assert_eq!(sb.backend(), SandboxBackend::Container);
+        let out = sb
+            .execute(&cmd("echo", &["pooled_ok"]))
+            .await
+            .expect("exec");
+        assert_eq!(out.exit_code, Some(0), "stderr: {}", out.stderr);
+        assert!(out.stdout.contains("pooled_ok"));
+    }
+    // Returned to the pool and reused on the next checkout (no fresh construction).
+    assert_eq!(pool.idle(), 2);
+    let _sb = pool.acquire().await.expect("reacquire");
+    assert_eq!(pool.reused(), 2, "both checkouts reused warm instances");
+    assert_eq!(pool.created(), 2, "no extra sandboxes built");
 }
