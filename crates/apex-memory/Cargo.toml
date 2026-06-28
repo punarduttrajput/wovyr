@@ -7,6 +7,11 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Memory engine: durable storage with hybrid (vector + keyword) retrieval and ranking."
 
+[features]
+# Tiered durable backends: a Postgres system-of-record + a Qdrant vector index.
+# Off by default (pulls tokio-postgres + reqwest); enable to use TieredStore.
+tiered = ["dep:tokio-postgres", "dep:reqwest"]
+
 [dependencies]
 apex-common.workspace = true
 apex-provider.workspace = true
@@ -15,6 +20,8 @@ serde_json.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tokio-postgres = { version = "0.7", optional = true }
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

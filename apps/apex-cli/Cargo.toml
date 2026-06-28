@@ -11,6 +11,11 @@ description = "The `apex` command-line interface for the Apex AI Platform."
 name = "apex"
 path = "src/main.rs"
 
+[features]
+# Durable tiered memory backend (Postgres + Qdrant), selected at runtime via
+# APEX_MEMORY_POSTGRES_URL + APEX_MEMORY_QDRANT_URL. Off by default (heavy deps).
+tiered-memory = ["apex-memory/tiered"]
+
 [dependencies]
 apex-common.workspace = true
 apex-provider.workspace = true

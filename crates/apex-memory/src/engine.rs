@@ -50,50 +50,69 @@ impl MemoryEngine {
     }
 
     /// Retrieve and rank memories for a query.
+    ///
+    /// When the store has a purpose-built index ([`MemoryStore::supports_pushdown`]),
+    /// candidate ids come from the store (vector ANN / keyword search); otherwise
+    /// the engine scans all records and computes relevance in-process.
     pub async fn query(&self, q: &MemoryQuery) -> Result<Vec<ScoredMemory>> {
+        if self.store.supports_pushdown()
+            && let Some(scored) = self.query_pushdown(q).await?
+        {
+            return Ok(scored);
+        }
+        self.query_in_process(q).await
+    }
+
+    /// In-process retrieval: scan `all()` and score every candidate.
+    async fn query_in_process(&self, q: &MemoryQuery) -> Result<Vec<ScoredMemory>> {
         let mut candidates = self.store.all(q.namespace.as_deref()).await?;
-        candidates.retain(|r| {
-            r.importance >= q.min_importance
-                && (q.tags.is_empty() || q.tags.iter().any(|t| r.tags.contains(t)))
-        });
+        candidates.retain(|r| passes_filters(r, q));
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
-
         let relevance = self.relevance(q, &candidates).await?;
-        let max_seq = candidates.iter().map(|r| r.seq).max().unwrap_or(0);
+        Ok(rank(candidates, &relevance, q))
+    }
 
-        let mut scored: Vec<ScoredMemory> = candidates
-            .into_iter()
-            .map(|r| {
-                let rel = relevance.get(&r.id).copied().unwrap_or(0.0);
-                let rec = recency_decay(max_seq.saturating_sub(r.seq), r.memory_type);
-                let imp = r.importance;
-                let total = q.weights.relevance * rel
-                    + q.weights.recency * rec
-                    + q.weights.importance * imp;
-                ScoredMemory {
-                    breakdown: ScoreBreakdown {
-                        relevance: rel,
-                        recency: rec,
-                        importance: imp,
-                        total,
-                    },
-                    score: total,
-                    record: r,
+    /// Pushdown retrieval: ask the store's index for candidate ids per the strategy,
+    /// fetch those records, then apply the weighted ranker. Returns `None` if the
+    /// store cannot satisfy the requested strategy (caller falls back to in-process).
+    async fn query_pushdown(&self, q: &MemoryQuery) -> Result<Option<Vec<ScoredMemory>>> {
+        // Over-fetch so metadata filtering still leaves enough to rank.
+        let k = q.limit.saturating_mul(4).max(50);
+        let ns = q.namespace.as_deref();
+
+        let relevance: HashMap<String, f32> = match q.strategy {
+            RetrievalStrategy::Vector => {
+                let qv = self.embed(&q.text).await?;
+                match self.store.vector_search(ns, &qv, k).await? {
+                    Some(hits) => normalize(hits),
+                    None => return Ok(None),
                 }
-            })
-            .collect();
+            }
+            RetrievalStrategy::Keyword => match self.store.keyword_search(ns, &q.text, k).await? {
+                Some(hits) => normalize(hits),
+                None => return Ok(None),
+            },
+            RetrievalStrategy::Hybrid => {
+                let qv = self.embed(&q.text).await?;
+                let vector = self.store.vector_search(ns, &qv, k).await?;
+                let keyword = self.store.keyword_search(ns, &q.text, k).await?;
+                match (vector, keyword) {
+                    (Some(v), Some(kw)) => reciprocal_rank_fusion(&[ids_of(&v), ids_of(&kw)]),
+                    // Partial support → let the in-process path handle it.
+                    _ => return Ok(None),
+                }
+            }
+        };
 
-        // Deterministic ordering: score desc, then id asc as a tiebreaker.
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.record.id.cmp(&b.record.id))
-        });
-        scored.truncate(q.limit.max(1));
-        Ok(scored)
+        if relevance.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let ids: Vec<String> = relevance.keys().cloned().collect();
+        let mut records = self.store.get(&ids).await?;
+        records.retain(|r| passes_filters(r, q));
+        Ok(Some(rank(records, &relevance, q)))
     }
 
     /// Compute the normalized relevance of each candidate per the query strategy.
@@ -186,6 +205,64 @@ fn reciprocal_rank_fusion(lists: &[Vec<String>]) -> HashMap<String, f32> {
         }
     }
     fused
+}
+
+/// Whether a record passes the query's metadata filters (importance + tags).
+fn passes_filters(r: &MemoryRecord, q: &MemoryQuery) -> bool {
+    r.importance >= q.min_importance
+        && (q.tags.is_empty() || q.tags.iter().any(|t| r.tags.contains(t)))
+}
+
+/// Apply the weighted ranker (relevance + recency + importance) to `records` and
+/// return them sorted best-first, truncated to the query limit.
+fn rank(
+    records: Vec<MemoryRecord>,
+    relevance: &HashMap<String, f32>,
+    q: &MemoryQuery,
+) -> Vec<ScoredMemory> {
+    let max_seq = records.iter().map(|r| r.seq).max().unwrap_or(0);
+    let mut scored: Vec<ScoredMemory> = records
+        .into_iter()
+        .map(|r| {
+            let rel = relevance.get(&r.id).copied().unwrap_or(0.0);
+            let rec = recency_decay(max_seq.saturating_sub(r.seq), r.memory_type);
+            let imp = r.importance;
+            let total =
+                q.weights.relevance * rel + q.weights.recency * rec + q.weights.importance * imp;
+            ScoredMemory {
+                breakdown: ScoreBreakdown {
+                    relevance: rel,
+                    recency: rec,
+                    importance: imp,
+                    total,
+                },
+                score: total,
+                record: r,
+            }
+        })
+        .collect();
+    // Deterministic ordering: score desc, then id asc as a tiebreaker.
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.record.id.cmp(&b.record.id))
+    });
+    scored.truncate(q.limit.max(1));
+    scored
+}
+
+/// Extract the ranked id list (best-first) from pushdown hits.
+fn ids_of(hits: &[(String, f32)]) -> Vec<String> {
+    hits.iter().map(|(id, _)| id.clone()).collect()
+}
+
+/// Normalize pushdown hit scores into a `[0,1]` relevance map (divide by the max).
+fn normalize(hits: Vec<(String, f32)>) -> HashMap<String, f32> {
+    let max = hits.iter().map(|(_, s)| *s).fold(0.0_f32, f32::max);
+    hits.into_iter()
+        .map(|(id, s)| (id, if max > 0.0 { s / max } else { 0.0 }))
+        .collect()
 }
 
 /// Exponential recency decay using sequence distance as a deterministic age proxy.

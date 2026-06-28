@@ -12,13 +12,62 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// A retrieval hit pushed down to the store: a record id and its normalized
+/// relevance in `[0,1]`, ordered best-first.
+pub type ScoredId = (String, f32);
+
 /// Durable store for memory records.
+///
+/// Beyond `put`/`all`, a store may **push retrieval down** (vector ANN, keyword
+/// search) when it has a purpose-built index — see [`Self::supports_pushdown`].
+/// Stores that don't (the in-memory/file stores) leave the defaults, and the engine
+/// ranks in-process over [`Self::all`].
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Store a record, assigning its `seq` and `id`; returns the id.
     async fn put(&self, record: MemoryRecord) -> Result<String>;
     /// All records, optionally restricted to a namespace.
     async fn all(&self, namespace: Option<&str>) -> Result<Vec<MemoryRecord>>;
+
+    /// Fetch records by id (any order). Defaults to scanning [`Self::all`]; stores
+    /// with primary-key lookup should override.
+    async fn get(&self, ids: &[String]) -> Result<Vec<MemoryRecord>> {
+        let want: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        Ok(self
+            .all(None)
+            .await?
+            .into_iter()
+            .filter(|r| want.contains(r.id.as_str()))
+            .collect())
+    }
+
+    /// Whether this store implements retrieval pushdown ([`Self::vector_search`] /
+    /// [`Self::keyword_search`]). When `false`, the engine ranks in-process.
+    fn supports_pushdown(&self) -> bool {
+        false
+    }
+
+    /// Approximate-nearest-neighbour search over embeddings → up to `k` hits
+    /// best-first. `None` means the store does not support vector pushdown.
+    async fn vector_search(
+        &self,
+        _namespace: Option<&str>,
+        _query: &[f32],
+        _k: usize,
+    ) -> Result<Option<Vec<ScoredId>>> {
+        Ok(None)
+    }
+
+    /// Keyword/full-text search → up to `k` hits best-first. `None` means the store
+    /// does not support keyword pushdown.
+    async fn keyword_search(
+        &self,
+        _namespace: Option<&str>,
+        _query: &str,
+        _k: usize,
+    ) -> Result<Option<Vec<ScoredId>>> {
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------

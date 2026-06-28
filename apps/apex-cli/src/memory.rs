@@ -7,17 +7,51 @@
 
 use crate::config;
 use apex_agent::{ContextRetriever, MemorySpec, RetrievedContext};
-use apex_memory::{FileStore, MemoryEngine, MemoryQuery, MemoryType, RetrievalStrategy};
+use apex_memory::{
+    FileStore, MemoryEngine, MemoryQuery, MemoryStore, MemoryType, RetrievalStrategy,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 
 use apex_provider::Gateway;
 
-/// Build a memory engine backed by `~/.apex/memory`.
-fn engine() -> apex_common::Result<MemoryEngine> {
+/// Build a memory engine. Uses the durable tiered backend (Postgres + Qdrant) when
+/// the `tiered-memory` feature is built and both `APEX_MEMORY_POSTGRES_URL` and
+/// `APEX_MEMORY_QDRANT_URL` are set; otherwise a local `~/.apex/memory` file store.
+async fn engine() -> apex_common::Result<MemoryEngine> {
+    Ok(MemoryEngine::new(Gateway::from_env(), open_store().await?))
+}
+
+/// The local JSON-lines file store under `~/.apex/memory`.
+fn file_store() -> apex_common::Result<Arc<dyn MemoryStore>> {
     let dir = config::config_dir()?.join("memory");
-    let store = FileStore::new(dir)?;
-    Ok(MemoryEngine::new(Gateway::from_env(), Arc::new(store)))
+    Ok(Arc::new(FileStore::new(dir)?))
+}
+
+/// Select the tiered backend when configured, else the file store.
+#[cfg(feature = "tiered-memory")]
+async fn open_store() -> apex_common::Result<Arc<dyn MemoryStore>> {
+    use apex_memory::TieredStore;
+    match (
+        std::env::var("APEX_MEMORY_POSTGRES_URL"),
+        std::env::var("APEX_MEMORY_QDRANT_URL"),
+    ) {
+        (Ok(pg), Ok(qdrant)) => {
+            let collection = std::env::var("APEX_MEMORY_QDRANT_COLLECTION")
+                .unwrap_or_else(|_| "apex_memory".to_string());
+            Ok(Arc::new(
+                TieredStore::connect(&pg, &qdrant, &collection).await?,
+            ))
+        }
+        // Tiered support compiled in but not configured → fall back to the file store.
+        _ => file_store(),
+    }
+}
+
+/// Without the `tiered-memory` feature there is only the file store.
+#[cfg(not(feature = "tiered-memory"))]
+async fn open_store() -> apex_common::Result<Arc<dyn MemoryStore>> {
+    file_store()
 }
 
 /// Adapts the local [`MemoryEngine`] to the agent runtime's [`ContextRetriever`],
@@ -27,9 +61,11 @@ pub struct EngineRetriever {
 }
 
 impl EngineRetriever {
-    /// Open a retriever over the local memory store.
-    pub fn open() -> apex_common::Result<Self> {
-        Ok(Self { engine: engine()? })
+    /// Open a retriever over the configured memory store.
+    pub async fn open() -> apex_common::Result<Self> {
+        Ok(Self {
+            engine: engine().await?,
+        })
     }
 }
 
@@ -73,7 +109,8 @@ pub async fn put_cmd(
     importance: f32,
     tags: Vec<String>,
 ) -> apex_common::Result<()> {
-    let id = engine()?
+    let id = engine()
+        .await?
         .remember(namespace, content, MemoryType::Semantic, importance, tags)
         .await?;
     println!("stored {id}");
@@ -90,7 +127,7 @@ pub async fn query_cmd(
     query.namespace = namespace;
     query.limit = limit;
 
-    let results = engine()?.query(&query).await?;
+    let results = engine().await?.query(&query).await?;
     if results.is_empty() {
         println!("(no matches)");
         return Ok(());

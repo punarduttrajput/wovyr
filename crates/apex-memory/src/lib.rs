@@ -13,13 +13,17 @@
 //! Postgres/Qdrant/Redis backends, the knowledge graph, MMR diversification,
 //! compression, and policy/ABAC filtering.
 
+#[cfg(feature = "tiered")]
+mod backends;
 mod engine;
 mod record;
 mod store;
 
+#[cfg(feature = "tiered")]
+pub use backends::{PostgresStore, QdrantStore, TieredStore};
 pub use engine::MemoryEngine;
 pub use record::{
     MemoryQuery, MemoryRecord, MemoryType, RankingWeights, RetrievalStrategy, ScoreBreakdown,
     ScoredMemory,
 };
-pub use store::{FileStore, InMemoryStore, MemoryStore};
+pub use store::{FileStore, InMemoryStore, MemoryStore, ScoredId};

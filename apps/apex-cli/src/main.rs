@@ -322,7 +322,7 @@ async fn run_local(file: &str, input: Value, stream: bool) -> apex_common::Resul
 
     // Open a memory retriever only when the agent enables it (RAG agents).
     let retriever = match &def.spec.memory {
-        Some(m) if m.enabled => Some(memory::EngineRetriever::open()?),
+        Some(m) if m.enabled => Some(memory::EngineRetriever::open().await?),
         _ => None,
     };
 
