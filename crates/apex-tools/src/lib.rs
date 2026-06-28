@@ -21,6 +21,7 @@ mod egress;
 mod pool;
 mod registry;
 mod sandbox;
+mod scheduler;
 mod tool;
 
 pub use builtin::{EchoTool, FsReadTool, HttpGetTool, ShellTool};
@@ -34,4 +35,5 @@ pub use sandbox::{
     NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend, SandboxCommand, SandboxError,
     SandboxManager, TrustClass, select_backend,
 };
+pub use scheduler::FairScheduler;
 pub use tool::{Tool, ToolContext, ToolError, ToolMetadata, ToolRequest, ToolResponse};
