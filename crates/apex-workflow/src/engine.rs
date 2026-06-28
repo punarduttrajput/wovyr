@@ -11,7 +11,7 @@
 //! in declaration order, one at a time. Parallel/distributed workers are a later
 //! slice; correctness and durability come first.
 
-use crate::definition::Definition;
+use crate::definition::{ActivityDef, Definition};
 use crate::event::WorkflowEvent;
 use crate::executor::{ActivityContext, ActivityError, ActivityExecutor};
 use crate::state::{ActivityState, WorkflowState};
@@ -217,6 +217,56 @@ impl Engine {
         self.drive(def, state).await
     }
 
+    /// Deliver a named **event** to a waiting execution and resume it. A `wait`
+    /// activity declared `{event: <name>}` observes it and completes with `payload`.
+    pub async fn signal_event(
+        &self,
+        def: &Definition,
+        execution_id: &str,
+        name: &str,
+        payload: Value,
+    ) -> Result<(RunOutcome, ExecutionState)> {
+        self.deliver(def, execution_id, &format!("event.{name}"), payload)
+            .await
+    }
+
+    /// Fire a **timer** for a waiting execution and resume it. A `wait` activity
+    /// declared `{timer: <id>}` observes it and completes.
+    pub async fn fire_timer(
+        &self,
+        def: &Definition,
+        execution_id: &str,
+        timer: &str,
+    ) -> Result<(RunOutcome, ExecutionState)> {
+        self.deliver(
+            def,
+            execution_id,
+            &format!("timer.{timer}"),
+            Value::Bool(true),
+        )
+        .await
+    }
+
+    /// Inject a delivered signal into the durable checkpoint, then resume.
+    async fn deliver(
+        &self,
+        def: &Definition,
+        execution_id: &str,
+        key: &str,
+        payload: Value,
+    ) -> Result<(RunOutcome, ExecutionState)> {
+        let mut state = self
+            .checkpoints
+            .latest(execution_id)
+            .await?
+            .ok_or_else(|| {
+                Error::NotFound(format!("no checkpoint for execution `{execution_id}`"))
+            })?;
+        state.variables.insert(key.to_string(), payload);
+        self.checkpoints.save(&state).await?;
+        self.resume(def, execution_id).await
+    }
+
     /// The scheduling loop: run ready activities until the workflow ends.
     async fn drive(
         &self,
@@ -292,9 +342,13 @@ impl Engine {
                 continue;
             }
             let record = &state.activities[&a.id];
+            // `Waiting` is runnable so a resumed wait re-evaluates its condition.
             let runnable = matches!(
                 record.state,
-                ActivityState::Created | ActivityState::Ready | ActivityState::Retrying
+                ActivityState::Created
+                    | ActivityState::Ready
+                    | ActivityState::Retrying
+                    | ActivityState::Waiting
             );
             if !runnable {
                 continue;
@@ -387,6 +441,13 @@ impl Engine {
         id: &str,
     ) -> Result<Step> {
         let activity = def.activity(id).expect("activity exists").clone();
+
+        // `wait` activities are handled by the engine: they suspend durably until a
+        // timer fires or a named event is delivered (see `signal_event`/`fire_timer`).
+        if activity.activity_type == "wait" {
+            return self.run_wait(state, &activity).await;
+        }
+
         let policy = def.retry_for(id);
 
         loop {
@@ -471,6 +532,50 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Handle a `wait` activity: complete it if the awaited timer/event has been
+    /// delivered (into `state.variables`), otherwise suspend the workflow durably.
+    async fn run_wait(&self, state: &mut ExecutionState, activity: &ActivityDef) -> Result<Step> {
+        let id = activity.id.clone();
+        let spec = WaitSpec::from_inputs(&activity.inputs)?;
+
+        if let Some(payload) = state.variables.get(&spec.variable_key()).cloned() {
+            // The signal arrived → complete, exposing the payload like any output.
+            {
+                let record = state.activities.get_mut(&id).expect("record exists");
+                record.state = ActivityState::Completed;
+                record.output = Some(payload.clone());
+            }
+            state.variables.insert(id.clone(), payload.clone());
+            state.completed_order.push(id.clone());
+            self.emit(
+                state,
+                WorkflowEvent::ActivityCompleted {
+                    id: id.clone(),
+                    output: payload,
+                },
+            )
+            .await?;
+            self.checkpoint(state).await?;
+            return Ok(Step::Completed);
+        }
+
+        // Not yet signalled → mark Waiting and suspend (resumable by delivery).
+        self.set_activity(state, &id, ActivityState::Waiting);
+        self.emit(
+            state,
+            WorkflowEvent::ActivityWaiting {
+                id: id.clone(),
+                waiting_for: spec.describe(),
+            },
+        )
+        .await?;
+        self.checkpoint(state).await?;
+        Ok(Step::Interrupted(format!(
+            "waiting for {}",
+            spec.describe()
+        )))
     }
 
     /// Mark an activity as terminally failed and record the event.
@@ -662,5 +767,44 @@ impl Engine {
     /// Persist a full checkpoint of the current state.
     async fn checkpoint(&self, state: &mut ExecutionState) -> Result<()> {
         self.checkpoints.save(state).await
+    }
+}
+
+/// What a `wait` activity is blocked on, parsed from its `inputs`.
+enum WaitSpec {
+    /// Waits for `signal_event(<name>)`.
+    Event(String),
+    /// Waits for `fire_timer(<id>)`.
+    Timer(String),
+}
+
+impl WaitSpec {
+    /// Parse `{event: <name>}` or `{timer: <id>}` from a wait activity's inputs.
+    fn from_inputs(inputs: &Value) -> Result<Self> {
+        if let Some(name) = inputs.get("event").and_then(Value::as_str) {
+            return Ok(WaitSpec::Event(name.to_string()));
+        }
+        if let Some(timer) = inputs.get("timer").and_then(Value::as_str) {
+            return Ok(WaitSpec::Timer(timer.to_string()));
+        }
+        Err(Error::Invalid(
+            "a `wait` activity needs an `event` or `timer` input".into(),
+        ))
+    }
+
+    /// The workflow variable a delivery writes (and the wait reads).
+    fn variable_key(&self) -> String {
+        match self {
+            WaitSpec::Event(name) => format!("event.{name}"),
+            WaitSpec::Timer(timer) => format!("timer.{timer}"),
+        }
+    }
+
+    /// Human-readable description for events/logs.
+    fn describe(&self) -> String {
+        match self {
+            WaitSpec::Event(name) => format!("event '{name}'"),
+            WaitSpec::Timer(timer) => format!("timer '{timer}'"),
+        }
     }
 }

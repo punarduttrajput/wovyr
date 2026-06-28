@@ -33,6 +33,8 @@ pub enum WorkflowEvent {
     ActivityCompleted { id: String, output: Value },
     /// An activity was skipped: every inbound branch was disabled by a guard.
     ActivitySkipped { id: String },
+    /// A `wait` activity suspended pending a timer or event (`waiting_for`).
+    ActivityWaiting { id: String, waiting_for: String },
     /// An activity attempt failed and will be retried after `delay_ms`.
     ActivityRetried {
         id: String,

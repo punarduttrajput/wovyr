@@ -153,6 +153,29 @@ enum WorkflowsCommand {
         #[arg(long, default_value = "approved")]
         decision: String,
     },
+
+    /// Deliver a timer/event signal to a waiting execution and resume it.
+    Signal {
+        /// Path to the workflow YAML definition.
+        #[arg(short = 'f', long = "file")]
+        file: String,
+
+        /// Execution id reported by `workflows run`.
+        #[arg(long)]
+        id: String,
+
+        /// Name of the event to deliver (mutually exclusive with --timer).
+        #[arg(long, conflicts_with = "timer")]
+        event: Option<String>,
+
+        /// Id of the timer to fire (mutually exclusive with --event).
+        #[arg(long)]
+        timer: Option<String>,
+
+        /// JSON payload for an event (default null).
+        #[arg(long, default_value = "null")]
+        payload: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -262,6 +285,13 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 task,
                 decision,
             } => workflow::approve_cmd(&file, &id, &task, &decision).await,
+            WorkflowsCommand::Signal {
+                file,
+                id,
+                event,
+                timer,
+                payload,
+            } => workflow::signal_cmd(&file, &id, event, timer, &payload).await,
         },
         Command::Memory { command } => match command {
             MemoryCommand::Put {

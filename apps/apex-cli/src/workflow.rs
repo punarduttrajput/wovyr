@@ -272,6 +272,39 @@ pub async fn approve_cmd(
     Ok(())
 }
 
+/// `apex workflows signal -f <file> --id <id> (--event <name> [--payload json] | --timer <id>)`
+/// — deliver a waiting-state signal to a suspended execution and resume it.
+pub async fn signal_cmd(
+    file: &str,
+    id: &str,
+    event: Option<String>,
+    timer: Option<String>,
+    payload: &str,
+) -> apex_common::Result<()> {
+    let def = Definition::from_file(file)?;
+    let engine = engine()?;
+
+    let (outcome, state) = match (event, timer) {
+        (Some(name), None) => {
+            let payload = serde_json::from_str(payload)
+                .map_err(|e| apex_common::Error::Invalid(format!("invalid --payload JSON: {e}")))?;
+            engine.signal_event(&def, id, &name, payload).await?
+        }
+        (None, Some(timer)) => engine.fire_timer(&def, id, &timer).await?,
+        _ => {
+            return Err(apex_common::Error::Invalid(
+                "provide exactly one of --event or --timer".into(),
+            ));
+        }
+    };
+
+    report(&def, id, &outcome, &state);
+    if let RunOutcome::Failed(_) = outcome {
+        return Err(apex_common::Error::Runtime("workflow failed".into()));
+    }
+    Ok(())
+}
+
 /// Print the outcome, per-activity states, and any pending human task.
 fn report(
     def: &Definition,

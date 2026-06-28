@@ -340,3 +340,86 @@ async fn human_task_suspends_and_resumes_durably() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn event_wait_suspends_then_resumes_on_signal() {
+    // start -> gate (wait for event 'approval') -> finish. The wait is handled by
+    // the engine: it suspends durably until `signal_event` delivers the event.
+    let def = Definition::from_yaml(
+        "metadata:\n  name: eventwait\nspec:\n  activities:\n    - {id: start, type: function}\n    - {id: gate, type: wait, inputs: {event: approval}}\n    - {id: finish, type: function}\n  transitions:\n    - {from: start, to: gate}\n    - {from: gate, to: finish}\n",
+    )
+    .unwrap();
+
+    fn executor() -> ClosureExecutor {
+        // The engine handles `gate` itself; only the function activities need handlers.
+        ClosureExecutor::new()
+            .on("start", |_| async { Ok(json!({"ok": true})) })
+            .on("finish", |_| async { Ok(json!({"sent": true})) })
+    }
+
+    let dir = std::env::temp_dir().join(format!("apex-wf-event-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = FileStore::new(&dir).unwrap();
+    let exec_id = "wf-event-1";
+
+    // First run suspends at the wait.
+    {
+        let engine = Engine::new(
+            Arc::new(store.clone()) as Arc<dyn EventLog>,
+            Arc::new(store.clone()) as Arc<dyn CheckpointStore>,
+            Arc::new(executor()),
+        );
+        let (outcome, state) = engine.run(&def, exec_id, json!({})).await.unwrap();
+        assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+        assert_eq!(state.activities["gate"].state, ActivityState::Waiting);
+        assert_ne!(state.activities["finish"].state, ActivityState::Completed);
+    }
+
+    // A fresh engine delivers the event → resumes and completes.
+    {
+        let engine = Engine::new(
+            Arc::new(store.clone()) as Arc<dyn EventLog>,
+            Arc::new(store.clone()) as Arc<dyn CheckpointStore>,
+            Arc::new(executor()),
+        );
+        let (outcome, state) = engine
+            .signal_event(&def, exec_id, "approval", json!({"by": "alice"}))
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert_eq!(state.activities["gate"].state, ActivityState::Completed);
+        assert_eq!(state.activities["finish"].state, ActivityState::Completed);
+        // The wait exposes the delivered payload as its output.
+        assert_eq!(state.variables.get("gate"), Some(&json!({"by": "alice"})));
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn timer_wait_suspends_then_resumes_on_fire() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: timerwait\nspec:\n  activities:\n    - {id: gate, type: wait, inputs: {timer: deadline}}\n    - {id: finish, type: function}\n  transitions:\n    - {from: gate, to: finish}\n",
+    )
+    .unwrap();
+
+    let executor = || ClosureExecutor::new().on("finish", |_| async { Ok(json!({"done": true})) });
+    let store = InMemoryStore::new();
+    let exec_id = "wf-timer-1";
+
+    let engine = Engine::new(
+        Arc::new(store.clone()) as Arc<dyn EventLog>,
+        Arc::new(store.clone()) as Arc<dyn CheckpointStore>,
+        Arc::new(executor()),
+    );
+
+    // Starts blocked on the timer.
+    let (outcome, state) = engine.run(&def, exec_id, json!({})).await.unwrap();
+    assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+    assert_eq!(state.activities["gate"].state, ActivityState::Waiting);
+
+    // Firing the timer resumes and completes the workflow.
+    let (outcome, state) = engine.fire_timer(&def, exec_id, "deadline").await.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
+    assert_eq!(state.activities["finish"].state, ActivityState::Completed);
+}

@@ -80,6 +80,9 @@ pub enum ActivityState {
     Failed,
     /// Waiting for a retry.
     Retrying,
+    /// Suspended pending a timer or event (a `wait` activity); resumes when the
+    /// signal is delivered ([waiting states](../../docs/03-workflow-engine/execution-model.md)).
+    Waiting,
     /// Not executed: every inbound branch was disabled by a guard
     /// ([conditional branching §11](../../docs/03-workflow-engine/workflow-dsl.md#11-conditional-branching)).
     Skipped,
@@ -101,6 +104,11 @@ impl ActivityState {
                 | (Retrying, Scheduled)
                 | (Created, Skipped)
                 | (Ready, Skipped)
+                // A `wait` activity suspends, then completes once signalled.
+                | (Created, Waiting)
+                | (Ready, Waiting)
+                | (Waiting, Waiting)
+                | (Waiting, Completed)
         )
     }
 }
