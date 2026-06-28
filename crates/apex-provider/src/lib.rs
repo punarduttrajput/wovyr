@@ -17,6 +17,8 @@ mod provider;
 #[cfg(feature = "redis")]
 mod redis_breaker;
 mod resilience;
+#[cfg(feature = "qdrant")]
+mod semantic_qdrant;
 mod types;
 
 pub use embeddings::{EmbeddingRequest, EmbeddingResponse, cosine_similarity};
@@ -28,6 +30,9 @@ pub use provider::AIProvider;
 pub use redis_breaker::RedisKv;
 pub use resilience::{
     BreakerConfig, BreakerKv, CacheConfig, CacheMode, CircuitBreaker, CostEvent, CostObserver,
-    InMemoryKv, LocalCircuitBreaker, RetryConfig, SharedCircuitBreaker,
+    HedgeConfig, InMemoryKv, InMemorySemanticCache, LocalCircuitBreaker, RetryConfig,
+    SemanticCacheStore, SharedCircuitBreaker,
 };
+#[cfg(feature = "qdrant")]
+pub use semantic_qdrant::QdrantSemanticCache;
 pub use types::{ChatRequest, ChatResponse, Message, Role, ToolCall, ToolSpec};

@@ -11,6 +11,9 @@ description = "Provider SDK and LLM gateway: a vendor-neutral chat interface for
 # Redis-shared circuit-breaker state, so a fleet of gateways reacts to a failing
 # provider consistently. Off by default (pulls the redis client).
 redis = ["dep:redis"]
+# Qdrant-backed distributed semantic cache (shared across a gateway fleet). Uses the
+# reqwest client already in deps; off by default to keep the surface opt-in.
+qdrant = []
 
 [dependencies]
 apex-common.workspace = true
@@ -18,10 +21,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+futures = "0.3"
 reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 redis = { version = "0.24", default-features = false, features = ["tokio-comp"], optional = true }
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

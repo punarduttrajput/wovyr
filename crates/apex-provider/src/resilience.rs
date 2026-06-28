@@ -12,6 +12,7 @@
 //! consistently ([resilience §6](../../docs/05-llm-gateway/resilience.md)). Semantic
 //! caching and hedging are deferred.
 
+use crate::embeddings::cosine_similarity;
 use crate::types::ChatResponse;
 use apex_common::Result;
 use async_trait::async_trait;
@@ -78,6 +79,32 @@ impl Default for CacheConfig {
             mode: CacheMode::Off,
             ttl_ms: 3_600_000,
             similarity_threshold: 0.95,
+        }
+    }
+}
+
+/// Request hedging ([resilience §7](../../docs/05-llm-gateway/resilience.md)).
+///
+/// When enabled, if a candidate hasn't responded within `delay_ms` the gateway
+/// dispatches the same request to the next healthy candidate and returns whichever
+/// finishes first, cancelling the losers. Disabled by default — hedging trades extra
+/// cost for tail-latency, and is metered as separate attempts.
+#[derive(Clone, Copy, Debug)]
+pub struct HedgeConfig {
+    /// Whether hedging is on.
+    pub enabled: bool,
+    /// Delay with no response before launching the next hedge.
+    pub delay_ms: u64,
+    /// Maximum requests in flight at once (including the original).
+    pub max_parallel: usize,
+}
+
+impl Default for HedgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            delay_ms: 800,
+            max_parallel: 2,
         }
     }
 }
@@ -419,6 +446,89 @@ pub(crate) struct SemanticEntry {
     pub param_key: String,
     pub response: ChatResponse,
     pub created_ms: u64,
+}
+
+/// Stores semantic-cache entries (request embedding → cached response) and serves
+/// nearest-neighbour lookups. The default [`InMemorySemanticCache`] keeps them in
+/// process; a distributed impl (e.g. Qdrant) shares them across a gateway fleet
+/// ([caching §4](../../docs/05-llm-gateway/caching.md)).
+#[async_trait]
+pub trait SemanticCacheStore: Send + Sync {
+    /// Best param-compatible response whose embedding similarity to `embedding`
+    /// clears `threshold`, within `ttl_ms` of `now_ms`. `None` is a miss.
+    async fn lookup(
+        &self,
+        param_key: &str,
+        embedding: &[f32],
+        threshold: f32,
+        ttl_ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<ChatResponse>>;
+    /// Index `response` under its request embedding and param-compatibility key.
+    async fn store(
+        &self,
+        param_key: &str,
+        embedding: &[f32],
+        response: &ChatResponse,
+        now_ms: u64,
+    ) -> Result<()>;
+}
+
+/// In-process semantic cache: a linear cosine scan over recent entries.
+#[derive(Default)]
+pub struct InMemorySemanticCache {
+    entries: Mutex<Vec<SemanticEntry>>,
+}
+
+impl InMemorySemanticCache {
+    /// An empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl SemanticCacheStore for InMemorySemanticCache {
+    async fn lookup(
+        &self,
+        param_key: &str,
+        embedding: &[f32],
+        threshold: f32,
+        ttl_ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<ChatResponse>> {
+        let entries = self.entries.lock().expect("cache mutex poisoned");
+        let mut best: Option<(f32, &SemanticEntry)> = None;
+        for entry in entries.iter() {
+            if entry.param_key != param_key || now_ms.saturating_sub(entry.created_ms) > ttl_ms {
+                continue;
+            }
+            let sim = cosine_similarity(embedding, &entry.embedding);
+            if sim >= threshold && best.is_none_or(|(b, _)| sim > b) {
+                best = Some((sim, entry));
+            }
+        }
+        Ok(best.map(|(_, e)| e.response.clone()))
+    }
+
+    async fn store(
+        &self,
+        param_key: &str,
+        embedding: &[f32],
+        response: &ChatResponse,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.entries
+            .lock()
+            .expect("cache mutex poisoned")
+            .push(SemanticEntry {
+                embedding: embedding.to_vec(),
+                param_key: param_key.to_string(),
+                response: response.clone(),
+                created_ms: now_ms,
+            });
+        Ok(())
+    }
 }
 
 #[cfg(test)]

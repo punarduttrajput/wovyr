@@ -12,23 +12,25 @@
 //! [circuit breaker](crate::CircuitBreaker) removes unhealthy upstreams. It also
 //! supports a [response cache](../../docs/05-llm-gateway/caching.md) — exact (request
 //! hash) and **semantic** (embedding similarity over param-compatible entries, with
-//! an exact check first) — and emits [`CostEvent`]s. A single-provider gateway
+//! an exact check first) — optional **request hedging** (race a slow candidate
+//! against its successors), and emits [`CostEvent`]s. A single-provider gateway
 //! (`new`/`from_env`) is just a candidate list of length one.
 
-use crate::embeddings::{EmbeddingRequest, EmbeddingResponse, cosine_similarity};
+use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
 use crate::mock::MockProvider;
 use crate::openai::OpenAiProvider;
 use crate::provider::AIProvider;
 use crate::resilience::{
     BreakerConfig, CacheConfig, CacheEntry, CacheMode, CircuitBreaker, CostEvent, CostObserver,
-    LocalCircuitBreaker, RetryConfig, SemanticEntry,
+    HedgeConfig, InMemorySemanticCache, LocalCircuitBreaker, RetryConfig, SemanticCacheStore,
 };
 use crate::types::{ChatRequest, ChatResponse, Role};
 use apex_common::{Error, Result};
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Declarative model requirement: pick a model by capability and class instead
 /// of pinning a vendor model id.
@@ -66,7 +68,8 @@ pub struct Gateway {
     max_failovers: usize,
     cache_cfg: CacheConfig,
     cache: Mutex<HashMap<String, CacheEntry>>,
-    semantic_cache: Mutex<Vec<SemanticEntry>>,
+    semantic_cache: Box<dyn SemanticCacheStore>,
+    hedge_cfg: HedgeConfig,
     cost: Option<Arc<dyn CostObserver>>,
     start: Instant,
 }
@@ -93,7 +96,8 @@ impl Gateway {
             max_failovers: 2,
             cache_cfg: CacheConfig::default(),
             cache: Mutex::new(HashMap::new()),
-            semantic_cache: Mutex::new(Vec::new()),
+            semantic_cache: Box::new(InMemorySemanticCache::new()),
+            hedge_cfg: HedgeConfig::default(),
             cost: None,
             start: Instant::now(),
         }
@@ -160,6 +164,29 @@ impl Gateway {
     pub fn with_cache(mut self, cache_cfg: CacheConfig) -> Self {
         self.cache_cfg = cache_cfg;
         self
+    }
+
+    /// Enable request hedging ([resilience §7](../../docs/05-llm-gateway/resilience.md)):
+    /// race slow candidates against their successors to cut tail latency.
+    pub fn with_hedging(mut self, hedge_cfg: HedgeConfig) -> Self {
+        self.hedge_cfg = hedge_cfg;
+        self
+    }
+
+    /// Override the semantic-cache backend (default in-process). Pass a distributed
+    /// store to share semantic cache entries across a fleet of gateways.
+    pub fn with_semantic_store(mut self, store: Box<dyn SemanticCacheStore>) -> Self {
+        self.semantic_cache = store;
+        self
+    }
+
+    /// Use a **Qdrant-backed** distributed semantic cache ([caching §4](../../docs/05-llm-gateway/caching.md))
+    /// so the whole fleet shares cached responses. Requires the `qdrant` cargo feature.
+    #[cfg(feature = "qdrant")]
+    pub fn with_qdrant_semantic_cache(self, url: &str, collection: &str) -> Self {
+        self.with_semantic_store(Box::new(crate::semantic_qdrant::QdrantSemanticCache::new(
+            url, collection,
+        )))
     }
 
     /// Set the max number of failover hops (default 2).
@@ -232,14 +259,54 @@ impl Gateway {
         } else {
             None
         };
-        if let Some(qv) = &query_vec
-            && let Some(hit) = self.semantic_lookup(&request, qv)
-        {
-            self.emit_cost_hit(&hit, "semantic");
-            return Ok(zero_cost(hit));
+        if let Some(qv) = &query_vec {
+            match self
+                .semantic_cache
+                .lookup(
+                    &param_key(&request),
+                    qv,
+                    self.cache_cfg.similarity_threshold,
+                    self.cache_cfg.ttl_ms,
+                    self.now_ms(),
+                )
+                .await
+            {
+                Ok(Some(hit)) => {
+                    self.emit_cost_hit(&hit, "semantic");
+                    return Ok(zero_cost(hit));
+                }
+                Ok(None) => {}
+                // A cache backend error must never fail the request — serve live.
+                Err(e) => tracing::warn!("semantic cache lookup failed, serving live: {e}"),
+            }
         }
 
-        // 2. Resilient dispatch across the candidate list.
+        // 2. Resilient dispatch — racing (hedged) or sequential failover.
+        let response = if self.hedge_cfg.enabled {
+            self.dispatch_hedged(&request).await
+        } else {
+            self.dispatch_sequential(&request).await
+        }?;
+
+        // 3. On a live result: store on the miss and meter the cost.
+        if self.cache_cfg.mode != CacheMode::Off {
+            self.cache_store(&request, &response);
+        }
+        if let Some(qv) = &query_vec
+            && let Err(e) = self
+                .semantic_cache
+                .store(&param_key(&request), qv, &response, self.now_ms())
+                .await
+        {
+            tracing::warn!("semantic cache store failed: {e}");
+        }
+        self.emit_cost_live(&response);
+        Ok(response)
+    }
+
+    /// Sequential failover: try each healthy candidate in order, moving on only when
+    /// one returns a transient error.
+    async fn dispatch_sequential(&self, request: &ChatRequest) -> Result<ChatResponse> {
         let mut last_err: Option<Error> = None;
         let mut hops = 0usize;
 
@@ -253,19 +320,8 @@ impl Gateway {
             }
             hops += 1;
 
-            match self.try_provider(i, &request).await {
-                Ok(response) => {
-                    // Store on a miss: exact for both modes, plus the semantic index
-                    // (reusing the embedding computed above) for Semantic mode.
-                    if self.cache_cfg.mode != CacheMode::Off {
-                        self.cache_store(&request, &response);
-                    }
-                    if let Some(qv) = &query_vec {
-                        self.semantic_store(&request, qv, &response);
-                    }
-                    self.emit_cost_live(&response);
-                    return Ok(response);
-                }
+            match self.try_provider(i, request).await {
+                Ok(response) => return Ok(response),
                 Err((err, transient)) => {
                     if !transient {
                         // Permanent error (bad request/auth): failover won't help.
@@ -275,8 +331,66 @@ impl Gateway {
                 }
             }
         }
-
         Err(last_err.unwrap_or_else(|| Error::provider("no healthy providers available")))
+    }
+
+    /// Hedged dispatch: launch the primary, and each time `delay_ms` elapses with no
+    /// answer (or a candidate fails transiently) launch the next healthy candidate,
+    /// racing up to `max_parallel` in flight. Returns the first success; a permanent
+    /// error short-circuits. Losing calls are cancelled when this future returns.
+    async fn dispatch_hedged(&self, request: &ChatRequest) -> Result<ChatResponse> {
+        let delay = Duration::from_millis(self.hedge_cfg.delay_ms);
+        let mut inflight = FuturesUnordered::new();
+        let mut next = 0usize; // next provider index to consider
+        let mut launched = 0usize; // distinct candidates dispatched so far
+        let mut last_err: Option<Error> = None;
+
+        loop {
+            // Fill up to the concurrency / failover budget, skipping open breakers.
+            while inflight.len() < self.hedge_cfg.max_parallel
+                && launched <= self.max_failovers
+                && next < self.providers.len()
+            {
+                let i = next;
+                next += 1;
+                if !self.breakers[i].allow(self.now_ms()).await {
+                    continue;
+                }
+                launched += 1;
+                inflight.push(self.try_provider(i, request));
+                break; // launch one, then wait (the hedge delay staggers the rest)
+            }
+
+            if inflight.is_empty() {
+                return Err(
+                    last_err.unwrap_or_else(|| Error::provider("no healthy providers available"))
+                );
+            }
+
+            // More candidates we could still hedge to after the delay?
+            let can_hedge = inflight.len() < self.hedge_cfg.max_parallel
+                && launched <= self.max_failovers
+                && next < self.providers.len();
+
+            tokio::select! {
+                // Bias toward completed responses over launching another hedge.
+                biased;
+                result = inflight.next() => match result {
+                    Some(Ok(response)) => return Ok(response),
+                    Some(Err((err, transient))) => {
+                        if !transient {
+                            return Err(err);
+                        }
+                        // Failed fast — loop to launch the next candidate immediately.
+                        last_err = Some(err);
+                    }
+                    None => unreachable!("inflight is non-empty"),
+                },
+                _ = tokio::time::sleep(delay), if can_hedge => {
+                    // Delay elapsed with no answer → loop to launch a hedge.
+                }
+            }
+        }
     }
 
     /// Try one provider with retry. Returns `Err((error, transient))` where
@@ -361,35 +475,6 @@ impl Gateway {
                 None
             }
         }
-    }
-
-    /// Best param-compatible entry whose embedding similarity clears the threshold.
-    fn semantic_lookup(&self, request: &ChatRequest, query: &[f32]) -> Option<ChatResponse> {
-        let pk = param_key(request);
-        let now = self.now_ms();
-        let store = self.semantic_cache.lock().expect("cache mutex poisoned");
-        let mut best: Option<(f32, &SemanticEntry)> = None;
-        for entry in store.iter() {
-            if entry.param_key != pk || now.saturating_sub(entry.created_ms) > self.cache_cfg.ttl_ms
-            {
-                continue;
-            }
-            let sim = cosine_similarity(query, &entry.embedding);
-            if sim >= self.cache_cfg.similarity_threshold && best.is_none_or(|(b, _)| sim > b) {
-                best = Some((sim, entry));
-            }
-        }
-        best.map(|(_, e)| e.response.clone())
-    }
-
-    fn semantic_store(&self, request: &ChatRequest, query: &[f32], response: &ChatResponse) {
-        let mut store = self.semantic_cache.lock().expect("cache mutex poisoned");
-        store.push(SemanticEntry {
-            embedding: query.to_vec(),
-            param_key: param_key(request),
-            response: response.clone(),
-            created_ms: self.now_ms(),
-        });
     }
 
     // --- cost events -------------------------------------------------------
@@ -699,6 +784,121 @@ mod tests {
         assert!(
             second.usage.cost_usd > 0.0,
             "similarity below threshold → live call"
+        );
+    }
+
+    /// A provider that records its call count, waits `delay_ms`, then succeeds (or
+    /// returns a transient error). With `tokio`'s paused clock the waits are virtual,
+    /// so the races below are deterministic.
+    struct SlowProvider {
+        name: &'static str,
+        delay_ms: u64,
+        fail: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl SlowProvider {
+        fn new(name: &'static str, delay_ms: u64, fail: bool) -> (Box<Self>, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Box::new(Self {
+                    name,
+                    delay_ms,
+                    fail,
+                    calls: calls.clone(),
+                }),
+                calls,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl AIProvider for SlowProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            if self.fail {
+                return Err(Error::provider("503 unavailable"));
+            }
+            Ok(ChatResponse {
+                message: Message::assistant(format!("ok from {}", self.name)),
+                model: request.model,
+                usage: Usage::new(3, 2, 0.01),
+                finish_reason: "stop".to_string(),
+            })
+        }
+    }
+
+    fn hedge_on(delay_ms: u64) -> HedgeConfig {
+        HedgeConfig {
+            enabled: true,
+            delay_ms,
+            max_parallel: 2,
+        }
+    }
+
+    /// A slow primary is hedged after the delay; the faster secondary wins, and both
+    /// were dispatched.
+    #[tokio::test(start_paused = true)]
+    async fn hedging_races_and_returns_faster_secondary() {
+        let (primary, pc) = SlowProvider::new("primary", 1_000, false);
+        let (secondary, sc) = SlowProvider::new("secondary", 10, false);
+        let gw = Gateway::with_providers(vec![primary, secondary]).with_hedging(hedge_on(100));
+
+        let resp = gw.chat(req()).await.unwrap();
+        assert_eq!(resp.message.content.as_deref(), Some("ok from secondary"));
+        assert_eq!(pc.load(Ordering::SeqCst), 1, "primary was dispatched");
+        assert_eq!(sc.load(Ordering::SeqCst), 1, "secondary was hedged in");
+    }
+
+    /// A fast primary answers before the hedge delay, so no hedge is launched.
+    #[tokio::test(start_paused = true)]
+    async fn hedging_skips_when_primary_is_fast() {
+        let (primary, pc) = SlowProvider::new("primary", 10, false);
+        let (secondary, sc) = SlowProvider::new("secondary", 1_000, false);
+        let gw = Gateway::with_providers(vec![primary, secondary]).with_hedging(hedge_on(100));
+
+        let resp = gw.chat(req()).await.unwrap();
+        assert_eq!(resp.message.content.as_deref(), Some("ok from primary"));
+        assert_eq!(pc.load(Ordering::SeqCst), 1);
+        assert_eq!(sc.load(Ordering::SeqCst), 0, "secondary never launched");
+    }
+
+    /// With hedging off, dispatch waits out the slow primary (no secondary call).
+    #[tokio::test(start_paused = true)]
+    async fn hedging_disabled_uses_primary_only() {
+        let (primary, pc) = SlowProvider::new("primary", 1_000, false);
+        let (secondary, sc) = SlowProvider::new("secondary", 10, false);
+        let gw = Gateway::with_providers(vec![primary, secondary]); // hedging default off
+
+        let resp = gw.chat(req()).await.unwrap();
+        assert_eq!(resp.message.content.as_deref(), Some("ok from primary"));
+        assert_eq!(pc.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sc.load(Ordering::SeqCst),
+            0,
+            "no hedge → secondary untouched"
+        );
+    }
+
+    /// Hedging composes with failover: a transient primary failure launches the next
+    /// candidate immediately (without waiting the full hedge delay).
+    #[tokio::test(start_paused = true)]
+    async fn hedging_fails_over_on_transient_error() {
+        let (primary, _pc) = SlowProvider::new("primary", 10, true);
+        let (secondary, sc) = SlowProvider::new("secondary", 10, false);
+        let gw = Gateway::with_providers(vec![primary, secondary])
+            .with_hedging(hedge_on(10_000)) // long delay: only a failure triggers failover
+            .with_retry(fast_retry());
+
+        let resp = gw.chat(req()).await.unwrap();
+        assert_eq!(resp.message.content.as_deref(), Some("ok from secondary"));
+        assert!(
+            sc.load(Ordering::SeqCst) >= 1,
+            "secondary served the request"
         );
     }
 }
