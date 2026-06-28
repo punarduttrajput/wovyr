@@ -7,12 +7,14 @@
 //! exposed in text exposition format, plus a [structured-logging](../../docs/14-observability/logging.md)
 //! initializer.
 //!
-//! v0.2 slice scope: in-process metrics rendered at `/metrics`, and JSON/text log
-//! init. **Deferred:** OpenTelemetry trace export (OTLP), exemplars, and a push
-//! pipeline — the `tracing` spans are already emitted, just not exported yet.
+//! v0.2 slice scope: in-process metrics rendered at `/metrics`, JSON/text log init,
+//! and (behind the `otlp` feature) OpenTelemetry **trace export** of the `tracing`
+//! spans emitted across the platform. **Deferred:** exemplars and OTLP metrics/logs.
 
 mod logging;
 mod metrics;
+#[cfg(feature = "otlp")]
+mod otlp;
 
-pub use logging::init_logging;
+pub use logging::{TelemetryGuard, init_logging};
 pub use metrics::{DEFAULT_SECONDS_BUCKETS, Metrics};

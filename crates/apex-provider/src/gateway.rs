@@ -242,6 +242,11 @@ impl Gateway {
     }
 
     /// Execute a chat completion with caching, retry, failover, and circuit breaking.
+    #[tracing::instrument(
+        name = "gateway.chat",
+        skip_all,
+        fields(provider = self.provider_name(), model = %request.model)
+    )]
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         // 1. Exact lookup — both Exact and Semantic modes check it first because it
         //    is cheaper and stronger ([caching §6](../../docs/05-llm-gateway/caching.md)).

@@ -434,6 +434,7 @@ impl Engine {
     }
 
     /// Execute a single activity with retry, persisting progress as it goes.
+    #[tracing::instrument(name = "workflow.activity", skip_all, fields(activity = %id))]
     async fn run_activity(
         &self,
         def: &Definition,

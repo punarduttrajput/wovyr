@@ -243,8 +243,10 @@ enum MemoryCommand {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // Structured, leveled logging to stderr (APEX_LOG / APEX_LOG_FORMAT=json).
-    apex_telemetry::init_logging();
+    // Structured, leveled logging to stderr (APEX_LOG / APEX_LOG_FORMAT=json), plus
+    // OTLP trace export when built with `--features otlp` and the endpoint is set.
+    // Held until `main` returns so batched spans flush on exit.
+    let _telemetry = apex_telemetry::init_logging();
 
     let cli = Cli::parse();
     match run(cli).await {

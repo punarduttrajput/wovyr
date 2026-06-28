@@ -120,6 +120,11 @@ pub async fn run_agent_with_memory(
     run_agent_inner(def, gateway, registry, opts, Some(retriever), sink).await
 }
 
+#[tracing::instrument(
+    name = "agent.run",
+    skip_all,
+    fields(agent = %def.metadata.name, max_steps = opts.max_steps)
+)]
 async fn run_agent_inner(
     def: &AgentDefinition,
     gateway: &Gateway,
