@@ -109,6 +109,10 @@ pub struct MemoryQuery {
     pub min_importance: f32,
     /// Ranking weights.
     pub weights: RankingWeights,
+    /// Result diversification in `[0,1]` via MMR ([ranking §7](../../docs/06-memory-engine/ranking.md)):
+    /// `0.0` ranks by pure relevance (default), higher values trade relevance for
+    /// less redundancy among the returned memories.
+    pub diversity: f32,
 }
 
 impl MemoryQuery {
@@ -122,6 +126,7 @@ impl MemoryQuery {
             tags: Vec::new(),
             min_importance: 0.0,
             weights: RankingWeights::default(),
+            diversity: 0.0,
         }
     }
 }

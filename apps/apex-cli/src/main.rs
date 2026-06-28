@@ -188,6 +188,10 @@ enum MemoryCommand {
         /// Maximum results.
         #[arg(long, default_value_t = 5)]
         limit: usize,
+
+        /// Result diversification via MMR in [0,1] (0 = pure relevance).
+        #[arg(long, default_value_t = 0.0)]
+        diversity: f32,
     },
 }
 
@@ -247,7 +251,8 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 query,
                 namespace,
                 limit,
-            } => memory::query_cmd(&query, namespace, limit).await,
+                diversity,
+            } => memory::query_cmd(&query, namespace, limit, diversity).await,
         },
     }
 }

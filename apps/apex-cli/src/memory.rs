@@ -122,10 +122,12 @@ pub async fn query_cmd(
     text: &str,
     namespace: Option<String>,
     limit: usize,
+    diversity: f32,
 ) -> apex_common::Result<()> {
     let mut query = MemoryQuery::new(text);
     query.namespace = namespace;
     query.limit = limit;
+    query.diversity = diversity;
 
     let results = engine().await?.query(&query).await?;
     if results.is_empty() {

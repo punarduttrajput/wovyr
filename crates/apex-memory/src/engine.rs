@@ -214,7 +214,8 @@ fn passes_filters(r: &MemoryRecord, q: &MemoryQuery) -> bool {
 }
 
 /// Apply the weighted ranker (relevance + recency + importance) to `records` and
-/// return them sorted best-first, truncated to the query limit.
+/// return them best-first, truncated to the query limit. When `q.diversity > 0`,
+/// the final selection is diversified with MMR ([ranking §7](../../docs/06-memory-engine/ranking.md)).
 fn rank(
     records: Vec<MemoryRecord>,
     relevance: &HashMap<String, f32>,
@@ -241,15 +242,49 @@ fn rank(
             }
         })
         .collect();
-    // Deterministic ordering: score desc, then id asc as a tiebreaker.
+    // Deterministic base order: score desc, then id asc as a tiebreaker.
     scored.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.record.id.cmp(&b.record.id))
     });
-    scored.truncate(q.limit.max(1));
-    scored
+
+    let limit = q.limit.max(1);
+    if q.diversity > 0.0 {
+        mmr_select(scored, q.diversity.clamp(0.0, 1.0), limit)
+    } else {
+        scored.truncate(limit);
+        scored
+    }
+}
+
+/// Greedily reorder `scored` (already in deterministic relevance order) by **Maximal
+/// Marginal Relevance**: each pick maximizes `λ·score − (1−λ)·maxSim`, where `λ =
+/// 1 − diversity` and `maxSim` is the cosine similarity to the most similar
+/// already-selected memory. Picks `limit` results; ties favor the relevance order.
+fn mmr_select(mut remaining: Vec<ScoredMemory>, diversity: f32, limit: usize) -> Vec<ScoredMemory> {
+    let lambda = 1.0 - diversity;
+    let mut selected: Vec<ScoredMemory> = Vec::with_capacity(limit.min(remaining.len()));
+    while !remaining.is_empty() && selected.len() < limit {
+        let mut best_idx = 0;
+        let mut best_mmr = f32::NEG_INFINITY;
+        for (i, cand) in remaining.iter().enumerate() {
+            let max_sim = selected
+                .iter()
+                .map(|s| cosine_similarity(&cand.record.embedding, &s.record.embedding))
+                .fold(0.0_f32, f32::max);
+            let mmr = lambda * cand.score - (1.0 - lambda) * max_sim;
+            // Strict `>` keeps the first (highest-relevance) candidate on ties, so
+            // the result stays deterministic for the sorted input.
+            if mmr > best_mmr {
+                best_mmr = mmr;
+                best_idx = i;
+            }
+        }
+        selected.push(remaining.remove(best_idx));
+    }
+    selected
 }
 
 /// Extract the ranked id list (best-first) from pushdown hits.
@@ -377,5 +412,99 @@ mod tests {
         q.strategy = RetrievalStrategy::Keyword;
         let results = eng.query(&q).await.unwrap();
         assert_eq!(results[0].record.content, "alpha beta gamma");
+    }
+
+    // --- MMR diversification -------------------------------------------------
+
+    use crate::record::RankingWeights;
+
+    fn rec(id: &str, embedding: Vec<f32>) -> MemoryRecord {
+        MemoryRecord {
+            id: id.to_string(),
+            namespace: "kb".to_string(),
+            content: id.to_string(),
+            embedding,
+            memory_type: MemoryType::Semantic, // recency_decay == 1.0 (no decay)
+            importance: 0.0,
+            tags: Vec::new(),
+            seq: 0,
+        }
+    }
+
+    fn scored(id: &str, score: f32, embedding: Vec<f32>) -> ScoredMemory {
+        ScoredMemory {
+            record: rec(id, embedding),
+            score,
+            breakdown: ScoreBreakdown {
+                relevance: score,
+                recency: 0.0,
+                importance: 0.0,
+                total: score,
+            },
+        }
+    }
+
+    fn ids(results: &[ScoredMemory]) -> Vec<&str> {
+        results.iter().map(|r| r.record.id.as_str()).collect()
+    }
+
+    #[test]
+    fn mmr_demotes_near_duplicate_for_a_diverse_candidate() {
+        // a (best) and b (near-duplicate of a) vs c (orthogonal/diverse). Pure
+        // relevance returns [a, b]; MMR should fill the 2nd slot with the diverse c.
+        let scored = vec![
+            scored("a", 0.90, vec![1.0, 0.0, 0.0]),
+            scored("b", 0.85, vec![1.0, 0.0, 0.0]),
+            scored("c", 0.70, vec![0.0, 1.0, 0.0]),
+        ];
+        let out = mmr_select(scored, 0.5, 2);
+        assert_eq!(
+            ids(&out),
+            vec!["a", "c"],
+            "near-duplicate b should be demoted"
+        );
+    }
+
+    #[test]
+    fn mmr_with_zero_diversity_is_pure_relevance() {
+        let scored = vec![
+            scored("a", 0.90, vec![1.0, 0.0, 0.0]),
+            scored("b", 0.85, vec![1.0, 0.0, 0.0]),
+            scored("c", 0.70, vec![0.0, 1.0, 0.0]),
+        ];
+        // diversity 0 → λ=1 → ranks by score only, keeping the near-duplicate.
+        let out = mmr_select(scored, 0.0, 2);
+        assert_eq!(ids(&out), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn rank_diversifies_only_when_diversity_is_set() {
+        let records = vec![
+            rec("a", vec![1.0, 0.0, 0.0]),
+            rec("b", vec![1.0, 0.0, 0.0]),
+            rec("c", vec![0.0, 1.0, 0.0]),
+        ];
+        let relevance: HashMap<String, f32> = [("a", 1.0), ("b", 0.95), ("c", 0.60)]
+            .into_iter()
+            .map(|(id, s)| (id.to_string(), s))
+            .collect();
+
+        // Isolate relevance: weight recency/importance to zero so score == relevance.
+        let mut q = MemoryQuery::new("x");
+        q.limit = 2;
+        q.weights = RankingWeights {
+            relevance: 1.0,
+            recency: 0.0,
+            importance: 0.0,
+        };
+
+        // Default (diversity 0): pure relevance keeps the near-duplicate b.
+        let base = rank(records.clone(), &relevance, &q);
+        assert_eq!(ids(&base), vec!["a", "b"]);
+
+        // Diversity on: the orthogonal c displaces the near-duplicate b.
+        q.diversity = 0.6;
+        let diversified = rank(records, &relevance, &q);
+        assert_eq!(ids(&diversified), vec!["a", "c"]);
     }
 }
