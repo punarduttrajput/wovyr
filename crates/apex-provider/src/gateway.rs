@@ -20,7 +20,7 @@ use crate::openai::OpenAiProvider;
 use crate::provider::AIProvider;
 use crate::resilience::{
     BreakerConfig, CacheConfig, CacheEntry, CacheMode, CircuitBreaker, CostEvent, CostObserver,
-    RetryConfig,
+    LocalCircuitBreaker, RetryConfig,
 };
 use crate::types::{ChatRequest, ChatResponse};
 use apex_common::{Error, Result};
@@ -60,7 +60,7 @@ impl Default for ModelSelector {
 /// Routes chat requests across a resilient candidate list of providers.
 pub struct Gateway {
     providers: Vec<Box<dyn AIProvider>>,
-    breakers: Vec<CircuitBreaker>,
+    breakers: Vec<Box<dyn CircuitBreaker>>,
     retry: RetryConfig,
     max_failovers: usize,
     cache_cfg: CacheConfig,
@@ -79,7 +79,10 @@ impl Gateway {
     pub fn with_providers(providers: Vec<Box<dyn AIProvider>>) -> Self {
         let breakers = providers
             .iter()
-            .map(|_| CircuitBreaker::new(BreakerConfig::default()))
+            .map(|_| {
+                Box::new(LocalCircuitBreaker::new(BreakerConfig::default()))
+                    as Box<dyn CircuitBreaker>
+            })
             .collect();
         Self {
             providers,
@@ -116,14 +119,38 @@ impl Gateway {
         self
     }
 
-    /// Override the circuit-breaker configuration (applied to every provider).
+    /// Override the circuit-breaker configuration with in-process breakers
+    /// (applied to every provider).
     pub fn with_breaker(mut self, cfg: BreakerConfig) -> Self {
         self.breakers = self
             .providers
             .iter()
-            .map(|_| CircuitBreaker::new(cfg))
+            .map(|_| Box::new(LocalCircuitBreaker::new(cfg)) as Box<dyn CircuitBreaker>)
             .collect();
         self
+    }
+
+    /// Use **Redis-shared** circuit breakers (one per provider, keyed by provider
+    /// name) so a fleet of gateways reacts to a failing provider consistently
+    /// ([resilience §6](../../docs/05-llm-gateway/resilience.md)). Requires the
+    /// `redis` cargo feature; connects once and shares the multiplexed connection
+    /// across all per-provider breakers.
+    #[cfg(feature = "redis")]
+    pub async fn with_redis_breakers(mut self, url: &str, cfg: BreakerConfig) -> Result<Self> {
+        let kv = std::sync::Arc::new(crate::redis_breaker::RedisKv::connect(url).await?)
+            as std::sync::Arc<dyn crate::resilience::BreakerKv>;
+        self.breakers = self
+            .providers
+            .iter()
+            .map(|p| {
+                Box::new(crate::resilience::SharedCircuitBreaker::new(
+                    cfg,
+                    kv.clone(),
+                    format!("apex:breaker:{}", p.name()),
+                )) as Box<dyn CircuitBreaker>
+            })
+            .collect();
+        Ok(self)
     }
 
     /// Override the cache configuration.
@@ -202,7 +229,7 @@ impl Gateway {
             if hops > self.max_failovers {
                 break;
             }
-            if !self.breakers[i].allow(self.now_ms()) {
+            if !self.breakers[i].allow(self.now_ms()).await {
                 // Provider circuit is open; skip without counting a hop.
                 continue;
             }
@@ -241,7 +268,7 @@ impl Gateway {
             attempt += 1;
             match self.providers[index].chat(request.clone()).await {
                 Ok(response) => {
-                    self.breakers[index].on_success();
+                    self.breakers[index].on_success().await;
                     return Ok(response);
                 }
                 Err(err) => {
@@ -250,7 +277,7 @@ impl Gateway {
                         // Don't trip the breaker on client errors.
                         return Err((err, false));
                     }
-                    self.breakers[index].on_failure(self.now_ms());
+                    self.breakers[index].on_failure(self.now_ms()).await;
                     if attempt < self.retry.max_attempts {
                         tokio::time::sleep(self.retry.backoff(attempt)).await;
                         continue;

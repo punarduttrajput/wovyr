@@ -14,6 +14,8 @@ mod gateway;
 mod mock;
 mod openai;
 mod provider;
+#[cfg(feature = "redis")]
+mod redis_breaker;
 mod resilience;
 mod types;
 
@@ -22,7 +24,10 @@ pub use gateway::{Gateway, ModelSelector};
 pub use mock::MockProvider;
 pub use openai::OpenAiProvider;
 pub use provider::AIProvider;
+#[cfg(feature = "redis")]
+pub use redis_breaker::RedisKv;
 pub use resilience::{
-    BreakerConfig, CacheConfig, CacheMode, CircuitBreaker, CostEvent, CostObserver, RetryConfig,
+    BreakerConfig, BreakerKv, CacheConfig, CacheMode, CircuitBreaker, CostEvent, CostObserver,
+    InMemoryKv, LocalCircuitBreaker, RetryConfig, SharedCircuitBreaker,
 };
 pub use types::{ChatRequest, ChatResponse, Message, Role, ToolCall, ToolSpec};

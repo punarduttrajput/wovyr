@@ -7,6 +7,11 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Provider SDK and LLM gateway: a vendor-neutral chat interface for the Apex AI Platform."
 
+[features]
+# Redis-shared circuit-breaker state, so a fleet of gateways reacts to a failing
+# provider consistently. Off by default (pulls the redis client).
+redis = ["dep:redis"]
+
 [dependencies]
 apex-common.workspace = true
 serde.workspace = true
@@ -16,6 +21,7 @@ async-trait.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+redis = { version = "0.24", default-features = false, features = ["tokio-comp"], optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
