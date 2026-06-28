@@ -6,10 +6,11 @@
 //! **run** endpoint, following the [Agents API](../../docs/09-api/agents.md) run
 //! response shape and the [error envelope](../../docs/09-api/overview.md#8-error-model).
 //!
-//! Deviation (documented): there is no agent store yet, so the run endpoint is
-//! `POST /api/v1/agents:run` and accepts the agent manifest inline rather than
-//! `POST /api/v1/agents/{id}:run` against a stored agent. Persistence, streaming
-//! (SSE), auth, and idempotency arrive in later milestones.
+//! Agents can be **persisted** (`POST/GET /api/v1/agents`, `GET/DELETE
+//! /api/v1/agents/{id}`) and run by id (`POST /api/v1/agents/{id}/run`), or run inline
+//! via `POST /api/v1/agents:run` (manifest in the body). The store is in-memory for
+//! now (durable file/db backing is a later slice). Streaming (SSE), auth, and
+//! idempotency arrive in later milestones.
 
 use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent};
 use apex_common::Error;
@@ -18,23 +19,81 @@ use apex_telemetry::Metrics;
 use apex_tools::ToolRegistry;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
+
+/// In-memory registry of stored agent manifests, keyed by agent id (`metadata.name`).
+/// Manifests are validated on create; durability (file/db) is a later slice.
+#[derive(Default)]
+struct AgentStore {
+    inner: RwLock<BTreeMap<String, String>>,
+}
+
+impl AgentStore {
+    /// Validate and store a manifest, returning the agent id.
+    fn create(&self, manifest: String) -> Result<String, ApiError> {
+        let def = AgentDefinition::from_yaml(&manifest).map_err(|e| {
+            ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
+        })?;
+        let id = def.metadata.name.clone();
+        self.inner
+            .write()
+            .expect("agent store poisoned")
+            .insert(id.clone(), manifest);
+        Ok(id)
+    }
+
+    /// The stored manifest for `id`, if any.
+    fn manifest(&self, id: &str) -> Option<String> {
+        self.inner
+            .read()
+            .expect("agent store poisoned")
+            .get(id)
+            .cloned()
+    }
+
+    /// The parsed definition for `id` (manifests are validated on create).
+    fn definition(&self, id: &str) -> Option<AgentDefinition> {
+        self.manifest(id)
+            .and_then(|m| AgentDefinition::from_yaml(&m).ok())
+    }
+
+    /// All stored agent ids, sorted.
+    fn list(&self) -> Vec<String> {
+        self.inner
+            .read()
+            .expect("agent store poisoned")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Remove `id`; returns whether it existed.
+    fn delete(&self, id: &str) -> bool {
+        self.inner
+            .write()
+            .expect("agent store poisoned")
+            .remove(id)
+            .is_some()
+    }
+}
 
 /// Shared server state: the LLM gateway, tool registry, metrics, and a run counter.
 pub struct AppState {
     gateway: Gateway,
     registry: ToolRegistry,
     metrics: Metrics,
+    agents: AgentStore,
     run_counter: AtomicU64,
 }
 
@@ -50,6 +109,7 @@ impl AppState {
             gateway,
             registry: ToolRegistry::with_builtins(),
             metrics,
+            agents: AgentStore::default(),
             run_counter: AtomicU64::new(1),
         }
     }
@@ -94,6 +154,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_handler))
         .route("/api/v1/agents:run", post(run_handler))
+        // Agent persistence: register agents once, then run/inspect them by id.
+        .route(
+            "/api/v1/agents",
+            post(create_agent_handler).get(list_agents_handler),
+        )
+        .route(
+            "/api/v1/agents/{id}",
+            get(get_agent_handler).delete(delete_agent_handler),
+        )
+        .route("/api/v1/agents/{id}/run", post(run_stored_handler))
         .with_state(state)
 }
 
@@ -179,16 +249,21 @@ async fn run_handler(
     result
 }
 
-/// The actual agent-run logic; returns the [Agents API §5](../../docs/09-api/agents.md) shape.
+/// Parse the inline manifest then run it ([Agents API §5](../../docs/09-api/agents.md)).
 async fn run_inner(state: &Arc<AppState>, req: RunRequest) -> Result<Json<Value>, ApiError> {
     let def = AgentDefinition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
+    run_definition(state, def, req.input).await
+}
 
-    let input = if req.input.is_null() {
-        json!({})
-    } else {
-        req.input
-    };
+/// Run a (parsed) agent definition with `input`, returning the run-response shape.
+/// Shared by the inline-manifest and stored-agent run endpoints.
+async fn run_definition(
+    state: &Arc<AppState>,
+    def: AgentDefinition,
+    input: Value,
+) -> Result<Json<Value>, ApiError> {
+    let input = if input.is_null() { json!({}) } else { input };
 
     let out = run_agent(
         &def,
@@ -211,6 +286,105 @@ async fn run_inner(state: &Arc<AppState>, req: RunRequest) -> Result<Json<Value>
             "cost_usd": out.usage.cost_usd,
         }
     })))
+}
+
+/// Body for `POST /api/v1/agents` — register an agent from its YAML manifest.
+#[derive(Debug, Deserialize)]
+struct CreateAgentRequest {
+    /// The agent manifest (YAML).
+    manifest: String,
+}
+
+/// Body for `POST /api/v1/agents/{id}/run` — run a stored agent.
+#[derive(Debug, Default, Deserialize)]
+struct RunStoredRequest {
+    /// Run input (e.g. `{"message": "..."}`).
+    #[serde(default)]
+    input: Value,
+}
+
+/// `POST /api/v1/agents` — register an agent; returns its id.
+async fn create_agent_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateAgentRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let id = state.agents.create(req.manifest)?;
+    Ok(Json(json!({ "id": id, "status": "created" })))
+}
+
+/// `GET /api/v1/agents` — list stored agent ids.
+async fn list_agents_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({ "agents": state.agents.list() }))
+}
+
+/// `GET /api/v1/agents/{id}` — fetch a stored agent's manifest.
+async fn get_agent_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    match state.agents.manifest(&id) {
+        Some(manifest) => Ok(Json(json!({ "id": id, "manifest": manifest }))),
+        None => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("agent `{id}` not found"),
+        )),
+    }
+}
+
+/// `DELETE /api/v1/agents/{id}` — remove a stored agent.
+async fn delete_agent_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if state.agents.delete(&id) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("agent `{id}` not found"),
+        ))
+    }
+}
+
+/// `POST /api/v1/agents/{id}/run` — run a stored agent by id.
+#[tracing::instrument(name = "api.agents_run_stored", skip_all)]
+async fn run_stored_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RunStoredRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let start = Instant::now();
+    let def = state.agents.definition(&id).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("agent `{id}` not found"),
+        )
+    });
+    let result = match def {
+        Ok(def) => run_definition(&state, def, req.input).await,
+        Err(e) => Err(e),
+    };
+
+    let status = match &result {
+        Ok(_) => 200u16,
+        Err(e) => e.status.as_u16(),
+    };
+    state.metrics.counter_inc(
+        "apex_api_requests_total",
+        &[
+            ("route", "agents_run_stored"),
+            ("status", &status.to_string()),
+        ],
+    );
+    state.metrics.histogram_observe(
+        "apex_api_request_duration_seconds",
+        &[("route", "agents_run_stored")],
+        start.elapsed().as_secs_f64(),
+    );
+    result
 }
 
 /// An API error rendered as the standard envelope.
@@ -414,5 +588,98 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"]["type"], "client_error");
+    }
+
+    /// POST/GET/DELETE a JSON request against a shared state, returning (status, body).
+    async fn req(
+        state: &Arc<AppState>,
+        method: &str,
+        uri: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn agent_persistence_lifecycle() {
+        let state = Arc::new(AppState::from_env());
+        let manifest = "metadata:\n  name: persisted\nspec:\n  instructions: Be friendly.\n";
+
+        // Create → returns the agent id.
+        let (st, body) = req(
+            &state,
+            "POST",
+            "/api/v1/agents",
+            json!({ "manifest": manifest }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["id"], "persisted");
+
+        // List includes it; Get returns its manifest.
+        let (_, list) = req(&state, "GET", "/api/v1/agents", Value::Null).await;
+        assert_eq!(list["agents"], json!(["persisted"]));
+        let (st, got) = req(&state, "GET", "/api/v1/agents/persisted", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(got["manifest"].as_str().unwrap().contains("persisted"));
+
+        // Run by id → succeeds and reflects the mock output.
+        let (st, run) = req(
+            &state,
+            "POST",
+            "/api/v1/agents/persisted/run",
+            json!({ "input": { "message": "hi there" } }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(run["status"], "succeeded");
+        assert!(
+            run["output"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("hi there")
+        );
+
+        // Delete → 204; subsequent get + run-by-id are 404.
+        let (st, _) = req(&state, "DELETE", "/api/v1/agents/persisted", Value::Null).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (st, _) = req(&state, "GET", "/api/v1/agents/persisted", Value::Null).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = req(
+            &state,
+            "POST",
+            "/api/v1/agents/persisted/run",
+            json!({ "input": {} }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_agent_rejects_invalid_manifest() {
+        let state = Arc::new(AppState::from_env());
+        let (st, body) = req(
+            &state,
+            "POST",
+            "/api/v1/agents",
+            json!({ "manifest": "kind: Workflow\nbroken: true\n" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["type"], "client_error");
     }
 }
