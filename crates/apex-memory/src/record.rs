@@ -170,6 +170,38 @@ pub struct ScoreBreakdown {
     pub total: f32,
 }
 
+/// Policy for a compaction pass ([compression](../../docs/06-memory-engine/overview.md)):
+/// which memories to consolidate into a summary.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionPolicy {
+    /// Only consolidate records with importance **below** this — high-value memories
+    /// are kept verbatim.
+    pub max_importance: f32,
+    /// Never consolidate the most recent `keep_recent` records (by sequence).
+    pub keep_recent: usize,
+    /// Skip compaction unless at least this many candidates qualify.
+    pub min_candidates: usize,
+}
+
+impl Default for CompactionPolicy {
+    fn default() -> Self {
+        Self {
+            max_importance: 0.5,
+            keep_recent: 5,
+            min_candidates: 2,
+        }
+    }
+}
+
+/// The result of a compaction pass.
+#[derive(Debug, Clone)]
+pub struct CompactionOutcome {
+    /// Number of source records consolidated and removed.
+    pub compacted: usize,
+    /// Id of the new summary memory, if one was written.
+    pub summary_id: Option<String>,
+}
+
 /// A ranked memory result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoredMemory {

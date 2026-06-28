@@ -23,7 +23,7 @@ mod store;
 pub use backends::{PostgresStore, QdrantStore, TieredStore};
 pub use engine::MemoryEngine;
 pub use record::{
-    AccessContext, MemoryQuery, MemoryRecord, MemoryType, RankingWeights, RetrievalStrategy,
-    ScoreBreakdown, ScoredMemory,
+    AccessContext, CompactionOutcome, CompactionPolicy, MemoryQuery, MemoryRecord, MemoryType,
+    RankingWeights, RetrievalStrategy, ScoreBreakdown, ScoredMemory,
 };
 pub use store::{FileStore, InMemoryStore, MemoryStore, ScoredId};

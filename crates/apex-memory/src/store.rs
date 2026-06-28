@@ -9,6 +9,7 @@
 use crate::record::MemoryRecord;
 use apex_common::{Error, Result};
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -39,6 +40,12 @@ pub trait MemoryStore: Send + Sync {
             .into_iter()
             .filter(|r| want.contains(r.id.as_str()))
             .collect())
+    }
+
+    /// Delete records by id (missing ids are ignored). Used by compaction to retire
+    /// records that have been consolidated into a summary. Defaults to unsupported.
+    async fn delete(&self, _ids: &[String]) -> Result<()> {
+        Err(Error::invalid("this store does not support deletion"))
     }
 
     /// Whether this store implements retrieval pushdown ([`Self::vector_search`] /
@@ -102,6 +109,13 @@ impl MemoryStore for InMemoryStore {
     async fn all(&self, namespace: Option<&str>) -> Result<Vec<MemoryRecord>> {
         let records = self.inner.lock().expect("memory mutex poisoned");
         Ok(filter_ns(records.iter().cloned(), namespace))
+    }
+
+    async fn delete(&self, ids: &[String]) -> Result<()> {
+        let want: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut records = self.inner.lock().expect("memory mutex poisoned");
+        records.retain(|r| !want.contains(r.id.as_str()));
+        Ok(())
     }
 }
 
@@ -188,6 +202,36 @@ impl MemoryStore for FileStore {
                 Ok(out)
             }
         }
+    }
+
+    async fn delete(&self, ids: &[String]) -> Result<()> {
+        let want: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        // Rewrite each namespace file that holds a targeted id, keeping the rest.
+        let mut entries = tokio::fs::read_dir(&self.dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let records = self.read_ns(&path).await?;
+            if !records.iter().any(|r| want.contains(r.id.as_str())) {
+                continue;
+            }
+            let kept: Vec<String> = records
+                .into_iter()
+                .filter(|r| !want.contains(r.id.as_str()))
+                .map(|r| serde_json::to_string(&r))
+                .collect::<std::result::Result<_, _>>()?;
+            let mut body = kept.join("\n");
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            // Atomic replace: write a temp file then rename.
+            let tmp = path.with_extension("jsonl.tmp");
+            tokio::fs::write(&tmp, body).await?;
+            tokio::fs::rename(&tmp, &path).await?;
+        }
+        Ok(())
     }
 }
 

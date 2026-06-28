@@ -1,11 +1,14 @@
 //! The memory engine: ingestion, hybrid retrieval, and ranking.
 
 use crate::record::{
-    MemoryQuery, MemoryRecord, MemoryType, RetrievalStrategy, ScoreBreakdown, ScoredMemory,
+    CompactionOutcome, CompactionPolicy, MemoryQuery, MemoryRecord, MemoryType, RetrievalStrategy,
+    ScoreBreakdown, ScoredMemory,
 };
 use crate::store::MemoryStore;
 use apex_common::{Error, Result};
-use apex_provider::{EmbeddingRequest, Gateway, cosine_similarity};
+use apex_provider::{
+    ChatRequest, EmbeddingRequest, Gateway, Message, ModelSelector, cosine_similarity,
+};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -71,6 +74,87 @@ impl MemoryEngine {
             seq: 0,
         };
         self.store.put(record).await
+    }
+
+    /// Consolidate stale, low-importance memories in `namespace` into a single
+    /// summary memory, then delete the originals ([compression](../../docs/06-memory-engine/overview.md)).
+    ///
+    /// Candidates are records older than the `keep_recent` newest whose importance is
+    /// below `max_importance`; the summary inherits the **union** of their tags and
+    /// `required_scopes` (so access is never widened) and the highest importance. A
+    /// no-op (returns `compacted: 0`) when fewer than `min_candidates` qualify.
+    pub async fn compress(
+        &self,
+        namespace: &str,
+        policy: CompactionPolicy,
+    ) -> Result<CompactionOutcome> {
+        let mut records = self.store.all(Some(namespace)).await?;
+        records.sort_by_key(|r| r.seq);
+        // Protect the most recent `keep_recent` from compaction.
+        let cutoff = records.len().saturating_sub(policy.keep_recent);
+        let candidates: Vec<MemoryRecord> = records
+            .into_iter()
+            .take(cutoff)
+            .filter(|r| r.importance < policy.max_importance)
+            .collect();
+
+        if candidates.len() < policy.min_candidates {
+            return Ok(CompactionOutcome {
+                compacted: 0,
+                summary_id: None,
+            });
+        }
+
+        let contents: Vec<&str> = candidates.iter().map(|r| r.content.as_str()).collect();
+        let summary = self.summarize(&contents).await?;
+
+        // Merge metadata conservatively.
+        let mut tags = BTreeSet::new();
+        let mut scopes = BTreeSet::new();
+        let mut importance = 0.0_f32;
+        for r in &candidates {
+            tags.extend(r.tags.iter().cloned());
+            scopes.extend(r.required_scopes.iter().cloned());
+            importance = importance.max(r.importance);
+        }
+
+        let summary_id = self
+            .remember_scoped(
+                namespace,
+                summary,
+                MemoryType::Semantic,
+                importance,
+                tags.into_iter().collect(),
+                scopes.into_iter().collect(),
+            )
+            .await?;
+
+        let ids: Vec<String> = candidates.iter().map(|r| r.id.clone()).collect();
+        self.store.delete(&ids).await?;
+
+        Ok(CompactionOutcome {
+            compacted: candidates.len(),
+            summary_id: Some(summary_id),
+        })
+    }
+
+    /// Summarize memory contents into a single note via the gateway.
+    async fn summarize(&self, contents: &[&str]) -> Result<String> {
+        let joined = contents
+            .iter()
+            .map(|c| format!("- {c}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let model = self.gateway.resolve_model(None, &ModelSelector::default());
+        let messages = vec![
+            Message::system(
+                "Summarize the following memories into a single concise note that \
+                 preserves the key facts.",
+            ),
+            Message::user(joined),
+        ];
+        let resp = self.gateway.chat(ChatRequest::new(model, messages)).await?;
+        Ok(resp.message.content.unwrap_or_default())
     }
 
     /// Retrieve and rank memories for a query.
@@ -623,5 +707,108 @@ mod tests {
 
         q.access = Some(AccessContext::new(vec!["pii".into(), "legal".into()]));
         assert!(abac_allows(&r, &q), "both scopes granted must allow");
+    }
+
+    // --- Compression / compaction -------------------------------------------
+
+    use crate::record::CompactionPolicy;
+
+    #[tokio::test]
+    async fn compress_consolidates_stale_low_importance_memories() {
+        let eng = engine();
+        // 4 stale low-importance memories + 1 recent high-importance one.
+        for i in 0..4 {
+            eng.remember(
+                "kb",
+                format!("trivia {i}"),
+                MemoryType::Episodic,
+                0.2,
+                vec![],
+            )
+            .await
+            .unwrap();
+        }
+        eng.remember("kb", "critical fact", MemoryType::Semantic, 0.9, vec![])
+            .await
+            .unwrap();
+
+        let policy = CompactionPolicy {
+            max_importance: 0.5,
+            keep_recent: 1, // protect only the newest
+            min_candidates: 2,
+        };
+        let outcome = eng.compress("kb", policy).await.unwrap();
+        assert_eq!(outcome.compacted, 4, "all 4 stale trivia consolidated");
+        assert!(outcome.summary_id.is_some());
+
+        // After compaction: the summary + the protected recent record remain; the
+        // four originals are gone.
+        let mut all = eng.store.all(Some("kb")).await.unwrap();
+        all.sort_by_key(|r| r.seq);
+        let contents: Vec<&str> = all.iter().map(|r| r.content.as_str()).collect();
+        assert!(contents.contains(&"critical fact"), "recent record kept");
+        assert!(
+            !contents.iter().any(|c| c.starts_with("trivia")),
+            "originals were deleted, got {contents:?}"
+        );
+        assert!(
+            all.iter()
+                .any(|r| Some(&r.id) == outcome.summary_id.as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn compress_is_a_noop_below_min_candidates() {
+        let eng = engine();
+        eng.remember("kb", "lonely trivia", MemoryType::Episodic, 0.2, vec![])
+            .await
+            .unwrap();
+        let policy = CompactionPolicy {
+            max_importance: 0.5,
+            keep_recent: 0,
+            min_candidates: 2,
+        };
+        let outcome = eng.compress("kb", policy).await.unwrap();
+        assert_eq!(outcome.compacted, 0);
+        assert!(outcome.summary_id.is_none());
+        assert_eq!(eng.store.all(Some("kb")).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn compress_unions_required_scopes_so_access_is_not_widened() {
+        let eng = engine();
+        eng.remember_scoped(
+            "kb",
+            "public-ish trivia",
+            MemoryType::Episodic,
+            0.1,
+            vec![],
+            vec![],
+        )
+        .await
+        .unwrap();
+        eng.remember_scoped(
+            "kb",
+            "pii trivia",
+            MemoryType::Episodic,
+            0.1,
+            vec![],
+            vec!["pii".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let policy = CompactionPolicy {
+            max_importance: 0.5,
+            keep_recent: 0,
+            min_candidates: 2,
+        };
+        let outcome = eng.compress("kb", policy).await.unwrap();
+        let summary_id = outcome.summary_id.unwrap();
+        let summary = eng.store.get(&[summary_id]).await.unwrap().pop().unwrap();
+        assert!(
+            summary.required_scopes.contains(&"pii".to_string()),
+            "summary must inherit the pii scope so it stays protected"
+        );
     }
 }

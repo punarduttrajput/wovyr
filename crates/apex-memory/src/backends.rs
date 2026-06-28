@@ -178,6 +178,15 @@ impl MemoryStore for PostgresStore {
         Ok(rows.iter().map(Self::row_to_record).collect())
     }
 
+    async fn delete(&self, ids: &[String]) -> Result<()> {
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        self.client
+            .execute("DELETE FROM memory_records WHERE id = ANY($1)", &[&id_refs])
+            .await
+            .map_err(|e| pg_err("delete", e))?;
+        Ok(())
+    }
+
     fn supports_pushdown(&self) -> bool {
         true
     }
@@ -394,6 +403,29 @@ impl MemoryStore for QdrantStore {
             .unwrap_or_default();
         Ok(Some(hits))
     }
+
+    async fn delete(&self, ids: &[String]) -> Result<()> {
+        // Points are keyed by a stable hash of the record id (see `upsert`).
+        let point_ids: Vec<u64> = ids.iter().map(|id| point_id(id)).collect();
+        let body = json!({ "points": point_ids });
+        let resp = self
+            .client
+            .post(format!("{}/points/delete?wait=true", self.collection_url()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| qd_err("delete", e))?;
+        // A missing collection means nothing to delete.
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(qd_err("delete", format!("{status}: {text}")));
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +467,13 @@ impl MemoryStore for TieredStore {
 
     async fn get(&self, ids: &[String]) -> Result<Vec<MemoryRecord>> {
         self.postgres.get(ids).await
+    }
+
+    async fn delete(&self, ids: &[String]) -> Result<()> {
+        // Remove from both tiers: the system of record and the vector index.
+        self.postgres.delete(ids).await?;
+        self.qdrant.delete(ids).await?;
+        Ok(())
     }
 
     fn supports_pushdown(&self) -> bool {

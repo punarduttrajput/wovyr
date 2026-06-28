@@ -201,6 +201,21 @@ enum MemoryCommand {
         #[arg(long = "grant")]
         grants: Vec<String>,
     },
+
+    /// Consolidate stale, low-importance memories into a summary.
+    Compact {
+        /// Namespace to compact.
+        #[arg(long, default_value = "default")]
+        namespace: String,
+
+        /// Only consolidate records with importance below this.
+        #[arg(long, default_value_t = 0.5)]
+        max_importance: f32,
+
+        /// Keep the most recent N records untouched.
+        #[arg(long, default_value_t = 5)]
+        keep_recent: usize,
+    },
 }
 
 #[tokio::main]
@@ -263,6 +278,11 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 diversity,
                 grants,
             } => memory::query_cmd(&query, namespace, limit, diversity, grants).await,
+            MemoryCommand::Compact {
+                namespace,
+                max_importance,
+                keep_recent,
+            } => memory::compact_cmd(&namespace, max_importance, keep_recent).await,
         },
     }
 }

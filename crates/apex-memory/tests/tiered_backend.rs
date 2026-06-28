@@ -129,6 +129,52 @@ async fn postgres_put_get_and_namespace_filter() {
 }
 
 #[tokio::test]
+async fn tiered_delete_removes_from_both_tiers() {
+    let store = match tiered().await {
+        Some(s) => Arc::new(s),
+        None => return,
+    };
+    let ns = format!("it-del-{}", nonce());
+    // Put through the engine so the embedding matches the shared collection's dim.
+    let engine = MemoryEngine::new(Gateway::new(Box::new(MockProvider::new())), store.clone());
+    let id = engine
+        .remember(&ns, "ephemeral memory", MemoryType::Semantic, 0.5, vec![])
+        .await
+        .unwrap();
+
+    // Present in Postgres (get) and Qdrant (vector_search) before deletion.
+    let stored = store.get(std::slice::from_ref(&id)).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    let query_vec = stored[0].embedding.clone();
+    let before = store
+        .vector_search(Some(&ns), &query_vec, 5)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(before.iter().any(|(hid, _)| *hid == id));
+
+    store.delete(std::slice::from_ref(&id)).await.unwrap();
+
+    // Gone from both tiers.
+    assert!(
+        store
+            .get(std::slice::from_ref(&id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let after = store
+        .vector_search(Some(&ns), &query_vec, 5)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !after.iter().any(|(hid, _)| *hid == id),
+        "vector index purged"
+    );
+}
+
+#[tokio::test]
 async fn postgres_round_trips_required_scopes_for_abac() {
     let Some(store) = pg().await else { return };
     let ns = format!("it-pg-abac-{}", nonce());

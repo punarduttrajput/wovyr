@@ -8,7 +8,8 @@
 use crate::config;
 use apex_agent::{ContextRetriever, MemorySpec, RetrievedContext};
 use apex_memory::{
-    FileStore, MemoryEngine, MemoryQuery, MemoryStore, MemoryType, RetrievalStrategy,
+    CompactionPolicy, FileStore, MemoryEngine, MemoryQuery, MemoryStore, MemoryType,
+    RetrievalStrategy,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -152,6 +153,25 @@ pub async fn query_cmd(
             "       relevance={:.2} recency={:.2} importance={:.2}",
             r.breakdown.relevance, r.breakdown.recency, r.breakdown.importance
         );
+    }
+    Ok(())
+}
+
+/// `apex memory compact` — consolidate stale, low-importance memories into a summary.
+pub async fn compact_cmd(
+    namespace: &str,
+    max_importance: f32,
+    keep_recent: usize,
+) -> apex_common::Result<()> {
+    let policy = CompactionPolicy {
+        max_importance,
+        keep_recent,
+        ..CompactionPolicy::default()
+    };
+    let outcome = engine().await?.compress(namespace, policy).await?;
+    match outcome.summary_id {
+        Some(id) => println!("compacted {} memories into {id}", outcome.compacted),
+        None => println!("nothing to compact (fewer than the minimum candidates)"),
     }
     Ok(())
 }
