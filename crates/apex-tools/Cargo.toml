@@ -7,6 +7,11 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Tool framework: the Tool trait, registry, and built-in tools for the Apex AI Platform."
 
+[features]
+# The WASI/WASM sandbox backend. Off by default: it pulls Wasmtime, a heavy
+# dependency, so only builds/tests that exercise the backend pay the compile cost.
+wasi = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasi-common"]
+
 [dependencies]
 apex-common.workspace = true
 serde.workspace = true
@@ -15,6 +20,16 @@ async-trait.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# Pinned to 14.x to reuse the warm offline cache (wasmtime 14.0.4 is already vendored).
+wasmtime = { version = "14", optional = true }
+wasmtime-wasi = { version = "14", optional = true }
+wasi-common = { version = "14", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tokio.workspace = true
+# Assembles tiny WASI test modules from WAT in-process, so the WASI tests need no
+# external wasm toolchain (cached: wat 1.252).
+wat = "1"

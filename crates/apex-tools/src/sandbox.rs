@@ -1,4 +1,4 @@
-//! Sandbox abstraction and the native-process backend.
+//! Sandbox abstraction and the isolation backends.
 //!
 //! Models the isolation backends, trust classes, and backend-selection rules from
 //! the [Sandbox Runtime](../../docs/07-tool-runtime/sandbox-runtime.md) and
@@ -6,12 +6,24 @@
 //! the runtime picks the **strongest** of (tool preference, tenant policy floor,
 //! trust-class minimum), then checks node capability.
 //!
-//! v0.2 implements the **native** backend only (process + timeout + output cap).
-//! Stronger backends (WASI, Container, gVisor, microVM, …) are represented in the
-//! [`SandboxBackend`] spectrum and selected for correctly, but constructing them
-//! returns [`SandboxError::Unsupported`] until their runtimes are integrated —
-//! containers/microVMs cannot run in every environment. Per-execution CPU/memory/
-//! network/filesystem confinement is likewise deferred to those backends.
+//! Implemented backends:
+//! - [`NativeSandbox`] — OS process with **real resource enforcement** on Unix via
+//!   `setrlimit` (memory `RLIMIT_AS`, CPU time `RLIMIT_CPU`) plus a wall-clock
+//!   timeout and an output cap.
+//! - [`ContainerSandbox`] — OCI container via the `docker`/`podman` CLI, enforcing
+//!   memory/CPU/PID limits through cgroups, a read-only rootfs, a bind-mounted
+//!   workspace, and a [`NetworkPolicy`] (`--network none` on deny). The same type
+//!   drives the **gVisor** backend via `--runtime=runsc`
+//!   ([`ContainerSandbox::gvisor`]).
+//! - [`FirecrackerSandbox`] — a microVM config builder ([`FirecrackerConfig`]) that
+//!   is selected and capability-gated; in-guest command execution requires a guest
+//!   rootfs carrying an agent (not bundled), so [`Sandbox::execute`] reports
+//!   [`SandboxError::Unsupported`] until one is provisioned.
+//!
+//! Backend *selection* ([`select_backend`]) is pure and deterministic. Node
+//! *capability detection* ([`SandboxManager::detect`]) probes the environment
+//! (docker daemon, `runsc` runtime, `firecracker` + `/dev/kvm`) and is the only
+//! part of this module that does ambient I/O.
 
 use async_trait::async_trait;
 use std::fmt;
@@ -96,19 +108,22 @@ impl TrustClass {
 /// Per-execution resource limits
 /// ([sandbox runtime §5](../../docs/07-tool-runtime/sandbox-runtime.md)).
 ///
-/// The native backend enforces `timeout` and `max_output_bytes`; CPU/memory/PID
-/// caps require cgroups and are carried but enforced only by stronger backends.
+/// The native backend enforces `timeout`, `max_output_bytes`, and (on Unix) the
+/// memory and CPU caps via `setrlimit`. The container/gVisor backends additionally
+/// enforce CPU/memory/PID limits through cgroups.
 #[derive(Clone, Debug)]
 pub struct ResourceLimits {
     /// Wall-clock execution timeout.
     pub timeout: Duration,
     /// Max captured stdout/stderr bytes (output beyond this is truncated).
     pub max_output_bytes: usize,
-    /// CPU quota in millicores (enforced by container/VM backends).
+    /// CPU quota in millicores. Native maps this to `RLIMIT_CPU` seconds;
+    /// containers map it to `--cpus`.
     pub cpu_millis: Option<u32>,
-    /// Memory cap in bytes (enforced by container/VM backends).
+    /// Memory cap in bytes. Native maps this to `RLIMIT_AS`; containers map it to
+    /// `--memory` (cgroup `memory.max`).
     pub memory_bytes: Option<u64>,
-    /// Max process count (enforced by cgroup `pids.max`).
+    /// Max process count (cgroup `pids.max`; enforced by container/VM backends).
     pub max_pids: Option<u32>,
 }
 
@@ -125,7 +140,9 @@ impl Default for ResourceLimits {
 }
 
 /// Declarative egress policy ([security §5](../../docs/07-tool-runtime/security-isolation.md)).
-/// Default is deny-all; enforcement requires a network-isolating backend/proxy.
+/// Default is deny-all; the container/gVisor backends enforce a full deny with
+/// `--network none`. Per-host allow-listing requires an egress proxy and is not yet
+/// enforced — a non-empty allow-list currently grants bridged egress.
 #[derive(Clone, Debug)]
 pub struct NetworkPolicy {
     /// Deny all egress unless explicitly allowed.
@@ -150,6 +167,12 @@ impl NetworkPolicy {
             return true;
         }
         self.outbound_allow.iter().any(|h| h == host)
+    }
+
+    /// Whether the policy denies *all* egress (no host may be reached). This is the
+    /// condition under which a backend uses a fully isolated network namespace.
+    pub fn denies_all(&self) -> bool {
+        self.default_deny && self.outbound_allow.is_empty()
     }
 }
 
@@ -211,7 +234,7 @@ pub struct SandboxManager {
 }
 
 impl SandboxManager {
-    /// A manager for a node that supports only the native backend (this build).
+    /// A manager for a node that supports only the native backend.
     pub fn native_only() -> Self {
         Self {
             capabilities: vec![SandboxBackend::Native],
@@ -225,6 +248,41 @@ impl SandboxManager {
             capabilities,
             policy_floor,
         }
+    }
+
+    /// Probe the host for available backends ([sandbox runtime §3, step 5](../../docs/07-tool-runtime/sandbox-runtime.md)).
+    ///
+    /// Native is always present. Container is added when a `docker` daemon is
+    /// reachable; gVisor when `runsc` is additionally registered as a docker
+    /// runtime; Firecracker when the `firecracker` binary and `/dev/kvm` are
+    /// present. This is the only ambient-I/O entry point in the module.
+    pub async fn detect() -> Self {
+        let mut capabilities = vec![SandboxBackend::Native];
+
+        // The WASI backend is in-process: available whenever compiled in.
+        #[cfg(feature = "wasi")]
+        capabilities.push(SandboxBackend::Wasi);
+
+        let docker = command_succeeds("docker", &["info"]).await;
+        if docker {
+            capabilities.push(SandboxBackend::Container);
+            if binary_exists("runsc").await && docker_info_mentions("runsc").await {
+                capabilities.push(SandboxBackend::Gvisor);
+            }
+        }
+        if binary_exists("firecracker").await && std::path::Path::new("/dev/kvm").exists() {
+            capabilities.push(SandboxBackend::Firecracker);
+        }
+
+        Self {
+            capabilities,
+            policy_floor: None,
+        }
+    }
+
+    /// The backends this node can run.
+    pub fn capabilities(&self) -> &[SandboxBackend] {
+        &self.capabilities
     }
 
     /// Resolve the backend for a tool with the given preference and trust class.
@@ -244,7 +302,7 @@ pub struct SandboxCommand {
     pub program: String,
     /// Arguments.
     pub args: Vec<String>,
-    /// Working directory.
+    /// Working directory (bind-mounted to `/workspace` for container backends).
     pub workdir: String,
     /// Resource limits.
     pub limits: ResourceLimits,
@@ -263,6 +321,11 @@ pub struct CommandOutcome {
     pub timed_out: bool,
     /// Whether output was truncated at `max_output_bytes`.
     pub truncated: bool,
+    /// Terminating Unix signal number, if the process was killed by a signal.
+    pub signal: Option<i32>,
+    /// Whether the process was terminated for breaching a resource limit
+    /// (`resource_exceeded` in [Execution API §10](../../docs/07-tool-runtime/execution-api.md)).
+    pub resource_exceeded: bool,
 }
 
 /// An isolated execution environment.
@@ -275,7 +338,8 @@ pub trait Sandbox: Send + Sync {
     async fn execute(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError>;
 }
 
-/// A native-process sandbox: timeout-enforced, output-capped child process.
+/// A native-process sandbox: timeout-enforced, output-capped child process with
+/// per-execution `setrlimit` memory/CPU caps on Unix.
 #[derive(Clone, Debug)]
 pub struct NativeSandbox {
     limits: ResourceLimits,
@@ -297,24 +361,56 @@ impl NativeSandbox {
         Self { limits }
     }
 
+    /// Build the child process, applying `setrlimit` caps in a `pre_exec` hook on
+    /// Unix (memory `RLIMIT_AS`, CPU `RLIMIT_CPU`).
+    fn build_command(&self, program: &str, args: &[&str], workdir: &str) -> Command {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            let mut std_cmd = std::process::Command::new(program);
+            std_cmd
+                .args(args)
+                .current_dir(workdir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let limits = self.limits.clone();
+            // SAFETY: `apply_rlimits` only issues `setrlimit` syscalls and touches
+            // stack memory, so it is async-signal-safe to run in the forked child
+            // before exec.
+            unsafe {
+                std_cmd.pre_exec(move || apply_rlimits(&limits));
+            }
+            let mut cmd = Command::from(std_cmd);
+            cmd.kill_on_drop(true);
+            cmd
+        }
+        #[cfg(not(unix))]
+        {
+            let mut command = Command::new(program);
+            command
+                .args(args)
+                .current_dir(workdir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            command
+        }
+    }
+
     /// Run `program` with `args` in `workdir`, capturing (capped) output.
     ///
     /// On timeout the child is killed and a [`CommandOutcome`] with
-    /// `timed_out = true` is returned rather than an error.
+    /// `timed_out = true` is returned rather than an error. A process killed by a
+    /// CPU/file-size rlimit returns `resource_exceeded = true`.
     pub async fn run(
         &self,
         program: &str,
         args: &[&str],
         workdir: &str,
     ) -> Result<CommandOutcome, SandboxError> {
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .current_dir(workdir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        let mut command = self.build_command(program, args, workdir);
 
         let child = command
             .spawn()
@@ -324,12 +420,15 @@ impl NativeSandbox {
             Ok(Ok(output)) => {
                 let (stdout, t1) = cap(&output.stdout, self.limits.max_output_bytes);
                 let (stderr, t2) = cap(&output.stderr, self.limits.max_output_bytes);
+                let (signal, resource_exceeded) = terminating_signal(&output.status);
                 Ok(CommandOutcome {
                     exit_code: output.status.code(),
                     stdout,
                     stderr,
                     timed_out: false,
                     truncated: t1 || t2,
+                    signal,
+                    resource_exceeded,
                 })
             }
             Ok(Err(e)) => Err(SandboxError::Internal(format!("process error: {e}"))),
@@ -339,6 +438,8 @@ impl NativeSandbox {
                 stderr: format!("execution exceeded timeout of {:?}", self.limits.timeout),
                 timed_out: true,
                 truncated: false,
+                signal: None,
+                resource_exceeded: false,
             }),
         }
     }
@@ -358,6 +459,509 @@ impl Sandbox for NativeSandbox {
     }
 }
 
+/// A container sandbox driven by the `docker`/`podman` CLI. The same type backs the
+/// gVisor backend by setting the container runtime to `runsc`
+/// ([`ContainerSandbox::gvisor`]).
+///
+/// Resource limits become cgroup flags (`--memory`, `--cpus`, `--pids-limit`); the
+/// rootfs is read-only with a `tmpfs` `/tmp`; the working directory is bind-mounted
+/// at `/workspace`; and a deny-all [`NetworkPolicy`] becomes `--network none`.
+#[derive(Clone, Debug)]
+pub struct ContainerSandbox {
+    backend: SandboxBackend,
+    runtime: String,
+    runtime_class: Option<String>,
+    image: String,
+    network: NetworkPolicy,
+}
+
+impl ContainerSandbox {
+    /// A Docker container backend running `image`.
+    pub fn docker(image: impl Into<String>) -> Self {
+        Self {
+            backend: SandboxBackend::Container,
+            runtime: "docker".to_string(),
+            runtime_class: None,
+            image: image.into(),
+            network: NetworkPolicy::default(),
+        }
+    }
+
+    /// A Podman container backend running `image`.
+    pub fn podman(image: impl Into<String>) -> Self {
+        Self {
+            backend: SandboxBackend::Container,
+            runtime: "podman".to_string(),
+            runtime_class: None,
+            image: image.into(),
+            network: NetworkPolicy::default(),
+        }
+    }
+
+    /// A gVisor backend: a Docker container with the `runsc` runtime.
+    pub fn gvisor(image: impl Into<String>) -> Self {
+        Self {
+            backend: SandboxBackend::Gvisor,
+            runtime: "docker".to_string(),
+            runtime_class: Some("runsc".to_string()),
+            image: image.into(),
+            network: NetworkPolicy::default(),
+        }
+    }
+
+    /// Override the egress policy (default: deny-all → `--network none`).
+    pub fn with_network(mut self, network: NetworkPolicy) -> Self {
+        self.network = network;
+        self
+    }
+
+    /// The full argv used to launch the container, including the wrapped command.
+    /// Pure and deterministic — the basis for the backend's unit tests.
+    pub fn argv(&self, cmd: &SandboxCommand) -> Vec<String> {
+        container_argv(
+            &self.runtime,
+            self.runtime_class.as_deref(),
+            &self.image,
+            cmd,
+            &self.network,
+        )
+    }
+}
+
+#[async_trait]
+impl Sandbox for ContainerSandbox {
+    fn backend(&self) -> SandboxBackend {
+        self.backend
+    }
+
+    async fn execute(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
+        let argv = self.argv(cmd);
+        let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+        // The container runtime enforces the inner cgroup limits; the outer native
+        // run only arms the wall-clock timeout and output cap and is spawned from
+        // the host cwd (the workdir is bind-mounted into the container).
+        let outer = ResourceLimits {
+            timeout: cmd.limits.timeout,
+            max_output_bytes: cmd.limits.max_output_bytes,
+            ..ResourceLimits::default()
+        };
+        NativeSandbox::with_limits(outer)
+            .run(&argv[0], &args, ".")
+            .await
+    }
+}
+
+/// Build the container launch argv. See [`ContainerSandbox::argv`].
+fn container_argv(
+    runtime: &str,
+    runtime_class: Option<&str>,
+    image: &str,
+    cmd: &SandboxCommand,
+    network: &NetworkPolicy,
+) -> Vec<String> {
+    let mut a: Vec<String> = vec![runtime.to_string(), "run".into(), "--rm".into()];
+    if let Some(rc) = runtime_class {
+        a.push("--runtime".into());
+        a.push(rc.to_string());
+    }
+    a.push("--network".into());
+    a.push(
+        if network.denies_all() {
+            "none"
+        } else {
+            "bridge"
+        }
+        .into(),
+    );
+    if let Some(bytes) = cmd.limits.memory_bytes {
+        a.push("--memory".into());
+        a.push(bytes.to_string());
+    }
+    if let Some(millis) = cmd.limits.cpu_millis {
+        a.push("--cpus".into());
+        a.push(format!("{:.3}", millis as f64 / 1000.0));
+    }
+    if let Some(pids) = cmd.limits.max_pids {
+        a.push("--pids-limit".into());
+        a.push(pids.to_string());
+    }
+    a.push("--read-only".into());
+    a.push("--tmpfs".into());
+    a.push("/tmp".into());
+    a.push("--workdir".into());
+    a.push("/workspace".into());
+    a.push("--volume".into());
+    a.push(format!("{}:/workspace", cmd.workdir));
+    a.push(image.to_string());
+    a.push(cmd.program.clone());
+    a.extend(cmd.args.iter().cloned());
+    a
+}
+
+/// A Firecracker microVM machine configuration
+/// ([sandbox runtime §2](../../docs/07-tool-runtime/sandbox-runtime.md)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirecrackerConfig {
+    /// Guest kernel image (uncompressed `vmlinux`).
+    pub kernel_image_path: String,
+    /// Root filesystem image (ext4) containing the guest agent.
+    pub rootfs_path: String,
+    /// Kernel boot arguments.
+    pub boot_args: String,
+    /// Virtual CPU count.
+    pub vcpu_count: u32,
+    /// Guest memory in MiB.
+    pub mem_size_mib: u32,
+}
+
+impl FirecrackerConfig {
+    /// Derive a config from resource limits: `cpu_millis`→`vcpu_count` (≥1),
+    /// `memory_bytes`→`mem_size_mib` (≥128).
+    pub fn from_limits(
+        kernel_image_path: impl Into<String>,
+        rootfs_path: impl Into<String>,
+        limits: &ResourceLimits,
+    ) -> Self {
+        let vcpu_count = limits
+            .cpu_millis
+            .map(|m| (m as f64 / 1000.0).ceil() as u32)
+            .unwrap_or(1)
+            .max(1);
+        let mem_size_mib = limits
+            .memory_bytes
+            .map(|b| (b / (1024 * 1024)) as u32)
+            .unwrap_or(256)
+            .max(128);
+        Self {
+            kernel_image_path: kernel_image_path.into(),
+            rootfs_path: rootfs_path.into(),
+            boot_args: "console=ttyS0 reboot=k panic=1 pci=off".into(),
+            vcpu_count,
+            mem_size_mib,
+        }
+    }
+
+    /// Render the Firecracker machine configuration JSON (the `--config-file` body).
+    /// Pure and deterministic — the basis for the backend's unit tests.
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\n",
+                "  \"boot-source\": {{\n",
+                "    \"kernel_image_path\": \"{kernel}\",\n",
+                "    \"boot_args\": \"{boot_args}\"\n",
+                "  }},\n",
+                "  \"drives\": [\n",
+                "    {{\n",
+                "      \"drive_id\": \"rootfs\",\n",
+                "      \"path_on_host\": \"{rootfs}\",\n",
+                "      \"is_root_device\": true,\n",
+                "      \"is_read_only\": false\n",
+                "    }}\n",
+                "  ],\n",
+                "  \"machine-config\": {{\n",
+                "    \"vcpu_count\": {vcpu},\n",
+                "    \"mem_size_mib\": {mem}\n",
+                "  }}\n",
+                "}}"
+            ),
+            kernel = self.kernel_image_path,
+            boot_args = self.boot_args,
+            rootfs = self.rootfs_path,
+            vcpu = self.vcpu_count,
+            mem = self.mem_size_mib,
+        )
+    }
+}
+
+/// A Firecracker microVM sandbox.
+///
+/// Backend selection and [`FirecrackerConfig`] construction are implemented and
+/// tested; running a command *inside* the guest and capturing its output requires a
+/// guest rootfs carrying an agent that accepts the command over vsock, which is not
+/// bundled. Until one is configured, [`Sandbox::execute`] returns
+/// [`SandboxError::Unsupported`].
+#[derive(Clone, Debug, Default)]
+pub struct FirecrackerSandbox {
+    config: Option<FirecrackerConfig>,
+}
+
+impl FirecrackerSandbox {
+    /// An unconfigured microVM sandbox (no guest image).
+    pub fn new() -> Self {
+        Self { config: None }
+    }
+
+    /// Attach a guest VM configuration.
+    pub fn with_config(config: FirecrackerConfig) -> Self {
+        Self {
+            config: Some(config),
+        }
+    }
+
+    /// The attached guest configuration, if any.
+    pub fn config(&self) -> Option<&FirecrackerConfig> {
+        self.config.as_ref()
+    }
+}
+
+#[async_trait]
+impl Sandbox for FirecrackerSandbox {
+    fn backend(&self) -> SandboxBackend {
+        SandboxBackend::Firecracker
+    }
+
+    async fn execute(&self, _cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
+        // A bootable config can be produced, but in-guest execution needs a rootfs
+        // with the apex guest-agent to relay the command and return its output.
+        Err(SandboxError::Unsupported(SandboxBackend::Firecracker))
+    }
+}
+
+/// Fuel units granted per millisecond of CPU budget. Wasmtime fuel meters executed
+/// instructions, not wall-clock time, so this is an approximate compute budget
+/// rather than a precise CPU-time limit (which the [`NativeSandbox`] enforces).
+#[cfg(feature = "wasi")]
+const WASI_FUEL_PER_MILLI: u64 = 1_000_000;
+
+/// A WASI/WASM sandbox: runs a `wasm32-wasi` module in an in-process Wasmtime VM
+/// with capability-based isolation ([sandbox runtime §2](../../docs/07-tool-runtime/sandbox-runtime.md)).
+///
+/// Unlike the process backends, [`SandboxCommand::program`] is the path to a
+/// `.wasm` module and [`SandboxCommand::args`] are its WASI argv. Isolation is
+/// capability-based: the guest gets no network and no filesystem beyond the
+/// bind-mounted `workdir` (preopened at `.`), so a deny-all [`NetworkPolicy`] is the
+/// default and needs no enforcement. Limits map to Wasmtime primitives: memory →
+/// `StoreLimits`, CPU → fuel, wall-clock → epoch interruption.
+///
+/// Enabled by the `wasi` cargo feature.
+#[cfg(feature = "wasi")]
+#[derive(Clone)]
+pub struct WasiSandbox {
+    engine: wasmtime::Engine,
+}
+
+#[cfg(feature = "wasi")]
+struct WasiState {
+    wasi: wasmtime_wasi::WasiCtx,
+    limits: wasmtime::StoreLimits,
+}
+
+#[cfg(feature = "wasi")]
+impl WasiSandbox {
+    /// Construct a sandbox with a fuel- and epoch-metered engine.
+    pub fn new() -> Result<Self, SandboxError> {
+        let mut config = wasmtime::Config::new();
+        config.consume_fuel(true);
+        config.epoch_interruption(true);
+        let engine = wasmtime::Engine::new(&config)
+            .map_err(|e| SandboxError::Internal(format!("wasmtime engine: {e}")))?;
+        Ok(Self { engine })
+    }
+
+    /// Run a module to completion on the current (blocking) thread.
+    fn run_module(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use wasi_common::pipe::WritePipe;
+        use wasmtime::{Linker, Module, Store, StoreLimitsBuilder, Trap};
+        use wasmtime_wasi::{Dir, WasiCtxBuilder, ambient_authority};
+
+        let module = Module::from_file(&self.engine, &cmd.program)
+            .map_err(|e| SandboxError::Spawn(format!("load wasm `{}`: {e}", cmd.program)))?;
+
+        // Capture stdout/stderr into in-memory pipes (cloned handles share the buffer).
+        let stdout = WritePipe::new_in_memory();
+        let stderr = WritePipe::new_in_memory();
+
+        let mut builder = WasiCtxBuilder::new();
+        let argv: Vec<String> = std::iter::once(cmd.program.clone())
+            .chain(cmd.args.iter().cloned())
+            .collect();
+        builder
+            .args(&argv)
+            .map_err(|e| SandboxError::Internal(format!("wasi args: {e}")))?;
+        builder.stdout(Box::new(stdout.clone()));
+        builder.stderr(Box::new(stderr.clone()));
+        if !cmd.workdir.is_empty() {
+            // Preopen the workdir as the guest's sole filesystem capability. A
+            // missing dir is non-fatal — the module simply gets no preopens.
+            if let Ok(dir) = Dir::open_ambient_dir(&cmd.workdir, ambient_authority()) {
+                builder
+                    .preopened_dir(dir, ".")
+                    .map_err(|e| SandboxError::Internal(format!("wasi preopen: {e}")))?;
+            }
+        }
+        let wasi = builder.build();
+
+        let mut limits = StoreLimitsBuilder::new();
+        if let Some(bytes) = cmd.limits.memory_bytes {
+            limits = limits.memory_size(bytes as usize);
+        }
+        let mut store = Store::new(
+            &self.engine,
+            WasiState {
+                wasi,
+                limits: limits.build(),
+            },
+        );
+        store.limiter(|s| &mut s.limits);
+
+        // CPU budget via fuel; unbounded when no cpu limit is requested.
+        let fuel = cmd
+            .limits
+            .cpu_millis
+            .map(|m| (m as u64).saturating_mul(WASI_FUEL_PER_MILLI))
+            .unwrap_or(u64::MAX);
+        store
+            .add_fuel(fuel)
+            .map_err(|e| SandboxError::Internal(format!("wasi fuel: {e}")))?;
+
+        // Wall-clock budget via epoch interruption: a watchdog ticks the engine's
+        // epoch once the timeout elapses, trapping a still-running guest.
+        store.set_epoch_deadline(1);
+        let finished = Arc::new(AtomicBool::new(false));
+        let watchdog = {
+            let engine = self.engine.clone();
+            let finished = finished.clone();
+            let timeout = cmd.limits.timeout;
+            std::thread::spawn(move || {
+                let step = Duration::from_millis(20);
+                let mut waited = Duration::ZERO;
+                while waited < timeout {
+                    if finished.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(step);
+                    waited += step;
+                }
+                engine.increment_epoch();
+            })
+        };
+
+        let mut linker = Linker::new(&self.engine);
+        wasmtime_wasi::add_to_linker(&mut linker, |s: &mut WasiState| &mut s.wasi)
+            .map_err(|e| SandboxError::Internal(format!("wasi linker: {e}")))?;
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .map_err(|e| SandboxError::Internal(format!("instantiate: {e}")))?;
+        let start = instance
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .map_err(|e| SandboxError::Spawn(format!("module has no WASI `_start`: {e}")))?;
+
+        let result = start.call(&mut store, ());
+        finished.store(true, Ordering::Relaxed);
+        let _ = watchdog.join();
+
+        let mut timed_out = false;
+        let mut resource_exceeded = false;
+        let exit_code = match result {
+            Ok(()) => Some(0),
+            Err(err) => {
+                if let Some(exit) = err.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                    // A WASI `proc_exit(code)` is a normal, non-zero return.
+                    Some(exit.0)
+                } else {
+                    match err.downcast_ref::<Trap>() {
+                        Some(Trap::OutOfFuel) => resource_exceeded = true,
+                        Some(Trap::Interrupt) => timed_out = true,
+                        _ => {}
+                    }
+                    None
+                }
+            }
+        };
+
+        // Drop the store so the sandbox's stdout/stderr clones are the sole holders
+        // before we reclaim the captured bytes.
+        drop(store);
+        let out = pipe_bytes(stdout);
+        let err = pipe_bytes(stderr);
+        let (stdout_s, t1) = cap(&out, cmd.limits.max_output_bytes);
+        let (stderr_s, t2) = cap(&err, cmd.limits.max_output_bytes);
+
+        Ok(CommandOutcome {
+            exit_code,
+            stdout: stdout_s,
+            stderr: stderr_s,
+            timed_out,
+            truncated: t1 || t2,
+            signal: None,
+            resource_exceeded,
+        })
+    }
+}
+
+#[cfg(feature = "wasi")]
+#[async_trait]
+impl Sandbox for WasiSandbox {
+    fn backend(&self) -> SandboxBackend {
+        SandboxBackend::Wasi
+    }
+
+    async fn execute(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
+        // Wasmtime execution is synchronous and CPU-bound; run it off the async
+        // runtime so it can't stall other tasks.
+        let this = self.clone();
+        let cmd = cmd.clone();
+        tokio::task::spawn_blocking(move || this.run_module(&cmd))
+            .await
+            .map_err(|e| SandboxError::Internal(format!("wasi join: {e}")))?
+    }
+}
+
+/// Reclaim the bytes written to an in-memory WASI pipe (sole-owner after the store
+/// is dropped).
+#[cfg(feature = "wasi")]
+fn pipe_bytes(pipe: wasi_common::pipe::WritePipe<std::io::Cursor<Vec<u8>>>) -> Vec<u8> {
+    pipe.try_into_inner()
+        .map(std::io::Cursor::into_inner)
+        .unwrap_or_default()
+}
+
+/// Map a process exit status to its terminating Unix signal and whether that signal
+/// indicates a resource-limit breach (`SIGXCPU`/`SIGXFSZ`).
+#[cfg(unix)]
+fn terminating_signal(status: &std::process::ExitStatus) -> (Option<i32>, bool) {
+    use std::os::unix::process::ExitStatusExt;
+    let signal = status.signal();
+    let exceeded = matches!(signal, Some(libc::SIGXCPU) | Some(libc::SIGXFSZ));
+    (signal, exceeded)
+}
+
+#[cfg(not(unix))]
+fn terminating_signal(_status: &std::process::ExitStatus) -> (Option<i32>, bool) {
+    (None, false)
+}
+
+/// Apply `setrlimit` caps in the forked child before `exec`. Async-signal-safe:
+/// only stack memory and `setrlimit` syscalls.
+#[cfg(unix)]
+fn apply_rlimits(limits: &ResourceLimits) -> std::io::Result<()> {
+    fn set(resource: libc::__rlimit_resource_t, soft: u64, hard: u64) -> std::io::Result<()> {
+        let lim = libc::rlimit {
+            rlim_cur: soft as libc::rlim_t,
+            rlim_max: hard as libc::rlim_t,
+        };
+        // SAFETY: `lim` is a valid, fully-initialized rlimit for the duration of the call.
+        if unsafe { libc::setrlimit(resource, &lim) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    if let Some(bytes) = limits.memory_bytes {
+        set(libc::RLIMIT_AS, bytes, bytes)?;
+    }
+    if let Some(millis) = limits.cpu_millis {
+        // RLIMIT_CPU is whole seconds: SIGXCPU at the soft limit, SIGKILL one
+        // second later at the hard limit.
+        let secs = millis.div_ceil(1000).max(1) as u64;
+        set(libc::RLIMIT_CPU, secs, secs + 1)?;
+    }
+    Ok(())
+}
+
 /// Truncate `bytes` to `max` (UTF-8 lossy); returns the string and whether it was cut.
 fn cap(bytes: &[u8], max: usize) -> (String, bool) {
     if bytes.len() > max {
@@ -367,9 +971,55 @@ fn cap(bytes: &[u8], max: usize) -> (String, bool) {
     }
 }
 
+/// Whether `program args...` exits successfully (used for capability detection).
+async fn command_succeeds(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Whether `name` resolves on `PATH`.
+async fn binary_exists(name: &str) -> bool {
+    command_succeeds("sh", &["-c", &format!("command -v {name}")]).await
+}
+
+/// Whether `docker info` reports a runtime/feature mentioning `needle` (e.g. `runsc`).
+async fn docker_info_mentions(needle: &str) -> bool {
+    let out = Command::new("docker")
+        .args(["info"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await;
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(needle),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_cmd() -> SandboxCommand {
+        SandboxCommand {
+            program: "echo".into(),
+            args: vec!["hi".into()],
+            workdir: "/work".into(),
+            limits: ResourceLimits {
+                memory_bytes: Some(256 * 1024 * 1024),
+                cpu_millis: Some(1500),
+                max_pids: Some(64),
+                ..ResourceLimits::default()
+            },
+        }
+    }
 
     async fn echo(text: &str) -> CommandOutcome {
         let sb = NativeSandbox::new(Duration::from_secs(10));
@@ -390,6 +1040,7 @@ mod tests {
         assert!(out.stdout.contains("apex_sandbox_ok"));
         assert_eq!(out.exit_code, Some(0));
         assert!(!out.timed_out);
+        assert!(!out.resource_exceeded);
     }
 
     #[cfg(unix)]
@@ -399,6 +1050,26 @@ mod tests {
         let out = sb.run("sh", &["-c", "sleep 5"], ".").await.unwrap();
         assert!(out.timed_out);
         assert_eq!(out.exit_code, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cpu_rlimit_terminates_with_resource_exceeded() {
+        // A busy loop with a 1s CPU cap is killed by SIGXCPU well before the 30s
+        // wall-clock timeout, so the breach is attributed to the resource limit.
+        let limits = ResourceLimits {
+            timeout: Duration::from_secs(30),
+            cpu_millis: Some(1000),
+            ..ResourceLimits::default()
+        };
+        let sb = NativeSandbox::with_limits(limits);
+        let out = sb
+            .run("sh", &["-c", "while :; do :; done"], ".")
+            .await
+            .unwrap();
+        assert!(!out.timed_out, "should hit the CPU cap, not the wall clock");
+        assert!(out.resource_exceeded);
+        assert_eq!(out.signal, Some(libc::SIGXCPU));
     }
 
     #[test]
@@ -453,8 +1124,200 @@ mod tests {
     fn network_policy_default_denies() {
         let mut p = NetworkPolicy::default();
         assert!(!p.allows_host("api.example.com"));
+        assert!(p.denies_all());
         p.outbound_allow.push("api.example.com".to_string());
         assert!(p.allows_host("api.example.com"));
         assert!(!p.allows_host("evil.example.com"));
+        assert!(!p.denies_all());
+    }
+
+    #[test]
+    fn container_argv_denies_network_and_maps_limits() {
+        let argv = ContainerSandbox::docker("alpine:3.20").argv(&sample_cmd());
+        // Deny-all egress isolates the network namespace.
+        let net = argv.windows(2).find(|w| w[0] == "--network").unwrap();
+        assert_eq!(net[1], "none");
+        // cgroup limit flags are derived from ResourceLimits.
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--memory" && w[1] == "268435456")
+        );
+        assert!(argv.windows(2).any(|w| w[0] == "--cpus" && w[1] == "1.500"));
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--pids-limit" && w[1] == "64")
+        );
+        // Read-only rootfs + bind-mounted workspace.
+        assert!(argv.iter().any(|s| s == "--read-only"));
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--volume" && w[1] == "/work:/workspace")
+        );
+        // The wrapped command comes last, after the image.
+        let img = argv.iter().position(|s| s == "alpine:3.20").unwrap();
+        assert_eq!(&argv[img + 1..], &["echo".to_string(), "hi".to_string()]);
+        // No runtime override for the plain container backend.
+        assert!(!argv.iter().any(|s| s == "--runtime"));
+    }
+
+    #[test]
+    fn gvisor_argv_sets_runsc_runtime() {
+        let argv = ContainerSandbox::gvisor("alpine:3.20").argv(&sample_cmd());
+        let rt = argv.windows(2).find(|w| w[0] == "--runtime").unwrap();
+        assert_eq!(rt[1], "runsc");
+    }
+
+    #[test]
+    fn container_argv_allows_bridge_when_egress_permitted() {
+        let policy = NetworkPolicy {
+            default_deny: false,
+            outbound_allow: vec![],
+        };
+        let argv = ContainerSandbox::docker("alpine:3.20")
+            .with_network(policy)
+            .argv(&sample_cmd());
+        let net = argv.windows(2).find(|w| w[0] == "--network").unwrap();
+        assert_eq!(net[1], "bridge");
+    }
+
+    #[test]
+    fn firecracker_config_derives_from_limits_and_renders_json() {
+        let limits = ResourceLimits {
+            cpu_millis: Some(2000),
+            memory_bytes: Some(512 * 1024 * 1024),
+            ..ResourceLimits::default()
+        };
+        let cfg = FirecrackerConfig::from_limits("/vmlinux", "/rootfs.ext4", &limits);
+        assert_eq!(cfg.vcpu_count, 2);
+        assert_eq!(cfg.mem_size_mib, 512);
+        let json = cfg.to_json();
+        assert!(json.contains("\"kernel_image_path\": \"/vmlinux\""));
+        assert!(json.contains("\"path_on_host\": \"/rootfs.ext4\""));
+        assert!(json.contains("\"vcpu_count\": 2"));
+        assert!(json.contains("\"mem_size_mib\": 512"));
+    }
+
+    #[tokio::test]
+    async fn firecracker_without_guest_is_unsupported() {
+        let err = FirecrackerSandbox::new()
+            .execute(&sample_cmd())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SandboxError::Unsupported(SandboxBackend::Firecracker)
+        ));
+    }
+
+    // ---- WASI/WASM backend (feature = "wasi") ----------------------------------
+
+    /// A WASI module that writes "apex_wasi_ok\n" to stdout via `fd_write`.
+    #[cfg(feature = "wasi")]
+    const PRINT_WAT: &str = r#"
+        (module
+          (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 8) "apex_wasi_ok\0a")
+          (func (export "_start")
+            (i32.store (i32.const 0) (i32.const 8))   ;; iov.buf  = 8
+            (i32.store (i32.const 4) (i32.const 13))  ;; iov.len  = 13
+            (drop (call $fd_write
+              (i32.const 1)    ;; fd = stdout
+              (i32.const 0)    ;; iovs ptr
+              (i32.const 1)    ;; iovs len
+              (i32.const 20))))) ;; nwritten ptr
+    "#;
+
+    /// A WASI module that loops forever (to exercise fuel/epoch limits).
+    #[cfg(feature = "wasi")]
+    const LOOP_WAT: &str = r#"(module (func (export "_start") (loop (br 0))))"#;
+
+    #[cfg(feature = "wasi")]
+    fn wasm_temp(wat_src: &str, tag: &str) -> std::path::PathBuf {
+        let bytes = wat::parse_str(wat_src).expect("assemble wat");
+        let mut path = std::env::temp_dir();
+        path.push(format!("apex_wasi_{tag}_{}.wasm", std::process::id()));
+        std::fs::write(&path, bytes).expect("write wasm fixture");
+        path
+    }
+
+    #[cfg(feature = "wasi")]
+    fn wasi_cmd(path: &std::path::Path, limits: ResourceLimits) -> SandboxCommand {
+        SandboxCommand {
+            program: path.to_string_lossy().into_owned(),
+            args: vec![],
+            workdir: ".".into(),
+            limits,
+        }
+    }
+
+    #[cfg(feature = "wasi")]
+    #[tokio::test]
+    async fn wasi_runs_module_and_captures_stdout() {
+        let path = wasm_temp(PRINT_WAT, "print");
+        let sb = WasiSandbox::new().unwrap();
+        let out = sb
+            .execute(&wasi_cmd(&path, ResourceLimits::default()))
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, Some(0), "stderr: {}", out.stderr);
+        assert!(
+            out.stdout.contains("apex_wasi_ok"),
+            "stdout: {:?}",
+            out.stdout
+        );
+    }
+
+    #[cfg(feature = "wasi")]
+    #[tokio::test]
+    async fn wasi_fuel_budget_exhaustion_is_resource_exceeded() {
+        // A 1 ms CPU budget is far less than an infinite loop needs.
+        let path = wasm_temp(LOOP_WAT, "fuel");
+        let limits = ResourceLimits {
+            cpu_millis: Some(1),
+            timeout: Duration::from_secs(30),
+            ..ResourceLimits::default()
+        };
+        let sb = WasiSandbox::new().unwrap();
+        let out = sb.execute(&wasi_cmd(&path, limits)).await.unwrap();
+        assert!(out.resource_exceeded, "expected fuel exhaustion");
+        assert!(!out.timed_out);
+        assert_eq!(out.exit_code, None);
+    }
+
+    #[cfg(feature = "wasi")]
+    #[tokio::test]
+    async fn wasi_wall_clock_timeout_interrupts() {
+        // Unbounded fuel (no cpu limit) → the epoch watchdog must stop the loop.
+        let path = wasm_temp(LOOP_WAT, "timeout");
+        let limits = ResourceLimits {
+            cpu_millis: None,
+            timeout: Duration::from_millis(150),
+            ..ResourceLimits::default()
+        };
+        let sb = WasiSandbox::new().unwrap();
+        let out = sb.execute(&wasi_cmd(&path, limits)).await.unwrap();
+        assert!(out.timed_out, "expected epoch interruption");
+        assert!(!out.resource_exceeded);
+    }
+
+    #[cfg(feature = "wasi")]
+    #[tokio::test]
+    async fn wasi_missing_module_is_spawn_error() {
+        let sb = WasiSandbox::new().unwrap();
+        let cmd = wasi_cmd(
+            std::path::Path::new("/nonexistent/apex.wasm"),
+            ResourceLimits::default(),
+        );
+        let err = sb.execute(&cmd).await.unwrap_err();
+        assert!(matches!(err, SandboxError::Spawn(_)));
+    }
+
+    #[cfg(feature = "wasi")]
+    #[tokio::test]
+    async fn wasi_backend_is_detected() {
+        let mgr = SandboxManager::detect().await;
+        assert!(mgr.capabilities().contains(&SandboxBackend::Wasi));
     }
 }
