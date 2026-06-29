@@ -27,6 +27,15 @@ pub struct Definition {
     pub metadata: Metadata,
     /// Workflow body.
     pub spec: Spec,
+    /// Stable content hash of the source the definition was parsed from, used to
+    /// **pin** an execution to the exact definition it started with: `resume`
+    /// rejects a definition whose hash (or version) drifted, so in-flight
+    /// executions never silently run a changed DAG
+    /// ([gap closure G7](../../docs/03-workflow-engine/temporal-gap-analysis.md#g7--in-flight-definition-versioning)).
+    /// Set by [`from_yaml`](Self::from_yaml)/[`from_file`](Self::from_file);
+    /// `None` for definitions built another way.
+    #[serde(skip, default)]
+    source_hash: Option<String>,
 }
 
 /// Workflow identity.
@@ -99,10 +108,17 @@ pub struct Transition {
 impl Definition {
     /// Parse and validate a definition from YAML.
     pub fn from_yaml(yaml: &str) -> Result<Self> {
-        let def: Definition = serde_yaml::from_str(yaml)
+        let mut def: Definition = serde_yaml::from_str(yaml)
             .map_err(|e| Error::invalid(format!("invalid workflow manifest: {e}")))?;
         def.validate()?;
+        def.source_hash = Some(content_hash(yaml));
         Ok(def)
+    }
+
+    /// The content hash of the source this definition was parsed from, if known.
+    /// Used by the engine to pin an execution to its original definition.
+    pub fn source_hash(&self) -> Option<&str> {
+        self.source_hash.as_deref()
     }
 
     /// Load and validate a definition from a file.
@@ -251,6 +267,18 @@ impl Definition {
         }
         Ok(())
     }
+}
+
+/// Stable, dependency-free FNV-1a 64-bit hash of the source text, rendered hex.
+/// Deterministic across processes (fixed offset basis + prime), so it is a sound
+/// drift detector for definition pinning.
+fn content_hash(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 #[cfg(test)]

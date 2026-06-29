@@ -55,13 +55,23 @@ perceived value to an evaluating buyer.
 
 | # | Gap | Impact | Effort | Status |
 |---|-----|--------|--------|--------|
-| G1 | Durable wall-clock timers | High | M | Planned |
-| G2 | Schedules / cron | High | S–M | Planned |
-| G3 | Queries (read live state) | Med-High | S | Planned |
+| G1 | Durable wall-clock timers | High | M | **Done** |
+| G2 | Schedules / cron | High | S–M | **Done** (interval; cron deferred) |
+| G3 | Queries (read live state) | Med-High | S | **Done** |
 | G4 | Visibility surface (list/inspect + minimal UI) | High | M–L | Planned |
 | G5 | Child / sub-workflows | Med | L | Investigate |
 | G6 | Horizontal scaling story (honest tiering) | Med | M | Planned |
-| G7 | In-flight definition versioning | Med | M | Planned |
+| G7 | In-flight definition versioning | Med | M | **Done** (pinning) |
+
+> **Implementation status (2026-06-29).** G1, G3, G7, and the interval form of G2
+> are implemented in `crates/apex-workflow` and exercised by
+> [`tests/temporal_gaps.rs`](../../crates/apex-workflow/tests/temporal_gaps.rs)
+> (deterministic, `ManualClock`-driven). CLI surface: `apex workflows status`
+> (G3), `apex workflows tick` (fires due timers + schedules), and
+> `apex workflows schedule create|list` (G2). Remaining in scope: **cron**
+> expressions for G2, plus G4/G5/G6. Per-gap "Approach"/"Acceptance" notes below
+> are retained as the design record; the **Done** gaps now describe shipped
+> behavior.
 
 ---
 

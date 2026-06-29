@@ -176,6 +176,51 @@ enum WorkflowsCommand {
         #[arg(long, default_value = "null")]
         payload: String,
     },
+
+    /// Show an execution's live state (a side-effect-free query).
+    Status {
+        /// Execution id reported by `workflows run`.
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Fire due wall-clock timers and start due schedules for a workflow.
+    Tick {
+        /// Path to the workflow YAML definition.
+        #[arg(short = 'f', long = "file")]
+        file: String,
+    },
+
+    /// Manage recurring schedules.
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommand {
+    /// Register a recurring schedule that starts a workflow on an interval.
+    Create {
+        /// Path to the workflow YAML definition.
+        #[arg(short = 'f', long = "file")]
+        file: String,
+
+        /// Unique schedule id (also the execution-id prefix).
+        #[arg(long)]
+        id: String,
+
+        /// Interval between runs, in milliseconds.
+        #[arg(long)]
+        every: u64,
+
+        /// Run input as JSON passed to each execution.
+        #[arg(long, default_value = "{}")]
+        input: String,
+    },
+
+    /// List registered schedules.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -294,6 +339,17 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 timer,
                 payload,
             } => workflow::signal_cmd(&file, &id, event, timer, &payload).await,
+            WorkflowsCommand::Status { id } => workflow::status_cmd(&id).await,
+            WorkflowsCommand::Tick { file } => workflow::tick_cmd(&file).await,
+            WorkflowsCommand::Schedule { command } => match command {
+                ScheduleCommand::Create {
+                    file,
+                    id,
+                    every,
+                    input,
+                } => workflow::schedule_create_cmd(&file, &id, every, &input).await,
+                ScheduleCommand::List => workflow::schedule_list_cmd().await,
+            },
         },
         Command::Memory { command } => match command {
             MemoryCommand::Put {

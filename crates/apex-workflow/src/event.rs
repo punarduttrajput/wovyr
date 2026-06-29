@@ -35,6 +35,11 @@ pub enum WorkflowEvent {
     ActivitySkipped { id: String },
     /// A `wait` activity suspended pending a timer or event (`waiting_for`).
     ActivityWaiting { id: String, waiting_for: String },
+    /// A durable wall-clock timer was scheduled to fire at `fire_at_ms` (Unix-epoch
+    /// milliseconds). Recording the deadline in the log keeps recovery
+    /// deterministic — the timer is not recomputed on resume
+    /// ([gap closure G1](../../docs/03-workflow-engine/temporal-gap-analysis.md#g1--durable-wall-clock-timers)).
+    TimerScheduled { id: String, fire_at_ms: u64 },
     /// An activity attempt failed and will be retried after `delay_ms`.
     ActivityRetried {
         id: String,

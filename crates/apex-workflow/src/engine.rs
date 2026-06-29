@@ -20,9 +20,10 @@ use crate::event::WorkflowEvent;
 use crate::executor::{ActivityContext, ActivityError, ActivityExecutor};
 use crate::state::{ActivityState, WorkflowState};
 use crate::store::{CheckpointStore, EventLog};
+use crate::timer::{Clock, PendingTimer, SystemClock, TimerStore, parse_duration_ms};
 use apex_common::{Error, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -72,9 +73,57 @@ pub struct ExecutionState {
     /// ([compensation §7](../../docs/03-workflow-engine/compensation-engine.md)).
     #[serde(default)]
     pub completed_order: Vec<String>,
+    /// Content hash of the definition this execution started with — the pin that
+    /// makes `resume` reject a drifted definition (G7). `None` for executions
+    /// created before pinning existed.
+    #[serde(default)]
+    pub definition_hash: Option<String>,
     /// Monotonic state version for optimistic concurrency
     /// ([state machine §13](../../docs/03-workflow-engine/state-machine.md)).
     pub version: u64,
+}
+
+/// A side-effect-free projection of an execution for **queries** (G3): read live
+/// state without resuming, leasing, or appending events
+/// ([gap closure G3](../../docs/03-workflow-engine/temporal-gap-analysis.md#g3--queries-read-live-state)).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionSummary {
+    /// Execution id.
+    pub execution_id: String,
+    /// Workflow name.
+    pub workflow_name: String,
+    /// Pinned workflow version.
+    pub workflow_version: String,
+    /// Current workflow status.
+    pub status: WorkflowState,
+    /// Per-activity state, keyed by activity id.
+    pub activities: BTreeMap<String, ActivityState>,
+    /// Activity ids currently suspended in a `wait`.
+    pub waiting_on: Vec<String>,
+}
+
+impl ExecutionState {
+    /// A lightweight, read-only summary of this execution for status queries.
+    pub fn summary(&self) -> ExecutionSummary {
+        let activities: BTreeMap<String, ActivityState> = self
+            .activities
+            .iter()
+            .map(|(id, r)| (id.clone(), r.state))
+            .collect();
+        let waiting_on = activities
+            .iter()
+            .filter(|(_, s)| **s == ActivityState::Waiting)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ExecutionSummary {
+            execution_id: self.execution_id.clone(),
+            workflow_name: self.workflow_name.clone(),
+            workflow_version: self.workflow_version.clone(),
+            status: self.status,
+            activities,
+            waiting_on,
+        }
+    }
 }
 
 /// Terminal result of driving an execution.
@@ -221,10 +270,18 @@ pub struct Engine {
     events: Arc<dyn EventLog>,
     checkpoints: Arc<dyn CheckpointStore>,
     executor: Arc<dyn ActivityExecutor>,
+    /// Time source — read only when first registering a durable timer (G1).
+    clock: Arc<dyn Clock>,
+    /// Durable registry for wall-clock timers; `None` disables durable timers
+    /// (a `wait` with a wall-clock deadline then errors instead of suspending
+    /// silently).
+    timers: Option<Arc<dyn TimerStore>>,
 }
 
 impl Engine {
     /// Build an engine over an event log, checkpoint store, and activity executor.
+    /// Uses the real [`SystemClock`] and no durable timer store; attach one with
+    /// [`with_timer_store`](Self::with_timer_store) to enable wall-clock timers.
     pub fn new(
         events: Arc<dyn EventLog>,
         checkpoints: Arc<dyn CheckpointStore>,
@@ -234,7 +291,33 @@ impl Engine {
             events,
             checkpoints,
             executor,
+            clock: Arc::new(SystemClock),
+            timers: None,
         }
+    }
+
+    /// Override the time source (tests inject a `ManualClock` for determinism).
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Attach a durable [`TimerStore`], enabling wall-clock `wait` timers (G1).
+    pub fn with_timer_store(mut self, timers: Arc<dyn TimerStore>) -> Self {
+        self.timers = Some(timers);
+        self
+    }
+
+    /// Read the latest durable snapshot of an execution **without side effects** —
+    /// no events, no lease, no resume (G3). Returns `None` if the execution is
+    /// unknown.
+    pub async fn query(&self, execution_id: &str) -> Result<Option<ExecutionState>> {
+        self.checkpoints.latest(execution_id).await
+    }
+
+    /// A read-only [`ExecutionSummary`] for an execution, if it exists (G3).
+    pub async fn status(&self, execution_id: &str) -> Result<Option<ExecutionSummary>> {
+        Ok(self.query(execution_id).await?.map(|s| s.summary()))
     }
 
     /// Start a new execution of `def` with id `execution_id` and JSON `input`, and
@@ -280,6 +363,7 @@ impl Engine {
                 .map(|a| (a.id.clone(), ActivityRecord::default()))
                 .collect(),
             completed_order: Vec::new(),
+            definition_hash: def.source_hash().map(str::to_string),
             version: 0,
         };
 
@@ -326,6 +410,8 @@ impl Engine {
             .ok_or_else(|| {
                 Error::NotFound(format!("no checkpoint for execution `{execution_id}`"))
             })?;
+
+        self.assert_pinned_definition(def, &state)?;
 
         match state.status {
             WorkflowState::Completed => return Ok((RunOutcome::Completed, state)),
@@ -703,9 +789,12 @@ impl Engine {
 
     /// Handle a `wait` activity: complete it if the awaited timer/event has been
     /// delivered (into `state.variables`), otherwise suspend the workflow durably.
+    /// A `wait` with a wall-clock deadline registers a durable timer the first time
+    /// it suspends, so a [`TimerDispatcher`](crate::TimerDispatcher) can resume it
+    /// autonomously when the deadline passes (G1).
     async fn run_wait(&self, state: &mut ExecutionState, activity: &ActivityDef) -> Result<Step> {
         let id = activity.id.clone();
-        let spec = WaitSpec::from_inputs(&activity.inputs)?;
+        let spec = WaitSpec::from_inputs(&id, &activity.inputs)?;
 
         if let Some(payload) = state.variables.get(&spec.variable_key()).cloned() {
             // The signal arrived → complete, exposing the payload like any output.
@@ -716,6 +805,15 @@ impl Engine {
             }
             state.variables.insert(id.clone(), payload.clone());
             state.completed_order.push(id.clone());
+            // A fired durable timer leaves no dangling registration or marker.
+            if let WaitSpec::Timer(tw) = &spec
+                && tw.deadline.is_some()
+            {
+                state.variables.remove(&format!("__timer_set.{}", tw.id));
+                if let Some(store) = &self.timers {
+                    store.cancel(&state.execution_id, &tw.id).await?;
+                }
+            }
             self.emit(
                 state,
                 WorkflowEvent::ActivityCompleted {
@@ -726,6 +824,43 @@ impl Engine {
             .await?;
             self.checkpoint(state).await?;
             return Ok(Step::Completed);
+        }
+
+        // A wall-clock timer registers its deadline once, on first suspend, then
+        // relies on the recorded `fire_at` (never recomputed) so resume stays
+        // deterministic.
+        if let WaitSpec::Timer(tw) = &spec
+            && let Some(deadline) = &tw.deadline
+        {
+            let marker = format!("__timer_set.{}", tw.id);
+            if !state.variables.contains_key(&marker) {
+                let Some(store) = &self.timers else {
+                    return Err(Error::Invalid(format!(
+                        "wait activity `{id}` declares a wall-clock timer but the engine \
+                         has no timer store; attach one with Engine::with_timer_store"
+                    )));
+                };
+                let fire_at = match deadline {
+                    TimerDeadline::After(ms) => self.clock.now_millis().saturating_add(*ms),
+                    TimerDeadline::At(ms) => *ms,
+                };
+                store
+                    .schedule(PendingTimer {
+                        execution_id: state.execution_id.clone(),
+                        timer_id: tw.id.clone(),
+                        fire_at_ms: fire_at,
+                    })
+                    .await?;
+                state.variables.insert(marker, json!(fire_at));
+                self.emit(
+                    state,
+                    WorkflowEvent::TimerScheduled {
+                        id: tw.id.clone(),
+                        fire_at_ms: fire_at,
+                    },
+                )
+                .await?;
+            }
         }
 
         // Not yet signalled → mark Waiting and suspend (resumable by delivery).
@@ -1004,6 +1139,32 @@ impl Engine {
         }
     }
 
+    /// Enforce definition pinning (G7): an execution must be resumed with the same
+    /// definition it started with. A drifted content hash or a changed version is a
+    /// fail-closed error, so an in-flight execution never silently runs a different
+    /// DAG. Executions started before pinning (no recorded hash) are not checked.
+    fn assert_pinned_definition(&self, def: &Definition, state: &ExecutionState) -> Result<()> {
+        let Some(pinned) = &state.definition_hash else {
+            return Ok(());
+        };
+        let drifted = match def.source_hash() {
+            Some(current) => current != pinned,
+            None => false, // can't compare; don't block (e.g. programmatically built def)
+        };
+        if drifted || def.metadata.version != state.workflow_version {
+            return Err(Error::Invalid(format!(
+                "definition for workflow `{}` changed since execution `{}` started \
+                 (pinned version {}, current version {}); resume it with the original \
+                 definition",
+                state.workflow_name,
+                state.execution_id,
+                state.workflow_version,
+                def.metadata.version,
+            )));
+        }
+        Ok(())
+    }
+
     /// Set an activity's state (used for non-persisted intermediate transitions).
     fn set_activity(&self, state: &mut ExecutionState, id: &str, to: ActivityState) {
         if let Some(record) = state.activities.get_mut(id) {
@@ -1045,29 +1206,76 @@ impl Engine {
 enum WaitSpec {
     /// Waits for `signal_event(<name>)`.
     Event(String),
-    /// Waits for `fire_timer(<id>)`.
-    Timer(String),
+    /// Waits for a timer — either fired manually via `fire_timer(<id>)` or, when a
+    /// wall-clock deadline is set, autonomously by the timer dispatcher.
+    Timer(TimerWait),
+}
+
+/// A parsed timer wait: its logical id plus an optional wall-clock deadline.
+struct TimerWait {
+    /// Logical timer id; the delivery writes `timer.<id>`.
+    id: String,
+    /// `None` = manual timer (fired by `fire_timer`); `Some` = durable wall-clock.
+    deadline: Option<TimerDeadline>,
+}
+
+/// A durable timer's deadline, in Unix-epoch milliseconds.
+enum TimerDeadline {
+    /// Fire `ms` after the timer is first registered.
+    After(u64),
+    /// Fire at an absolute epoch-millis instant.
+    At(u64),
 }
 
 impl WaitSpec {
-    /// Parse `{event: <name>}` or `{timer: <id>}` from a wait activity's inputs.
-    fn from_inputs(inputs: &Value) -> Result<Self> {
+    /// Parse a wait's inputs. Accepted forms:
+    /// - `{event: <name>}` — wait for a named event.
+    /// - `{timer: <id>}` — manual timer fired by `fire_timer(<id>)`.
+    /// - `{timer: {after: "30d"[, id: <id>]}}` — wall-clock timer, relative.
+    /// - `{timer: {at: <epoch_ms>[, id: <id>]}}` — wall-clock timer, absolute.
+    ///
+    /// For the object forms `id` defaults to the activity's own id.
+    fn from_inputs(activity_id: &str, inputs: &Value) -> Result<Self> {
         if let Some(name) = inputs.get("event").and_then(Value::as_str) {
             return Ok(WaitSpec::Event(name.to_string()));
         }
-        if let Some(timer) = inputs.get("timer").and_then(Value::as_str) {
-            return Ok(WaitSpec::Timer(timer.to_string()));
+        match inputs.get("timer") {
+            Some(Value::String(id)) => Ok(WaitSpec::Timer(TimerWait {
+                id: id.clone(),
+                deadline: None,
+            })),
+            Some(Value::Object(map)) => {
+                let id = map
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| activity_id.to_string());
+                let deadline = if let Some(after) = map.get("after") {
+                    TimerDeadline::After(parse_duration_ms(after)?)
+                } else if let Some(at) = map.get("at").and_then(Value::as_u64) {
+                    TimerDeadline::At(at)
+                } else {
+                    return Err(Error::Invalid(
+                        "a `timer` object needs an `after` duration or an `at` epoch-ms instant"
+                            .into(),
+                    ));
+                };
+                Ok(WaitSpec::Timer(TimerWait {
+                    id,
+                    deadline: Some(deadline),
+                }))
+            }
+            _ => Err(Error::Invalid(
+                "a `wait` activity needs an `event` or `timer` input".into(),
+            )),
         }
-        Err(Error::Invalid(
-            "a `wait` activity needs an `event` or `timer` input".into(),
-        ))
     }
 
     /// The workflow variable a delivery writes (and the wait reads).
     fn variable_key(&self) -> String {
         match self {
             WaitSpec::Event(name) => format!("event.{name}"),
-            WaitSpec::Timer(timer) => format!("timer.{timer}"),
+            WaitSpec::Timer(tw) => format!("timer.{}", tw.id),
         }
     }
 
@@ -1075,7 +1283,11 @@ impl WaitSpec {
     fn describe(&self) -> String {
         match self {
             WaitSpec::Event(name) => format!("event '{name}'"),
-            WaitSpec::Timer(timer) => format!("timer '{timer}'"),
+            WaitSpec::Timer(tw) => match &tw.deadline {
+                Some(TimerDeadline::After(ms)) => format!("timer '{}' (after {ms}ms)", tw.id),
+                Some(TimerDeadline::At(ms)) => format!("timer '{}' (at {ms})", tw.id),
+                None => format!("timer '{}'", tw.id),
+            },
         }
     }
 }

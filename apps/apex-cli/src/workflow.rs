@@ -12,8 +12,10 @@ use crate::config;
 use apex_provider::{ChatRequest, Gateway, Message, ModelSelector};
 use apex_tools::{ToolContext, ToolError, ToolRegistry, ToolRequest};
 use apex_workflow::{
-    ActivityContext, ActivityError, ActivityExecutor, ActivityState, CheckpointStore, Definition,
-    Engine, EventLog, FileStore, RunOutcome,
+    ActivityContext, ActivityError, ActivityExecutor, ActivityState, CheckpointStore, Clock,
+    Definition, DefinitionResolver, Engine, EventLog, FileScheduleStore, FileStore, FileTimerStore,
+    RunOutcome, Schedule, ScheduleDispatcher, ScheduleStore, SystemClock, TimerDispatcher,
+    TimerStore,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -183,22 +185,47 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
-/// A durable engine over `~/.apex/workflows`, plus the platform executor.
+/// The durable workflow directory under `~/.apex/workflows`.
+fn workflows_dir() -> apex_common::Result<std::path::PathBuf> {
+    Ok(config::config_dir()?.join("workflows"))
+}
+
+/// A durable engine over `~/.apex/workflows`, plus the platform executor. A durable
+/// [`FileTimerStore`] is attached so wall-clock `wait` timers fire across `tick`s.
 fn engine() -> apex_common::Result<Engine> {
-    let dir = config::config_dir()?.join("workflows");
-    let store = FileStore::new(dir)?;
+    let dir = workflows_dir()?;
+    let store = FileStore::new(dir.clone())?;
     let events: Arc<dyn EventLog> = Arc::new(store.clone());
     let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let timers: Arc<dyn TimerStore> = Arc::new(FileTimerStore::new(dir)?);
     let executor = Arc::new(PlatformExecutor {
         registry: ToolRegistry::with_builtins(),
         gateway: Gateway::from_env(),
     });
-    Ok(Engine::new(events, checkpoints, executor))
+    Ok(Engine::new(events, checkpoints, executor).with_timer_store(timers))
 }
 
 /// Durable checkpoint store at `~/.apex/workflows` (for decision injection).
 fn checkpoint_store() -> apex_common::Result<FileStore> {
-    FileStore::new(config::config_dir()?.join("workflows"))
+    FileStore::new(workflows_dir()?)
+}
+
+/// Durable timer store at `~/.apex/workflows` (shared with the engine).
+fn timer_store() -> apex_common::Result<Arc<dyn TimerStore>> {
+    Ok(Arc::new(FileTimerStore::new(workflows_dir()?)?))
+}
+
+/// Durable schedule store at `~/.apex/workflows`.
+fn schedule_store() -> apex_common::Result<Arc<dyn ScheduleStore>> {
+    Ok(Arc::new(FileScheduleStore::new(workflows_dir()?)?))
+}
+
+/// A resolver that returns `def` for its own workflow name — the CLI drives one
+/// definition file at a time, so `tick` resolves only that workflow.
+fn resolver_for(def: &Definition) -> DefinitionResolver {
+    let name = def.metadata.name.clone();
+    let def = def.clone();
+    Arc::new(move |want: &str| (want == name).then(|| def.clone()))
 }
 
 /// `apex workflows validate -f <file>` — compile and validate a definition.
@@ -302,6 +329,105 @@ pub async fn signal_cmd(
     report(&def, id, &outcome, &state);
     if let RunOutcome::Failed(_) = outcome {
         return Err(apex_common::Error::Runtime("workflow failed".into()));
+    }
+    Ok(())
+}
+
+/// `apex workflows status --id <id>` — read an execution's live state without
+/// resuming it (a side-effect-free query, G3).
+pub async fn status_cmd(id: &str) -> apex_common::Result<()> {
+    let summary = engine()?.status(id).await?.ok_or_else(|| {
+        apex_common::Error::NotFound(format!("no execution `{id}`; run the workflow first"))
+    })?;
+    println!(
+        "execution '{}' — workflow '{}' v{} — {:?}",
+        summary.execution_id, summary.workflow_name, summary.workflow_version, summary.status
+    );
+    for (id, state) in &summary.activities {
+        println!("  {id:<16} {state:?}");
+    }
+    if !summary.waiting_on.is_empty() {
+        println!("  waiting on: {}", summary.waiting_on.join(", "));
+    }
+    Ok(())
+}
+
+/// `apex workflows tick -f <file>` — fire any due wall-clock timers (G1) and start
+/// any due schedules (G2) for the given workflow, then report what happened.
+/// Caller-driven: run it on a cron/interval to advance time-based work.
+pub async fn tick_cmd(file: &str) -> apex_common::Result<()> {
+    let def = Definition::from_file(file)?;
+    let engine = engine()?;
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let resolver = resolver_for(&def);
+
+    let timers = TimerDispatcher::new(
+        engine.clone(),
+        timer_store()?,
+        clock.clone(),
+        resolver.clone(),
+    );
+    let fired = timers.poll().await?;
+
+    let schedules = ScheduleDispatcher::new(engine, schedule_store()?, clock, resolver);
+    let started = schedules.poll().await?;
+
+    println!(
+        "tick: {} timer(s) fired, {} schedule run(s) started",
+        fired.len(),
+        started.len()
+    );
+    for id in &fired {
+        println!("  fired timer '{id}' and resumed its execution");
+    }
+    for id in &started {
+        println!("  started scheduled execution '{id}'");
+    }
+    Ok(())
+}
+
+/// `apex workflows schedule create -f <file> --id <id> --every <ms> [--input json]`
+/// — register a recurring schedule that starts the workflow every `every_ms` (G2).
+pub async fn schedule_create_cmd(
+    file: &str,
+    id: &str,
+    every_ms: u64,
+    input: &str,
+) -> apex_common::Result<()> {
+    if every_ms == 0 {
+        return Err(apex_common::Error::Invalid(
+            "--every must be greater than 0".into(),
+        ));
+    }
+    let def = Definition::from_file(file)?;
+    let input_value: Value =
+        serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
+
+    let first_fire = SystemClock.now_millis().saturating_add(every_ms);
+    let schedule = Schedule::every(id, def.metadata.name.clone(), every_ms, first_fire)
+        .with_input(input_value);
+    schedule_store()?.save(&schedule).await?;
+
+    println!(
+        "created schedule '{id}' for workflow '{}' every {every_ms}ms (first fire at {first_fire})",
+        def.metadata.name
+    );
+    println!("advance it with: apex workflows tick -f {file}");
+    Ok(())
+}
+
+/// `apex workflows schedule list` — list registered schedules.
+pub async fn schedule_list_cmd() -> apex_common::Result<()> {
+    let schedules = schedule_store()?.list().await?;
+    if schedules.is_empty() {
+        println!("no schedules registered");
+        return Ok(());
+    }
+    for s in schedules {
+        println!(
+            "{:<16} workflow={} every={}ms next={} paused={} overlap={:?}",
+            s.id, s.workflow_name, s.interval_ms, s.next_fire_ms, s.paused, s.overlap
+        );
     }
     Ok(())
 }
