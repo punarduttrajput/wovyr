@@ -7,6 +7,11 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Plugin Engine: manifest, signature verification, permission grants, and the install/enable/disable lifecycle for extension capabilities."
 
+[features]
+# The WASM capability loader (`WasiCapabilityRuntime`). Off by default: it enables
+# apex-tools' `wasi` backend, which pulls Wasmtime (a heavy dependency).
+wasi = ["apex-tools/wasi"]
+
 [dependencies]
 apex-common.workspace = true
 apex-tools.workspace = true
@@ -24,3 +29,6 @@ semver = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+# Assembles tiny WASI test modules from WAT in-process (cached: wat 1.x), so the
+# WASM capability-loader tests need no external wasm toolchain.
+wat = "1"

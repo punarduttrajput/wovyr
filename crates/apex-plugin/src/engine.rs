@@ -29,6 +29,7 @@ use apex_tools::{
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// An installable plugin package: the signed manifest bytes, a detached ed25519
@@ -80,6 +81,10 @@ pub struct InstalledPlugin {
     /// The permissions the operator granted at install (a superset of the
     /// manifest's requested permissions).
     pub granted_permissions: Vec<String>,
+    /// Where this plugin's artifacts were staged on disk, if the engine has a
+    /// staging directory configured. `None` means artifacts were verified but not
+    /// persisted (so a disk-backed runtime can't load them).
+    pub artifact_dir: Option<PathBuf>,
 }
 
 /// A lifecycle event emitted by the engine, mirroring the platform `plugin.*` events
@@ -103,10 +108,15 @@ pub struct CapabilityCall<'a> {
     pub plugin: &'a str,
     /// The capability id being invoked.
     pub capability_id: &'a str,
-    /// The capability's entry point within the package.
+    /// The capability's entry point within the package — for a `wasm` capability,
+    /// the relative path (under [`artifact_dir`](Self::artifact_dir)) of the module
+    /// to execute.
     pub entry: &'a str,
     /// The capability's requested sandbox backend (e.g. `wasm`, `container`).
     pub sandbox: &'a str,
+    /// The directory the plugin's artifacts were staged into, if any. A disk-backed
+    /// runtime resolves the artifact to run as `artifact_dir.join(entry)`.
+    pub artifact_dir: Option<&'a Path>,
     /// The tool execution context (correlation ids, workdir, grants).
     pub ctx: &'a ToolContext,
 }
@@ -154,6 +164,7 @@ pub struct PluginTool {
     metadata: ToolMetadata,
     entry: String,
     sandbox: String,
+    artifact_dir: Option<PathBuf>,
     runtime: Arc<dyn CapabilityRuntime>,
 }
 
@@ -179,6 +190,7 @@ impl Tool for PluginTool {
             capability_id: &self.metadata.id,
             entry: &self.entry,
             sandbox: &self.sandbox,
+            artifact_dir: self.artifact_dir.as_deref(),
             ctx,
         };
         self.runtime.invoke(&call, request).await
@@ -190,6 +202,7 @@ pub struct PluginEngine {
     trust: TrustStore,
     platform_api: semver::Version,
     runtime: Arc<dyn CapabilityRuntime>,
+    staging_dir: Option<PathBuf>,
     plugins: BTreeMap<String, InstalledPlugin>,
     events: Vec<PluginEvent>,
 }
@@ -201,6 +214,7 @@ impl PluginEngine {
             trust,
             platform_api,
             runtime: Arc::new(NotLoadedRuntime),
+            staging_dir: None,
             plugins: BTreeMap::new(),
             events: Vec::new(),
         }
@@ -209,6 +223,15 @@ impl PluginEngine {
     /// Use `runtime` to execute plugin capabilities (replaces [`NotLoadedRuntime`]).
     pub fn with_runtime(mut self, runtime: Arc<dyn CapabilityRuntime>) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    /// Persist verified artifacts under `dir` at install (content-addressed staging,
+    /// [overview §6 step 7](../../docs/08-plugin-sdk/overview.md#6-installation-lifecycle)),
+    /// so a disk-backed [`CapabilityRuntime`] (e.g. the WASM loader) can load them.
+    /// Without it, artifacts are digest-verified but not written to disk.
+    pub fn with_staging_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.staging_dir = Some(dir.into());
         self
     }
 
@@ -253,7 +276,13 @@ impl PluginEngine {
         }
 
         // 7. Stage artifacts (content-addressed): each declared artifact must be
-        //    present in the package and match its digest.
+        //    present in the package and match its digest, then (if a staging dir is
+        //    configured) is written to disk so a disk-backed runtime can load it.
+        let artifact_dir = self.staging_dir.as_ref().map(|root| {
+            root.join(&manifest.metadata.publisher)
+                .join(&manifest.metadata.name)
+                .join(&manifest.metadata.version)
+        });
         for artifact in &manifest.artifacts {
             let bytes = package.artifacts.get(&artifact.path).ok_or_else(|| {
                 Error::invalid(format!(
@@ -262,6 +291,13 @@ impl PluginEngine {
                 ))
             })?;
             verify_digest(&artifact.digest, bytes)?;
+            if let Some(dir) = &artifact_dir {
+                let dest = dir.join(&artifact.path);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&dest, bytes)?;
+            }
         }
 
         // 8. Register (disabled).
@@ -272,6 +308,7 @@ impl PluginEngine {
                 manifest,
                 state: PluginState::Disabled,
                 granted_permissions: grants.to_vec(),
+                artifact_dir,
             },
         );
         self.events.push(PluginEvent::Installed(reference));
@@ -297,6 +334,7 @@ impl PluginEngine {
                 metadata: tool_metadata(&plugin.manifest, cap),
                 entry: cap.entry.clone(),
                 sandbox: cap.sandbox.clone(),
+                artifact_dir: plugin.artifact_dir.clone(),
                 runtime: Arc::clone(&self.runtime),
             };
             registry.register(Arc::new(tool));
