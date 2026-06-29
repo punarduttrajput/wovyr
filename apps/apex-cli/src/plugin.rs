@@ -173,10 +173,9 @@ pub fn trust_cmd(publisher: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// `apex plugin install <dir> [--grant <perm>]` — read a package directory
-/// (`plugin.yaml` + `plugin.sig` + artifacts), verify its signature, stage artifacts,
-/// and register it (disabled). `grants` must cover every permission the manifest requests.
-pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
+/// Read a package directory (`plugin.yaml` + `plugin.sig` + declared artifacts) into a
+/// [`Package`], returning it alongside the parsed manifest.
+fn read_package(dir: &str) -> Result<(Package, PluginManifest)> {
     let dir = Path::new(dir);
     let manifest_yaml = std::fs::read_to_string(dir.join("plugin.yaml"))
         .map_err(|e| Error::config(format!("could not read {}/plugin.yaml: {e}", dir.display())))?;
@@ -186,8 +185,6 @@ pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
             dir.display()
         ))
     })?;
-
-    // Parse the manifest to learn which artifact blobs the package must carry.
     let manifest = PluginManifest::from_yaml(&manifest_yaml)?;
     let mut package = Package::new(manifest_yaml, signature);
     for artifact in &manifest.artifacts {
@@ -200,7 +197,14 @@ pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
         })?;
         package = package.with_artifact(artifact.path.clone(), bytes);
     }
+    Ok((package, manifest))
+}
 
+/// `apex plugin install <dir> [--grant <perm>]` — read a package directory, verify its
+/// signature, stage artifacts, and register it (disabled). `grants` must cover every
+/// permission the manifest requests.
+pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
+    let (package, manifest) = read_package(dir)?;
     let mut engine = engine()?;
     let installed = engine.install(&package, &grants)?;
     let reference = installed.manifest.reference();
@@ -220,6 +224,39 @@ pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
         "Enable it with `apex plugin enable {}`.",
         manifest.qualified_id()
     );
+    Ok(())
+}
+
+/// `apex plugin upgrade <dir> [--grant <perm>]` — swap an installed plugin to the
+/// version in the package, retaining the prior version for rollback. New permissions
+/// must be granted; the upgrade is refused if it would break an installed dependent.
+pub fn upgrade_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
+    let (package, manifest) = read_package(dir)?;
+    let id = manifest.qualified_id();
+    let mut engine = engine()?;
+    let from = engine
+        .get(&id)
+        .map(|p| p.manifest.metadata.version.clone())
+        .unwrap_or_default();
+    let mut registry = ToolRegistry::new();
+    engine.upgrade(&package, &grants, &mut registry)?;
+    save_catalog(&engine.catalog())?;
+    println!("Upgraded {id} {from} -> {}.", manifest.metadata.version);
+    println!("Roll back with `apex plugin rollback {id}`.");
+    Ok(())
+}
+
+/// `apex plugin rollback <id>` — revert a plugin to its retained previous version.
+pub fn rollback_cmd(id: &str) -> Result<()> {
+    let mut engine = engine()?;
+    let mut registry = ToolRegistry::new();
+    engine.rollback(id, &mut registry)?;
+    save_catalog(&engine.catalog())?;
+    let now = engine
+        .get(id)
+        .map(|p| p.manifest.metadata.version.clone())
+        .unwrap_or_default();
+    println!("Rolled back {id} to {now}.");
     Ok(())
 }
 

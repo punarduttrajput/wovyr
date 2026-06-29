@@ -135,6 +135,22 @@ enum PluginCommand {
         grants: Vec<String>,
     },
 
+    /// Upgrade an installed plugin to the version in a package directory.
+    Upgrade {
+        /// Path to the new plugin package directory.
+        dir: String,
+
+        /// Permission to grant for the new version (repeatable); covers any new perms.
+        #[arg(long = "grant")]
+        grants: Vec<String>,
+    },
+
+    /// Roll a plugin back to its previous version.
+    Rollback {
+        /// Plugin id (`publisher/name`).
+        id: String,
+    },
+
     /// List installed plugins.
     List,
 
@@ -486,6 +502,8 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
             PluginCommand::Sign { key, manifest, out } => plugin::sign_cmd(&key, &manifest, out),
             PluginCommand::Trust { publisher, key } => plugin::trust_cmd(&publisher, &key),
             PluginCommand::Install { dir, grants } => plugin::install_cmd(&dir, grants),
+            PluginCommand::Upgrade { dir, grants } => plugin::upgrade_cmd(&dir, grants),
+            PluginCommand::Rollback { id } => plugin::rollback_cmd(&id),
             PluginCommand::List => plugin::list_cmd(),
             PluginCommand::Enable { id } => plugin::enable_cmd(&id),
             PluginCommand::Disable { id } => plugin::disable_cmd(&id),
