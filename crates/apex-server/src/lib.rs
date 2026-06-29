@@ -105,7 +105,9 @@ pub struct AppState {
 impl AppState {
     /// Build state from the environment (provider chosen by `OPENAI_API_KEY`).
     pub fn from_env() -> Self {
-        let metrics = Metrics::new();
+        // Export metrics to OTLP when built with `--features otlp` and the endpoint is
+        // set; otherwise an in-process-only registry (see `Metrics::with_otlp_export`).
+        let metrics = Metrics::with_otlp_export("apex");
         // Cost events from the gateway become LLM token/cost/savings metrics.
         let gateway = Gateway::from_env().with_cost_observer(Arc::new(MetricsCostObserver {
             metrics: metrics.clone(),

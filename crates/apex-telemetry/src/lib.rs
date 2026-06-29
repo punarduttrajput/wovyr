@@ -8,8 +8,10 @@
 //! initializer.
 //!
 //! v0.2 slice scope: in-process metrics rendered at `/metrics`, JSON/text log init,
-//! and (behind the `otlp` feature) OpenTelemetry **trace export** of the `tracing`
-//! spans emitted across the platform. **Deferred:** exemplars and OTLP metrics/logs.
+//! and (behind the `otlp` feature) OpenTelemetry export of **traces** (the `tracing`
+//! spans emitted across the platform), **metrics** (the registry dual-writes to an
+//! OTLP push exporter via [`Metrics::with_otlp_export`]), and **logs** (log events
+//! bridged to OTLP) — all activated only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
 mod logging;
 mod metrics;

@@ -6,7 +6,8 @@
 //! is human-readable text at `warn` so normal CLI runs have clean output.
 //!
 //! When built with the `otlp` feature and `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the
-//! same `tracing` spans are additionally exported to an OTLP collector
+//! same `tracing` spans are additionally exported to an OTLP collector as **traces**,
+//! and log events are bridged to OTLP **logs**
 //! ([observability §traces](../../docs/14-observability/index.md)).
 
 use tracing_subscriber::prelude::*;
@@ -19,6 +20,8 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 pub struct TelemetryGuard {
     #[cfg(feature = "otlp")]
     _otel: Option<crate::otlp::OtelGuard>,
+    #[cfg(feature = "otlp")]
+    _otel_logs: Option<crate::otlp::OtelLogGuard>,
 }
 
 /// Initialize the global logging subscriber (and OTLP export when configured). Safe
@@ -59,6 +62,12 @@ pub fn init_logging() -> TelemetryGuard {
     if let Some((otel_layer, otel_guard)) = crate::otlp::layer::<Registry>("apex") {
         layers.push(otel_layer.boxed());
         guard._otel = Some(otel_guard);
+    }
+
+    #[cfg(feature = "otlp")]
+    if let Some((logs_layer, logs_guard)) = crate::otlp::logs_layer::<Registry>("apex") {
+        layers.push(logs_layer.boxed());
+        guard._otel_logs = Some(logs_guard);
     }
 
     Registry::default().with(layers).init();

@@ -24,6 +24,10 @@ struct Inner {
     counters: BTreeMap<String, BTreeMap<String, f64>>,
     /// metric name → (label-set string → histogram)
     histograms: BTreeMap<String, BTreeMap<String, Hist>>,
+    /// Optional OTLP metrics sink: when present, record calls are mirrored to it
+    /// (a dual-write alongside the in-process Prometheus aggregation above).
+    #[cfg(feature = "otlp")]
+    otel: Option<crate::otlp::OtelMetrics>,
 }
 
 /// An OpenMetrics exemplar: a sample value tagged with the trace it came from, so a
@@ -80,6 +84,23 @@ impl Metrics {
         Self::default()
     }
 
+    /// Create a registry that, in addition to in-process Prometheus aggregation, also
+    /// exports to an OTLP collector when built with the `otlp` feature and
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` is set (`service` tags `service.name`). Without
+    /// the feature, or when unconfigured, this is equivalent to [`Self::new`]. Must be
+    /// called inside a Tokio runtime (the exporter's periodic reader runs on it).
+    pub fn with_otlp_export(service: &str) -> Self {
+        let m = Self::new();
+        #[cfg(feature = "otlp")]
+        {
+            if let Some(otel) = crate::otlp::OtelMetrics::build(service) {
+                m.inner.lock().expect("metrics mutex poisoned").otel = Some(otel);
+            }
+        }
+        let _ = service;
+        m
+    }
+
     /// Increment a counter by `value`.
     pub fn counter_add(&self, name: &str, labels: &[(&str, &str)], value: f64) {
         let key = render_labels(labels);
@@ -90,6 +111,10 @@ impl Metrics {
             .or_default()
             .entry(key)
             .or_insert(0.0) += value;
+        #[cfg(feature = "otlp")]
+        if let Some(otel) = inner.otel.as_mut() {
+            otel.add_counter(name, value, labels);
+        }
     }
 
     /// Increment a counter by 1.
@@ -126,6 +151,10 @@ impl Metrics {
             .entry(key)
             .or_insert_with(|| Hist::new(DEFAULT_SECONDS_BUCKETS))
             .observe(value, exemplar);
+        #[cfg(feature = "otlp")]
+        if let Some(otel) = inner.otel.as_mut() {
+            otel.record_histogram(name, value, labels);
+        }
     }
 
     /// Render the registry in Prometheus text exposition format.
@@ -365,6 +394,29 @@ mod tests {
         assert!(!empty_bucket.contains("trace_id"), "got: {empty_bucket}");
         // OpenMetrics requires the EOF terminator.
         assert!(out.trim_end().ends_with("# EOF"), "got:\n{out}");
+    }
+
+    #[test]
+    fn with_otlp_export_still_aggregates_in_process() {
+        // With no endpoint configured, `with_otlp_export` behaves like `new` — the
+        // in-process Prometheus aggregation is unaffected (the OTLP sink is inert),
+        // so `/metrics` keeps working whether or not export is on.
+        let m = Metrics::with_otlp_export("apex");
+        m.counter_inc("apex_api_requests_total", &[("route", "run")]);
+        m.histogram_observe(
+            "apex_api_request_duration_seconds",
+            &[("route", "run")],
+            0.03,
+        );
+        let out = m.render_prometheus();
+        assert!(
+            out.contains("apex_api_requests_total{route=\"run\"} 1"),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains("apex_api_request_duration_seconds_count{route=\"run\"} 1"),
+            "got:\n{out}"
+        );
     }
 
     #[test]
