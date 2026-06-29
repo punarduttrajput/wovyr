@@ -245,6 +245,56 @@ async fn schedule_starts_executions_on_its_interval() {
 }
 
 #[tokio::test]
+async fn cron_schedule_fires_at_cron_instants() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: cron_wf\nspec:\n  activities:\n    - {id: a, type: function}\n",
+    )
+    .unwrap();
+
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let executor = ClosureExecutor::new().on("a", |_| async { Ok(json!("tick")) });
+    let engine = Engine::new(events, checkpoints, Arc::new(executor));
+
+    let schedules = InMemoryScheduleStore::new();
+    // Every 5 minutes (UTC); first fire after t=0 is minute 5 (300_000 ms).
+    schedules
+        .save(&Schedule::cron("five", "cron_wf", "*/5 * * * *", 0).unwrap())
+        .await
+        .unwrap();
+    let clock = ManualClock::new(0);
+    let dispatcher = ScheduleDispatcher::new(
+        engine.clone(),
+        Arc::new(schedules.clone()) as Arc<dyn ScheduleStore>,
+        Arc::new(clock.clone()),
+        resolver_for(&def),
+    );
+
+    // Not due before the first cron instant.
+    clock.set(299_000);
+    assert!(dispatcher.poll().await.unwrap().is_empty());
+
+    // At minute 5 it fires and re-aligns to minute 10.
+    clock.set(300_000);
+    assert_eq!(
+        dispatcher.poll().await.unwrap(),
+        vec!["five-300000".to_string()]
+    );
+    assert_eq!(
+        schedules.get("five").await.unwrap().unwrap().next_fire_ms,
+        600_000
+    );
+
+    // At minute 10 it fires again.
+    clock.set(600_000);
+    assert_eq!(
+        dispatcher.poll().await.unwrap(),
+        vec!["five-600000".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn schedule_skip_overlap_does_not_start_concurrent_runs() {
     // A workflow that suspends (waits for an event it never gets) stays non-terminal.
     let def = Definition::from_yaml(

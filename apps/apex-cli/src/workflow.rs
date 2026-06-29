@@ -386,31 +386,59 @@ pub async fn tick_cmd(file: &str) -> apex_common::Result<()> {
     Ok(())
 }
 
-/// `apex workflows schedule create -f <file> --id <id> --every <ms> [--input json]`
-/// — register a recurring schedule that starts the workflow every `every_ms` (G2).
+/// `apex workflows schedule create -f <file> --id <id> (--every <ms> | --cron <expr>)
+/// [--input json]` — register a recurring schedule that starts the workflow on an
+/// interval or a cron expression (UTC) (G2).
 pub async fn schedule_create_cmd(
     file: &str,
     id: &str,
-    every_ms: u64,
+    every_ms: Option<u64>,
+    cron: Option<String>,
     input: &str,
 ) -> apex_common::Result<()> {
-    if every_ms == 0 {
-        return Err(apex_common::Error::Invalid(
-            "--every must be greater than 0".into(),
-        ));
-    }
     let def = Definition::from_file(file)?;
     let input_value: Value =
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
+    let now = SystemClock.now_millis();
 
-    let first_fire = SystemClock.now_millis().saturating_add(every_ms);
-    let schedule = Schedule::every(id, def.metadata.name.clone(), every_ms, first_fire)
-        .with_input(input_value);
+    let schedule = match (every_ms, cron) {
+        (Some(_), Some(_)) => {
+            return Err(apex_common::Error::Invalid(
+                "provide exactly one of --every or --cron".into(),
+            ));
+        }
+        (Some(every_ms), None) => {
+            if every_ms == 0 {
+                return Err(apex_common::Error::Invalid(
+                    "--every must be greater than 0".into(),
+                ));
+            }
+            Schedule::every(
+                id,
+                def.metadata.name.clone(),
+                every_ms,
+                now.saturating_add(every_ms),
+            )
+        }
+        (None, Some(expr)) => Schedule::cron(id, def.metadata.name.clone(), expr, now)?,
+        (None, None) => {
+            return Err(apex_common::Error::Invalid(
+                "provide one of --every <ms> or --cron <expr>".into(),
+            ));
+        }
+    }
+    .with_input(input_value);
+
+    let cadence = schedule
+        .cron
+        .clone()
+        .map(|c| format!("cron '{c}'"))
+        .unwrap_or_else(|| format!("every {}ms", schedule.interval_ms));
     schedule_store()?.save(&schedule).await?;
 
     println!(
-        "created schedule '{id}' for workflow '{}' every {every_ms}ms (first fire at {first_fire})",
-        def.metadata.name
+        "created schedule '{id}' for workflow '{}' ({cadence}); first fire at {}",
+        def.metadata.name, schedule.next_fire_ms
     );
     println!("advance it with: apex workflows tick -f {file}");
     Ok(())
@@ -424,9 +452,14 @@ pub async fn schedule_list_cmd() -> apex_common::Result<()> {
         return Ok(());
     }
     for s in schedules {
+        let cadence = s
+            .cron
+            .as_ref()
+            .map(|c| format!("cron='{c}'"))
+            .unwrap_or_else(|| format!("every={}ms", s.interval_ms));
         println!(
-            "{:<16} workflow={} every={}ms next={} paused={} overlap={:?}",
-            s.id, s.workflow_name, s.interval_ms, s.next_fire_ms, s.paused, s.overlap
+            "{:<16} workflow={} {cadence} next={} paused={} overlap={:?}",
+            s.id, s.workflow_name, s.next_fire_ms, s.paused, s.overlap
         );
     }
     Ok(())

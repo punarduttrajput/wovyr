@@ -25,6 +25,7 @@
 //! definition (G7).
 
 mod condition;
+mod cron;
 mod definition;
 mod engine;
 mod event;
@@ -39,6 +40,7 @@ mod store;
 mod timer;
 mod worker;
 
+pub use cron::Cron;
 pub use definition::{ActivityDef, Definition};
 pub use engine::{Engine, ExecutionState, ExecutionSummary, RunOutcome};
 pub use event::WorkflowEvent;

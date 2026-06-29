@@ -13,6 +13,7 @@
 //! deadline past `now`. An [`OverlapPolicy`] decides whether a new run may start
 //! while the schedule's previous execution is still in flight.
 
+use crate::cron::Cron;
 use crate::engine::Engine;
 use crate::timer::Clock;
 use crate::worker::DefinitionResolver;
@@ -37,7 +38,8 @@ pub enum OverlapPolicy {
     Allow,
 }
 
-/// A recurring schedule that starts a workflow every `interval_ms`.
+/// A recurring schedule that starts a workflow on a cadence — either a fixed
+/// `interval_ms` or, when `cron` is set, a cron expression (UTC).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Schedule {
     /// Unique schedule id (also the execution-id prefix).
@@ -47,8 +49,12 @@ pub struct Schedule {
     /// Run input passed to each started execution.
     #[serde(default)]
     pub input: Value,
-    /// Interval between fires, in milliseconds.
+    /// Interval between fires, in milliseconds. Ignored when `cron` is set.
     pub interval_ms: u64,
+    /// Cron expression (5-field or `@macro`, UTC). When present it drives the
+    /// cadence instead of `interval_ms` ([G2 cron](../../docs/03-workflow-engine/temporal-gap-analysis.md#g2--schedules--cron)).
+    #[serde(default)]
+    pub cron: Option<String>,
     /// Next fire time, in Unix-epoch milliseconds.
     pub next_fire_ms: u64,
     /// When `true`, the dispatcher skips this schedule entirely.
@@ -75,11 +81,38 @@ impl Schedule {
             workflow_name: workflow_name.into(),
             input: Value::Null,
             interval_ms,
+            cron: None,
             next_fire_ms: first_fire_ms,
             paused: false,
             overlap: OverlapPolicy::Skip,
             last_execution_id: None,
         }
+    }
+
+    /// A schedule driven by a cron `expr` (UTC), with its first fire computed as the
+    /// next cron instant strictly after `now_ms`. Validates the expression.
+    pub fn cron(
+        id: impl Into<String>,
+        workflow_name: impl Into<String>,
+        expr: impl Into<String>,
+        now_ms: u64,
+    ) -> Result<Self> {
+        let expr = expr.into();
+        let parsed = Cron::parse(&expr)?;
+        let first_fire = parsed
+            .next_after(now_ms)
+            .ok_or_else(|| Error::Invalid(format!("cron `{expr}` has no upcoming fire time")))?;
+        Ok(Self {
+            id: id.into(),
+            workflow_name: workflow_name.into(),
+            input: Value::Null,
+            interval_ms: 0,
+            cron: Some(expr),
+            next_fire_ms: first_fire,
+            paused: false,
+            overlap: OverlapPolicy::Skip,
+            last_execution_id: None,
+        })
     }
 
     /// Set the run input.
@@ -94,12 +127,21 @@ impl Schedule {
         self
     }
 
-    /// Advance `next_fire_ms` past `now`, skipping any missed ticks.
-    fn advance_past(&mut self, now: u64) {
-        self.next_fire_ms = self.next_fire_ms.saturating_add(self.interval_ms);
-        while self.next_fire_ms <= now {
+    /// Advance `next_fire_ms` past `now`, skipping any missed ticks. For a cron
+    /// schedule the next fire is the next cron instant strictly after `now`; for an
+    /// interval schedule it is the next multiple of `interval_ms` past `now`.
+    fn advance_past(&mut self, now: u64) -> Result<()> {
+        if let Some(expr) = &self.cron {
+            self.next_fire_ms = Cron::parse(expr)?
+                .next_after(now)
+                .ok_or_else(|| Error::Invalid(format!("cron `{expr}` has no further fire time")))?;
+        } else {
             self.next_fire_ms = self.next_fire_ms.saturating_add(self.interval_ms);
+            while self.next_fire_ms <= now {
+                self.next_fire_ms = self.next_fire_ms.saturating_add(self.interval_ms);
+            }
         }
+        Ok(())
     }
 }
 
@@ -273,7 +315,7 @@ impl ScheduleDispatcher {
                 && let Some(state) = self.engine.query(prev).await?
                 && !state.status.is_terminal()
             {
-                schedule.advance_past(now);
+                schedule.advance_past(now)?;
                 self.store.save(&schedule).await?;
                 continue;
             }
@@ -290,7 +332,7 @@ impl ScheduleDispatcher {
             started.push(exec_id.clone());
 
             schedule.last_execution_id = Some(exec_id);
-            schedule.advance_past(now);
+            schedule.advance_past(now)?;
             self.store.save(&schedule).await?;
         }
         Ok(started)
@@ -304,11 +346,25 @@ mod tests {
     #[tokio::test]
     async fn advances_past_now_skipping_missed_ticks() {
         let mut s = Schedule::every("s", "w", 1_000, 1_000);
-        s.advance_past(1_000); // fired at 1000 → next strictly after 1000
+        s.advance_past(1_000).unwrap(); // fired at 1000 → next strictly after 1000
         assert_eq!(s.next_fire_ms, 2_000);
 
         let mut s = Schedule::every("s", "w", 1_000, 1_000);
-        s.advance_past(5_500); // host was down; skip missed ticks
+        s.advance_past(5_500).unwrap(); // host was down; skip missed ticks
         assert_eq!(s.next_fire_ms, 6_000);
+    }
+
+    #[test]
+    fn cron_schedule_computes_fire_times() {
+        // Every 5 minutes; first fire strictly after t=0 is minute 5.
+        let mut s = Schedule::cron("c", "w", "*/5 * * * *", 0).unwrap();
+        assert_eq!(s.next_fire_ms, 300_000);
+        s.advance_past(300_000).unwrap();
+        assert_eq!(s.next_fire_ms, 600_000);
+
+        // A macro is accepted and validated.
+        assert!(Schedule::cron("d", "w", "@daily", 0).is_ok());
+        // An invalid expression is rejected at construction.
+        assert!(Schedule::cron("e", "w", "nope", 0).is_err());
     }
 }

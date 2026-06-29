@@ -210,9 +210,13 @@ enum ScheduleCommand {
         #[arg(long)]
         id: String,
 
-        /// Interval between runs, in milliseconds.
+        /// Interval between runs, in milliseconds (mutually exclusive with --cron).
+        #[arg(long, conflicts_with = "cron")]
+        every: Option<u64>,
+
+        /// Cron expression (5-field or @macro, UTC; mutually exclusive with --every).
         #[arg(long)]
-        every: u64,
+        cron: Option<String>,
 
         /// Run input as JSON passed to each execution.
         #[arg(long, default_value = "{}")]
@@ -346,8 +350,9 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                     file,
                     id,
                     every,
+                    cron,
                     input,
-                } => workflow::schedule_create_cmd(&file, &id, every, &input).await,
+                } => workflow::schedule_create_cmd(&file, &id, every, cron, &input).await,
                 ScheduleCommand::List => workflow::schedule_list_cmd().await,
             },
         },
