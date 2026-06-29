@@ -1019,11 +1019,16 @@ impl WasiSandbox {
         Ok(Self { engine })
     }
 
-    /// Run a module to completion on the current (blocking) thread.
-    fn run_module(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
+    /// Run a module to completion on the current (blocking) thread, feeding `stdin`
+    /// to the guest's standard input.
+    fn run_module(
+        &self,
+        cmd: &SandboxCommand,
+        stdin: &[u8],
+    ) -> Result<CommandOutcome, SandboxError> {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-        use wasi_common::pipe::WritePipe;
+        use wasi_common::pipe::{ReadPipe, WritePipe};
         use wasmtime::{Linker, Module, Store, StoreLimitsBuilder, Trap};
         use wasmtime_wasi::{Dir, WasiCtxBuilder, ambient_authority};
 
@@ -1043,6 +1048,8 @@ impl WasiSandbox {
             .map_err(|e| SandboxError::Internal(format!("wasi args: {e}")))?;
         builder.stdout(Box::new(stdout.clone()));
         builder.stderr(Box::new(stderr.clone()));
+        // Feed the request bytes to the guest's stdin (empty → no input available).
+        builder.stdin(Box::new(ReadPipe::from(stdin.to_vec())));
         if !cmd.workdir.is_empty() {
             // Preopen the workdir as the guest's sole filesystem capability. A
             // missing dir is non-fatal — the module simply gets no preopens.
@@ -1150,6 +1157,22 @@ impl WasiSandbox {
             resource_exceeded,
         })
     }
+
+    /// Execute the module at [`SandboxCommand::program`], feeding `stdin` to the
+    /// guest and capturing its stdout/stderr. The async variant of [`run_module`]:
+    /// Wasmtime execution is synchronous and CPU-bound, so it runs on a blocking
+    /// thread to avoid stalling the async runtime.
+    pub async fn execute_with_stdin(
+        &self,
+        cmd: &SandboxCommand,
+        stdin: Vec<u8>,
+    ) -> Result<CommandOutcome, SandboxError> {
+        let this = self.clone();
+        let cmd = cmd.clone();
+        tokio::task::spawn_blocking(move || this.run_module(&cmd, &stdin))
+            .await
+            .map_err(|e| SandboxError::Internal(format!("wasi join: {e}")))?
+    }
 }
 
 #[cfg(feature = "wasi")]
@@ -1160,13 +1183,7 @@ impl Sandbox for WasiSandbox {
     }
 
     async fn execute(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
-        // Wasmtime execution is synchronous and CPU-bound; run it off the async
-        // runtime so it can't stall other tasks.
-        let this = self.clone();
-        let cmd = cmd.clone();
-        tokio::task::spawn_blocking(move || this.run_module(&cmd))
-            .await
-            .map_err(|e| SandboxError::Internal(format!("wasi join: {e}")))?
+        self.execute_with_stdin(cmd, Vec::new()).await
     }
 }
 

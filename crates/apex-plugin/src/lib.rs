@@ -17,15 +17,21 @@
 //! - [`engine`] — the [`PluginEngine`]: the installed-plugin catalog and the
 //!   install → enable → disable → uninstall lifecycle, routing tool capabilities into
 //!   the [`ToolRegistry`](apex_tools::ToolRegistry) and emitting `plugin.*` events.
+//! - [`runtime`] (behind the `wasi` feature) — [`WasiCapabilityRuntime`], the WASM
+//!   capability loader: it runs a `tool` capability's staged `wasm32-wasi` module in
+//!   the WASI sandbox (request JSON on stdin → response JSON on stdout). Without the
+//!   feature, the engine's default [`NotLoadedRuntime`] registers capabilities but
+//!   errors on call.
 //!
 //! Deferred to later slices (see [overview §15](../../docs/08-plugin-sdk/overview.md#15-future-enhancements)):
-//! the wasm/container capability loader behind [`CapabilityRuntime`] (the default
-//! [`NotLoadedRuntime`] registers capabilities but cannot execute them yet), plugin
+//! container/microVM capability loaders (only the WASM loader exists today), plugin
 //! dependency resolution, upgrade/rollback, and marketplace distribution.
 
 pub mod engine;
 pub mod manifest;
 pub mod permissions;
+#[cfg(feature = "wasi")]
+pub mod runtime;
 pub mod verify;
 
 pub use engine::{
@@ -37,4 +43,6 @@ pub use manifest::{
     PLUGIN_API_VERSION, PluginManifest,
 };
 pub use permissions::{grant_covers, is_broad, missing_grants};
+#[cfg(feature = "wasi")]
+pub use runtime::WasiCapabilityRuntime;
 pub use verify::{TrustStore, verify_digest};
