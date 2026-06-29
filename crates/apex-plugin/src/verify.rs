@@ -8,6 +8,7 @@
 
 use apex_common::{Error, Result};
 use ring::signature::{ED25519, UnparsedPublicKey};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -44,7 +45,11 @@ mod hex {
 /// A registry of trusted publisher signing keys (ed25519 public keys, 32 bytes).
 /// Operators populate it with the publishers they trust; verification fails closed
 /// for any publisher not present.
-#[derive(Clone, Default)]
+///
+/// Serializable so a durable trust store (e.g. the CLI's
+/// `~/.apex/plugins/trust.json`) persists across processes; keys are stored as raw
+/// bytes.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct TrustStore {
     keys: BTreeMap<String, Vec<u8>>,
 }
@@ -64,6 +69,11 @@ impl TrustStore {
     /// Whether any publisher is trusted.
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+
+    /// The trusted publishers, sorted.
+    pub fn publishers(&self) -> Vec<String> {
+        self.keys.keys().cloned().collect()
     }
 
     /// Verify a detached ed25519 `signature` over `message` against the trusted key

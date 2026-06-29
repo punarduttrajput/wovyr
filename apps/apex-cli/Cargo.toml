@@ -17,6 +17,9 @@ path = "src/main.rs"
 tiered-memory = ["apex-memory/tiered"]
 # OpenTelemetry OTLP trace export (spans → OTEL_EXPORTER_OTLP_ENDPOINT).
 otlp = ["apex-telemetry/otlp"]
+# The WASM plugin capability loader, so enabled plugin tools actually execute on
+# `agents run --local`. Off by default (pulls Wasmtime via apex-plugin/wasi).
+plugin-wasi = ["apex-plugin/wasi"]
 
 [dependencies]
 apex-common.workspace = true
@@ -26,6 +29,7 @@ apex-agent.workspace = true
 apex-workflow.workspace = true
 apex-memory.workspace = true
 apex-telemetry.workspace = true
+apex-plugin.workspace = true
 apex-server.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -33,3 +37,8 @@ serde_json.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
+# ed25519 keygen + signing for `apex plugin keygen|sign` (CLI tooling: signing lives
+# outside the determinism-constrained library core).
+ring = "0.17"
+# The running platform-API version the engine checks plugin compatibility against.
+semver = "1"
