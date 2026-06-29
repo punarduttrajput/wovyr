@@ -19,7 +19,8 @@ use apex_common::{Error, Result};
 use apex_plugin::{
     CapabilityKind, InstalledPlugin, Package, PluginEngine, PluginManifest, PluginState, TrustStore,
 };
-use apex_tools::ToolRegistry;
+use apex_tools::{ToolContext, ToolRegistry, ToolRequest};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// The platform-API version the engine checks plugin `compatibility` ranges against.
@@ -257,6 +258,46 @@ pub fn rollback_cmd(id: &str) -> Result<()> {
         .map(|p| p.manifest.metadata.version.clone())
         .unwrap_or_default();
     println!("Rolled back {id} to {now}.");
+    Ok(())
+}
+
+/// `apex plugin run <capability> [--input <json>]` — invoke an enabled plugin tool
+/// capability directly through the engine's runtime (an operator test path; the same
+/// route an agent uses). Enforces the owning plugin's granted permissions. Requires the
+/// CLI built with `--features plugin-wasi` for the capability to actually execute.
+pub async fn run_cmd(capability: &str, input: &str) -> Result<()> {
+    let engine = engine()?;
+    let mut registry = ToolRegistry::new();
+    engine.register_enabled(&mut registry);
+    if !registry.contains(capability) {
+        return Err(Error::config(format!(
+            "no enabled plugin capability `{capability}` (install + enable a plugin that provides it)"
+        )));
+    }
+
+    // Run with the owning plugin's granted permissions, so the registry's permission
+    // check reflects what the operator consented to at install.
+    let grants = engine.catalog().into_iter().find_map(|p| {
+        p.manifest
+            .capabilities
+            .iter()
+            .any(|c| c.id == capability)
+            .then_some(p.granted_permissions)
+    });
+    let ctx = ToolContext {
+        execution_id: format!("plugin-run-{capability}"),
+        agent_id: "apex-cli".to_string(),
+        workdir: ".".to_string(),
+        granted_permissions: grants,
+    };
+    let params: Value =
+        serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
+
+    let resp = registry
+        .execute(capability, &ctx, ToolRequest::new(params))
+        .await
+        .map_err(|e| Error::Tool(format!("capability `{capability}` failed: {e}")))?;
+    println!("{}", serde_json::to_string_pretty(&resp.payload)?);
     Ok(())
 }
 

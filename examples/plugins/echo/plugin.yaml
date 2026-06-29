@@ -1,0 +1,20 @@
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata:
+  name: echo
+  version: 1.0.0
+  publisher: acme
+  description: Echoes its JSON request back as the response (plugin ABI demo).
+  license: Apache-2.0
+compatibility:
+  platform_api: ">=0.1.0 <2.0.0"
+permissions:
+  - net:egress:api.example.com
+capabilities:
+  - kind: tool
+    id: echo.run
+    entry: echo.wasm
+    sandbox: wasm
+artifacts:
+  - path: echo.wasm
+    digest: "sha256:5b167f2d9c56caf55822ed75a83c5236f1a36ff4374462ca6b5514e2d10e6810"

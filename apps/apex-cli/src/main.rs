@@ -151,6 +151,16 @@ enum PluginCommand {
         id: String,
     },
 
+    /// Invoke an enabled plugin tool capability directly (operator test path).
+    Run {
+        /// Capability id to invoke (e.g. `echo.run`).
+        capability: String,
+
+        /// Request parameters as JSON (plain text also accepted).
+        #[arg(long, default_value = "{}")]
+        input: String,
+    },
+
     /// List installed plugins.
     List,
 
@@ -504,6 +514,7 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
             PluginCommand::Install { dir, grants } => plugin::install_cmd(&dir, grants),
             PluginCommand::Upgrade { dir, grants } => plugin::upgrade_cmd(&dir, grants),
             PluginCommand::Rollback { id } => plugin::rollback_cmd(&id),
+            PluginCommand::Run { capability, input } => plugin::run_cmd(&capability, &input).await,
             PluginCommand::List => plugin::list_cmd(),
             PluginCommand::Enable { id } => plugin::enable_cmd(&id),
             PluginCommand::Disable { id } => plugin::disable_cmd(&id),
