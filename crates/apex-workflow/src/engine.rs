@@ -21,6 +21,7 @@ use crate::executor::{ActivityContext, ActivityError, ActivityExecutor};
 use crate::state::{ActivityState, WorkflowState};
 use crate::store::{CheckpointStore, EventLog};
 use crate::timer::{Clock, PendingTimer, SystemClock, TimerStore, parse_duration_ms};
+use crate::worker::DefinitionResolver;
 use apex_common::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -305,6 +306,10 @@ pub struct Engine {
     /// (a `wait` with a wall-clock deadline then errors instead of suspending
     /// silently).
     timers: Option<Arc<dyn TimerStore>>,
+    /// Resolves child workflow definitions by name for `workflow`-typed activities
+    /// (G5, [ADR-0008](../../docs/17-adr/ADR-0008-subworkflows.md)). `None` disables
+    /// sub-workflows (a `workflow` activity then errors).
+    subworkflows: Option<DefinitionResolver>,
 }
 
 impl Engine {
@@ -322,6 +327,7 @@ impl Engine {
             executor,
             clock: Arc::new(SystemClock),
             timers: None,
+            subworkflows: None,
         }
     }
 
@@ -334,6 +340,13 @@ impl Engine {
     /// Attach a durable [`TimerStore`], enabling wall-clock `wait` timers (G1).
     pub fn with_timer_store(mut self, timers: Arc<dyn TimerStore>) -> Self {
         self.timers = Some(timers);
+        self
+    }
+
+    /// Attach a resolver for child workflow definitions, enabling `workflow`-typed
+    /// activities (G5, [ADR-0008](../../docs/17-adr/ADR-0008-subworkflows.md)).
+    pub fn with_subworkflows(mut self, resolver: DefinitionResolver) -> Self {
+        self.subworkflows = Some(resolver);
         self
     }
 
@@ -636,6 +649,9 @@ impl Engine {
             .filter(|a| {
                 !handlers.contains(&a.id)
                     && a.activity_type != "wait"
+                    // `workflow` activities drive a child execution (and may suspend);
+                    // they take the sequential path, not the concurrent batch.
+                    && a.activity_type != "workflow"
                     && self.is_ready(def, state, &a.id)
             })
             .map(|a| a.id.clone())
@@ -746,6 +762,11 @@ impl Engine {
         // timer fires or a named event is delivered (see `signal_event`/`fire_timer`).
         if activity.activity_type == "wait" {
             return self.run_wait(state, &activity).await;
+        }
+
+        // `workflow` activities run a child execution and expose its result (G5).
+        if activity.activity_type == "workflow" {
+            return self.run_subworkflow(state, &activity).await;
         }
 
         let policy = def.retry_for(id);
@@ -925,6 +946,83 @@ impl Engine {
             "waiting for {}",
             spec.describe()
         )))
+    }
+
+    /// Handle a `workflow` activity (G5): run a child execution to a terminal point
+    /// and expose its result as this activity's output. The child is a real
+    /// execution with a derived id (`<parent>::<activity>`), so it is durable and
+    /// visible through the G3/G4 surfaces. See
+    /// [ADR-0008](../../docs/17-adr/ADR-0008-subworkflows.md).
+    async fn run_subworkflow(
+        &self,
+        state: &mut ExecutionState,
+        activity: &ActivityDef,
+    ) -> Result<Step> {
+        let id = activity.id.clone();
+        let Some(resolver) = &self.subworkflows else {
+            return Err(Error::Invalid(format!(
+                "workflow activity `{id}` requires a child-workflow resolver; attach one \
+                 with Engine::with_subworkflows"
+            )));
+        };
+        let child_name = activity.name.as_deref().ok_or_else(|| {
+            Error::Invalid(format!(
+                "workflow activity `{id}` needs a `name` (the child workflow name)"
+            ))
+        })?;
+        let child_def = resolver(child_name).ok_or_else(|| {
+            Error::Invalid(format!(
+                "unknown child workflow `{child_name}` for activity `{id}`"
+            ))
+        })?;
+        let child_id = format!("{}::{}", state.execution_id, id);
+
+        // Start the child on first encounter, else resume it. The recursive drive is
+        // boxed to keep the future a finite size.
+        let started = self.checkpoints.latest(&child_id).await?.is_some();
+        let (outcome, child_state) = if started {
+            Box::pin(self.resume(&child_def, &child_id)).await?
+        } else {
+            Box::pin(self.run(&child_def, &child_id, activity.inputs.clone())).await?
+        };
+
+        match outcome {
+            RunOutcome::Completed => {
+                let result = child_result(&child_state);
+                {
+                    let record = state.activities.get_mut(&id).expect("record exists");
+                    record.state = ActivityState::Completed;
+                    record.output = Some(result.clone());
+                }
+                state.variables.insert(id.clone(), result.clone());
+                state.completed_order.push(id.clone());
+                self.emit(
+                    state,
+                    WorkflowEvent::ActivityCompleted {
+                        id: id.clone(),
+                        output: result,
+                    },
+                )
+                .await?;
+                self.checkpoint(state).await?;
+                Ok(Step::Completed)
+            }
+            RunOutcome::Failed(msg) | RunOutcome::Compensated(msg) => {
+                let attempt = state.activities[&id].attempts + 1;
+                let msg = format!("child workflow `{child_name}` ({child_id}) failed: {msg}");
+                self.terminal_activity_failure(state, &id, attempt, msg)
+                    .await
+            }
+            RunOutcome::Interrupted(msg) => {
+                // The child suspended (e.g. on its own `wait`). Suspend the parent
+                // activity; resuming the parent re-drives the child.
+                self.set_activity(state, &id, ActivityState::Ready);
+                self.checkpoint(state).await?;
+                Ok(Step::Interrupted(format!(
+                    "child workflow `{child_name}` suspended: {msg}"
+                )))
+            }
+        }
     }
 
     /// Mark an activity as terminally failed and record the event.
@@ -1247,6 +1345,19 @@ impl Engine {
     async fn checkpoint(&self, state: &mut ExecutionState) -> Result<()> {
         self.checkpoints.save(state).await
     }
+}
+
+/// The result a completed child workflow exposes to its parent activity: the child's
+/// final variables, minus engine-internal markers and the echoed run input. The
+/// parent reads this (keyed under the `workflow` activity's id) to aggregate results.
+fn child_result(child: &ExecutionState) -> Value {
+    let map: serde_json::Map<String, Value> = child
+        .variables
+        .iter()
+        .filter(|(k, _)| !k.starts_with("__") && k.as_str() != "input")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Value::Object(map)
 }
 
 /// What a `wait` activity is blocked on, parsed from its `inputs`.

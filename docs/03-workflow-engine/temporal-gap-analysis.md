@@ -59,7 +59,7 @@ perceived value to an evaluating buyer.
 | G2 | Schedules / cron | High | S–M | **Done** |
 | G3 | Queries (read live state) | Med-High | S | **Done** |
 | G4 | Visibility surface (list/inspect + minimal UI) | High | M–L | **Done** |
-| G5 | Child / sub-workflows | Med | L | Investigate |
+| G5 | Child / sub-workflows | Med | L | **Prototype + ADR** |
 | G6 | Horizontal scaling story (honest tiering) | Med | M | Planned |
 | G7 | In-flight definition versioning | Med | M | **Done** (pinning) |
 
@@ -76,8 +76,15 @@ perceived value to an evaluating buyer.
 > engine over the durable store, a minimal read-only UI at `GET /workflows`, and CLI
 > `apex workflows list`/`show`. CLI surface also: `apex workflows status` (G3),
 > `apex workflows tick`, and `apex workflows schedule create --every|--cron / list`
-> (G2). **Remaining in scope: G5, G6.** Per-gap "Approach"/"Acceptance" notes below
-> are retained as the design record; the **Done** gaps now describe shipped
+> (G2). **G5 child workflows** are a prototype: the decision is recorded in
+> [ADR-0008](../17-adr/ADR-0008-subworkflows.md) (child-as-activity over inline
+> expansion) and the engine handles a `workflow`-typed activity by running a child
+> execution (derived id `<parent>::<activity>`, durable + visible via G3/G4),
+> exposing its result to the parent — covered by `parent_fans_out_to_two_children…`
+> and child-failure tests. **Remaining in scope: G6** (plus the G5 follow-ups in
+> ADR-0008 §Consequences: concurrent children, input templating, cascading
+> compensation, depth guard, CLI wiring). Per-gap "Approach"/"Acceptance" notes
+> below are retained as the design record; the **Done** gaps now describe shipped
 > behavior. *(G4 deferred polish: recency ordering — current ordering is by
 > execution id to stay deterministic — and arbitrary search attributes.)*
 
@@ -171,7 +178,7 @@ is one of its strongest adoption drivers ("I can *see* my workflows").
 
 ---
 
-## G5 — Child / sub-workflows  *(investigate first)*
+## G5 — Child / sub-workflows  *(prototype shipped — [ADR-0008](../17-adr/ADR-0008-subworkflows.md))*
 
 **Problem.** No composition: a workflow cannot invoke another as a unit. Needed
 once anyone builds non-trivial workflows. **In tension with the static-DAG

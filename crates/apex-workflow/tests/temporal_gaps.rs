@@ -5,8 +5,8 @@
 //! with a `ManualClock` and in-memory stores — no wall-clock sleeps.
 
 use apex_workflow::{
-    ActivityState, CheckpointStore, ClosureExecutor, Definition, DefinitionResolver, Engine,
-    EventLog, ExecutionFilter, InMemoryScheduleStore, InMemoryStore, InMemoryTimerStore,
+    ActivityError, ActivityState, CheckpointStore, ClosureExecutor, Definition, DefinitionResolver,
+    Engine, EventLog, ExecutionFilter, InMemoryScheduleStore, InMemoryStore, InMemoryTimerStore,
     ManualClock, OverlapPolicy, RunOutcome, Schedule, ScheduleDispatcher, ScheduleStore,
     TimerDispatcher, TimerStore, WorkflowState,
 };
@@ -160,6 +160,119 @@ async fn history_returns_the_event_timeline() {
     // A completed single-activity run emits a non-trivial, ordered event log.
     assert!(history.len() >= 4, "expected a populated timeline");
     assert!(engine.history("nope").await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// G5 — child / sub-workflows (ADR-0008)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn parent_fans_out_to_two_children_and_aggregates() {
+    // Two child workflows, each producing a distinct leaf value.
+    let child_a = Definition::from_yaml(
+        "metadata:\n  name: child_a\nspec:\n  activities:\n    - {id: leaf_a, type: function}\n",
+    )
+    .unwrap();
+    let child_b = Definition::from_yaml(
+        "metadata:\n  name: child_b\nspec:\n  activities:\n    - {id: leaf_b, type: function}\n",
+    )
+    .unwrap();
+    // Parent fans out to both children, then aggregates their results.
+    let parent = Definition::from_yaml(
+        "metadata:\n  name: parent\nspec:\n  activities:\n    - {id: ca, type: workflow, name: child_a}\n    - {id: cb, type: workflow, name: child_b}\n    - {id: agg, type: function}\n  transitions:\n    - {from: ca, to: agg}\n    - {from: cb, to: agg}\n",
+    )
+    .unwrap();
+
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    // One executor drives parent and child activities (same engine, distinct ids).
+    let executor = ClosureExecutor::new()
+        .on("leaf_a", |_| async { Ok(json!({ "value": 1 })) })
+        .on("leaf_b", |_| async { Ok(json!({ "value": 2 })) })
+        .on("agg", |ctx| async move {
+            let a = ctx.variables["ca"]["leaf_a"]["value"].as_i64().unwrap();
+            let b = ctx.variables["cb"]["leaf_b"]["value"].as_i64().unwrap();
+            Ok(json!({ "sum": a + b }))
+        });
+
+    let resolver: DefinitionResolver = {
+        let (ca, cb) = (child_a.clone(), child_b.clone());
+        Arc::new(move |name: &str| match name {
+            "child_a" => Some(ca.clone()),
+            "child_b" => Some(cb.clone()),
+            _ => None,
+        })
+    };
+    let engine = Engine::new(events, checkpoints, Arc::new(executor)).with_subworkflows(resolver);
+
+    let (outcome, state) = engine.run(&parent, "p-1", json!({})).await.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
+    // The aggregator saw both children's results.
+    assert_eq!(state.variables["agg"]["sum"], json!(3));
+
+    // Children ran as real, independently-visible executions (G3/G4).
+    let summary_a = engine.status("p-1::ca").await.unwrap().unwrap();
+    assert_eq!(summary_a.workflow_name, "child_a");
+    assert_eq!(summary_a.status, WorkflowState::Completed);
+    let ids: Vec<String> = engine
+        .list(&ExecutionFilter::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.execution_id)
+        .collect();
+    assert_eq!(ids, vec!["p-1", "p-1::ca", "p-1::cb"]);
+}
+
+#[tokio::test]
+async fn child_failure_fails_the_parent_activity() {
+    let child_fail = Definition::from_yaml(
+        "metadata:\n  name: child_fail\nspec:\n  activities:\n    - {id: boom, type: function}\n",
+    )
+    .unwrap();
+    let parent = Definition::from_yaml(
+        "metadata:\n  name: pfail\nspec:\n  activities:\n    - {id: cf, type: workflow, name: child_fail}\n",
+    )
+    .unwrap();
+
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let executor = ClosureExecutor::new().on("boom", |_| async {
+        Err(ActivityError::Permanent("kaboom".into()))
+    });
+    let resolver: DefinitionResolver = {
+        let cf = child_fail.clone();
+        Arc::new(move |name: &str| (name == "child_fail").then(|| cf.clone()))
+    };
+    let engine = Engine::new(events, checkpoints, Arc::new(executor)).with_subworkflows(resolver);
+
+    let (outcome, _) = engine.run(&parent, "pf-1", json!({})).await.unwrap();
+    match outcome {
+        RunOutcome::Failed(msg) => assert!(msg.contains("child workflow `child_fail`")),
+        other => panic!("expected parent failure, got {other:?}"),
+    }
+    // The child execution recorded its own terminal failure.
+    assert_eq!(
+        engine.status("pf-1::cf").await.unwrap().unwrap().status,
+        WorkflowState::Failed
+    );
+}
+
+#[tokio::test]
+async fn workflow_activity_without_a_resolver_is_a_clear_error() {
+    let parent = Definition::from_yaml(
+        "metadata:\n  name: noresolver\nspec:\n  activities:\n    - {id: c, type: workflow, name: child}\n",
+    )
+    .unwrap();
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let engine = Engine::new(events, checkpoints, Arc::new(ClosureExecutor::new()));
+
+    let err = engine.run(&parent, "nr-1", json!({})).await.unwrap_err();
+    assert!(err.to_string().contains("child-workflow resolver"));
 }
 
 // ---------------------------------------------------------------------------
