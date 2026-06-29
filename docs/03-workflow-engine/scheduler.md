@@ -452,6 +452,8 @@ engine-workflow/
 * Distributed Execution
 * Persistence
 * Rust Crate Design
+* [Temporal Gap Closure (next phase)](temporal-gap-analysis.md) — durable timers
+  (G1) and schedules/cron (G2) extend this scheduler.
 
 ---
 

@@ -103,6 +103,7 @@ A detailed lifecycle appears in [Overview §6](overview.md).
 | [worker-pool.md](worker-pool.md) | Execution fleet, scheduling, scaling, distributed execution |
 | [security-isolation.md](security-isolation.md) | Network/filesystem isolation, secrets, tenant isolation, threat model |
 | [observability-ops.md](observability-ops.md) | Health, metrics, tracing, audit, SLOs, runbooks |
+| [e2b-gap-analysis.md](e2b-gap-analysis.md) | *(Planned)* E2B gap closure: persistent sessions, filesystem/process APIs, streaming, SDK |
 
 ---
 

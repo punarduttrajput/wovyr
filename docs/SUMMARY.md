@@ -73,6 +73,7 @@ New contributors should follow the [Reading Order](#reading-order) at the bottom
 | [Persistence Layer](03-workflow-engine/persistence-layer.md) | Available |
 | [Distributed Execution](03-workflow-engine/distributed-execution.md) | Available |
 | [Agent Runtime (in-workflow)](03-workflow-engine/agent-runtime.md) | Available |
+| [Temporal Gap Closure (next phase)](03-workflow-engine/temporal-gap-analysis.md) | Planned |
 
 ---
 
@@ -149,6 +150,7 @@ model as a multi-tenant platform container
 | [Worker Pool](07-tool-runtime/worker-pool.md) | Available |
 | [Security & Isolation](07-tool-runtime/security-isolation.md) | Available |
 | [Observability & Ops](07-tool-runtime/observability-ops.md) | Available |
+| [E2B Gap Closure (next phase)](07-tool-runtime/e2b-gap-analysis.md) | Planned |
 
 Built-in tool catalog:
 

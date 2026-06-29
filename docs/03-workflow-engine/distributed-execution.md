@@ -684,6 +684,10 @@ engine-distributed/
 - AI-driven scheduling
 - Autonomous cluster healing
 
+See [Temporal Gap Closure (next phase)](temporal-gap-analysis.md) (G6) for the
+near-term scaling work: benchmarking the leased work-queue envelope and
+partitioning the queue to remove worker-pool contention.
+
 ---
 
 # 34. Revision History

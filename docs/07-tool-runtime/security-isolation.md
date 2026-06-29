@@ -200,6 +200,9 @@ referenced, never valued.
 - [`07-tool-runtime/overview.md`](overview.md)
 - [`07-tool-runtime/worker-pool.md`](worker-pool.md)
 - [`07-tool-runtime/observability-ops.md`](observability-ops.md)
+- [`07-tool-runtime/e2b-gap-analysis.md`](e2b-gap-analysis.md) — persistent
+  sessions must preserve these isolation guarantees (deny-by-default egress,
+  trust-class floors), not relax them for convenience.
 
 ---
 

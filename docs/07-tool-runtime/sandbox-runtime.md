@@ -196,6 +196,8 @@ crash, via a reaper that sweeps orphaned sandboxes.
 - [`07-tool-runtime/overview.md`](overview.md)
 - [`07-tool-runtime/execution-api.md`](execution-api.md)
 - [`02-architecture/deployment-architecture.md`](../02-architecture/deployment-architecture.md)
+- [`07-tool-runtime/e2b-gap-analysis.md`](e2b-gap-analysis.md) — next-phase work
+  evolving the one-shot model into persistent sessions (G1) on this runtime.
 
 ---
 

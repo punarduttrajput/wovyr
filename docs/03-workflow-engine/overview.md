@@ -445,6 +445,7 @@ Each integration is accessed through ports defined by the domain layer.
 * Distributed Execution
 * Persistence
 * Rust Crate Design
+* [Temporal Gap Closure (next phase)](temporal-gap-analysis.md)
 
 ---
 
