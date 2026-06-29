@@ -13,9 +13,9 @@ use apex_provider::{ChatRequest, Gateway, Message, ModelSelector};
 use apex_tools::{ToolContext, ToolError, ToolRegistry, ToolRequest};
 use apex_workflow::{
     ActivityContext, ActivityError, ActivityExecutor, ActivityState, CheckpointStore, Clock,
-    Definition, DefinitionResolver, Engine, EventLog, FileScheduleStore, FileStore, FileTimerStore,
-    RunOutcome, Schedule, ScheduleDispatcher, ScheduleStore, SystemClock, TimerDispatcher,
-    TimerStore,
+    Definition, DefinitionResolver, Engine, EventLog, ExecutionFilter, FileScheduleStore,
+    FileStore, FileTimerStore, RunOutcome, Schedule, ScheduleDispatcher, ScheduleStore,
+    SystemClock, TimerDispatcher, TimerStore, WorkflowState,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -348,6 +348,81 @@ pub async fn status_cmd(id: &str) -> apex_common::Result<()> {
     }
     if !summary.waiting_on.is_empty() {
         println!("  waiting on: {}", summary.waiting_on.join(", "));
+    }
+    Ok(())
+}
+
+/// Parse a workflow status name (case-insensitive) into a [`WorkflowState`].
+fn parse_status(s: &str) -> apex_common::Result<WorkflowState> {
+    let status = match s.to_ascii_lowercase().as_str() {
+        "created" => WorkflowState::Created,
+        "validated" => WorkflowState::Validated,
+        "scheduled" => WorkflowState::Scheduled,
+        "running" => WorkflowState::Running,
+        "waiting" => WorkflowState::Waiting,
+        "resumed" => WorkflowState::Resumed,
+        "compensating" => WorkflowState::Compensating,
+        "completed" => WorkflowState::Completed,
+        "failed" => WorkflowState::Failed,
+        "cancelled" | "canceled" => WorkflowState::Cancelled,
+        other => {
+            return Err(apex_common::Error::Invalid(format!(
+                "unknown status `{other}`"
+            )));
+        }
+    };
+    Ok(status)
+}
+
+/// `apex workflows list [--workflow <name>] [--status <status>] [--limit <n>]` —
+/// list executions, optionally filtered (G4 visibility).
+pub async fn list_cmd(
+    workflow: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+) -> apex_common::Result<()> {
+    let filter = ExecutionFilter {
+        workflow_name: workflow,
+        status: status.as_deref().map(parse_status).transpose()?,
+        limit,
+    };
+    let executions = engine()?.list(&filter).await?;
+    if executions.is_empty() {
+        println!("no executions found");
+        return Ok(());
+    }
+    for e in executions {
+        let waits = if e.waiting_on.is_empty() {
+            String::new()
+        } else {
+            format!("  waiting:{}", e.waiting_on.join(","))
+        };
+        println!(
+            "{:<24} {:<16} v{:<8} {:?}{waits}",
+            e.execution_id, e.workflow_name, e.workflow_version, e.status
+        );
+    }
+    Ok(())
+}
+
+/// `apex workflows show --id <id>` — show an execution's status plus its full event
+/// timeline (G4 visibility).
+pub async fn show_cmd(id: &str) -> apex_common::Result<()> {
+    let engine = engine()?;
+    let summary = engine.status(id).await?.ok_or_else(|| {
+        apex_common::Error::NotFound(format!("no execution `{id}`; run the workflow first"))
+    })?;
+    println!(
+        "execution '{}' — workflow '{}' v{} — {:?}",
+        summary.execution_id, summary.workflow_name, summary.workflow_version, summary.status
+    );
+    for (aid, state) in &summary.activities {
+        println!("  {aid:<16} {state:?}");
+    }
+    println!("\ntimeline:");
+    for (i, event) in engine.history(id).await?.iter().enumerate() {
+        let line = serde_json::to_string(event).unwrap_or_else(|_| "<unserializable>".into());
+        println!("  {:>3}. {line}", i + 1);
     }
     Ok(())
 }

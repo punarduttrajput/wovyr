@@ -189,6 +189,7 @@ dependencies = [
  "apex-provider",
  "apex-telemetry",
  "apex-tools",
+ "apex-workflow",
  "axum 0.8.9",
  "futures",
  "serde",

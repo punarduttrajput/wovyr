@@ -6,9 +6,9 @@
 
 use apex_workflow::{
     ActivityState, CheckpointStore, ClosureExecutor, Definition, DefinitionResolver, Engine,
-    EventLog, InMemoryScheduleStore, InMemoryStore, InMemoryTimerStore, ManualClock, OverlapPolicy,
-    RunOutcome, Schedule, ScheduleDispatcher, ScheduleStore, TimerDispatcher, TimerStore,
-    WorkflowState,
+    EventLog, ExecutionFilter, InMemoryScheduleStore, InMemoryStore, InMemoryTimerStore,
+    ManualClock, OverlapPolicy, RunOutcome, Schedule, ScheduleDispatcher, ScheduleStore,
+    TimerDispatcher, TimerStore, WorkflowState,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -72,6 +72,94 @@ async fn query_surfaces_pending_waits() {
 
     let summary = engine.status("qw-1").await.unwrap().unwrap();
     assert_eq!(summary.waiting_on, vec!["hold".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// G4 — visibility (list + history)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_filters_orders_and_limits_executions() {
+    let def_a = Definition::from_yaml(
+        "metadata:\n  name: alpha\nspec:\n  activities:\n    - {id: a, type: function}\n",
+    )
+    .unwrap();
+    let def_b = Definition::from_yaml(
+        "metadata:\n  name: beta\nspec:\n  activities:\n    - {id: hold, type: wait, inputs: {event: go}}\n",
+    )
+    .unwrap();
+
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let executor = ClosureExecutor::new().on("a", |_| async { Ok(json!("ok")) });
+    let engine = Engine::new(events, checkpoints, Arc::new(executor));
+
+    // Two completed `alpha` runs and one suspended `beta` run.
+    engine.run(&def_a, "alpha-2", json!({})).await.unwrap();
+    engine.run(&def_a, "alpha-1", json!({})).await.unwrap();
+    engine.run(&def_b, "beta-1", json!({})).await.unwrap();
+
+    // Unfiltered: all three, ordered by execution id.
+    let all = engine.list(&ExecutionFilter::default()).await.unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|s| s.execution_id.clone())
+            .collect::<Vec<_>>(),
+        vec!["alpha-1", "alpha-2", "beta-1"]
+    );
+
+    // Filter by workflow name.
+    let alphas = engine
+        .list(&ExecutionFilter {
+            workflow_name: Some("alpha".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(alphas.len(), 2);
+    assert!(alphas.iter().all(|s| s.workflow_name == "alpha"));
+
+    // Filter by status.
+    let running = engine
+        .list(&ExecutionFilter {
+            status: Some(WorkflowState::Running),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].execution_id, "beta-1");
+
+    // Limit caps after ordering.
+    let capped = engine
+        .list(&ExecutionFilter {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(capped.len(), 1);
+    assert_eq!(capped[0].execution_id, "alpha-1");
+}
+
+#[tokio::test]
+async fn history_returns_the_event_timeline() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: hist\nspec:\n  activities:\n    - {id: a, type: function}\n",
+    )
+    .unwrap();
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let executor = ClosureExecutor::new().on("a", |_| async { Ok(json!("ok")) });
+    let engine = Engine::new(events, checkpoints, Arc::new(executor));
+
+    engine.run(&def, "h-1", json!({})).await.unwrap();
+    let history = engine.history("h-1").await.unwrap();
+    // A completed single-activity run emits a non-trivial, ordered event log.
+    assert!(history.len() >= 4, "expected a populated timeline");
+    assert!(engine.history("nope").await.unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------

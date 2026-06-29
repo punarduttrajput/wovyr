@@ -102,6 +102,35 @@ pub struct ExecutionSummary {
     pub waiting_on: Vec<String>,
 }
 
+/// Filter for listing executions (G4 visibility). Absent fields don't constrain.
+#[derive(Clone, Debug, Default)]
+pub struct ExecutionFilter {
+    /// Only executions of this workflow.
+    pub workflow_name: Option<String>,
+    /// Only executions in this status.
+    pub status: Option<WorkflowState>,
+    /// Cap the number returned (applied after filtering + ordering).
+    pub limit: Option<usize>,
+}
+
+impl ExecutionFilter {
+    /// Whether `state` satisfies the name/status constraints (limit is applied by
+    /// the caller after ordering).
+    pub fn matches(&self, state: &ExecutionState) -> bool {
+        if let Some(name) = &self.workflow_name
+            && &state.workflow_name != name
+        {
+            return false;
+        }
+        if let Some(status) = self.status
+            && state.status != status
+        {
+            return false;
+        }
+        true
+    }
+}
+
 impl ExecutionState {
     /// A lightweight, read-only summary of this execution for status queries.
     pub fn summary(&self) -> ExecutionSummary {
@@ -318,6 +347,24 @@ impl Engine {
     /// A read-only [`ExecutionSummary`] for an execution, if it exists (G3).
     pub async fn status(&self, execution_id: &str) -> Result<Option<ExecutionSummary>> {
         Ok(self.query(execution_id).await?.map(|s| s.summary()))
+    }
+
+    /// List executions matching `filter`, as summaries (G4 visibility). Ordered
+    /// deterministically by execution id; `filter.limit` caps the result.
+    pub async fn list(&self, filter: &ExecutionFilter) -> Result<Vec<ExecutionSummary>> {
+        Ok(self
+            .checkpoints
+            .list(filter)
+            .await?
+            .iter()
+            .map(ExecutionState::summary)
+            .collect())
+    }
+
+    /// The full event history for an execution, in order — the timeline behind the
+    /// detail view (G4). Empty if the execution is unknown.
+    pub async fn history(&self, execution_id: &str) -> Result<Vec<WorkflowEvent>> {
+        self.events.load(execution_id).await
     }
 
     /// Start a new execution of `def` with id `execution_id` and JSON `input`, and

@@ -12,6 +12,7 @@ apex-common.workspace = true
 apex-provider.workspace = true
 apex-tools.workspace = true
 apex-agent.workspace = true
+apex-workflow.workspace = true
 apex-telemetry.workspace = true
 axum.workspace = true
 tokio.workspace = true

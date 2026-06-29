@@ -17,12 +17,16 @@ use apex_common::Error;
 use apex_provider::{CostEvent, CostObserver, Gateway};
 use apex_telemetry::Metrics;
 use apex_tools::ToolRegistry;
+use apex_workflow::{
+    CheckpointStore, ClosureExecutor, Engine, EventLog, ExecutionFilter, FileStore, InMemoryStore,
+    WorkflowState,
+};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{
-        IntoResponse, Response,
+        Html, IntoResponse, Response,
         sse::{Event, Sse},
     },
     routing::{get, post},
@@ -93,13 +97,17 @@ impl AgentStore {
     }
 }
 
-/// Shared server state: the LLM gateway, tool registry, metrics, and a run counter.
+/// Shared server state: the LLM gateway, tool registry, metrics, a run counter, and a
+/// read-only workflow engine over the durable store (for visibility endpoints).
 pub struct AppState {
     gateway: Gateway,
     registry: ToolRegistry,
     metrics: Metrics,
     agents: AgentStore,
     run_counter: AtomicU64,
+    /// Read-only engine over the durable workflow store — drives the `GET
+    /// /api/v1/workflows*` visibility endpoints (G4). Its executor is never invoked.
+    workflows: Engine,
 }
 
 impl AppState {
@@ -118,8 +126,41 @@ impl AppState {
             metrics,
             agents: AgentStore::default(),
             run_counter: AtomicU64::new(1),
+            workflows: default_workflows_engine(),
         }
     }
+
+    /// Override the read-only workflow engine (used by tests to inject a seeded
+    /// in-memory store).
+    pub fn with_workflows(mut self, engine: Engine) -> Self {
+        self.workflows = engine;
+        self
+    }
+}
+
+/// A read-only [`Engine`] over the durable workflow store at `~/.apex/workflows`
+/// (the same directory the CLI writes to), falling back to an empty in-memory store
+/// if that directory is unavailable. The executor is a no-op — only the read paths
+/// (`list`/`status`/`history`) are used.
+fn default_workflows_engine() -> Engine {
+    let dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| {
+            std::path::PathBuf::from(home)
+                .join(".apex")
+                .join("workflows")
+        });
+    if let Some(dir) = dir
+        && let Ok(store) = FileStore::new(dir)
+    {
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+        return Engine::new(events, checkpoints, Arc::new(ClosureExecutor::new()));
+    }
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    Engine::new(events, checkpoints, Arc::new(ClosureExecutor::new()))
 }
 
 /// Translates gateway [`CostEvent`]s into Prometheus metrics
@@ -172,6 +213,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_agent_handler).delete(delete_agent_handler),
         )
         .route("/api/v1/agents/{id}/run", post(run_stored_handler))
+        // Workflow visibility (G4): list/inspect executions + a minimal read-only UI.
+        .route("/api/v1/workflows", get(list_workflows_handler))
+        .route("/api/v1/workflows/{id}", get(get_workflow_handler))
+        .route("/workflows", get(workflows_ui_handler))
         .with_state(state)
 }
 
@@ -471,6 +516,156 @@ async fn run_stored_handler(
     result
 }
 
+/// Query params for `GET /api/v1/workflows`.
+#[derive(Debug, Deserialize)]
+struct WorkflowListQuery {
+    /// Filter to a workflow name.
+    workflow: Option<String>,
+    /// Filter to a status (e.g. `running`, `completed`, `failed`).
+    status: Option<String>,
+    /// Cap the number returned.
+    limit: Option<usize>,
+}
+
+/// `GET /api/v1/workflows` — list executions, optionally filtered (G4 visibility).
+async fn list_workflows_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<WorkflowListQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let status = match query
+        .status
+        .as_deref()
+        .map(parse_workflow_status)
+        .transpose()
+    {
+        Ok(status) => status,
+        Err(msg) => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "validation_failed",
+                msg,
+            ));
+        }
+    };
+    let filter = ExecutionFilter {
+        workflow_name: query.workflow,
+        status,
+        limit: query.limit,
+    };
+    let executions = state.workflows.list(&filter).await?;
+    Ok(Json(json!({ "executions": executions })))
+}
+
+/// `GET /api/v1/workflows/{id}` — an execution's status plus its event timeline (G4).
+async fn get_workflow_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let summary = state.workflows.status(&id).await?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("execution `{id}` not found"),
+        )
+    })?;
+    let events = state.workflows.history(&id).await?;
+    Ok(Json(json!({ "execution": summary, "events": events })))
+}
+
+/// `GET /workflows` — a minimal, read-only HTML UI over the visibility API (G4).
+async fn workflows_ui_handler() -> Html<&'static str> {
+    Html(WORKFLOWS_UI)
+}
+
+/// Parse a workflow status name (case-insensitive) for the list filter.
+fn parse_workflow_status(s: &str) -> Result<WorkflowState, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "created" => Ok(WorkflowState::Created),
+        "validated" => Ok(WorkflowState::Validated),
+        "scheduled" => Ok(WorkflowState::Scheduled),
+        "running" => Ok(WorkflowState::Running),
+        "waiting" => Ok(WorkflowState::Waiting),
+        "resumed" => Ok(WorkflowState::Resumed),
+        "compensating" => Ok(WorkflowState::Compensating),
+        "completed" => Ok(WorkflowState::Completed),
+        "failed" => Ok(WorkflowState::Failed),
+        "cancelled" | "canceled" => Ok(WorkflowState::Cancelled),
+        other => Err(format!("unknown status `{other}`")),
+    }
+}
+
+/// A self-contained read-only UI that calls the visibility JSON API.
+const WORKFLOWS_UI: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apex Workflows</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; padding: 1.5rem; color: #1a1a1a; }
+  h1 { font-size: 1.2rem; } h2 { font-size: 1rem; margin-top: 1.2rem; }
+  .row { display: flex; gap: 1.5rem; align-items: flex-start; }
+  .col { flex: 1; min-width: 0; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #e3e3e3; }
+  tbody tr { cursor: pointer; } tbody tr:hover { background: #f3f6ff; }
+  .pill { padding: .1rem .5rem; border-radius: 1rem; font-size: .8rem; }
+  .Running, .Waiting { background: #fff4d6; } .Completed { background: #d8f5dd; }
+  .Failed, .Cancelled { background: #fbdcdc; }
+  pre { background: #f6f8fa; padding: .8rem; border-radius: 6px; overflow-x: auto; }
+  .muted { color: #888; } button { font: inherit; }
+</style>
+</head>
+<body>
+  <h1>Apex Workflows</h1>
+  <div class="muted">Read-only visibility over <code>/api/v1/workflows</code>.
+    <button onclick="load()">Refresh</button></div>
+  <div class="row" style="margin-top:1rem">
+    <div class="col">
+      <h2>Executions</h2>
+      <table><thead><tr><th>id</th><th>workflow</th><th>status</th></tr></thead>
+      <tbody id="list"><tr><td colspan="3" class="muted">loading…</td></tr></tbody></table>
+    </div>
+    <div class="col"><h2>Detail</h2><div id="detail" class="muted">Select an execution.</div></div>
+  </div>
+<script>
+async function load() {
+  const tbody = document.getElementById('list');
+  try {
+    const res = await fetch('/api/v1/workflows');
+    const data = await res.json();
+    const rows = (data.executions || []);
+    if (!rows.length) { tbody.innerHTML = '<tr><td colspan="3" class="muted">no executions</td></tr>'; return; }
+    tbody.innerHTML = '';
+    for (const e of rows) {
+      const tr = document.createElement('tr');
+      tr.onclick = () => detail(e.execution_id);
+      tr.innerHTML = `<td>${e.execution_id}</td><td>${e.workflow_name}</td>`
+        + `<td><span class="pill ${e.status}">${e.status}</span></td>`;
+      tbody.appendChild(tr);
+    }
+  } catch (err) { tbody.innerHTML = `<tr><td colspan="3">error: ${err}</td></tr>`; }
+}
+async function detail(id) {
+  const el = document.getElementById('detail');
+  el.textContent = 'loading…';
+  try {
+    const res = await fetch('/api/v1/workflows/' + encodeURIComponent(id));
+    if (!res.ok) { el.textContent = 'not found'; return; }
+    const d = await res.json();
+    const acts = Object.entries(d.execution.activities || {})
+      .map(([k, v]) => `<li>${k}: <span class="pill ${v}">${v}</span></li>`).join('');
+    const events = (d.events || []).map((ev, i) => `${String(i + 1).padStart(3)}. ${JSON.stringify(ev)}`).join('\n');
+    el.innerHTML = `<div><b>${d.execution.execution_id}</b> — ${d.execution.workflow_name} `
+      + `v${d.execution.workflow_version} — <span class="pill ${d.execution.status}">${d.execution.status}</span></div>`
+      + `<ul>${acts}</ul><h2>Timeline</h2><pre>${events.replace(/</g, '&lt;')}</pre>`;
+  } catch (err) { el.textContent = 'error: ' + err; }
+}
+load();
+</script>
+</body>
+</html>"#;
+
 /// An API error rendered as the standard envelope.
 struct ApiError {
     status: StatusCode,
@@ -547,6 +742,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Build a router whose workflow engine is seeded with one completed execution.
+    async fn workflow_app() -> Router {
+        use apex_workflow::Definition;
+        let store = InMemoryStore::new();
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+        let executor = ClosureExecutor::new().on("a", |_| async { Ok(json!("ok")) });
+        let engine = Engine::new(events, checkpoints, Arc::new(executor));
+        let def = Definition::from_yaml(
+            "metadata:\n  name: demo\nspec:\n  activities:\n    - {id: a, type: function}\n",
+        )
+        .unwrap();
+        engine.run(&def, "demo-1", json!({})).await.unwrap();
+        router(Arc::new(AppState::from_env().with_workflows(engine)))
+    }
+
+    #[tokio::test]
+    async fn lists_and_inspects_workflow_executions() {
+        let app = workflow_app().await;
+
+        // List returns the seeded execution.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workflows")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["executions"][0]["execution_id"], "demo-1");
+        assert_eq!(v["executions"][0]["status"], "Completed");
+
+        // Status filter that excludes it yields an empty list.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workflows?status=running")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["executions"].as_array().unwrap().len(), 0);
+
+        // Detail returns the summary plus a non-empty event timeline.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workflows/demo-1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["execution"]["activities"]["a"], "Completed");
+        assert!(v["events"].as_array().unwrap().len() >= 4);
+
+        // Unknown execution → 404.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workflows/missing")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

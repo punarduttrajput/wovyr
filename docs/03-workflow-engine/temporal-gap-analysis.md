@@ -58,22 +58,28 @@ perceived value to an evaluating buyer.
 | G1 | Durable wall-clock timers | High | M | **Done** |
 | G2 | Schedules / cron | High | S–M | **Done** |
 | G3 | Queries (read live state) | Med-High | S | **Done** |
-| G4 | Visibility surface (list/inspect + minimal UI) | High | M–L | Planned |
+| G4 | Visibility surface (list/inspect + minimal UI) | High | M–L | **Done** |
 | G5 | Child / sub-workflows | Med | L | Investigate |
 | G6 | Horizontal scaling story (honest tiering) | Med | M | Planned |
 | G7 | In-flight definition versioning | Med | M | **Done** (pinning) |
 
-> **Implementation status (2026-06-29).** G1, G2 (interval **and** cron), G3, and
-> G7 are implemented in `crates/apex-workflow` and exercised by
-> [`tests/temporal_gaps.rs`](../../crates/apex-workflow/tests/temporal_gaps.rs)
-> plus the `cron`/`schedule` unit tests (deterministic, `ManualClock`-driven).
+> **Implementation status (2026-06-29).** G1, G2 (interval **and** cron), G3, G4,
+> and G7 are implemented in `crates/apex-workflow` (+ `apex-server`, `apex-cli`) and
+> exercised by [`tests/temporal_gaps.rs`](../../crates/apex-workflow/tests/temporal_gaps.rs),
+> the `cron`/`schedule` unit tests, and the server's
+> `lists_and_inspects_workflow_executions` test (deterministic, `ManualClock`-driven).
 > Cron is a dependency-free 5-field/`@macro` evaluator (UTC, Vixie DOM/DOW
-> semantics) in [`cron.rs`](../../crates/apex-workflow/src/cron.rs). CLI surface:
-> `apex workflows status` (G3), `apex workflows tick` (fires due timers +
-> schedules), and `apex workflows schedule create --every|--cron / list` (G2).
-> **Remaining in scope: G4, G5, G6.** Per-gap "Approach"/"Acceptance" notes below
+> semantics) in [`cron.rs`](../../crates/apex-workflow/src/cron.rs). **G4 visibility:**
+> `CheckpointStore::list` + `Engine::list`/`history`, server routes
+> `GET /api/v1/workflows` (filter by `workflow`/`status`/`limit`) and
+> `GET /api/v1/workflows/{id}` (summary + event timeline) backed by a read-only
+> engine over the durable store, a minimal read-only UI at `GET /workflows`, and CLI
+> `apex workflows list`/`show`. CLI surface also: `apex workflows status` (G3),
+> `apex workflows tick`, and `apex workflows schedule create --every|--cron / list`
+> (G2). **Remaining in scope: G5, G6.** Per-gap "Approach"/"Acceptance" notes below
 > are retained as the design record; the **Done** gaps now describe shipped
-> behavior.
+> behavior. *(G4 deferred polish: recency ordering — current ordering is by
+> execution id to stay deterministic — and arbitrary search attributes.)*
 
 ---
 

@@ -8,7 +8,7 @@
 //! same encoding [`FileStore`](crate::FileStore) uses), so no extra Postgres type
 //! mapping is needed. Enabled by the `postgres` cargo feature.
 
-use crate::engine::ExecutionState;
+use crate::engine::{ExecutionFilter, ExecutionState};
 use crate::event::WorkflowEvent;
 use crate::queue::WorkQueue;
 use crate::store::{CheckpointStore, EventLog};
@@ -137,6 +137,30 @@ impl CheckpointStore for PostgresStore {
             Some(row) => Ok(Some(serde_json::from_str(row.get::<_, &str>("snapshot"))?)),
             None => Ok(None),
         }
+    }
+
+    async fn list(&self, filter: &ExecutionFilter) -> Result<Vec<ExecutionState>> {
+        // Ordered by execution id at the database; name/status/limit are applied in
+        // Rust over the decoded snapshots (a dedicated index column is a later slice).
+        let rows = self
+            .client
+            .query(
+                "SELECT snapshot FROM workflow_checkpoints ORDER BY execution_id",
+                &[],
+            )
+            .await
+            .map_err(|e| pg_err("list checkpoints", e))?;
+        let mut snapshots = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let state: ExecutionState = serde_json::from_str(row.get::<_, &str>("snapshot"))?;
+            if filter.matches(&state) {
+                snapshots.push(state);
+            }
+        }
+        if let Some(limit) = filter.limit {
+            snapshots.truncate(limit);
+        }
+        Ok(snapshots)
     }
 }
 

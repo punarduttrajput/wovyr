@@ -42,7 +42,7 @@ mod worker;
 
 pub use cron::Cron;
 pub use definition::{ActivityDef, Definition};
-pub use engine::{Engine, ExecutionState, ExecutionSummary, RunOutcome};
+pub use engine::{Engine, ExecutionFilter, ExecutionState, ExecutionSummary, RunOutcome};
 pub use event::WorkflowEvent;
 pub use executor::{ActivityContext, ActivityError, ActivityExecutor, ClosureExecutor};
 #[cfg(feature = "postgres")]

@@ -184,6 +184,28 @@ enum WorkflowsCommand {
         id: String,
     },
 
+    /// List executions, optionally filtered by workflow/status.
+    List {
+        /// Only executions of this workflow name.
+        #[arg(long)]
+        workflow: Option<String>,
+
+        /// Only executions in this status (e.g. running, completed, failed).
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Cap the number of executions listed.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+
+    /// Show an execution's status and full event timeline.
+    Show {
+        /// Execution id reported by `workflows run`.
+        #[arg(long)]
+        id: String,
+    },
+
     /// Fire due wall-clock timers and start due schedules for a workflow.
     Tick {
         /// Path to the workflow YAML definition.
@@ -344,6 +366,12 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 payload,
             } => workflow::signal_cmd(&file, &id, event, timer, &payload).await,
             WorkflowsCommand::Status { id } => workflow::status_cmd(&id).await,
+            WorkflowsCommand::List {
+                workflow,
+                status,
+                limit,
+            } => workflow::list_cmd(workflow, status, limit).await,
+            WorkflowsCommand::Show { id } => workflow::show_cmd(&id).await,
             WorkflowsCommand::Tick { file } => workflow::tick_cmd(&file).await,
             WorkflowsCommand::Schedule { command } => match command {
                 ScheduleCommand::Create {

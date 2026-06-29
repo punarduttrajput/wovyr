@@ -8,7 +8,7 @@
 //! [`InMemoryStore`] for tests and a [`FileStore`] for real cross-process
 //! durability. Postgres/S3/RocksDB adapters arrive later.
 
-use crate::engine::ExecutionState;
+use crate::engine::{ExecutionFilter, ExecutionState};
 use crate::event::WorkflowEvent;
 use apex_common::{Error, Result};
 use async_trait::async_trait;
@@ -32,6 +32,24 @@ pub trait CheckpointStore: Send + Sync {
     async fn save(&self, snapshot: &ExecutionState) -> Result<()>;
     /// Load the latest snapshot for an execution, if any.
     async fn latest(&self, execution_id: &str) -> Result<Option<ExecutionState>>;
+    /// List snapshots matching `filter`, ordered deterministically by execution id,
+    /// honoring `filter.limit` (G4 visibility). The default scans all snapshots;
+    /// indexed stores may override for efficiency.
+    async fn list(&self, filter: &ExecutionFilter) -> Result<Vec<ExecutionState>>;
+}
+
+/// Order, filter, and cap a set of snapshots per an [`ExecutionFilter`] — the shared
+/// logic behind the scanning stores' `list`.
+fn apply_filter(
+    mut snapshots: Vec<ExecutionState>,
+    filter: &ExecutionFilter,
+) -> Vec<ExecutionState> {
+    snapshots.retain(|s| filter.matches(s));
+    snapshots.sort_by(|a, b| a.execution_id.cmp(&b.execution_id));
+    if let Some(limit) = filter.limit {
+        snapshots.truncate(limit);
+    }
+    snapshots
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +111,18 @@ impl CheckpointStore for InMemoryStore {
             .lock()
             .expect("checkpoint mutex poisoned");
         Ok(cps.get(execution_id).cloned())
+    }
+
+    async fn list(&self, filter: &ExecutionFilter) -> Result<Vec<ExecutionState>> {
+        let snapshots: Vec<ExecutionState> = self
+            .inner
+            .checkpoints
+            .lock()
+            .expect("checkpoint mutex poisoned")
+            .values()
+            .cloned()
+            .collect();
+        Ok(apply_filter(snapshots, filter))
     }
 }
 
@@ -194,6 +224,27 @@ impl CheckpointStore for FileStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(Error::Io(e)),
         }
+    }
+
+    async fn list(&self, filter: &ExecutionFilter) -> Result<Vec<ExecutionState>> {
+        let mut snapshots = Vec::new();
+        let mut entries = match tokio::fs::read_dir(&self.dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::Io(e)),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.ends_with(".checkpoint.json") {
+                continue;
+            }
+            // Read execution_id from the snapshot itself (the filename stem is
+            // sanitized and not a reliable inverse).
+            let contents = tokio::fs::read_to_string(entry.path()).await?;
+            snapshots.push(serde_json::from_str(&contents)?);
+        }
+        Ok(apply_filter(snapshots, filter))
     }
 }
 
