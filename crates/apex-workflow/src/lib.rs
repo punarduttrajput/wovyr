@@ -47,7 +47,7 @@ pub use event::WorkflowEvent;
 pub use executor::{ActivityContext, ActivityError, ActivityExecutor, ClosureExecutor};
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStore;
-pub use queue::{InMemoryWorkQueue, WorkQueue};
+pub use queue::{InMemoryWorkQueue, PartitionAssignment, WorkQueue, shard_of};
 pub use retry::{RetryPolicy, RetryStrategy};
 pub use schedule::{
     FileScheduleStore, InMemoryScheduleStore, OverlapPolicy, Schedule, ScheduleDispatcher,

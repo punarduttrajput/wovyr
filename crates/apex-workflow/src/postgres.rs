@@ -10,7 +10,7 @@
 
 use crate::engine::{ExecutionFilter, ExecutionState};
 use crate::event::WorkflowEvent;
-use crate::queue::WorkQueue;
+use crate::queue::{PartitionAssignment, WorkQueue, shard_of};
 use crate::store::{CheckpointStore, EventLog};
 use apex_common::{Error, Result};
 use async_trait::async_trait;
@@ -23,6 +23,10 @@ fn pg_err(context: &str, e: impl std::fmt::Display) -> Error {
 /// A PostgreSQL-backed event log + checkpoint store.
 pub struct PostgresStore {
     client: tokio_postgres::Client,
+    /// Number of queue partitions; each enqueued execution is assigned a shard
+    /// `shard_of(id, partitions)` so worker pools can lease disjoint partitions
+    /// without contending (G6). Defaults to 1 (no sharding).
+    partitions: u32,
 }
 
 impl PostgresStore {
@@ -38,9 +42,19 @@ impl PostgresStore {
             }
         });
 
-        let store = Self { client };
+        let store = Self {
+            client,
+            partitions: 1,
+        };
         store.migrate().await?;
         Ok(store)
+    }
+
+    /// Set the number of queue partitions (must be done before enqueuing, and must
+    /// match the `total` of every worker pool's [`PartitionAssignment`]).
+    pub fn with_partitions(mut self, partitions: u32) -> Self {
+        self.partitions = partitions.max(1);
+        self
     }
 
     async fn migrate(&self) -> Result<()> {
@@ -59,8 +73,11 @@ impl PostgresStore {
                  CREATE TABLE IF NOT EXISTS workflow_queue (
                      execution_id TEXT PRIMARY KEY,
                      leased_by    TEXT,
-                     leased_until TIMESTAMPTZ
-                 );",
+                     leased_until TIMESTAMPTZ,
+                     shard        INT NOT NULL DEFAULT 0
+                 );
+                 ALTER TABLE workflow_queue ADD COLUMN IF NOT EXISTS shard INT NOT NULL DEFAULT 0;
+                 CREATE INDEX IF NOT EXISTS workflow_queue_shard_idx ON workflow_queue (shard);",
             )
             .await
             .map_err(|e| pg_err("migrate", e))?;
@@ -169,9 +186,12 @@ impl WorkQueue for PostgresStore {
     async fn enqueue(&self, execution_id: &str) -> Result<()> {
         self.client
             .execute(
-                "INSERT INTO workflow_queue (execution_id) VALUES ($1)
+                "INSERT INTO workflow_queue (execution_id, shard) VALUES ($1, $2)
                  ON CONFLICT (execution_id) DO NOTHING",
-                &[&execution_id],
+                &[
+                    &execution_id,
+                    &(shard_of(execution_id, self.partitions) as i32),
+                ],
             )
             .await
             .map_err(|e| pg_err("enqueue", e))?;
@@ -200,6 +220,37 @@ impl WorkQueue for PostgresStore {
             )
             .await
             .map_err(|e| pg_err("lease", e))?;
+        Ok(row.map(|r| r.get::<_, String>("execution_id")))
+    }
+
+    async fn lease_sharded(
+        &self,
+        worker: &str,
+        assignment: &PartitionAssignment,
+        ttl: Duration,
+    ) -> Result<Option<String>> {
+        // Same atomic claim as `lease`, scoped to the partitions this pool owns, so
+        // disjoint pools never lock the same rows (G6).
+        let secs = ttl.as_secs_f64();
+        let owned: Vec<i32> = assignment.owned.iter().map(|s| *s as i32).collect();
+        let row = self
+            .client
+            .query_opt(
+                "WITH picked AS (
+                     SELECT execution_id FROM workflow_queue
+                     WHERE (leased_by IS NULL OR leased_until < now()) AND shard = ANY($3)
+                     ORDER BY execution_id
+                     FOR UPDATE SKIP LOCKED
+                     LIMIT 1
+                 )
+                 UPDATE workflow_queue q
+                 SET leased_by = $1, leased_until = now() + make_interval(secs => $2)
+                 FROM picked WHERE q.execution_id = picked.execution_id
+                 RETURNING q.execution_id",
+                &[&worker, &secs, &owned],
+            )
+            .await
+            .map_err(|e| pg_err("lease_sharded", e))?;
         Ok(row.map(|r| r.get::<_, String>("execution_id")))
     }
 

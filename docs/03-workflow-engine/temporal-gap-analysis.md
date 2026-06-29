@@ -60,7 +60,7 @@ perceived value to an evaluating buyer.
 | G3 | Queries (read live state) | Med-High | S | **Done** |
 | G4 | Visibility surface (list/inspect + minimal UI) | High | M–L | **Done** |
 | G5 | Child / sub-workflows | Med | L | **Prototype + ADR** |
-| G6 | Horizontal scaling story (honest tiering) | Med | M | Planned |
+| G6 | Horizontal scaling story (honest tiering) | Med | M | **Done** |
 | G7 | In-flight definition versioning | Med | M | **Done** (pinning) |
 
 > **Implementation status (2026-06-29).** G1, G2 (interval **and** cron), G3, G4,
@@ -81,12 +81,19 @@ perceived value to an evaluating buyer.
 > expansion) and the engine handles a `workflow`-typed activity by running a child
 > execution (derived id `<parent>::<activity>`, durable + visible via G3/G4),
 > exposing its result to the parent — covered by `parent_fans_out_to_two_children…`
-> and child-failure tests. **Remaining in scope: G6** (plus the G5 follow-ups in
-> ADR-0008 §Consequences: concurrent children, input templating, cascading
-> compensation, depth guard, CLI wiring). Per-gap "Approach"/"Acceptance" notes
-> below are retained as the design record; the **Done** gaps now describe shipped
-> behavior. *(G4 deferred polish: recency ordering — current ordering is by
-> execution id to stay deterministic — and arbitrary search attributes.)*
+> and child-failure tests. **G6 scaling** ships queue **partitioning** (`shard_of` +
+> `PartitionAssignment` + `WorkQueue::lease_sharded`, in-memory and Postgres, with
+> `Worker::with_partitions`), a contention test
+> (`sharded_pools_lease_disjoint_executions`), measured throughput baselines
+> ([`tests/perf.rs`](../../crates/apex-workflow/tests/perf.rs)), and a published
+> **scaling envelope**
+> ([distributed-execution §33](distributed-execution.md#33-scaling-envelope-g6)). All
+> seven gaps are now addressed. **Remaining follow-ups** are non-gap polish: the G5
+> items in [ADR-0008](../17-adr/ADR-0008-subworkflows.md) §Consequences (concurrent
+> children, input templating, cascading compensation, depth guard, CLI wiring) and G4
+> recency ordering / search attributes (current ordering is by execution id to stay
+> deterministic). Per-gap "Approach"/"Acceptance" notes below are retained as the
+> design record; the **Done** gaps now describe shipped behavior.
 
 ---
 

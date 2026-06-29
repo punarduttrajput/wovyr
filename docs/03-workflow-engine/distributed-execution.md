@@ -674,7 +674,74 @@ engine-distributed/
 
 ---
 
-# 33. Future Enhancements
+# 33. Scaling Envelope (G6)
+
+This section states the **current, honest scaling envelope** of the implemented
+distributed runtime — the leased `WorkQueue` + `Worker` model — and how to scale it
+out, rather than overstating it. It closes
+[gap-closure item G6](temporal-gap-analysis.md#g6--horizontal-scaling-story-honest-tiering).
+
+## 33.1 Model
+
+Executions are durably created by `Engine::start`, enqueued, and leased to one
+`Worker` at a time via a time-bounded lease; a crashed worker's lease expires and
+another reclaims it (exactly-once activity effects via idempotent `resume`). Two
+queue backends:
+
+- **`InMemoryWorkQueue`** — single process. Entries live in a `BTreeMap` keyed by
+  execution id; a lease takes the first ready entry by an early-exiting ordered scan
+  (no per-call sort), so lease/remove is near-O(1) when leases are removed promptly.
+- **`PostgresStore`** as a `WorkQueue` — cross-process/node. Uses `FOR UPDATE SKIP
+  LOCKED` so concurrent workers claim disjoint rows without blocking.
+
+## 33.2 Partitioning (removing pool contention)
+
+To let **multiple worker pools** scale horizontally without contending on one hot
+row range, the queue is **sharded**. Each execution is assigned a partition
+`shard_of(id, total)` (a stable FNV-1a hash mod `total`). A pool serves a
+`PartitionAssignment` (`PartitionAssignment::for_pool(index, pool_count, total)`),
+and `WorkQueue::lease_sharded` only considers executions in the pool's owned
+partitions — so pools on disjoint partitions never lock the same rows. For the
+Postgres queue the shard is a column populated at enqueue (`PostgresStore::with_partitions`,
+indexed), so the `SKIP LOCKED` claim is filtered server-side (`WHERE shard = ANY(...)`).
+A `Worker::with_partitions(assignment)` joins one pool.
+
+Correctness is covered by `queue::tests::sharded_pools_lease_disjoint_executions`
+(N pools over P partitions lease every execution exactly once, each only from its own
+partitions).
+
+## 33.3 Measured baselines
+
+Assertion-style baselines from
+[`crates/apex-workflow/tests/perf.rs`](../../crates/apex-workflow/tests/perf.rs),
+trivial single-activity workflow, in-memory stores, **single core, debug build** on a
+developer machine (2026-06-29) — a software-overhead ceiling, *not* a distributed
+figure:
+
+| Metric | Measured | Notes |
+|--------|----------|-------|
+| Engine throughput | ~23,600 executions/sec | start → drive → complete, one core |
+| Lease + remove | ~299,000 ops/sec | in-memory queue primitive |
+
+Release builds and real activity work shift these; the test asserts a conservative
+floor and prints the live number so regressions surface.
+
+## 33.4 Honest ceiling & migration path
+
+- The single leased queue + `SKIP LOCKED` scales to **many workers on one Postgres
+  queue** for moderate load. **Partitioning** (§33.2) extends this to **multiple
+  pools** by removing cross-pool lock contention — the recommended first scale step.
+- Beyond that, the bottleneck becomes the single Postgres queue table itself.
+  Splitting matching from history (a Temporal-style **matching/history service**
+  tier) is **out of scope** by design — see
+  [ADR rationale in the gap analysis](temporal-gap-analysis.md#6-explicitly-not-doing).
+  The documented path is: shard the queue across pools → if needed, shard the queue
+  table/Postgres → only then consider a dedicated matching tier. We publish the
+  envelope rather than imply web-scale we have not built.
+
+---
+
+# 34. Future Enhancements
 
 - Multi-cluster federation
 - Cross-cloud execution
@@ -684,14 +751,11 @@ engine-distributed/
 - AI-driven scheduling
 - Autonomous cluster healing
 
-See [Temporal Gap Closure (next phase)](temporal-gap-analysis.md) (G6) for the
-near-term scaling work: benchmarking the leased work-queue envelope and
-partitioning the queue to remove worker-pool contention.
-
 ---
 
-# 34. Revision History
+# 35. Revision History
 
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-06-26 | Initial Distributed Execution Specification |
+| 1.1.0 | 2026-06-29 | Added §33 Scaling Envelope (G6): partitioning + measured baselines |

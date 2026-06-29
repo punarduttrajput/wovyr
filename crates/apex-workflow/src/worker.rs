@@ -10,7 +10,7 @@
 
 use crate::definition::Definition;
 use crate::engine::{Engine, RunOutcome};
-use crate::queue::WorkQueue;
+use crate::queue::{PartitionAssignment, WorkQueue};
 use crate::store::CheckpointStore;
 use apex_common::{Error, Result};
 use std::sync::Arc;
@@ -28,6 +28,9 @@ pub struct Worker {
     checkpoints: Arc<dyn CheckpointStore>,
     resolver: DefinitionResolver,
     lease_ttl: Duration,
+    /// When set, the worker only leases executions in these partitions (G6), so it
+    /// can join a pool serving a disjoint partition set. `None` leases from all.
+    partitions: Option<PartitionAssignment>,
 }
 
 impl Worker {
@@ -47,6 +50,7 @@ impl Worker {
             checkpoints,
             resolver,
             lease_ttl: Duration::from_secs(30),
+            partitions: None,
         }
     }
 
@@ -56,10 +60,25 @@ impl Worker {
         self
     }
 
+    /// Restrict this worker to a partition set, so it can serve one pool of a sharded
+    /// queue without contending with pools on other partitions (G6).
+    pub fn with_partitions(mut self, partitions: PartitionAssignment) -> Self {
+        self.partitions = Some(partitions);
+        self
+    }
+
     /// Lease and drive one ready execution. Returns `Some((execution_id, outcome))`
     /// if it processed one, or `None` if the queue was empty.
     pub async fn step(&self) -> Result<Option<(String, RunOutcome)>> {
-        let Some(execution_id) = self.queue.lease(&self.id, self.lease_ttl).await? else {
+        let leased = match &self.partitions {
+            Some(assignment) => {
+                self.queue
+                    .lease_sharded(&self.id, assignment, self.lease_ttl)
+                    .await?
+            }
+            None => self.queue.lease(&self.id, self.lease_ttl).await?,
+        };
+        let Some(execution_id) = leased else {
             return Ok(None);
         };
 
