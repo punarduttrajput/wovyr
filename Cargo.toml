@@ -8,6 +8,7 @@ members = [
     "crates/apex-workflow",
     "crates/apex-memory",
     "crates/apex-telemetry",
+    "crates/apex-plugin",
     "crates/apex-server",
     "apps/apex-cli",
 ]
@@ -28,6 +29,7 @@ apex-agent = { path = "crates/apex-agent" }
 apex-workflow = { path = "crates/apex-workflow" }
 apex-memory = { path = "crates/apex-memory" }
 apex-telemetry = { path = "crates/apex-telemetry" }
+apex-plugin = { path = "crates/apex-plugin" }
 apex-server = { path = "crates/apex-server" }
 
 # External

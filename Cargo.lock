@@ -164,6 +164,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-plugin"
+version = "0.1.0"
+dependencies = [
+ "apex-common",
+ "apex-tools",
+ "async-trait",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "apex-provider"
 version = "0.1.0"
 dependencies = [

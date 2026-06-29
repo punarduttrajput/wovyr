@@ -37,6 +37,12 @@ impl ToolRegistry {
         self.tools.insert(id, tool);
     }
 
+    /// Remove tool `id`, returning it if present. Used when a capability is
+    /// withdrawn (e.g. a plugin is disabled or uninstalled).
+    pub fn unregister(&mut self, id: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.remove(id)
+    }
+
     /// Look up a tool by id.
     pub fn get(&self, id: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(id).cloned()
@@ -82,6 +88,15 @@ mod tests {
         assert!(r.contains("http_get"));
         assert!(r.contains("shell"));
         assert_eq!(r.ids().len(), 4);
+    }
+
+    #[test]
+    fn unregister_removes_a_tool() {
+        let mut r = ToolRegistry::with_builtins();
+        assert!(r.unregister("echo").is_some());
+        assert!(!r.contains("echo"));
+        // Removing a missing tool is a no-op (None).
+        assert!(r.unregister("echo").is_none());
     }
 
     fn ctx(granted: Option<&[&str]>) -> ToolContext {

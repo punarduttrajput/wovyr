@@ -1,0 +1,26 @@
+[package]
+name = "apex-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Plugin Engine: manifest, signature verification, permission grants, and the install/enable/disable lifecycle for extension capabilities."
+
+[dependencies]
+apex-common.workspace = true
+apex-tools.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+# ed25519 signature verification (already in the dep graph via rustls/ring).
+ring = "0.17"
+# Artifact content digests (sha256:...).
+sha2 = "0.10"
+# Platform-API compatibility ranges.
+semver = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
