@@ -27,6 +27,7 @@ use apex_tools::{
     Tool, ToolContext, ToolError, ToolMetadata, ToolRegistry, ToolRequest, ToolResponse,
 };
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -63,7 +64,8 @@ impl Package {
 }
 
 /// Whether an installed plugin's capabilities are live in their hosts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PluginState {
     /// Installed and registered, but capabilities are withdrawn (not live).
     Disabled,
@@ -71,8 +73,10 @@ pub enum PluginState {
     Enabled,
 }
 
-/// A catalogued plugin and its current grant/lifecycle state.
-#[derive(Clone, Debug)]
+/// A catalogued plugin and its current grant/lifecycle state. Serializable so a
+/// durable catalog (e.g. the CLI's `~/.apex/plugins/catalog.json`) survives across
+/// processes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstalledPlugin {
     /// The validated manifest.
     pub manifest: PluginManifest,
@@ -328,20 +332,22 @@ impl PluginEngine {
         }
 
         let plugin_ref = plugin.manifest.reference();
-        for cap in plugin.manifest.tool_capabilities() {
-            let tool = PluginTool {
-                plugin_ref: plugin_ref.clone(),
-                metadata: tool_metadata(&plugin.manifest, cap),
-                entry: cap.entry.clone(),
-                sandbox: cap.sandbox.clone(),
-                artifact_dir: plugin.artifact_dir.clone(),
-                runtime: Arc::clone(&self.runtime),
-            };
-            registry.register(Arc::new(tool));
-        }
+        register_tools(plugin, &self.runtime, registry);
         plugin.state = PluginState::Enabled;
         self.events.push(PluginEvent::Enabled(plugin_ref));
         Ok(())
+    }
+
+    /// Register the tool capabilities of every **already-enabled** plugin into
+    /// `registry`, without changing state or emitting events. Used to rehydrate a
+    /// process (e.g. an agent run) from a restored catalog so enabled plugin tools are
+    /// callable. Plugins in [`PluginState::Disabled`] are skipped.
+    pub fn register_enabled(&self, registry: &mut ToolRegistry) {
+        for plugin in self.plugins.values() {
+            if plugin.state == PluginState::Enabled {
+                register_tools(plugin, &self.runtime, registry);
+            }
+        }
     }
 
     /// Disable plugin `qualified_id`: withdraw its capabilities from their hosts,
@@ -386,6 +392,23 @@ impl PluginEngine {
         self.plugins.keys().cloned().collect()
     }
 
+    /// A snapshot of the catalog, sorted by qualified id — for persisting a durable
+    /// installed-plugin list (the inverse of [`with_catalog`](Self::with_catalog)).
+    pub fn catalog(&self) -> Vec<InstalledPlugin> {
+        self.plugins.values().cloned().collect()
+    }
+
+    /// Restore a previously-persisted catalog into the engine (replacing any current
+    /// entries), keyed by each plugin's qualified id. Lets the CLI/server rebuild an
+    /// engine from `~/.apex/plugins/catalog.json` without re-running install.
+    pub fn with_catalog(mut self, plugins: impl IntoIterator<Item = InstalledPlugin>) -> Self {
+        self.plugins = plugins
+            .into_iter()
+            .map(|p| (p.manifest.qualified_id(), p))
+            .collect();
+        self
+    }
+
     /// The lifecycle events emitted so far, in order.
     pub fn events(&self) -> &[PluginEvent] {
         &self.events
@@ -412,6 +435,28 @@ impl PluginEngine {
                 self.platform_api
             )))
         }
+    }
+}
+
+/// Register every tool capability of `plugin` as a [`PluginTool`] into `registry`,
+/// routing execution to `runtime`. Shared by [`PluginEngine::enable`] and
+/// [`PluginEngine::register_enabled`].
+fn register_tools(
+    plugin: &InstalledPlugin,
+    runtime: &Arc<dyn CapabilityRuntime>,
+    registry: &mut ToolRegistry,
+) {
+    let plugin_ref = plugin.manifest.reference();
+    for cap in plugin.manifest.tool_capabilities() {
+        let tool = PluginTool {
+            plugin_ref: plugin_ref.clone(),
+            metadata: tool_metadata(&plugin.manifest, cap),
+            entry: cap.entry.clone(),
+            sandbox: cap.sandbox.clone(),
+            artifact_dir: plugin.artifact_dir.clone(),
+            runtime: Arc::clone(runtime),
+        };
+        registry.register(Arc::new(tool));
     }
 }
 
@@ -522,6 +567,40 @@ artifacts:
                 PluginEvent::Uninstalled("acme/github@1.4.0".into()),
             ]
         );
+    }
+
+    #[test]
+    fn catalog_snapshot_restores_and_register_enabled_rehydrates() {
+        // Install + enable, snapshot the catalog, then round-trip it through JSON and
+        // rebuild a fresh engine — register_enabled must re-register the tool.
+        let (package, mut engine) = signed_package();
+        let mut registry = ToolRegistry::new();
+        engine.install(&package, &grants()).unwrap();
+        engine.enable("acme/github", &mut registry).unwrap();
+
+        let json = serde_json::to_string(&engine.catalog()).unwrap();
+        let restored: Vec<InstalledPlugin> = serde_json::from_str(&json).unwrap();
+
+        let rebuilt = PluginEngine::new(semver::Version::new(1, 0, 0), TrustStore::new())
+            .with_catalog(restored);
+        assert_eq!(rebuilt.installed(), vec!["acme/github".to_string()]);
+        assert_eq!(
+            rebuilt.get("acme/github").unwrap().state,
+            PluginState::Enabled
+        );
+
+        let mut fresh = ToolRegistry::new();
+        rebuilt.register_enabled(&mut fresh);
+        assert!(fresh.contains("github.create_issue"));
+    }
+
+    #[test]
+    fn register_enabled_skips_disabled_plugins() {
+        let (package, mut engine) = signed_package();
+        engine.install(&package, &grants()).unwrap(); // installed → Disabled
+        let mut registry = ToolRegistry::new();
+        engine.register_enabled(&mut registry);
+        assert!(!registry.contains("github.create_issue"));
     }
 
     #[test]

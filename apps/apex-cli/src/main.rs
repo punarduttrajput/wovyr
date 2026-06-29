@@ -16,6 +16,7 @@
 
 mod config;
 mod memory;
+mod plugin;
 mod stream;
 mod workflow;
 
@@ -78,6 +79,81 @@ enum Command {
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
+    },
+
+    /// Install and manage plugins (extension capabilities).
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginCommand {
+    /// Generate an ed25519 signing keypair for a publisher.
+    Keygen {
+        /// Publisher name the keypair signs for.
+        publisher: String,
+
+        /// Directory to write the `<publisher>.key` / `.pub` files into.
+        #[arg(long, default_value = ".")]
+        dir: String,
+    },
+
+    /// Sign a plugin manifest, producing a detached signature.
+    Sign {
+        /// PKCS#8 ed25519 private key (from `keygen`).
+        #[arg(long)]
+        key: String,
+
+        /// Path to the plugin manifest (`plugin.yaml`).
+        #[arg(long)]
+        manifest: String,
+
+        /// Output signature path (defaults to `plugin.sig` beside the manifest).
+        #[arg(long)]
+        out: Option<String>,
+    },
+
+    /// Trust a publisher's public key so its packages verify on install.
+    Trust {
+        /// Publisher name to trust.
+        publisher: String,
+
+        /// Path to the publisher's raw ed25519 public key (from `keygen`).
+        #[arg(long)]
+        key: String,
+    },
+
+    /// Install a plugin package directory (`plugin.yaml` + `plugin.sig` + artifacts).
+    Install {
+        /// Path to the plugin package directory.
+        dir: String,
+
+        /// Permission to grant the plugin (repeatable); must cover all it requests.
+        #[arg(long = "grant")]
+        grants: Vec<String>,
+    },
+
+    /// List installed plugins.
+    List,
+
+    /// Enable an installed plugin's capabilities.
+    Enable {
+        /// Plugin id (`publisher/name`).
+        id: String,
+    },
+
+    /// Disable a plugin's capabilities (state retained).
+    Disable {
+        /// Plugin id (`publisher/name`).
+        id: String,
+    },
+
+    /// Uninstall a plugin and remove its staged artifacts.
+    Uninstall {
+        /// Plugin id (`publisher/name`).
+        id: String,
     },
 }
 
@@ -405,6 +481,16 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 keep_recent,
             } => memory::compact_cmd(&namespace, max_importance, keep_recent).await,
         },
+        Command::Plugin { command } => match command {
+            PluginCommand::Keygen { publisher, dir } => plugin::keygen_cmd(&publisher, &dir),
+            PluginCommand::Sign { key, manifest, out } => plugin::sign_cmd(&key, &manifest, out),
+            PluginCommand::Trust { publisher, key } => plugin::trust_cmd(&publisher, &key),
+            PluginCommand::Install { dir, grants } => plugin::install_cmd(&dir, grants),
+            PluginCommand::List => plugin::list_cmd(),
+            PluginCommand::Enable { id } => plugin::enable_cmd(&id),
+            PluginCommand::Disable { id } => plugin::disable_cmd(&id),
+            PluginCommand::Uninstall { id } => plugin::uninstall_cmd(&id),
+        },
     }
 }
 
@@ -473,7 +559,9 @@ async fn run_agent_cmd(
 async fn run_local(file: &str, input: Value, stream: bool) -> apex_common::Result<()> {
     let def = AgentDefinition::from_file(file)?;
     let gateway = Gateway::from_env();
-    let registry = ToolRegistry::with_builtins();
+    let mut registry = ToolRegistry::with_builtins();
+    // Make enabled plugins' tool capabilities callable by the agent.
+    plugin::engine()?.register_enabled(&mut registry);
     let opts = RunOptions::new(input);
 
     // Open a memory retriever only when the agent enables it (RAG agents).
