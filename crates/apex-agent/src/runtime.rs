@@ -174,14 +174,15 @@ async fn run_agent_inner(
         request.max_tokens = def.spec.max_tokens;
         request.tools = tools.clone();
 
-        let response = gateway.chat(request).await?;
+        // Stream the model call, emitting deltas as content arrives, and use the
+        // completed response to decide whether to call tools or finish.
+        let response = stream_chat(gateway, request, sink).await?;
         usage.add(response.usage);
         steps += 1;
 
-        // No tool calls → the model produced a final answer.
+        // No tool calls → the model produced a final answer (already streamed).
         if response.message.tool_calls.is_empty() {
             final_text = response.message.content.clone().unwrap_or_default();
-            sink.emit(RunEvent::Delta { text: &final_text });
             break;
         }
 
@@ -214,6 +215,31 @@ async fn run_agent_inner(
         usage,
         steps,
     })
+}
+
+/// Drive one streamed model call: emit a `Delta` per content chunk and return the
+/// completed [`ChatResponse`] from the terminal `Done` event.
+async fn stream_chat(
+    gateway: &Gateway,
+    request: apex_provider::ChatRequest,
+    sink: &mut dyn RunEventSink,
+) -> Result<apex_provider::ChatResponse> {
+    use apex_provider::ChatStreamEvent;
+    use futures::StreamExt;
+
+    let mut stream = gateway.chat_stream(request).await?;
+    let mut completed = None;
+    while let Some(event) = stream.next().await {
+        match event? {
+            ChatStreamEvent::Delta(text) => {
+                if !text.is_empty() {
+                    sink.emit(RunEvent::Delta { text: &text });
+                }
+            }
+            ChatStreamEvent::Done(response) => completed = Some(response),
+        }
+    }
+    completed.ok_or_else(|| Error::provider("model stream ended without a final response"))
 }
 
 /// Execute a single tool call and return a string result suitable to feed back to

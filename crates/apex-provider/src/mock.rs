@@ -90,6 +90,23 @@ impl AIProvider for MockProvider {
         })
     }
 
+    /// Stream the deterministic reply as fixed-size content chunks (so callers see
+    /// real multi-delta streaming offline), then the completed response.
+    async fn chat_stream(&self, request: ChatRequest) -> Result<crate::provider::ChatStream> {
+        use crate::provider::ChatStreamEvent;
+        let response = self.chat(request).await?;
+        let content = response.message.content.clone().unwrap_or_default();
+
+        let mut events: Vec<Result<ChatStreamEvent>> = content
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(16)
+            .map(|c| Ok(ChatStreamEvent::Delta(c.iter().collect())))
+            .collect();
+        events.push(Ok(ChatStreamEvent::Done(response)));
+        Ok(Box::pin(futures::stream::iter(events)))
+    }
+
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let vectors: Vec<Vec<f32>> = request.input.iter().map(|t| mock_embedding(t)).collect();
         let prompt_tokens = request

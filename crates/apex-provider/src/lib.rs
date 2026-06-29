@@ -25,7 +25,7 @@ pub use embeddings::{EmbeddingRequest, EmbeddingResponse, cosine_similarity};
 pub use gateway::{Gateway, ModelSelector};
 pub use mock::MockProvider;
 pub use openai::OpenAiProvider;
-pub use provider::AIProvider;
+pub use provider::{AIProvider, ChatStream, ChatStreamEvent};
 #[cfg(feature = "redis")]
 pub use redis_breaker::RedisKv;
 pub use resilience::{

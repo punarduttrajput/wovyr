@@ -16,7 +16,7 @@ pub enum RunEvent<'a> {
     /// A memory was retrieved and injected as grounding context (one per result),
     /// exposing the source and score for the trace.
     MemoryRetrieved { source: &'a str, score: f32 },
-    /// A chunk of assistant text. v0.1 emits the full message as one delta.
+    /// A chunk of streamed assistant text (multiple per answer as tokens arrive).
     Delta { text: &'a str },
     /// The model requested a tool call.
     ToolCall { name: &'a str, arguments: &'a str },

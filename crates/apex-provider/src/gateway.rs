@@ -309,6 +309,59 @@ impl Gateway {
         Ok(response)
     }
 
+    /// Stream a chat completion. Establishes the stream against the candidate list
+    /// with failover + circuit breaking (like [`chat`](Self::chat)), then emits a
+    /// cost event when the stream completes. The response cache and per-call retry do
+    /// not apply to streams (the standard streaming tradeoff).
+    pub async fn chat_stream(&self, request: ChatRequest) -> Result<crate::provider::ChatStream> {
+        use futures::StreamExt;
+
+        let mut last_err: Option<Error> = None;
+        let mut hops = 0usize;
+        for i in 0..self.providers.len() {
+            if hops > self.max_failovers {
+                break;
+            }
+            if !self.breakers[i].allow(self.now_ms()).await {
+                continue;
+            }
+            hops += 1;
+            match self.providers[i].chat_stream(request.clone()).await {
+                Ok(stream) => {
+                    self.breakers[i].on_success().await;
+                    let cost = self.cost.clone();
+                    let provider = self.provider_name().to_string();
+                    // Meter the cost when the terminal `Done` event passes through.
+                    let metered = stream.map(move |event| {
+                        if let (Ok(crate::provider::ChatStreamEvent::Done(resp)), Some(obs)) =
+                            (&event, &cost)
+                        {
+                            obs.on_cost(CostEvent {
+                                provider: provider.clone(),
+                                model: resp.model.clone(),
+                                prompt_tokens: resp.usage.prompt_tokens,
+                                completion_tokens: resp.usage.completion_tokens,
+                                cost_usd: resp.usage.cost_usd,
+                                cache: None,
+                                estimated_savings_usd: 0.0,
+                            });
+                        }
+                        event
+                    });
+                    return Ok(Box::pin(metered));
+                }
+                Err(err) => {
+                    if !is_transient(&err) {
+                        return Err(err);
+                    }
+                    self.breakers[i].on_failure(self.now_ms()).await;
+                    last_err = Some(err);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| Error::provider("no healthy providers available")))
+    }
+
     /// Sequential failover: try each healthy candidate in order, moving on only when
     /// one returns a transient error.
     async fn dispatch_sequential(&self, request: &ChatRequest) -> Result<ChatResponse> {
@@ -676,6 +729,44 @@ mod tests {
         .with_retry(fast_retry());
         let err = gw.chat(req()).await.unwrap_err();
         assert!(matches!(err, Error::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_emits_chunks_and_meters_cost() {
+        use crate::provider::ChatStreamEvent;
+        use futures::StreamExt;
+
+        struct Collector(Mutex<Vec<CostEvent>>);
+        impl CostObserver for Collector {
+            fn on_cost(&self, event: CostEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let collector = Arc::new(Collector(Mutex::new(Vec::new())));
+        let gw = Gateway::new(Box::new(MockProvider::new())).with_cost_observer(collector.clone());
+
+        let mut stream = gw.chat_stream(req()).await.unwrap();
+        let mut deltas = 0usize;
+        let mut text = String::new();
+        let mut done: Option<ChatResponse> = None;
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                ChatStreamEvent::Delta(t) => {
+                    deltas += 1;
+                    text.push_str(&t);
+                }
+                ChatStreamEvent::Done(r) => done = Some(r),
+            }
+        }
+        let response = done.expect("a Done event ends the stream");
+        // The mock chunks its reply, so we see real multi-delta streaming...
+        assert!(deltas > 1, "expected multiple deltas, got {deltas}");
+        // ...and reassembling the deltas reproduces the final content exactly.
+        assert_eq!(text, response.message.content.unwrap());
+        // Cost is metered once, when the stream completes.
+        let events = collector.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].cost_usd > 0.0);
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@
 //! now (durable file/db backing is a later slice). Streaming (SSE), auth, and
 //! idempotency arrive in later milestones.
 
-use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent};
+use apex_agent::{AgentDefinition, NullSink, RunEvent, RunEventSink, RunOptions, run_agent};
 use apex_common::Error;
 use apex_provider::{CostEvent, CostObserver, Gateway};
 use apex_telemetry::Metrics;
@@ -21,12 +21,17 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, Sse},
+    },
     routing::{get, post},
 };
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -154,6 +159,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_handler))
         .route("/api/v1/agents:run", post(run_handler))
+        .route("/api/v1/agents:stream", post(run_stream_handler))
         // Agent persistence: register agents once, then run/inspect them by id.
         .route(
             "/api/v1/agents",
@@ -254,6 +260,82 @@ async fn run_inner(state: &Arc<AppState>, req: RunRequest) -> Result<Json<Value>
     let def = AgentDefinition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
     run_definition(state, def, req.input).await
+}
+
+/// A [`RunEventSink`] that forwards each run event to an SSE channel as a JSON frame.
+struct ChannelSink {
+    tx: futures::channel::mpsc::UnboundedSender<Event>,
+}
+
+impl RunEventSink for ChannelSink {
+    fn emit(&mut self, event: RunEvent<'_>) {
+        let data = match event {
+            RunEvent::Start { model, provider } => {
+                json!({ "type": "start", "model": model, "provider": provider })
+            }
+            RunEvent::MemoryRetrieved { source, score } => {
+                json!({ "type": "memory", "source": source, "score": score })
+            }
+            RunEvent::Delta { text } => json!({ "type": "delta", "text": text }),
+            RunEvent::ToolCall { name, arguments } => {
+                json!({ "type": "tool_call", "name": name, "arguments": arguments })
+            }
+            RunEvent::ToolResult { name, ok } => {
+                json!({ "type": "tool_result", "name": name, "ok": ok })
+            }
+            RunEvent::Done { usage } => json!({
+                "type": "done",
+                "usage": { "total_tokens": usage.total_tokens, "cost_usd": usage.cost_usd }
+            }),
+        };
+        let _ = self
+            .tx
+            .unbounded_send(Event::default().data(data.to_string()));
+    }
+}
+
+/// `POST /api/v1/agents:stream` — run an inline-manifest agent, streaming its events
+/// (start / delta / tool_call / tool_result / done, then a final `result`) as SSE.
+async fn run_stream_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RunRequest>,
+) -> Response {
+    let def = match AgentDefinition::from_yaml(&req.manifest) {
+        Ok(d) => d,
+        Err(e) => {
+            return ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
+                .into_response();
+        }
+    };
+    let input = if req.input.is_null() {
+        json!({})
+    } else {
+        req.input
+    };
+
+    let (tx, rx) = futures::channel::mpsc::unbounded::<Event>();
+    tokio::spawn(async move {
+        let mut sink = ChannelSink { tx: tx.clone() };
+        let frame = match run_agent(
+            &def,
+            &state.gateway,
+            &state.registry,
+            RunOptions::new(input),
+            &mut sink,
+        )
+        .await
+        {
+            Ok(out) => Event::default().event("result").data(
+                json!({ "status": "succeeded", "output": { "message": out.text }, "steps": out.steps })
+                    .to_string(),
+            ),
+            Err(e) => Event::default().event("error").data(e.to_string()),
+        };
+        let _ = tx.unbounded_send(frame);
+        // `tx` (and the sink's clone) drop here, closing the SSE stream.
+    });
+
+    Sse::new(rx.map(Ok::<Event, Infallible>)).into_response()
 }
 
 /// Run a (parsed) agent definition with `input`, returning the run-response shape.
@@ -667,6 +749,52 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn streaming_endpoint_emits_sse_event_frames() {
+        let state = Arc::new(AppState::from_env());
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents:stream")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "manifest": "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
+                            "input": { "message": "stream me" }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(ct.contains("text/event-stream"), "content-type was {ct}");
+
+        let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        // The run streamed start, multiple delta frames, a done, and a final result.
+        assert!(body.contains(r#""type":"start""#), "body:\n{body}");
+        assert!(
+            body.matches(r#""type":"delta""#).count() > 1,
+            "expected multiple delta frames:\n{body}"
+        );
+        assert!(body.contains(r#""type":"done""#), "body:\n{body}");
+        assert!(body.contains("event: result"), "body:\n{body}");
+        assert!(
+            body.contains("stream me"),
+            "delta text should reach the client:\n{body}"
+        );
     }
 
     #[tokio::test]
