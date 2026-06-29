@@ -423,3 +423,110 @@ async fn timer_wait_suspends_then_resumes_on_fire() {
     assert_eq!(outcome, RunOutcome::Completed);
     assert_eq!(state.activities["finish"].state, ActivityState::Completed);
 }
+
+/// The two independent branches of a diamond run **concurrently**, not one-after-the-
+/// other. A `Barrier(2)` that both `b` and `c` must reach can only be cleared if they
+/// overlap in time — a sequential scheduler would deadlock (caught by the timeout).
+#[tokio::test]
+async fn parallel_branches_run_concurrently() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: diamond\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n    - {id: c, type: function}\n    - {id: d, type: function}\n  transitions:\n    - {from: a, to: b}\n    - {from: a, to: c}\n    - {from: b, to: d}\n    - {from: c, to: d}\n",
+    )
+    .unwrap();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut executor = ClosureExecutor::new()
+        .on("a", |_| async { Ok(Value::Null) })
+        .on("d", |_| async { Ok(Value::Null) });
+    for id in ["b", "c"] {
+        let barrier = barrier.clone();
+        executor = executor.on(id, move |ctx| {
+            let barrier = barrier.clone();
+            async move {
+                // Rendezvous: both branches must be in-flight at once to pass.
+                barrier.wait().await;
+                Ok(json!({"id": ctx.id}))
+            }
+        });
+    }
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let run = engine.run(&def, "wf-parallel-1", json!({}));
+    let (outcome, _) = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("branches must run concurrently (sequential would deadlock on the barrier)")
+        .unwrap();
+
+    assert_eq!(outcome, RunOutcome::Completed);
+}
+
+/// Concurrent execution, deterministic commit: even when `c` finishes well before
+/// `b`, the engine commits the batch in **declaration order**, so `completed_order`
+/// (and thus the event log / resume behavior) is reproducible regardless of timing.
+#[tokio::test]
+async fn parallel_commit_order_is_deterministic() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: diamond\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n    - {id: c, type: function}\n    - {id: d, type: function}\n  transitions:\n    - {from: a, to: b}\n    - {from: a, to: c}\n    - {from: b, to: d}\n    - {from: c, to: d}\n",
+    )
+    .unwrap();
+
+    let executor = ClosureExecutor::new()
+        .on("a", |_| async { Ok(Value::Null) })
+        .on("d", |_| async { Ok(Value::Null) })
+        // `b` is the slow branch; `c` returns immediately and finishes first.
+        .on("b", |_| async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(json!({"id": "b"}))
+        })
+        .on("c", |_| async { Ok(json!({"id": "c"})) });
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, state) = engine.run(&def, "wf-parallel-2", json!({})).await.unwrap();
+
+    assert_eq!(outcome, RunOutcome::Completed);
+    // Declaration order, not completion order (c finished before b).
+    assert_eq!(state.completed_order, vec!["a", "b", "c", "d"]);
+}
+
+/// When one branch of a concurrent batch fails, the batch still commits the sibling
+/// that completed (so its effects are durable), then the workflow compensates —
+/// rolling back the committed activities in reverse order.
+#[tokio::test]
+async fn parallel_branch_failure_compensates_completed_siblings() {
+    // a -> {b, c} -> d. `b` fails permanently; `c` (and `a`) completed and must roll back.
+    let def = Definition::from_yaml(
+        "metadata:\n  name: diamond\nspec:\n  activities:\n    - {id: a, type: function, compensate: undo_a}\n    - {id: b, type: function}\n    - {id: c, type: function, compensate: undo_c}\n    - {id: d, type: function}\n    - {id: undo_a, type: function}\n    - {id: undo_c, type: function}\n  transitions:\n    - {from: a, to: b}\n    - {from: a, to: c}\n    - {from: b, to: d}\n    - {from: c, to: d}\n",
+    )
+    .unwrap();
+
+    let log = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut executor = ClosureExecutor::new();
+    for id in ["a", "c", "d", "undo_a", "undo_c"] {
+        let log = log.clone();
+        executor = executor.on(id, move |ctx| {
+            let log = log.clone();
+            async move {
+                log.lock().unwrap().push(ctx.id.clone());
+                Ok(Value::Null)
+            }
+        });
+    }
+    executor = executor.on("b", |_| async {
+        Err(ActivityError::Permanent("branch b rejected".into()))
+    });
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, state) = engine
+        .run(&def, "wf-parallel-fail-1", json!({}))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, RunOutcome::Compensated(_)),
+        "got {outcome:?}"
+    );
+    assert_eq!(state.activities["b"].state, ActivityState::Failed);
+    // c committed despite the sibling failure; rollback runs in reverse completed order.
+    let order = log.lock().unwrap().clone();
+    assert_eq!(order, vec!["a", "c", "undo_c", "undo_a"]);
+}

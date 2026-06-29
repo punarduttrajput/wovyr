@@ -7,9 +7,13 @@
 //! re-executing completed activities
 //! ([recovery §16](../../docs/03-workflow-engine/execution-model.md)).
 //!
-//! Scheduling is deterministic: ready activities (all predecessors completed) run
-//! in declaration order, one at a time. Parallel/distributed workers are a later
-//! slice; correctness and durability come first.
+//! Scheduling is deterministic: when several activities are ready at once (all
+//! predecessors completed), the engine runs them **concurrently** — their executor
+//! calls (and retry backoffs) overlap — then commits their results to the event log
+//! and checkpoint in declaration order, so the persisted history stays reproducible
+//! regardless of real-time completion order. Independent branches share no data edge,
+//! so each runs against the same pre-batch variable snapshot. A lone ready activity
+//! (or a `wait` suspension point) takes the simple sequential path.
 
 use crate::definition::{ActivityDef, Definition};
 use crate::event::WorkflowEvent;
@@ -21,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::task::JoinSet;
 
 /// Per-activity durable record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +95,113 @@ enum Step {
     Completed,
     Failed(String),
     Interrupted(String),
+}
+
+/// The aggregate result of running a batch of independent activities concurrently.
+enum BatchStep {
+    /// Every activity in the batch settled (completed). The loop continues.
+    AllSettled,
+    /// At least one activity failed terminally; carries the failure to compensate on.
+    Failed(String),
+    /// At least one activity suspended durably; the workflow yields after committing
+    /// the rest of the batch. Names the suspending activity for the interrupt event.
+    Interrupted { activity: String, msg: String },
+}
+
+/// The outcome of running one activity to a terminal point in isolation — computed
+/// off the shared state (Phase 1) so a batch can run concurrently, then committed in
+/// declaration order (Phase 2). `events` are the per-attempt events to replay on
+/// commit (`ActivityStarted`/`ActivityRetried`), in order.
+struct IsolatedOutcome {
+    id: String,
+    attempts: u32,
+    events: Vec<WorkflowEvent>,
+    result: IsolatedResult,
+}
+
+/// The terminal disposition of an isolated activity run.
+enum IsolatedResult {
+    Completed(Value),
+    /// Permanent failure or exhausted retries — the message to record/compensate on.
+    Failed(String),
+    Interrupted(String),
+}
+
+/// Run one activity to a terminal point against a fixed variable snapshot, with the
+/// same retry semantics as the sequential path — but touching no shared state, so a
+/// batch of these can run concurrently on the runtime. Owns its inputs to be
+/// `'static` for [`JoinSet`] spawning.
+#[tracing::instrument(name = "workflow.activity", skip_all, fields(activity = %id))]
+async fn run_attempts(
+    executor: Arc<dyn ActivityExecutor>,
+    id: String,
+    activity: ActivityDef,
+    policy: crate::retry::RetryPolicy,
+    variables: BTreeMap<String, Value>,
+    base_attempts: u32,
+) -> IsolatedOutcome {
+    let mut events = Vec::new();
+    let mut attempt = base_attempts;
+    loop {
+        attempt += 1;
+        events.push(WorkflowEvent::ActivityStarted {
+            id: id.clone(),
+            attempt,
+        });
+        let ctx = ActivityContext {
+            id: id.clone(),
+            activity_type: activity.activity_type.clone(),
+            name: activity.name.clone(),
+            inputs: activity.inputs.clone(),
+            variables: variables.clone(),
+            attempt,
+        };
+        match executor.execute(&ctx).await {
+            Ok(output) => {
+                return IsolatedOutcome {
+                    id,
+                    attempts: attempt,
+                    events,
+                    result: IsolatedResult::Completed(output),
+                };
+            }
+            Err(ActivityError::Interrupted(msg)) => {
+                return IsolatedOutcome {
+                    id,
+                    attempts: attempt,
+                    events,
+                    result: IsolatedResult::Interrupted(msg),
+                };
+            }
+            Err(ActivityError::Permanent(msg)) => {
+                return IsolatedOutcome {
+                    id,
+                    attempts: attempt,
+                    events,
+                    result: IsolatedResult::Failed(msg),
+                };
+            }
+            Err(ActivityError::Retryable(msg)) => {
+                if attempt >= policy.max_attempts {
+                    let msg = format!("retries exhausted after {attempt} attempts: {msg}");
+                    return IsolatedOutcome {
+                        id,
+                        attempts: attempt,
+                        events,
+                        result: IsolatedResult::Failed(msg),
+                    };
+                }
+                let delay = policy.next_delay(attempt);
+                events.push(WorkflowEvent::ActivityRetried {
+                    id: id.clone(),
+                    attempt,
+                    delay_ms: delay.as_millis() as u64,
+                    reason: msg,
+                });
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
 }
 
 /// Classification of an inbound edge during scheduling.
@@ -303,6 +415,27 @@ impl Engine {
                 return Ok((RunOutcome::Completed, state));
             }
 
+            // When more than one independent activity is ready, run the whole batch
+            // concurrently (their executor calls + backoffs overlap) and commit the
+            // results in declaration order. A single ready activity — or a `wait`
+            // suspension point — takes the sequential path below.
+            let batch = self.ready_batch(def, &state);
+            if batch.len() > 1 {
+                match self.run_ready_batch(def, &mut state, &batch).await? {
+                    BatchStep::AllSettled => continue,
+                    BatchStep::Failed(msg) => {
+                        let outcome = self.compensate(def, &mut state, msg).await?;
+                        return Ok((outcome, state));
+                    }
+                    BatchStep::Interrupted { activity, msg } => {
+                        self.emit(&mut state, WorkflowEvent::WorkflowInterrupted { activity })
+                            .await?;
+                        self.checkpoint(&mut state).await?;
+                        return Ok((RunOutcome::Interrupted(msg), state));
+                    }
+                }
+            }
+
             let Some(id) = self.next_ready(def, &state) else {
                 // Nothing runnable and not all complete → blocked on a failed activity.
                 let err = "workflow is blocked: no runnable activities remain".to_string();
@@ -351,37 +484,56 @@ impl Engine {
     /// Compensation handlers are excluded — they run only during rollback.
     fn next_ready(&self, def: &Definition, state: &ExecutionState) -> Option<String> {
         let handlers = def.compensation_targets();
-        for a in &def.spec.activities {
-            if handlers.contains(&a.id) {
-                continue;
-            }
-            let record = &state.activities[&a.id];
-            // `Waiting` is runnable so a resumed wait re-evaluates its condition.
-            let runnable = matches!(
-                record.state,
-                ActivityState::Created
-                    | ActivityState::Ready
-                    | ActivityState::Retrying
-                    | ActivityState::Waiting
-            );
-            if !runnable {
-                continue;
-            }
-            let inbound = def.inbound(&a.id);
-            if inbound.is_empty() {
-                return Some(a.id.clone()); // entry node
-            }
-            let edges: Vec<Edge> = inbound
-                .iter()
-                .map(|t| self.classify_edge(t, state))
-                .collect();
-            let any_pending = edges.contains(&Edge::Pending);
-            let any_live = edges.contains(&Edge::Live);
-            if !any_pending && any_live {
-                return Some(a.id.clone());
-            }
+        def.spec
+            .activities
+            .iter()
+            .find(|a| !handlers.contains(&a.id) && self.is_ready(def, state, &a.id))
+            .map(|a| a.id.clone())
+    }
+
+    /// The full set of ready, non-`wait` activities (in declaration order) — the
+    /// candidates for one concurrent batch. `wait` activities are excluded: they are
+    /// suspension points handled by the sequential [`run_wait`](Self::run_wait) path,
+    /// not parallel work.
+    fn ready_batch(&self, def: &Definition, state: &ExecutionState) -> Vec<String> {
+        let handlers = def.compensation_targets();
+        def.spec
+            .activities
+            .iter()
+            .filter(|a| {
+                !handlers.contains(&a.id)
+                    && a.activity_type != "wait"
+                    && self.is_ready(def, state, &a.id)
+            })
+            .map(|a| a.id.clone())
+            .collect()
+    }
+
+    /// Whether activity `id` is ready to run: not yet settled, none of its inbound
+    /// edges still undecided, and at least one inbound edge *live* (an entry node with
+    /// no edges is always ready).
+    fn is_ready(&self, def: &Definition, state: &ExecutionState, id: &str) -> bool {
+        let record = &state.activities[id];
+        // `Waiting` is runnable so a resumed wait re-evaluates its condition.
+        let runnable = matches!(
+            record.state,
+            ActivityState::Created
+                | ActivityState::Ready
+                | ActivityState::Retrying
+                | ActivityState::Waiting
+        );
+        if !runnable {
+            return false;
         }
-        None
+        let inbound = def.inbound(id);
+        if inbound.is_empty() {
+            return true; // entry node
+        }
+        let edges: Vec<Edge> = inbound
+            .iter()
+            .map(|t| self.classify_edge(t, state))
+            .collect();
+        !edges.contains(&Edge::Pending) && edges.contains(&Edge::Live)
     }
 
     /// Mark activities whose inbound edges are all *decided and dead* as `Skipped`,
@@ -615,6 +767,110 @@ impl Engine {
         .await?;
         self.checkpoint(state).await?;
         Ok(Step::Failed(format!("activity `{id}` failed: {msg}")))
+    }
+
+    /// Run a batch of independent ready activities concurrently, then commit their
+    /// results to the event log + checkpoint in declaration order, so the persisted
+    /// history is deterministic regardless of completion timing. Each activity runs
+    /// against the same pre-batch variable snapshot — sound because batch members
+    /// share no data edge.
+    async fn run_ready_batch(
+        &self,
+        def: &Definition,
+        state: &mut ExecutionState,
+        batch: &[String],
+    ) -> Result<BatchStep> {
+        // Phase 1: execute concurrently, off the shared state (pure w.r.t. the engine).
+        let snapshot = state.variables.clone();
+        let mut set = JoinSet::new();
+        for (idx, id) in batch.iter().enumerate() {
+            let executor = self.executor.clone();
+            let activity = def.activity(id).expect("activity exists").clone();
+            let policy = def.retry_for(id);
+            let vars = snapshot.clone();
+            let base = state.activities[id].attempts;
+            let id = id.clone();
+            set.spawn(async move {
+                (
+                    idx,
+                    run_attempts(executor, id, activity, policy, vars, base).await,
+                )
+            });
+        }
+
+        // Restore declaration order — JoinSet yields completions as they finish.
+        let mut slots: Vec<Option<IsolatedOutcome>> = (0..batch.len()).map(|_| None).collect();
+        while let Some(joined) = set.join_next().await {
+            let (idx, outcome) =
+                joined.map_err(|e| Error::Runtime(format!("activity task panicked: {e}")))?;
+            slots[idx] = Some(outcome);
+        }
+
+        // Phase 2: commit deterministically in declaration order.
+        let mut failure: Option<String> = None;
+        let mut interrupt: Option<(String, String)> = None;
+        for outcome in slots.into_iter().map(|s| s.expect("every slot filled")) {
+            let id = outcome.id.clone();
+            let attempts = outcome.attempts;
+            self.set_activity(state, &id, ActivityState::Running);
+            for event in outcome.events {
+                self.emit(state, event).await?;
+            }
+            match outcome.result {
+                IsolatedResult::Completed(output) => {
+                    let record = state.activities.get_mut(&id).expect("record exists");
+                    record.attempts = attempts;
+                    record.state = ActivityState::Completed;
+                    record.output = Some(output.clone());
+                    state.variables.insert(id.clone(), output.clone());
+                    state.completed_order.push(id.clone());
+                    self.emit(
+                        state,
+                        WorkflowEvent::ActivityCompleted {
+                            id: id.clone(),
+                            output,
+                        },
+                    )
+                    .await?;
+                    self.checkpoint(state).await?;
+                }
+                IsolatedResult::Failed(msg) => {
+                    let record = state.activities.get_mut(&id).expect("record exists");
+                    record.attempts = attempts;
+                    record.state = ActivityState::Failed;
+                    record.last_error = Some(msg.clone());
+                    self.emit(
+                        state,
+                        WorkflowEvent::ActivityFailed {
+                            id: id.clone(),
+                            error: msg.clone(),
+                        },
+                    )
+                    .await?;
+                    self.checkpoint(state).await?;
+                    if failure.is_none() {
+                        failure = Some(format!("activity `{id}` failed: {msg}"));
+                    }
+                }
+                IsolatedResult::Interrupted(msg) => {
+                    // Reset to Ready so a resume re-runs this (uncompleted) activity.
+                    self.set_activity(state, &id, ActivityState::Ready);
+                    self.checkpoint(state).await?;
+                    if interrupt.is_none() {
+                        interrupt = Some((id, msg));
+                    }
+                }
+            }
+        }
+
+        // A failure takes precedence (it drives compensation); otherwise a suspend.
+        if let Some(msg) = failure {
+            return Ok(BatchStep::Failed(msg));
+        }
+        if let Some((activity, msg)) = interrupt {
+            return Ok(BatchStep::Interrupted { activity, msg });
+        }
+        Ok(BatchStep::AllSettled)
     }
 
     /// Handle a terminal failure: transition to `Failed`, then roll back completed
