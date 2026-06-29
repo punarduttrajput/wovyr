@@ -8,10 +8,11 @@
 //! code ([coding standards §9](../../docs/19-implementation-guide/coding-standards.md)).
 
 use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
-use crate::provider::AIProvider;
+use crate::provider::{AIProvider, ChatStream, ChatStreamEvent};
 use crate::types::{ChatRequest, ChatResponse, Message, Role, ToolCall};
 use apex_common::{Error, Result, Usage};
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::{Value, json};
 
 /// Default OpenAI API base URL.
@@ -45,6 +46,37 @@ impl OpenAiProvider {
         let base_url =
             std::env::var("APEX_OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         Ok(Self::new(base_url, api_key))
+    }
+
+    /// Build the `/chat/completions` request body from a normalized request.
+    fn request_body(request: &ChatRequest) -> Value {
+        let messages: Vec<Value> = request.messages.iter().map(Self::encode_message).collect();
+        let mut body = json!({ "model": request.model, "messages": messages });
+        if let Some(t) = request.temperature {
+            body["temperature"] = json!(t);
+        }
+        if let Some(m) = request.max_tokens {
+            body["max_tokens"] = json!(m);
+        }
+        if !request.tools.is_empty() {
+            body["tools"] = Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "type": "function",
+                            "function": {
+                                "name": t.name,
+                                "description": t.description,
+                                "parameters": t.parameters,
+                            },
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        body
     }
 
     /// Translate a normalized [`Message`] into the OpenAI wire shape.
@@ -94,37 +126,7 @@ impl AIProvider for OpenAiProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
-        let messages: Vec<Value> = request.messages.iter().map(Self::encode_message).collect();
-
-        let mut body = json!({
-            "model": request.model,
-            "messages": messages,
-        });
-        if let Some(t) = request.temperature {
-            body["temperature"] = json!(t);
-        }
-        if let Some(m) = request.max_tokens {
-            body["max_tokens"] = json!(m);
-        }
-        if !request.tools.is_empty() {
-            body["tools"] = Value::Array(
-                request
-                    .tools
-                    .iter()
-                    .map(|t| {
-                        json!({
-                            "type": "function",
-                            "function": {
-                                "name": t.name,
-                                "description": t.description,
-                                "parameters": t.parameters,
-                            },
-                        })
-                    })
-                    .collect(),
-            );
-        }
-
+        let body = Self::request_body(&request);
         let url = format!("{}/chat/completions", self.base_url);
         let resp = self
             .client
@@ -150,6 +152,64 @@ impl AIProvider for OpenAiProvider {
         }
 
         parse_response(&payload, &request.model)
+    }
+
+    async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
+        // Ask for an SSE stream and (where supported) usage in the final chunk.
+        let mut body = Self::request_body(&request);
+        body["stream"] = json!(true);
+        body["stream_options"] = json!({ "include_usage": true });
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let requested_model = request.model.clone();
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::provider(format!("request to {url} failed: {e}")))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(classify_http_error(status.as_u16(), &text));
+        }
+
+        let mut bytes = resp.bytes_stream();
+        let stream = async_stream::stream! {
+            let mut buf = String::new();
+            let mut acc = StreamAccumulator::new(requested_model);
+
+            while let Some(chunk) = bytes.next().await {
+                let chunk = match chunk {
+                    Ok(b) => b,
+                    Err(e) => { yield Err(Error::provider(format!("stream read failed: {e}"))); return; }
+                };
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete SSE events (delimited by a blank line).
+                while let Some(pos) = buf.find("\n\n") {
+                    let event: String = buf.drain(..pos + 2).collect();
+                    for line in event.lines() {
+                        let Some(data) = line.trim().strip_prefix("data:") else { continue };
+                        let data = data.trim();
+                        if data == "[DONE]" {
+                            yield Ok(ChatStreamEvent::Done(acc.finish()));
+                            return;
+                        }
+                        let Ok(json) = serde_json::from_str::<Value>(data) else { continue };
+                        if let Some(delta) = acc.ingest(&json) {
+                            yield Ok(ChatStreamEvent::Delta(delta));
+                        }
+                    }
+                }
+            }
+            // Stream ended without an explicit [DONE].
+            yield Ok(ChatStreamEvent::Done(acc.finish()));
+        };
+        Ok(Box::pin(stream))
     }
 
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
@@ -232,6 +292,123 @@ fn parse_embeddings(payload: &Value, requested_model: &str) -> Result<EmbeddingR
         vectors,
         usage: Usage::new(prompt_tokens, 0, 0.0),
     })
+}
+
+/// Accumulates streamed `/chat/completions` chunks into a final [`ChatResponse`].
+/// Content arrives as `delta.content`; tool calls arrive as `delta.tool_calls` whose
+/// `id`/`function.name`/`function.arguments` are filled incrementally, keyed by index.
+struct StreamAccumulator {
+    model: String,
+    content: String,
+    tool_calls: Vec<(String, String, String)>,
+    finish_reason: String,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+}
+
+impl StreamAccumulator {
+    fn new(model: String) -> Self {
+        Self {
+            model,
+            content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: "stop".to_string(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+        }
+    }
+
+    /// Fold one chunk in; return any new content delta to surface to the caller.
+    fn ingest(&mut self, json: &Value) -> Option<String> {
+        if let Some(m) = json.get("model").and_then(Value::as_str) {
+            self.model = m.to_string();
+        }
+        if let Some(pt) = json.pointer("/usage/prompt_tokens").and_then(Value::as_u64) {
+            self.prompt_tokens = pt as u32;
+        }
+        if let Some(ct) = json
+            .pointer("/usage/completion_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.completion_tokens = ct as u32;
+        }
+
+        let choice = json.pointer("/choices/0")?;
+        if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.finish_reason = fr.to_string();
+        }
+        let delta = choice.get("delta");
+
+        if let Some(tcs) = delta
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(Value::as_array)
+        {
+            for tc in tcs {
+                let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                while self.tool_calls.len() <= idx {
+                    self.tool_calls
+                        .push((String::new(), String::new(), String::new()));
+                }
+                if let Some(id) = tc
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    self.tool_calls[idx].0 = id.to_string();
+                }
+                if let Some(n) = tc.pointer("/function/name").and_then(Value::as_str) {
+                    self.tool_calls[idx].1.push_str(n);
+                }
+                if let Some(a) = tc.pointer("/function/arguments").and_then(Value::as_str) {
+                    self.tool_calls[idx].2.push_str(a);
+                }
+            }
+        }
+
+        let content = delta
+            .and_then(|d| d.get("content"))
+            .and_then(Value::as_str)?;
+        if content.is_empty() {
+            return None;
+        }
+        self.content.push_str(content);
+        Some(content.to_string())
+    }
+
+    /// Assemble the completed response from the accumulated state.
+    fn finish(self) -> ChatResponse {
+        let tool_calls: Vec<ToolCall> = self
+            .tool_calls
+            .into_iter()
+            .filter(|(id, name, _)| !id.is_empty() || !name.is_empty())
+            .map(|(id, name, arguments)| ToolCall {
+                id,
+                name,
+                arguments: if arguments.is_empty() {
+                    "{}".to_string()
+                } else {
+                    arguments
+                },
+            })
+            .collect();
+        let content = if self.content.is_empty() && !tool_calls.is_empty() {
+            None
+        } else {
+            Some(self.content)
+        };
+        ChatResponse {
+            message: Message {
+                role: Role::Assistant,
+                content,
+                tool_calls,
+                tool_call_id: None,
+                name: None,
+            },
+            model: self.model,
+            usage: Usage::new(self.prompt_tokens, self.completion_tokens, 0.0),
+            finish_reason: self.finish_reason,
+        }
+    }
 }
 
 /// Parse an OpenAI-shaped completion payload into a [`ChatResponse`].
@@ -377,6 +554,81 @@ mod tests {
         assert_eq!(v["tool_call_id"], "call_1");
         assert_eq!(v["name"], "echo");
         assert_eq!(v["content"], "{\"ok\":true}");
+    }
+
+    #[test]
+    fn accumulates_streamed_text_and_usage() {
+        let mut acc = StreamAccumulator::new("requested".to_string());
+        // Role-only opening chunk carries no content delta.
+        assert_eq!(
+            acc.ingest(&json!({
+                "model": "gpt-4o-mini",
+                "choices": [{ "delta": { "role": "assistant" } }]
+            })),
+            None
+        );
+        assert_eq!(
+            acc.ingest(&json!({ "choices": [{ "delta": { "content": "Hel" } }] })),
+            Some("Hel".to_string())
+        );
+        assert_eq!(
+            acc.ingest(&json!({ "choices": [{ "delta": { "content": "lo" } }] })),
+            Some("lo".to_string())
+        );
+        // Terminal chunk: finish reason + a usage-only frame.
+        acc.ingest(&json!({ "choices": [{ "delta": {}, "finish_reason": "stop" }] }));
+        acc.ingest(&json!({
+            "choices": [],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 2 }
+        }));
+
+        let r = acc.finish();
+        assert_eq!(r.message.content.as_deref(), Some("Hello"));
+        assert_eq!(r.model, "gpt-4o-mini");
+        assert_eq!(r.finish_reason, "stop");
+        assert_eq!(r.usage.prompt_tokens, 5);
+        assert_eq!(r.usage.total_tokens, 7);
+        assert!(r.message.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn accumulates_streamed_tool_call_across_chunks() {
+        let mut acc = StreamAccumulator::new("m".to_string());
+        // id + name arrive first, arguments stream in fragments keyed by index.
+        acc.ingest(&json!({
+            "choices": [{ "delta": { "tool_calls": [{
+                "index": 0, "id": "call_1",
+                "function": { "name": "echo", "arguments": "{\"x\"" }
+            }] } }]
+        }));
+        acc.ingest(&json!({
+            "choices": [{ "delta": { "tool_calls": [{
+                "index": 0,
+                "function": { "arguments": ":1}" }
+            }] }, "finish_reason": "tool_calls" }]
+        }));
+
+        let r = acc.finish();
+        assert_eq!(r.finish_reason, "tool_calls");
+        assert_eq!(r.message.tool_calls.len(), 1);
+        assert_eq!(r.message.tool_calls[0].id, "call_1");
+        assert_eq!(r.message.tool_calls[0].name, "echo");
+        assert_eq!(r.message.tool_calls[0].arguments, "{\"x\":1}");
+        // A tool-call-only response carries no text content.
+        assert!(r.message.content.is_none());
+    }
+
+    #[test]
+    fn empty_tool_call_arguments_default_to_object() {
+        let mut acc = StreamAccumulator::new("m".to_string());
+        acc.ingest(&json!({
+            "choices": [{ "delta": { "tool_calls": [{
+                "index": 0, "id": "call_1",
+                "function": { "name": "noop" }
+            }] } }]
+        }));
+        let r = acc.finish();
+        assert_eq!(r.message.tool_calls[0].arguments, "{}");
     }
 
     #[test]

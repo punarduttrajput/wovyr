@@ -1,0 +1,99 @@
+//! End-to-end `chat_stream` test for the OpenAI provider, driving the real
+//! HTTP + SSE parsing path against a canned local server (no network).
+//!
+//! Covers [provider SDK §streaming](../../../docs/04-agent-framework/provider-sdk.md):
+//! incremental `Delta`s followed by a terminal `Done` carrying the assembled
+//! message, tool calls, and usage.
+
+use apex_provider::{AIProvider, ChatRequest, ChatStreamEvent, Message, OpenAiProvider};
+use futures::StreamExt;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+/// Spawn a one-shot HTTP/1.1 server that replies to the first connection with
+/// `body` (served as `text/event-stream`), and return its base URL.
+fn serve_sse(body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        // Drain the request headers so the client's write completes.
+        let mut buf = [0u8; 4096];
+        let _ = sock.read(&mut buf);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        sock.write_all(resp.as_bytes()).unwrap();
+        sock.flush().unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn streams_text_deltas_then_done() {
+    // Two content chunks, a finish chunk, a usage-only chunk, then [DONE].
+    let body = "\
+data: {\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n\
+data: [DONE]\n\n";
+
+    let provider = OpenAiProvider::new(serve_sse(body), "test-key");
+    let req = ChatRequest::new("gpt-4o-mini", vec![Message::user("hi")]);
+    let mut stream = provider.chat_stream(req).await.unwrap();
+
+    let mut deltas = Vec::new();
+    let mut done = None;
+    while let Some(ev) = stream.next().await {
+        match ev.unwrap() {
+            ChatStreamEvent::Delta(d) => deltas.push(d),
+            ChatStreamEvent::Done(r) => done = Some(r),
+        }
+    }
+
+    assert_eq!(deltas, vec!["Hel".to_string(), "lo".to_string()]);
+    let done = done.expect("stream must end with Done");
+    assert_eq!(done.message.content.as_deref(), Some("Hello"));
+    assert_eq!(done.model, "gpt-4o-mini");
+    assert_eq!(done.finish_reason, "stop");
+    assert_eq!(done.usage.prompt_tokens, 5);
+    assert_eq!(done.usage.total_tokens, 7);
+}
+
+#[tokio::test]
+async fn streams_tool_call_in_final_done() {
+    // Tool call assembled across chunks; no text content surfaces as a delta.
+    let body = "\
+data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"echo\",\"arguments\":\"{\\\"x\\\"\"}}]}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n\
+data: [DONE]\n\n";
+
+    let provider = OpenAiProvider::new(serve_sse(body), "test-key");
+    let req = ChatRequest::new("m", vec![Message::user("call echo")]);
+    let mut stream = provider.chat_stream(req).await.unwrap();
+
+    let mut deltas = Vec::new();
+    let mut done = None;
+    while let Some(ev) = stream.next().await {
+        match ev.unwrap() {
+            ChatStreamEvent::Delta(d) => deltas.push(d),
+            ChatStreamEvent::Done(r) => done = Some(r),
+        }
+    }
+
+    assert!(
+        deltas.is_empty(),
+        "tool-call-only stream yields no text deltas"
+    );
+    let done = done.expect("stream must end with Done");
+    assert_eq!(done.finish_reason, "tool_calls");
+    assert_eq!(done.message.tool_calls.len(), 1);
+    assert_eq!(done.message.tool_calls[0].id, "call_1");
+    assert_eq!(done.message.tool_calls[0].name, "echo");
+    assert_eq!(done.message.tool_calls[0].arguments, "{\"x\":1}");
+    assert!(done.message.content.is_none());
+}
