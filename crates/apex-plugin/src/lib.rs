@@ -24,12 +24,14 @@
 //!   errors on call.
 //!
 //! Deferred to later slices (see [overview §15](../../docs/08-plugin-sdk/overview.md#15-future-enhancements)):
-//! container/microVM capability loaders (only the WASM loader exists today), plugin
-//! dependency resolution, upgrade/rollback, and marketplace distribution.
+//! container/microVM capability loaders (only the WASM loader exists today),
+//! upgrade/rollback, and marketplace distribution (incl. fetching missing dependencies
+//! — dependency *resolution* against the installed catalog is implemented).
 
 pub mod engine;
 pub mod manifest;
 pub mod permissions;
+mod resolve;
 #[cfg(feature = "wasi")]
 pub mod runtime;
 pub mod verify;

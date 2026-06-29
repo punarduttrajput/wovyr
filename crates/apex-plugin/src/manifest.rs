@@ -180,6 +180,18 @@ impl PluginManifest {
                 )));
             }
         }
+
+        // Dependency version requirements must be valid semver ranges (fail-closed at
+        // parse, before resolution).
+        for dep in &self.dependencies {
+            if dep.name.trim().is_empty() {
+                return Err(Error::invalid(
+                    "dependency name must not be empty".to_string(),
+                ));
+            }
+            parse_version_req(&dep.version)
+                .map_err(|e| Error::invalid(format!("dependency `{}`: {e}", dep.name)))?;
+        }
         Ok(())
     }
 
@@ -189,6 +201,15 @@ impl PluginManifest {
             .iter()
             .filter(|c| c.kind == CapabilityKind::Tool)
     }
+}
+
+/// Parse a semver requirement, accepting the spec's space-separated comparator syntax
+/// (`>=0.1.0 <2.0.0`) — which the `semver` crate itself writes comma-separated. Used
+/// for both `compatibility.platform_api` and dependency version ranges.
+pub fn parse_version_req(range: &str) -> Result<semver::VersionReq> {
+    let normalized = range.split_whitespace().collect::<Vec<_>>().join(",");
+    semver::VersionReq::parse(&normalized)
+        .map_err(|e| Error::invalid(format!("invalid version requirement `{range}`: {e}")))
 }
 
 #[cfg(test)]
