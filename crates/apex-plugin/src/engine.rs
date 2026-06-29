@@ -19,8 +19,9 @@
 //! since the wasm/container loader is deferred to a later slice. Other capability
 //! kinds (provider/memory/policy/workflow_activity) are catalogued but not yet routed.
 
-use crate::manifest::{CapabilityDescriptor, CapabilityKind, PluginManifest};
+use crate::manifest::{CapabilityDescriptor, CapabilityKind, PluginManifest, parse_version_req};
 use crate::permissions::missing_grants;
+use crate::resolve;
 use crate::verify::{TrustStore, verify_digest};
 use apex_common::{Error, Result};
 use apex_tools::{
@@ -270,6 +271,12 @@ impl PluginEngine {
         // 4. Platform-API compatibility.
         self.check_compatibility(&manifest)?;
 
+        // 5. Resolve dependencies against the installed catalog (deps install first):
+        //    each declared dependency must already be installed and version-compatible.
+        for dep in &manifest.dependencies {
+            resolve::resolve_dep(dep, &self.plugins)?;
+        }
+
         // 6. Permission grants/consent: every requested permission must be granted.
         let missing = missing_grants(&manifest.permissions, grants);
         if !missing.is_empty() {
@@ -320,21 +327,32 @@ impl PluginEngine {
     }
 
     /// Enable plugin `qualified_id`: route its capabilities to their hosts and go live.
-    /// Tool capabilities are registered into `registry`; other kinds are catalogued
-    /// (no live host yet). Idempotent for an already-enabled plugin.
+    /// Its transitive **dependencies are enabled first** (in dependency order); tool
+    /// capabilities are registered into `registry`, other kinds are catalogued (no live
+    /// host yet). Idempotent for already-enabled plugins, and fail-closed on a missing
+    /// dependency or a dependency cycle.
     pub fn enable(&mut self, qualified_id: &str, registry: &mut ToolRegistry) -> Result<()> {
-        let plugin = self
-            .plugins
-            .get_mut(qualified_id)
-            .ok_or_else(|| Error::NotFound(format!("plugin `{qualified_id}` is not installed")))?;
-        if plugin.state == PluginState::Enabled {
-            return Ok(());
+        if !self.plugins.contains_key(qualified_id) {
+            return Err(Error::NotFound(format!(
+                "plugin `{qualified_id}` is not installed"
+            )));
         }
-
-        let plugin_ref = plugin.manifest.reference();
-        register_tools(plugin, &self.runtime, registry);
-        plugin.state = PluginState::Enabled;
-        self.events.push(PluginEvent::Enabled(plugin_ref));
+        // Dependencies first, then the plugin itself.
+        let order = resolve::enable_order(qualified_id, &self.plugins)?;
+        let runtime = Arc::clone(&self.runtime);
+        for id in order {
+            let plugin = self
+                .plugins
+                .get_mut(&id)
+                .expect("resolved id is in the catalog");
+            if plugin.state == PluginState::Enabled {
+                continue;
+            }
+            register_tools(plugin, &runtime, registry);
+            plugin.state = PluginState::Enabled;
+            let reference = plugin.manifest.reference();
+            self.events.push(PluginEvent::Enabled(reference));
+        }
         Ok(())
     }
 
@@ -351,32 +369,64 @@ impl PluginEngine {
     }
 
     /// Disable plugin `qualified_id`: withdraw its capabilities from their hosts,
-    /// retaining the catalog entry + grants. Idempotent for an already-disabled plugin.
+    /// retaining the catalog entry + grants. Idempotent for an already-disabled plugin,
+    /// and **fail-closed if an enabled plugin still depends on it** (disable the
+    /// dependents first).
     pub fn disable(&mut self, qualified_id: &str, registry: &mut ToolRegistry) -> Result<()> {
+        let state = self
+            .plugins
+            .get(qualified_id)
+            .ok_or_else(|| Error::NotFound(format!("plugin `{qualified_id}` is not installed")))?
+            .state;
+        if state == PluginState::Disabled {
+            return Ok(());
+        }
+        let enabled_dependents: Vec<String> = resolve::dependents(qualified_id, &self.plugins)
+            .into_iter()
+            .filter(|d| self.plugins.get(d).map(|p| p.state) == Some(PluginState::Enabled))
+            .collect();
+        if !enabled_dependents.is_empty() {
+            return Err(Error::invalid(format!(
+                "cannot disable `{qualified_id}`: still required by enabled plugin(s): {}",
+                enabled_dependents.join(", ")
+            )));
+        }
+
         let plugin = self
             .plugins
             .get_mut(qualified_id)
-            .ok_or_else(|| Error::NotFound(format!("plugin `{qualified_id}` is not installed")))?;
-        if plugin.state == PluginState::Disabled {
-            return Ok(());
-        }
+            .expect("checked present above");
         for cap in plugin.manifest.tool_capabilities() {
             registry.unregister(&cap.id);
         }
         plugin.state = PluginState::Disabled;
-        self.events
-            .push(PluginEvent::Disabled(plugin.manifest.reference()));
+        let reference = plugin.manifest.reference();
+        self.events.push(PluginEvent::Disabled(reference));
         Ok(())
     }
 
     /// Uninstall plugin `qualified_id`: withdraw its capabilities and drop it from the
-    /// catalog.
+    /// catalog. **Fail-closed if any installed plugin still depends on it** (uninstall
+    /// the dependents first).
     pub fn uninstall(&mut self, qualified_id: &str, registry: &mut ToolRegistry) -> Result<()> {
+        if !self.plugins.contains_key(qualified_id) {
+            return Err(Error::NotFound(format!(
+                "plugin `{qualified_id}` is not installed"
+            )));
+        }
+        let dependents = resolve::dependents(qualified_id, &self.plugins);
+        if !dependents.is_empty() {
+            return Err(Error::invalid(format!(
+                "cannot uninstall `{qualified_id}`: still required by installed plugin(s): {}",
+                dependents.join(", ")
+            )));
+        }
+        // No dependents remain, so disabling can't be blocked.
         self.disable(qualified_id, registry)?;
         let plugin = self
             .plugins
             .remove(qualified_id)
-            .ok_or_else(|| Error::NotFound(format!("plugin `{qualified_id}` is not installed")))?;
+            .expect("checked present above");
         self.events
             .push(PluginEvent::Uninstalled(plugin.manifest.reference()));
         Ok(())
@@ -421,11 +471,7 @@ impl PluginEngine {
         if range.is_empty() {
             return Ok(());
         }
-        // The spec writes ranges space-separated (`>=0.1.0 <2.0.0`); `semver` wants
-        // comparators comma-separated. Normalize so the documented syntax parses.
-        let normalized = range.split_whitespace().collect::<Vec<_>>().join(",");
-        let req = semver::VersionReq::parse(&normalized)
-            .map_err(|e| Error::invalid(format!("invalid platform_api range `{range}`: {e}")))?;
+        let req = parse_version_req(range)?;
         if req.matches(&self.platform_api) {
             Ok(())
         } else {
@@ -734,5 +780,134 @@ artifacts:
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Internal(m) if m.contains("sandbox loader")));
+    }
+
+    // --- Dependency resolution ---------------------------------------------------
+
+    const BASE: &str = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata: { name: http-core, version: 1.2.0, publisher: acme }
+capabilities:
+  - { kind: tool, id: http.get }
+"#;
+
+    const DEPENDENT: &str = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata: { name: app, version: 0.1.0, publisher: acme }
+dependencies:
+  - { name: http-core, version: "^1.0.0" }
+capabilities:
+  - { kind: tool, id: app.run }
+"#;
+
+    /// An engine trusting `acme`, plus a signer that produces packages for it.
+    fn dep_engine() -> (PluginEngine, ring::signature::Ed25519KeyPair) {
+        let (kp, public) = generate_keypair();
+        let mut trust = TrustStore::new();
+        trust.trust("acme", public);
+        (PluginEngine::new(semver::Version::new(1, 0, 0), trust), kp)
+    }
+
+    fn pkg(kp: &ring::signature::Ed25519KeyPair, manifest: &str) -> Package {
+        Package::new(manifest, sign(kp, manifest.as_bytes()))
+    }
+
+    #[test]
+    fn install_requires_dependencies_first() {
+        let (mut engine, kp) = dep_engine();
+        // Installing the dependent before its dependency fails closed.
+        let err = engine.install(&pkg(&kp, DEPENDENT), &[]).unwrap_err();
+        assert!(format!("{err}").contains("not installed"), "got {err}");
+        assert!(engine.installed().is_empty());
+
+        // With the dependency installed first, the dependent installs.
+        engine.install(&pkg(&kp, BASE), &[]).unwrap();
+        engine.install(&pkg(&kp, DEPENDENT), &[]).unwrap();
+        assert_eq!(engine.installed().len(), 2);
+    }
+
+    #[test]
+    fn enable_brings_up_dependencies_first() {
+        let (mut engine, kp) = dep_engine();
+        engine.install(&pkg(&kp, BASE), &[]).unwrap();
+        engine.install(&pkg(&kp, DEPENDENT), &[]).unwrap();
+
+        let mut registry = ToolRegistry::new();
+        engine.enable("acme/app", &mut registry).unwrap();
+
+        // The dependency was auto-enabled too, before the dependent (event order).
+        assert_eq!(
+            engine.get("acme/http-core").unwrap().state,
+            PluginState::Enabled
+        );
+        assert!(registry.contains("http.get") && registry.contains("app.run"));
+        let enabled: Vec<&PluginEvent> = engine
+            .events()
+            .iter()
+            .filter(|e| matches!(e, PluginEvent::Enabled(_)))
+            .collect();
+        assert_eq!(
+            enabled,
+            vec![
+                &PluginEvent::Enabled("acme/http-core@1.2.0".into()),
+                &PluginEvent::Enabled("acme/app@0.1.0".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn disable_blocked_by_enabled_dependent() {
+        let (mut engine, kp) = dep_engine();
+        engine.install(&pkg(&kp, BASE), &[]).unwrap();
+        engine.install(&pkg(&kp, DEPENDENT), &[]).unwrap();
+        let mut registry = ToolRegistry::new();
+        engine.enable("acme/app", &mut registry).unwrap();
+
+        // Can't disable the dependency while the dependent is enabled.
+        let err = engine.disable("acme/http-core", &mut registry).unwrap_err();
+        assert!(format!("{err}").contains("required by enabled plugin(s): acme/app"));
+
+        // Disabling the dependent first unblocks it.
+        engine.disable("acme/app", &mut registry).unwrap();
+        engine.disable("acme/http-core", &mut registry).unwrap();
+        assert_eq!(
+            engine.get("acme/http-core").unwrap().state,
+            PluginState::Disabled
+        );
+    }
+
+    #[test]
+    fn uninstall_blocked_by_installed_dependent() {
+        let (mut engine, kp) = dep_engine();
+        engine.install(&pkg(&kp, BASE), &[]).unwrap();
+        engine.install(&pkg(&kp, DEPENDENT), &[]).unwrap();
+        let mut registry = ToolRegistry::new();
+
+        let err = engine
+            .uninstall("acme/http-core", &mut registry)
+            .unwrap_err();
+        assert!(format!("{err}").contains("required by installed plugin(s): acme/app"));
+
+        // Removing the dependent first unblocks it.
+        engine.uninstall("acme/app", &mut registry).unwrap();
+        engine.uninstall("acme/http-core", &mut registry).unwrap();
+        assert!(engine.installed().is_empty());
+    }
+
+    #[test]
+    fn install_rejects_version_conflict() {
+        let (mut engine, kp) = dep_engine();
+        engine.install(&pkg(&kp, BASE), &[]).unwrap(); // http-core 1.2.0
+        let needs_v2 = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata: { name: app, version: 0.1.0, publisher: acme }
+dependencies:
+  - { name: http-core, version: "^2.0.0" }
+"#;
+        let err = engine.install(&pkg(&kp, needs_v2), &[]).unwrap_err();
+        assert!(format!("{err}").contains("do not satisfy"), "got {err}");
     }
 }
