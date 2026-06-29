@@ -71,6 +71,16 @@ export APEX_LOG=warn          # quiet the sandbox's trace logging
    Enabled plugin tools are also wired into `apex agents run --local`, so an agent whose
    model emits a `echo.run` tool call invokes the same capability.
 
+## Distributing as a single file
+
+Bundle the signed package directory into one content-addressed `.apexpkg` and install
+from it directly (distribution §2 / §5 "Local file"):
+
+```bash
+apex plugin pack examples/plugins/echo --out echo.apexpkg
+apex plugin install echo.apexpkg --grant 'net:egress:api.example.com'
+```
+
 ## Lifecycle extras
 
 ```bash

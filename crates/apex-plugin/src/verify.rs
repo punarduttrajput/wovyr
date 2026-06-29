@@ -31,14 +31,29 @@ pub fn verify_digest(declared: &str, bytes: &[u8]) -> Result<()> {
     }
 }
 
-/// Minimal lowercase hex encoder (avoids pulling a `hex` crate for one use).
-mod hex {
+/// Minimal lowercase hex codec (avoids pulling a `hex` crate for a couple of uses).
+pub(crate) mod hex {
+    use apex_common::{Error, Result};
+
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
         let mut s = String::with_capacity(bytes.as_ref().len() * 2);
         for b in bytes.as_ref() {
             s.push_str(&format!("{b:02x}"));
         }
         s
+    }
+
+    pub fn decode(s: &str) -> Result<Vec<u8>> {
+        if s.len() % 2 != 0 {
+            return Err(Error::invalid("hex string has odd length".to_string()));
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&s[i..i + 2], 16)
+                    .map_err(|e| Error::invalid(format!("invalid hex: {e}")))
+            })
+            .collect()
     }
 }
 

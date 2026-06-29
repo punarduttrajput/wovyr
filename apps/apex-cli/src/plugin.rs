@@ -174,10 +174,23 @@ pub fn trust_cmd(publisher: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read a package directory (`plugin.yaml` + `plugin.sig` + declared artifacts) into a
-/// [`Package`], returning it alongside the parsed manifest.
-fn read_package(dir: &str) -> Result<(Package, PluginManifest)> {
-    let dir = Path::new(dir);
+/// Load a plugin package from `source`: either a package **directory** (holding
+/// `plugin.yaml`, `plugin.sig`, and artifacts) or a single **`.apexpkg`** file.
+/// Returns the package alongside its parsed manifest.
+fn load_package(source: &str) -> Result<(Package, PluginManifest)> {
+    let path = Path::new(source);
+    if path.is_file() {
+        let bytes = std::fs::read(path)
+            .map_err(|e| Error::config(format!("could not read {source}: {e}")))?;
+        let package = Package::from_apexpkg(&bytes)?;
+        let manifest = package.manifest()?;
+        return Ok((package, manifest));
+    }
+    read_package_dir(path)
+}
+
+/// Read a package directory (`plugin.yaml` + `plugin.sig` + declared artifacts).
+fn read_package_dir(dir: &Path) -> Result<(Package, PluginManifest)> {
     let manifest_yaml = std::fs::read_to_string(dir.join("plugin.yaml"))
         .map_err(|e| Error::config(format!("could not read {}/plugin.yaml: {e}", dir.display())))?;
     let signature = std::fs::read(dir.join("plugin.sig")).map_err(|e| {
@@ -201,11 +214,26 @@ fn read_package(dir: &str) -> Result<(Package, PluginManifest)> {
     Ok((package, manifest))
 }
 
-/// `apex plugin install <dir> [--grant <perm>]` — read a package directory, verify its
-/// signature, stage artifacts, and register it (disabled). `grants` must cover every
-/// permission the manifest requests.
-pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
-    let (package, manifest) = read_package(dir)?;
+/// `apex plugin pack <dir> [--out <file.apexpkg>]` — bundle a package directory into a
+/// single content-addressed `.apexpkg` file for distribution.
+pub fn pack_cmd(dir: &str, out: Option<String>) -> Result<()> {
+    let (package, manifest) = read_package_dir(Path::new(dir))?;
+    let out = out.unwrap_or_else(|| {
+        format!(
+            "{}-{}.apexpkg",
+            manifest.metadata.name, manifest.metadata.version
+        )
+    });
+    std::fs::write(&out, package.to_apexpkg()?)?;
+    println!("Packed {} -> {out}", manifest.reference());
+    Ok(())
+}
+
+/// `apex plugin install <source> [--grant <perm>]` — install from a package directory
+/// or a `.apexpkg` file: verify its signature, stage artifacts, and register it
+/// (disabled). `grants` must cover every permission the manifest requests.
+pub fn install_cmd(source: &str, grants: Vec<String>) -> Result<()> {
+    let (package, manifest) = load_package(source)?;
     let mut engine = engine()?;
     let installed = engine.install(&package, &grants)?;
     let reference = installed.manifest.reference();
@@ -228,11 +256,11 @@ pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// `apex plugin upgrade <dir> [--grant <perm>]` — swap an installed plugin to the
-/// version in the package, retaining the prior version for rollback. New permissions
-/// must be granted; the upgrade is refused if it would break an installed dependent.
-pub fn upgrade_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
-    let (package, manifest) = read_package(dir)?;
+/// `apex plugin upgrade <source> [--grant <perm>]` — swap an installed plugin to the
+/// version in a package directory or `.apexpkg`, retaining the prior version for
+/// rollback. New permissions must be granted; refused if it would break a dependent.
+pub fn upgrade_cmd(source: &str, grants: Vec<String>) -> Result<()> {
+    let (package, manifest) = load_package(source)?;
     let id = manifest.qualified_id();
     let mut engine = engine()?;
     let from = engine

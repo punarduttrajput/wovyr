@@ -115,6 +115,16 @@ enum PluginCommand {
         out: Option<String>,
     },
 
+    /// Bundle a package directory into a single distributable `.apexpkg` file.
+    Pack {
+        /// Path to the plugin package directory.
+        dir: String,
+
+        /// Output file (defaults to `<name>-<version>.apexpkg`).
+        #[arg(long)]
+        out: Option<String>,
+    },
+
     /// Trust a publisher's public key so its packages verify on install.
     Trust {
         /// Publisher name to trust.
@@ -510,6 +520,7 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
         Command::Plugin { command } => match command {
             PluginCommand::Keygen { publisher, dir } => plugin::keygen_cmd(&publisher, &dir),
             PluginCommand::Sign { key, manifest, out } => plugin::sign_cmd(&key, &manifest, out),
+            PluginCommand::Pack { dir, out } => plugin::pack_cmd(&dir, out),
             PluginCommand::Trust { publisher, key } => plugin::trust_cmd(&publisher, &key),
             PluginCommand::Install { dir, grants } => plugin::install_cmd(&dir, grants),
             PluginCommand::Upgrade { dir, grants } => plugin::upgrade_cmd(&dir, grants),

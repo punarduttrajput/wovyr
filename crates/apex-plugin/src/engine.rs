@@ -62,6 +62,55 @@ impl Package {
         self.artifacts.insert(path.into(), bytes);
         self
     }
+
+    /// Serialize to the single-file **`.apexpkg`** distribution format
+    /// ([distribution §2](../../docs/08-plugin-sdk/distribution.md#2-package-format-apexpkg)):
+    /// a self-contained JSON envelope bundling the manifest YAML, the detached
+    /// signature, and every artifact blob (hex-encoded). Content-address the resulting
+    /// bytes (sha256) for a stable package identity.
+    pub fn to_apexpkg(&self) -> Result<Vec<u8>> {
+        let envelope = ApexPkg {
+            manifest: self.manifest_yaml.clone(),
+            signature: crate::verify::hex::encode(&self.signature),
+            artifacts: self
+                .artifacts
+                .iter()
+                .map(|(p, b)| (p.clone(), crate::verify::hex::encode(b)))
+                .collect(),
+        };
+        serde_json::to_vec_pretty(&envelope).map_err(Error::from)
+    }
+
+    /// Parse and validate the package's manifest (e.g. to read its identity before
+    /// install).
+    pub fn manifest(&self) -> Result<PluginManifest> {
+        PluginManifest::from_yaml(&self.manifest_yaml)
+    }
+
+    /// Reconstruct a package from `.apexpkg` bytes (the inverse of
+    /// [`to_apexpkg`](Self::to_apexpkg)). The signature and artifacts are re-verified
+    /// at install, so a tampered envelope is rejected there.
+    pub fn from_apexpkg(bytes: &[u8]) -> Result<Self> {
+        let envelope: ApexPkg = serde_json::from_slice(bytes)
+            .map_err(|e| Error::invalid(format!("invalid .apexpkg: {e}")))?;
+        let mut package = Package::new(
+            envelope.manifest,
+            crate::verify::hex::decode(&envelope.signature)?,
+        );
+        for (path, hex) in envelope.artifacts {
+            package = package.with_artifact(path, crate::verify::hex::decode(&hex)?);
+        }
+        Ok(package)
+    }
+}
+
+/// The on-disk `.apexpkg` envelope: manifest YAML + hex signature + hex artifact blobs.
+#[derive(Serialize, Deserialize)]
+struct ApexPkg {
+    manifest: String,
+    signature: String,
+    #[serde(default)]
+    artifacts: BTreeMap<String, String>,
 }
 
 /// Whether an installed plugin's capabilities are live in their hosts.
@@ -773,6 +822,17 @@ artifacts:
         let mut fresh = ToolRegistry::new();
         rebuilt.register_enabled(&mut fresh);
         assert!(fresh.contains("github.create_issue"));
+    }
+
+    #[test]
+    fn apexpkg_round_trips_and_installs() {
+        // Pack a signed package to .apexpkg bytes, reconstruct it, and install — the
+        // reconstructed package must verify (signature + artifact digest) intact.
+        let (package, mut engine) = signed_package();
+        let bytes = package.to_apexpkg().unwrap();
+        let restored = Package::from_apexpkg(&bytes).unwrap();
+        engine.install(&restored, &grants()).unwrap();
+        assert_eq!(engine.installed(), vec!["acme/github".to_string()]);
     }
 
     #[test]
