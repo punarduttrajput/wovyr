@@ -38,8 +38,7 @@ export const routes: Routes = [
   {
     path: 'settings',
     title: 'Settings · Apex',
-    loadComponent: () => import('./features/placeholder/placeholder').then((m) => m.Placeholder),
-    data: { surface: 'Settings', eyebrow: 'Administer / Settings' },
+    loadComponent: () => import('./features/settings/settings').then((m) => m.Settings),
   },
   { path: '**', redirectTo: 'agents' },
 ];

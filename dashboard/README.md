@@ -7,10 +7,16 @@ NestJS BFF is deferred; the SPA currently talks to `apex-server` directly).
 
 ## Surfaces
 
-Monitoring · **Agent Studio** (built) · Workflow Builder · Memory Explorer ·
-Marketplace · Settings. Each is a lazy-loaded route under `src/app/features/`.
-Agent Studio is wired to the live API (`/api/v1/agents` + the `agents:stream` SSE
-endpoint); the others are placeholders pending their build slices.
+**Monitoring** (built) · **Agent Studio** (built) · Workflow Builder · Memory Explorer ·
+Marketplace · **Settings** (built). Each is a lazy-loaded route under `src/app/features/`.
+
+- **Agent Studio** — agent CRUD (`/api/v1/agents`) + live `agents:stream` SSE test console.
+- **Monitoring** — polls `/metrics`, `/healthz`, `/api/v1/workflows` every 5s.
+- **Settings** — orgs / projects / members / quotas / webhooks (tenancy + webhooks API).
+
+Workflow Builder, Memory Explorer and Marketplace remain placeholders — the platform
+server does not expose workflow-authoring, memory, or plugin HTTP routes yet (those are
+CLI-only today), so those surfaces are blocked on backend endpoints.
 
 ## Run it locally
 
@@ -19,6 +25,10 @@ endpoint); the others are placeholders pending their build slices.
    ```bash
    # from the repo root
    cargo run -p apex-cli -- dev        # binds 127.0.0.1:8080
+
+   # For the Settings surface, authorize the dashboard's principal as a platform
+   # admin so tenancy/webhook calls aren't denied (see src/app/core/tenant.config.ts):
+   APEX_PLATFORM_ADMINS=admin@apex.local cargo run -p apex-cli -- dev
    ```
 
 2. Start the dashboard dev server (proxies `/api` → `127.0.0.1:8080` via

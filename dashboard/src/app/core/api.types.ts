@@ -49,6 +49,47 @@ export interface MetricSample {
   value: number;
 }
 
+// ---- tenancy / settings ----
+
+export interface Organization {
+  id: string;
+  name: string;
+  tenant: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  organization: string;
+  tenant: string;
+  settings?: Record<string, unknown>;
+  status?: string;
+  version?: number;
+}
+
+/** Built-in roles, snake_case on the wire. */
+export type Role = 'viewer' | 'editor' | 'project_admin' | 'org_admin' | 'platform_admin';
+
+export interface Membership {
+  user: string;
+  role: Role;
+  scope: unknown;
+}
+
+export interface QuotaLimits {
+  llm_cost_per_day_usd?: number | null;
+  tool_executions_per_minute?: number | null;
+  memory_records?: number | null;
+  concurrent_agent_runs?: number | null;
+}
+
+export interface Webhook {
+  id: string;
+  url: string;
+  events: string[];
+  active?: boolean;
+}
+
 /**
  * A normalized run-stream event. The server emits anonymous `data:` frames carrying a
  * `type` discriminator (start/memory/delta/tool_call/tool_result/done), then a terminal
