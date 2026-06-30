@@ -12,10 +12,13 @@
 //! now (durable file/db backing is a later slice). Streaming (SSE), auth, and
 //! idempotency arrive in later milestones.
 
+mod tenancy;
+
 use apex_agent::{AgentDefinition, NullSink, RunEvent, RunEventSink, RunOptions, run_agent};
 use apex_common::Error;
 use apex_provider::{CostEvent, CostObserver, Gateway};
 use apex_telemetry::Metrics;
+use apex_tenancy::{FileTenancyStore, InMemoryTenancyStore, TenancyStore};
 use apex_tools::ToolRegistry;
 use apex_workflow::{
     CheckpointStore, ClosureExecutor, Engine, EventLog, ExecutionFilter, FileStore, InMemoryStore,
@@ -108,6 +111,8 @@ pub struct AppState {
     /// Read-only engine over the durable workflow store — drives the `GET
     /// /api/v1/workflows*` visibility endpoints (G4). Its executor is never invoked.
     workflows: Engine,
+    /// Tenancy catalog backing the org/project/membership/quota routes (G: tenancy).
+    pub(crate) tenancy: Arc<dyn TenancyStore>,
 }
 
 impl AppState {
@@ -127,6 +132,7 @@ impl AppState {
             agents: AgentStore::default(),
             run_counter: AtomicU64::new(1),
             workflows: default_workflows_engine(),
+            tenancy: default_tenancy_store(),
         }
     }
 
@@ -136,6 +142,26 @@ impl AppState {
         self.workflows = engine;
         self
     }
+
+    /// Override the tenancy store (used by tests to inject a seeded in-memory store).
+    pub fn with_tenancy(mut self, store: Arc<dyn TenancyStore>) -> Self {
+        self.tenancy = store;
+        self
+    }
+}
+
+/// A durable [`FileTenancyStore`] at `~/.apex/tenancy` (shared with the CLI), falling
+/// back to an in-memory store if that directory is unavailable.
+fn default_tenancy_store() -> Arc<dyn TenancyStore> {
+    let dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| std::path::PathBuf::from(home).join(".apex").join("tenancy"));
+    if let Some(dir) = dir
+        && let Ok(store) = FileTenancyStore::new(dir)
+    {
+        return Arc::new(store);
+    }
+    Arc::new(InMemoryTenancyStore::new())
 }
 
 /// A read-only [`Engine`] over the durable workflow store at `~/.apex/workflows`
@@ -217,6 +243,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/workflows", get(list_workflows_handler))
         .route("/api/v1/workflows/{id}", get(get_workflow_handler))
         .route("/workflows", get(workflows_ui_handler))
+        // Multi-tenancy: organizations, projects, memberships, quotas (RBAC-gated).
+        .merge(tenancy::routes())
         .with_state(state)
 }
 
@@ -667,14 +695,14 @@ load();
 </html>"#;
 
 /// An API error rendered as the standard envelope.
-struct ApiError {
+pub(crate) struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
 }
 
 impl ApiError {
-    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status,
             code,
