@@ -1,0 +1,52 @@
+<section class="view">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">Operate / Execution</div>
+      <h1 class="mono">{{ id() }}</h1>
+      @if (execution(); as e) {
+        <p>{{ e.workflow_name }} · version {{ e.workflow_version }}</p>
+      }
+    </div>
+    <div class="head-actions">
+      <a class="btn" routerLink="/monitoring">← Monitoring</a>
+    </div>
+  </div>
+
+  @if (error()) {
+    <div class="card empty"><b>{{ error() }}</b></div>
+  } @else if (execution(); as e) {
+    <div class="two">
+      <div class="card">
+        <div class="card-h"><h3>Status</h3>
+          <div class="right"><span class="pill {{ statusClass(e.status) }}"><span class="pd"></span>{{ e.status }}</span></div>
+        </div>
+        <div class="kv"><span>Execution</span><b class="mono">{{ e.execution_id }}</b></div>
+        <div class="kv"><span>Workflow</span><b>{{ e.workflow_name }}</b></div>
+        <div class="kv"><span>Version</span><b class="mono">{{ e.workflow_version }}</b></div>
+        <div class="kv"><span>Waiting on</span><b class="mono">{{ e.waiting_on.length ? e.waiting_on.join(', ') : '—' }}</b></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h3>Activities</h3><span class="sub">{{ activities().length }}</span></div>
+        @for (a of activities(); track a.id) {
+          <div class="act">
+            <span class="mono">{{ a.id }}</span>
+            <span class="pill {{ statusClass(a.state) }}"><span class="pd"></span>{{ a.state }}</span>
+          </div>
+        } @empty { <div class="pad muted">No activities recorded.</div> }
+      </div>
+    </div>
+
+    <div class="card timeline">
+      <div class="card-h"><h3>Event timeline</h3><span class="sub">{{ events().length }} events · durable log</span></div>
+      @for (ev of events(); track $index) {
+        <div class="evt">
+          <span class="seq mono">{{ $index + 1 }}</span>
+          <pre class="mono">{{ ev | json }}</pre>
+        </div>
+      } @empty { <div class="pad muted">No events.</div> }
+    </div>
+  } @else {
+    <div class="card empty"><b>Loading…</b></div>
+  }
+</section>

@@ -3,6 +3,8 @@ import { Router, NavigationEnd, RouterOutlet, RouterLink, RouterLinkActive } fro
 import { filter } from 'rxjs/operators';
 import { ThemeService } from './core/theme.service';
 import { SafeSvgPipe } from './core/safe-svg.pipe';
+import { ToastService } from './core/toast.service';
+import { CommandPalette } from './shared/command-palette';
 
 interface NavItem {
   path: string;
@@ -13,12 +15,13 @@ interface NavItem {
 
 @Component({
   selector: 'app-root',
-  imports: [RouterOutlet, RouterLink, RouterLinkActive, SafeSvgPipe],
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, SafeSvgPipe, CommandPalette],
   templateUrl: './app.html',
   styleUrl: './app.scss',
 })
 export class App {
   readonly theme = inject(ThemeService);
+  readonly toasts = inject(ToastService);
   private router = inject(Router);
 
   readonly crumb = signal<{ root: string; leaf: string }>({ root: 'Build', leaf: 'Agent Studio' });
@@ -29,6 +32,7 @@ export class App {
     memory: { root: 'Build', leaf: 'Memory Explorer' },
     marketplace: { root: 'Extend', leaf: 'Marketplace' },
     settings: { root: 'Administer', leaf: 'Settings' },
+    executions: { root: 'Operate', leaf: 'Execution' },
   };
 
   constructor() {

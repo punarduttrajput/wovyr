@@ -1,0 +1,116 @@
+<section class="view">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">Build / Memory Explorer</div>
+      <h1>Memory Explorer</h1>
+      <p>Browse, search and manage agent memory with transparent, tunable hybrid ranking.
+        Backed by the platform memory engine under <code>~/.apex/memory</code>.</p>
+    </div>
+    <div class="head-actions">
+      <button class="btn" (click)="showAdd.set(!showAdd())">{{ showAdd() ? 'Close' : '+ Add memory' }}</button>
+    </div>
+  </div>
+
+  @if (status()) {
+    <div class="status-bar" [class.err]="status().startsWith('Error')">{{ status() }}</div>
+  }
+
+  <div class="mem">
+    <!-- namespaces -->
+    <div class="card ns-card">
+      <div class="eyebrow pad-sm">Namespaces</div>
+      <div class="ns-item" [class.on]="selectedNs() === null" (click)="select(null)">
+        all <span class="ct tnum">{{ totalCount() }}</span>
+      </div>
+      @for (n of namespaces(); track n.namespace) {
+        <div class="ns-item" [class.on]="selectedNs() === n.namespace" (click)="select(n.namespace)">
+          {{ n.namespace }} <span class="ct tnum">{{ n.count }}</span>
+        </div>
+      } @empty {
+        <div class="pad-sm muted mini">No namespaces yet.</div>
+      }
+    </div>
+
+    <!-- main -->
+    <div>
+      @if (showAdd()) {
+        <div class="card add-card">
+          <div class="card-h"><h3>Add memory</h3>
+            <span class="sub">→ {{ selectedNs() ?? 'pick a namespace' }}</span></div>
+          <div class="add-b">
+            <textarea [(ngModel)]="add.content" rows="2" placeholder="Memory content…"></textarea>
+            <div class="add-row">
+              <input type="text" [(ngModel)]="add.tags" placeholder="tags, comma-separated" />
+              <label class="imp">importance
+                <input type="number" min="0" max="1" step="0.1" [(ngModel)]="add.importance" /></label>
+              <button class="btn pri" (click)="store()">Store</button>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- search -->
+      <div class="card search-card">
+        <div class="search-row">
+          <div class="search-box">
+            <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <input type="text" [(ngModel)]="q" (keydown.enter)="search()"
+              placeholder="Hybrid search across {{ selectedNs() ?? 'all namespaces' }}…" />
+            @if (q) { <button class="clear" (click)="clearSearch()">×</button> }
+          </div>
+          <select [(ngModel)]="strategy" (change)="search()" class="strat">
+            <option value="hybrid">hybrid</option>
+            <option value="vector">vector</option>
+            <option value="keyword">keyword</option>
+          </select>
+          <button class="btn pri" (click)="search()">Search</button>
+        </div>
+        <div class="weights">
+          <span class="eyebrow">Ranking weights</span>
+          <label>relevance <input type="number" min="0" max="1" step="0.05" [(ngModel)]="weights.relevance" (change)="search()" /></label>
+          <label>recency <input type="number" min="0" max="1" step="0.05" [(ngModel)]="weights.recency" (change)="search()" /></label>
+          <label>importance <input type="number" min="0" max="1" step="0.05" [(ngModel)]="weights.importance" (change)="search()" /></label>
+          <label>diversity (MMR) <input type="number" min="0" max="1" step="0.1" [(ngModel)]="diversity" (change)="search()" /></label>
+        </div>
+      </div>
+
+      <!-- results -->
+      <div class="card">
+        <div class="card-h">
+          <h3>{{ mode() === 'search' ? 'Results' : 'Records' }}</h3>
+          <span class="sub">{{ results().length }} {{ mode() === 'search' ? 'matches' : 'records' }}</span>
+          @if (mode() === 'search') { <div class="right"><span class="pill info"><span class="pd"></span>{{ strategy.toUpperCase() }}</span></div> }
+        </div>
+        @for (r of results(); track r.id) {
+          <div class="result">
+            <div class="rh">
+              <span class="ti">{{ r.content }}</span>
+            </div>
+            <div class="rmeta">
+              <span class="pill mut">{{ r.namespace }}</span>
+              <span class="pill mut">{{ r.type }}</span>
+              @for (t of r.tags; track t) { <span class="tag">{{ t }}</span> }
+              @if (mode() === 'search') {
+                <span class="sc {{ scoreClass(r.score) }}">{{ r.score.toFixed(2) }}</span>
+              } @else {
+                <span class="imp-badge mono">imp {{ r.importance.toFixed(2) }}</span>
+              }
+            </div>
+            @if (mode() === 'search') {
+              <div class="bd">
+                <div class="seg"><div class="bl"><span>relevance</span><span>{{ r.breakdown.relevance.toFixed(2) }}</span></div><div class="bar"><i [style.width]="pct(r.breakdown.relevance)" style="background:var(--accent)"></i></div></div>
+                <div class="seg"><div class="bl"><span>recency</span><span>{{ r.breakdown.recency.toFixed(2) }}</span></div><div class="bar"><i [style.width]="pct(r.breakdown.recency)" style="background:var(--violet)"></i></div></div>
+                <div class="seg"><div class="bl"><span>importance</span><span>{{ r.breakdown.importance.toFixed(2) }}</span></div><div class="bar"><i [style.width]="pct(r.breakdown.importance)" style="background:var(--ink-3)"></i></div></div>
+              </div>
+            }
+          </div>
+        } @empty {
+          <div class="pad muted">
+            @if (mode() === 'search') { No matches. Try different terms or widen the namespace. }
+            @else { No records{{ selectedNs() ? ' in ' + selectedNs() : '' }}. Add one, or seed via <code>apex memory put</code>. }
+          </div>
+        }
+      </div>
+    </div>
+  </div>
+</section>

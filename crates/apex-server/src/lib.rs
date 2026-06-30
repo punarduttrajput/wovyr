@@ -15,6 +15,8 @@
 //! **idempotency keys** (§9) on runs, and a **request-id** on every response (§14).
 
 mod hardening;
+mod memory;
+mod plugins;
 mod tenancy;
 mod webhooks;
 
@@ -130,6 +132,11 @@ pub struct AppState {
     pub(crate) event_counter: AtomicU64,
     /// Caches responses by `Idempotency-Key` so client retries of mutations are safe.
     pub(crate) idempotency: hardening::IdempotencyStore,
+    /// Memory engine backing the memory-explorer routes (embeds via the gateway).
+    pub(crate) memory: apex_memory::MemoryEngine,
+    /// The memory store the engine writes to, kept alongside for namespace/record
+    /// enumeration (the engine does not expose its store).
+    pub(crate) memory_store: Arc<dyn apex_memory::MemoryStore>,
 }
 
 impl AppState {
@@ -142,6 +149,7 @@ impl AppState {
         let gateway = Gateway::from_env().with_cost_observer(Arc::new(MetricsCostObserver {
             metrics: metrics.clone(),
         }));
+        let (memory, memory_store) = memory::default_engine();
         Self {
             gateway,
             registry: ToolRegistry::with_builtins(),
@@ -156,6 +164,8 @@ impl AppState {
             webhook_policy: BackoffPolicy::default(),
             event_counter: AtomicU64::new(1),
             idempotency: hardening::IdempotencyStore::default(),
+            memory,
+            memory_store,
         }
     }
 
@@ -307,6 +317,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(tenancy::routes())
         // Webhooks: register/list/delete subscriptions (RBAC-gated).
         .merge(webhooks::routes())
+        // Memory explorer: namespaces, records, hybrid query, put.
+        .merge(memory::routes())
+        // Plugins: list the installed catalog, enable/disable.
+        .merge(plugins::routes())
         .with_state(state)
         // Stamp every response (incl. errors) with a request id (API overview §14).
         .layer(axum::middleware::from_fn(hardening::request_id))

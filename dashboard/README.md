@@ -7,16 +7,20 @@ NestJS BFF is deferred; the SPA currently talks to `apex-server` directly).
 
 ## Surfaces
 
-**Monitoring** (built) · **Agent Studio** (built) · Workflow Builder · Memory Explorer ·
-Marketplace · **Settings** (built). Each is a lazy-loaded route under `src/app/features/`.
+**Monitoring** · **Agent Studio** · **Memory Explorer** · **Marketplace** ·
+**Settings** all built; Workflow Builder is the lone placeholder. Each is a lazy-loaded
+route under `src/app/features/`.
 
 - **Agent Studio** — agent CRUD (`/api/v1/agents`) + live `agents:stream` SSE test console.
-- **Monitoring** — polls `/metrics`, `/healthz`, `/api/v1/workflows` every 5s.
+- **Monitoring** — polls `/metrics`, `/healthz`, `/api/v1/workflows` every 5s; rows link
+  to an **execution detail** view (`/executions/:id`).
+- **Memory Explorer** — namespaces, browse, and hybrid search with explainable
+  `score_breakdown` (`/api/v1/memory/*`).
+- **Marketplace** — installed plugin catalog with enable/disable (`/api/v1/plugins*`).
 - **Settings** — orgs / projects / members / quotas / webhooks (tenancy + webhooks API).
 
-Workflow Builder, Memory Explorer and Marketplace remain placeholders — the platform
-server does not expose workflow-authoring, memory, or plugin HTTP routes yet (those are
-CLI-only today), so those surfaces are blocked on backend endpoints.
+A ⌘K command palette (top-bar or `Ctrl/⌘+K`) jumps between surfaces. Workflow Builder
+stays a placeholder — the server exposes no workflow-authoring routes yet (CLI-only).
 
 ## Run it locally
 

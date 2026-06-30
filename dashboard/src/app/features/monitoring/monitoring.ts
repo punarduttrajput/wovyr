@@ -1,5 +1,6 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
+import { RouterLink } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { forkJoin, of, timer } from 'rxjs';
 import { catchError, switchMap } from 'rxjs/operators';
@@ -11,7 +12,7 @@ const HISTORY = 30;
 
 @Component({
   selector: 'app-monitoring',
-  imports: [DecimalPipe],
+  imports: [DecimalPipe, RouterLink],
   templateUrl: './monitoring.html',
   styleUrl: './monitoring.scss',
 })
