@@ -15,11 +15,14 @@ apex-agent.workspace = true
 apex-workflow.workspace = true
 apex-telemetry.workspace = true
 apex-tenancy.workspace = true
+apex-events.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
 futures = "0.3"
 
 [dev-dependencies]

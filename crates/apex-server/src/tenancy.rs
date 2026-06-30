@@ -70,7 +70,11 @@ fn is_platform_admin(principal: &str) -> bool {
 
 /// Build the [`TenantContext`] for a request, resolving the principal's effective roles
 /// against the tenancy store (narrowed to `project` and its org when project-scoped).
-fn context(state: &AppState, headers: &HeaderMap, project: Option<String>) -> TenantContext {
+pub(crate) fn context(
+    state: &AppState,
+    headers: &HeaderMap,
+    project: Option<String>,
+) -> TenantContext {
     let tenant = header(headers, "x-apex-tenant")
         .unwrap_or(DEFAULT_TENANT)
         .to_string();
@@ -141,6 +145,7 @@ async fn create_org(
     let org = state
         .tenancy
         .create_org(Organization::new(&ctx.tenant, req.name))?;
+    crate::webhooks::emit(&state, "organization.created", &ctx.tenant, json!(org));
     Ok((StatusCode::CREATED, Json(json!(org))))
 }
 
@@ -181,6 +186,7 @@ async fn create_project(
         ApiError::new(StatusCode::NOT_FOUND, "not_found", "organization not found")
     })?;
     let project = state.tenancy.create_project(Project::new(&org, req.name))?;
+    crate::webhooks::emit(&state, "project.created", &ctx.tenant, json!(project));
     Ok((StatusCode::CREATED, Json(json!(project))))
 }
 
@@ -217,6 +223,7 @@ async fn patch_project(
         project.status = status;
     }
     state.tenancy.update_project(project.clone())?;
+    crate::webhooks::emit(&state, "project.updated", &ctx.tenant, json!(project));
     Ok(Json(json!(project)))
 }
 
@@ -228,6 +235,7 @@ async fn delete_project(
     let ctx = context(&state, &headers, Some(id.clone()));
     ctx.authorize("projects:admin")?;
     state.tenancy.delete_project(&id)?;
+    crate::webhooks::emit(&state, "project.deleted", &ctx.tenant, json!({ "id": id }));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -264,6 +272,7 @@ async fn add_member(
         scope: MemberScope::Project(id),
     };
     state.tenancy.add_membership(membership.clone())?;
+    crate::webhooks::emit(&state, "member.added", &ctx.tenant, json!(membership));
     Ok((StatusCode::CREATED, Json(json!(membership))))
 }
 
@@ -276,7 +285,13 @@ async fn remove_member(
     ctx.authorize("projects:admin")?;
     state
         .tenancy
-        .remove_membership(&uid, &MemberScope::Project(id))?;
+        .remove_membership(&uid, &MemberScope::Project(id.clone()))?;
+    crate::webhooks::emit(
+        &state,
+        "member.removed",
+        &ctx.tenant,
+        json!({ "user": uid, "project": id }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -303,6 +318,12 @@ async fn set_quota(
     let ctx = context(&state, &headers, Some(id.clone()));
     ctx.authorize("org.admin")?;
     state.tenancy.set_quota(&id, limits.clone())?;
+    crate::webhooks::emit(
+        &state,
+        "quota.updated",
+        &ctx.tenant,
+        json!({ "project": id, "limits": limits }),
+    );
     Ok(Json(json!({ "scope": "project", "limits": limits })))
 }
 
@@ -416,6 +437,13 @@ pub(crate) fn record_run_cost(state: &Arc<AppState>, project: Option<&str>, cost
 /// The in-scope project for a run, from the `X-Apex-Project` request header.
 pub(crate) fn run_project(headers: &HeaderMap) -> Option<String> {
     header(headers, "x-apex-project").map(str::to_string)
+}
+
+/// The in-scope tenant for a run, from `X-Apex-Tenant` (defaults to `default`).
+pub(crate) fn run_tenant(headers: &HeaderMap) -> String {
+    header(headers, "x-apex-tenant")
+        .unwrap_or(DEFAULT_TENANT)
+        .to_string()
 }
 
 #[cfg(test)]
