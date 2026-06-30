@@ -90,6 +90,51 @@ export interface Webhook {
   active?: boolean;
 }
 
+// ---- memory ----
+
+export interface MemoryNamespace {
+  namespace: string;
+  count: number;
+}
+
+export interface ScoreBreakdown {
+  relevance: number;
+  recency: number;
+  importance: number;
+  total: number;
+}
+
+export interface MemoryResult {
+  id: string;
+  namespace: string;
+  content: string;
+  type: string;
+  importance: number;
+  tags: string[];
+  score: number;
+  breakdown: ScoreBreakdown;
+}
+
+// ---- plugins ----
+
+export interface PluginCapability {
+  kind: string;
+  id: string;
+}
+
+export interface PluginInfo {
+  id: string;
+  name: string;
+  version: string;
+  publisher: string;
+  description: string;
+  state: 'enabled' | 'disabled';
+  permissions: string[];
+  granted: string[];
+  capabilities: PluginCapability[];
+  platform_api: string;
+}
+
 /**
  * A normalized run-stream event. The server emits anonymous `data:` frames carrying a
  * `type` discriminator (start/memory/delta/tool_call/tool_result/done), then a terminal

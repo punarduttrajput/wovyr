@@ -134,7 +134,7 @@
         <thead><tr><th>Execution</th><th>Workflow</th><th>Version</th><th>Status</th><th class="num">Activities</th><th>Waiting on</th></tr></thead>
         <tbody>
           @for (w of workflows(); track w.execution_id) {
-            <tr>
+            <tr class="link-row" [routerLink]="['/executions', w.execution_id]">
               <td class="rid">{{ w.execution_id }}</td>
               <td><b>{{ w.workflow_name }}</b></td>
               <td class="mono muted">{{ w.workflow_version }}</td>

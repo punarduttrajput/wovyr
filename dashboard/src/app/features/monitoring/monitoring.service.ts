@@ -30,6 +30,12 @@ export class MonitoringService {
     return this.http.get<Page<WorkflowSummary>>('/api/v1/workflows');
   }
 
+  execution(id: string): Observable<{ execution: WorkflowSummary; events: unknown[] }> {
+    return this.http.get<{ execution: WorkflowSummary; events: unknown[] }>(
+      `/api/v1/workflows/${encodeURIComponent(id)}`,
+    );
+  }
+
   metrics(): Observable<MetricsSnapshot> {
     return this.http
       .get('/metrics', { responseType: 'text' })

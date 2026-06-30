@@ -24,16 +24,21 @@ export const routes: Routes = [
     data: { surface: 'Workflow Builder', eyebrow: 'Build / Workflow Builder' },
   },
   {
+    path: 'executions/:id',
+    title: 'Execution · Apex',
+    loadComponent: () =>
+      import('./features/execution-detail/execution-detail').then((m) => m.ExecutionDetail),
+  },
+  {
     path: 'memory',
     title: 'Memory Explorer · Apex',
-    loadComponent: () => import('./features/placeholder/placeholder').then((m) => m.Placeholder),
-    data: { surface: 'Memory Explorer', eyebrow: 'Build / Memory Explorer' },
+    loadComponent: () =>
+      import('./features/memory-explorer/memory-explorer').then((m) => m.MemoryExplorer),
   },
   {
     path: 'marketplace',
     title: 'Marketplace · Apex',
-    loadComponent: () => import('./features/placeholder/placeholder').then((m) => m.Placeholder),
-    data: { surface: 'Marketplace', eyebrow: 'Extend / Marketplace' },
+    loadComponent: () => import('./features/marketplace/marketplace').then((m) => m.Marketplace),
   },
   {
     path: 'settings',

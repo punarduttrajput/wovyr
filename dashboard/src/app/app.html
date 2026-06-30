@@ -63,11 +63,11 @@
         <svg viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <b>{{ crumb().leaf }}</b>
       </div>
-      <div class="search">
+      <button class="search" type="button" (click)="cmdk.toggle()" aria-label="Open command palette">
         <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        <input placeholder="Search agents, workflows, runs, memory…" aria-label="Search" />
+        <span class="ph">Jump to a surface…</span>
         <kbd>⌘K</kbd>
-      </div>
+      </button>
       <div class="top-actions">
         <button class="icon-btn" type="button" title="Alerts" aria-label="Alerts">
           <svg viewBox="0 0 24 24" fill="none"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.7 21a2 2 0 01-3.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -78,4 +78,15 @@
       <router-outlet />
     </div>
   </main>
+</div>
+
+<app-command-palette #cmdk />
+
+<div class="toasts">
+  @for (t of toasts.toasts(); track t.id) {
+    <div class="toast" [class.err]="t.kind === 'err'">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      {{ t.message }}
+    </div>
+  }
 </div>

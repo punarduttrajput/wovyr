@@ -78,13 +78,12 @@ main { display:flex; flex-direction:column; min-width:0; }
 .search {
   margin-left:8px; flex:1; max-width:420px; display:flex; align-items:center; gap:8px;
   border:1px solid var(--line); background:var(--surface-2); border-radius:var(--r-sm);
-  padding:7px 11px; color:var(--ink-3);
+  padding:8px 11px; color:var(--ink-3); cursor:pointer; font-family:var(--sans); text-align:left;
+  transition:border-color .15s;
 }
+.search:hover { border-color:var(--ink-3); }
 .search svg { width:15px; height:15px; }
-.search input {
-  border:0; background:transparent; outline:none; font-family:var(--sans);
-  font-size:13px; color:var(--ink); width:100%;
-}
+.search .ph { flex:1; font-size:13px; }
 .search kbd {
   font-family:var(--mono); font-size:10px; border:1px solid var(--line);
   border-radius:4px; padding:1px 5px; color:var(--ink-3); background:var(--surface);
@@ -92,6 +91,17 @@ main { display:flex; flex-direction:column; min-width:0; }
 .top-actions { margin-left:auto; display:flex; align-items:center; gap:8px; }
 
 .content { flex:1; min-width:0; }
+
+.toasts { position:fixed; bottom:22px; right:22px; display:flex; flex-direction:column; gap:9px; z-index:120; }
+.toast {
+  display:flex; align-items:center; gap:10px; background:var(--ink); color:var(--canvas);
+  padding:11px 15px; border-radius:10px; box-shadow:var(--shadow-lg); font-size:13px; font-weight:500;
+  animation:toastIn .28s cubic-bezier(.2,.8,.2,1);
+}
+.toast svg { width:16px; height:16px; color:var(--ok); flex:none; }
+.toast.err svg { color:var(--crit); }
+@keyframes toastIn { from { opacity:0; transform:translateY(12px) scale(.96); } to { opacity:1; transform:none; } }
+@media (prefers-reduced-motion:reduce) { .toast { animation:none; } }
 
 @media (max-width:760px) {
   .app { grid-template-columns:1fr; }

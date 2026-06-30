@@ -48,6 +48,8 @@ tbody tr:hover { background:var(--surface-2); }
 .route { color:var(--ink-2); }
 .has-err { color:var(--crit); font-weight:600; }
 .rid { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); }
+.link-row { cursor:pointer; }
+.link-row:hover .rid { color:var(--accent); }
 .pill { display:inline-flex; }
 
 .pad { padding:16px; font-size:13px; }
