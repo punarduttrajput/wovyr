@@ -9,9 +9,12 @@
 //! Agents can be **persisted** (`POST/GET /api/v1/agents`, `GET/DELETE
 //! /api/v1/agents/{id}`) and run by id (`POST /api/v1/agents/{id}/run`), or run inline
 //! via `POST /api/v1/agents:run` (manifest in the body). The store is in-memory for
-//! now (durable file/db backing is a later slice). Streaming (SSE), auth, and
-//! idempotency arrive in later milestones.
+//! now (durable file/db backing is a later slice). The server also hosts the workflow
+//! visibility, multi-tenancy, and webhook routes, and applies the shared `/v1`
+//! conventions in [`hardening`]: cursor **pagination** (§6) on list endpoints,
+//! **idempotency keys** (§9) on runs, and a **request-id** on every response (§14).
 
+mod hardening;
 mod tenancy;
 mod webhooks;
 
@@ -125,6 +128,8 @@ pub struct AppState {
     pub(crate) webhook_policy: BackoffPolicy,
     /// Monotonic counter for emitted event ids.
     pub(crate) event_counter: AtomicU64,
+    /// Caches responses by `Idempotency-Key` so client retries of mutations are safe.
+    pub(crate) idempotency: hardening::IdempotencyStore,
 }
 
 impl AppState {
@@ -150,6 +155,7 @@ impl AppState {
             webhook_sender: Arc::new(webhooks::ReqwestSender::default()),
             webhook_policy: BackoffPolicy::default(),
             event_counter: AtomicU64::new(1),
+            idempotency: hardening::IdempotencyStore::default(),
         }
     }
 
@@ -302,6 +308,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Webhooks: register/list/delete subscriptions (RBAC-gated).
         .merge(webhooks::routes())
         .with_state(state)
+        // Stamp every response (incl. errors) with a request id (API overview §14).
+        .layer(axum::middleware::from_fn(hardening::request_id))
 }
 
 /// Metrics endpoint ([metrics §2](../../docs/14-observability/metrics.md)). Serves
@@ -369,13 +377,22 @@ async fn run_handler(
     Json(req): Json<RunRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let start = Instant::now();
-    let result = run_inner(
-        &state,
-        tenancy::run_tenant(&headers),
-        tenancy::run_project(&headers),
-        req,
-    )
-    .await;
+    let tenant = tenancy::run_tenant(&headers);
+
+    // Idempotency (overview §9): replay the original response for a repeated key.
+    let idem_key = hardening::idempotency_key(&headers);
+    if let Some(key) = &idem_key
+        && let Some(cached) = state.idempotency.get(&tenant, key)
+    {
+        return Ok(Json(cached));
+    }
+
+    let result = run_inner(&state, tenant.clone(), tenancy::run_project(&headers), req).await;
+
+    // Cache successful responses so a client retry with the same key is safe.
+    if let (Some(key), Ok(Json(body))) = (&idem_key, &result) {
+        state.idempotency.put(&tenant, key, body.clone());
+    }
 
     let status = match &result {
         Ok(_) => 200u16,
@@ -574,9 +591,13 @@ async fn create_agent_handler(
     Ok(Json(json!({ "id": id, "status": "created" })))
 }
 
-/// `GET /api/v1/agents` — list stored agent ids.
-async fn list_agents_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({ "agents": state.agents.list() }))
+/// `GET /api/v1/agents` — list stored agent ids (cursor-paginated, overview §6).
+async fn list_agents_handler(
+    State(state): State<Arc<AppState>>,
+    Query(page): Query<hardening::PageQuery>,
+) -> Json<Value> {
+    let items: Vec<Value> = state.agents.list().into_iter().map(Value::String).collect();
+    Json(hardening::paginate(items, &page.page()))
 }
 
 /// `GET /api/v1/agents/{id}` — fetch a stored agent's manifest.
@@ -652,18 +673,20 @@ async fn run_stored_handler(
     result
 }
 
-/// Query params for `GET /api/v1/workflows`.
+/// Query params for `GET /api/v1/workflows`: filters plus cursor pagination.
 #[derive(Debug, Deserialize)]
 struct WorkflowListQuery {
     /// Filter to a workflow name.
     workflow: Option<String>,
     /// Filter to a status (e.g. `running`, `completed`, `failed`).
     status: Option<String>,
-    /// Cap the number returned.
-    limit: Option<usize>,
+    /// `limit` + `cursor` (overview §6).
+    #[serde(flatten)]
+    page: hardening::PageQuery,
 }
 
-/// `GET /api/v1/workflows` — list executions, optionally filtered (G4 visibility).
+/// `GET /api/v1/workflows` — list executions, optionally filtered (G4 visibility),
+/// cursor-paginated (overview §6).
 async fn list_workflows_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<WorkflowListQuery>,
@@ -683,13 +706,18 @@ async fn list_workflows_handler(
             ));
         }
     };
+    // Fetch the full filtered set; pagination slices it (the cursor is the offset).
     let filter = ExecutionFilter {
         workflow_name: query.workflow,
         status,
-        limit: query.limit,
+        limit: None,
     };
     let executions = state.workflows.list(&filter).await?;
-    Ok(Json(json!({ "executions": executions })))
+    let items: Vec<Value> = executions
+        .into_iter()
+        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+        .collect();
+    Ok(Json(hardening::paginate(items, &query.page.page())))
 }
 
 /// `GET /api/v1/workflows/{id}` — an execution's status plus its event timeline (G4).
@@ -770,7 +798,7 @@ async function load() {
   try {
     const res = await fetch('/api/v1/workflows');
     const data = await res.json();
-    const rows = (data.executions || []);
+    const rows = (data.data || []);
     if (!rows.length) { tbody.innerHTML = '<tr><td colspan="3" class="muted">no executions</td></tr>'; return; }
     tbody.innerHTML = '';
     for (const e of rows) {
@@ -920,8 +948,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["executions"][0]["execution_id"], "demo-1");
-        assert_eq!(v["executions"][0]["status"], "Completed");
+        assert_eq!(v["data"][0]["execution_id"], "demo-1");
+        assert_eq!(v["data"][0]["status"], "Completed");
+        assert_eq!(v["has_more"], false);
 
         // Status filter that excludes it yields an empty list.
         let resp = app
@@ -936,7 +965,7 @@ mod tests {
             .unwrap();
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["executions"].as_array().unwrap().len(), 0);
+        assert_eq!(v["data"].as_array().unwrap().len(), 0);
 
         // Detail returns the summary plus a non-empty event timeline.
         let resp = app
@@ -1133,9 +1162,10 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["id"], "persisted");
 
-        // List includes it; Get returns its manifest.
+        // List includes it (paginated envelope); Get returns its manifest.
         let (_, list) = req(&state, "GET", "/api/v1/agents", Value::Null).await;
-        assert_eq!(list["agents"], json!(["persisted"]));
+        assert_eq!(list["data"], json!(["persisted"]));
+        assert_eq!(list["total_estimate"], 1);
         let (st, got) = req(&state, "GET", "/api/v1/agents/persisted", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
         assert!(got["manifest"].as_str().unwrap().contains("persisted"));
@@ -1230,5 +1260,119 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["type"], "client_error");
+    }
+
+    // --- /v1 hardening: request id, idempotency, pagination ----------------------
+
+    /// Issue a request with arbitrary headers, returning the response (for header asserts).
+    async fn raw(
+        state: &Arc<AppState>,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Value,
+    ) -> axum::http::Response<axum::body::Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        builder = builder.header("content-type", "application/json");
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        router(state.clone())
+            .oneshot(
+                builder
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn request_id_is_generated_and_honored() {
+        let state = Arc::new(AppState::from_env());
+        // Generated when absent.
+        let resp = raw(&state, "GET", "/healthz", &[], Value::Null).await;
+        assert!(resp.headers().get("x-request-id").is_some());
+        // Honored when supplied (client correlation).
+        let resp = raw(
+            &state,
+            "GET",
+            "/healthz",
+            &[("x-request-id", "req-abc")],
+            Value::Null,
+        )
+        .await;
+        assert_eq!(resp.headers()["x-request-id"], "req-abc");
+    }
+
+    #[tokio::test]
+    async fn error_envelope_carries_request_id() {
+        let state = Arc::new(AppState::from_env());
+        let resp = raw(&state, "GET", "/api/v1/agents/missing", &[], Value::Null).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            v["error"]["request_id"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "error body should carry a request_id: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_is_idempotent_per_key() {
+        let state = Arc::new(AppState::from_env());
+        let body = json!({
+            "manifest": "metadata:\n  name: idem\nspec:\n  instructions: Hi.\n",
+            "input": { "message": "hi" }
+        });
+        let run = |key: &'static str| {
+            let state = state.clone();
+            let body = body.clone();
+            async move {
+                let resp = raw(
+                    &state,
+                    "POST",
+                    "/api/v1/agents:run",
+                    &[("idempotency-key", key)],
+                    body,
+                )
+                .await;
+                let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+                let v: Value = serde_json::from_slice(&bytes).unwrap();
+                v["run_id"].as_str().unwrap().to_string()
+            }
+        };
+        // Same key → same run_id (replayed); a different key → a fresh run.
+        let first = run("k1").await;
+        assert_eq!(run("k1").await, first);
+        assert_ne!(run("k2").await, first);
+    }
+
+    #[tokio::test]
+    async fn agent_list_is_cursor_paginated() {
+        let state = Arc::new(AppState::from_env());
+        for name in ["alpha", "bravo", "charlie"] {
+            let m = format!("metadata:\n  name: {name}\nspec:\n  instructions: hi\n");
+            req(&state, "POST", "/api/v1/agents", json!({ "manifest": m })).await;
+        }
+        // First page of 2 → has_more + a cursor.
+        let (_, p1) = req(&state, "GET", "/api/v1/agents?limit=2", Value::Null).await;
+        assert_eq!(p1["data"].as_array().unwrap().len(), 2);
+        assert_eq!(p1["has_more"], true);
+        assert_eq!(p1["total_estimate"], 3);
+        let cursor = p1["next_cursor"].as_str().unwrap();
+        // Following the cursor returns the remainder.
+        let (_, p2) = req(
+            &state,
+            "GET",
+            &format!("/api/v1/agents?limit=2&cursor={cursor}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(p2["data"].as_array().unwrap().len(), 1);
+        assert_eq!(p2["has_more"], false);
+        assert_eq!(p2["next_cursor"], Value::Null);
     }
 }
