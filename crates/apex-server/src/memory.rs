@@ -15,12 +15,36 @@ use apex_provider::Gateway;
 use axum::{
     Json, Router,
     extract::{Query, State},
+    http::HeaderMap,
     routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+/// The required-scope prefix that tags a record with its owning tenant.
+const TENANT_SCOPE_PREFIX: &str = "tenant:";
+
+/// The required scope that marks a record as owned by `tenant`.
+fn tenant_scope(tenant: &str) -> String {
+    format!("{TENANT_SCOPE_PREFIX}{tenant}")
+}
+
+/// Whether `tenant` may see a record carrying `required_scopes`. A record tagged with a
+/// `tenant:<owner>` scope is visible only to that owner; an untagged record (legacy or
+/// CLI-created) belongs to the anonymous `default` space. This is the tenant-isolation
+/// filter applied to every read path (the ABAC grants in [`query`] additionally enforce
+/// within-tenant scopes).
+fn visible_to(required_scopes: &[String], tenant: &str) -> bool {
+    match required_scopes
+        .iter()
+        .find_map(|s| s.strip_prefix(TENANT_SCOPE_PREFIX))
+    {
+        Some(owner) => owner == tenant,
+        None => tenant == crate::tenancy::DEFAULT_TENANT,
+    }
+}
 
 /// Build the memory engine over the durable `~/.apex/memory` file store (shared with the
 /// CLI), falling back to in-memory if that directory is unavailable. Returns the engine
@@ -75,14 +99,20 @@ fn parse_strategy(s: Option<&str>) -> RetrievalStrategy {
     }
 }
 
-/// `GET /api/v1/memory/namespaces` — distinct namespaces with their record counts.
+/// `GET /api/v1/memory/namespaces` — distinct namespaces with their record counts
+/// (scoped to the caller's tenant).
 async fn list_namespaces(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, crate::ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "memory:read")?;
     let records = state.memory_store.all(None).await?;
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut total = 0usize;
-    for r in &records {
+    for r in records
+        .iter()
+        .filter(|r| visible_to(&r.required_scopes, &tenant))
+    {
         *counts.entry(r.namespace.clone()).or_default() += 1;
         total += 1;
     }
@@ -103,9 +133,14 @@ struct RecordsQuery {
 /// `GET /api/v1/memory/records?namespace=` — browse records (cursor-paginated).
 async fn list_records(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(q): Query<RecordsQuery>,
 ) -> Result<Json<Value>, crate::ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "memory:read")?;
     let mut records = state.memory_store.all(q.namespace.as_deref()).await?;
+    // Tenant isolation: drop records this tenant does not own (the namespace file may
+    // hold other tenants' records under the same logical namespace).
+    records.retain(|r| visible_to(&r.required_scopes, &tenant));
     // Newest first (by insertion sequence).
     records.sort_by_key(|r| std::cmp::Reverse(r.seq));
     let items: Vec<Value> = records.iter().map(record_json).collect();
@@ -135,8 +170,10 @@ struct QueryRequest {
 /// `POST /api/v1/memory:query` — hybrid retrieval with an explainable score breakdown.
 async fn query(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<Value>, crate::ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "memory:read")?;
     let mut q = MemoryQuery::new(req.text);
     q.namespace = req.namespace;
     q.strategy = parse_strategy(req.strategy.as_deref());
@@ -160,13 +197,24 @@ async fn query(
             importance: req.importance.unwrap_or(d.importance),
         };
     }
-    if let Some(grants) = req.grants {
-        q.access = Some(AccessContext::new(grants));
-    }
+    // ABAC: grant the caller's own tenant scope (so its tenant-tagged records pass) plus
+    // any within-tenant scopes the client supplies — but never let the client assert a
+    // `tenant:` grant (that boundary is server-controlled).
+    let mut grants: Vec<String> = req
+        .grants
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|g| !g.starts_with(TENANT_SCOPE_PREFIX))
+        .collect();
+    grants.push(tenant_scope(&tenant));
+    q.access = Some(AccessContext::new(grants));
 
     let results = state.memory.query(&q).await?;
     let data: Vec<Value> = results
         .iter()
+        // Defense in depth: enforce tenant ownership on the results too (covers
+        // untagged/legacy records, which ABAC treats as public).
+        .filter(|s| visible_to(&s.record.required_scopes, &tenant))
         .map(|s| {
             json!({
                 "id": s.record.id,
@@ -202,8 +250,19 @@ struct PutRequest {
 /// `POST /api/v1/memory/records` — store a memory (embedded via the gateway).
 async fn put_record(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<PutRequest>,
 ) -> Result<Json<Value>, crate::ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "memory:write")?;
+    // Tag the record with its owning tenant so every read path can scope it. Any
+    // client-supplied `tenant:` scope is dropped — the boundary is server-controlled.
+    let mut required_scopes: Vec<String> = req
+        .required_scopes
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.starts_with(TENANT_SCOPE_PREFIX))
+        .collect();
+    required_scopes.push(tenant_scope(&tenant));
     let id = state
         .memory
         .remember_scoped(
@@ -212,7 +271,7 @@ async fn put_record(
             parse_type(req.memory_type.as_deref()),
             req.importance.unwrap_or(0.5).clamp(0.0, 1.0),
             req.tags.unwrap_or_default(),
-            req.required_scopes.unwrap_or_default(),
+            required_scopes,
         )
         .await?;
     Ok(Json(json!({ "id": id, "status": "stored" })))

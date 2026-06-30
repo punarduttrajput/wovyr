@@ -218,6 +218,19 @@ impl AppState {
         self
     }
 
+    /// Override the memory engine + store (tests inject an in-memory store so they don't
+    /// touch the shared `~/.apex/memory`).
+    #[cfg(test)]
+    pub(crate) fn with_memory(
+        mut self,
+        engine: apex_memory::MemoryEngine,
+        store: Arc<dyn apex_memory::MemoryStore>,
+    ) -> Self {
+        self.memory = engine;
+        self.memory_store = store;
+        self
+    }
+
     /// Record the owning tenant of a workflow execution (called at submit).
     fn record_workflow_owner(&self, execution_id: &str, tenant: &str) {
         self.workflow_owners
@@ -1555,6 +1568,152 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK, "owner may read its execution");
+    }
+
+    /// Cross-tenant isolation for the memory surface: records stored by one tenant are
+    /// invisible to another via namespaces, record listing, and hybrid query — even when
+    /// both tenants use the same logical namespace — and `X-Apex-Tenant` cannot be
+    /// spoofed. (v0.3 exit criterion: zero cross-tenant leakage — memory surface.)
+    #[tokio::test]
+    async fn memory_is_isolated_per_tenant() {
+        use apex_memory::{InMemoryStore, MemoryEngine};
+        use apex_provider::Gateway;
+        use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org_a = tenancy
+            .create_org(Organization::new("acme", "Acme"))
+            .unwrap();
+        let org_b = tenancy
+            .create_org(Organization::new("beta", "Beta"))
+            .unwrap();
+        let member = |user: &str, org: &str| Membership {
+            user: user.to_string(),
+            role: Role::OrgAdmin,
+            scope: MemberScope::Organization(org.to_string()),
+        };
+        tenancy.add_membership(member("alice", &org_a.id)).unwrap();
+        tenancy.add_membership(member("bob", &org_b.id)).unwrap();
+
+        let store: Arc<dyn apex_memory::MemoryStore> = Arc::new(InMemoryStore::new());
+        let engine = MemoryEngine::new(Gateway::from_env(), store.clone());
+        let state = Arc::new(
+            AppState::from_env()
+                .with_tenancy(tenancy)
+                .with_memory(engine, store),
+        );
+
+        // Both tenants write into the *same* logical namespace "notes".
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/memory/records",
+            "acme",
+            "alice",
+            json!({ "namespace": "notes", "content": "acme launch codes" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/memory/records",
+            "beta",
+            "bob",
+            json!({ "namespace": "notes", "content": "beta picnic plan" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+
+        // Bob lists records in "notes" — sees only his own, never acme's.
+        let (st, list) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/memory/records?namespace=notes",
+            "beta",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let contents: Vec<&str> = list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["content"].as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["beta picnic plan"],
+            "beta sees only its own record"
+        );
+
+        // Bob's hybrid query cannot surface acme's record.
+        let (st, q) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/memory:query",
+            "beta",
+            "bob",
+            json!({ "text": "launch codes" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let found: Vec<&str> = q["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["content"].as_str())
+            .collect();
+        assert!(
+            !found.iter().any(|c| c.contains("acme")),
+            "beta query must not surface acme's record: {found:?}"
+        );
+
+        // Header spoofing: bob claims acme but isn't a member → 403.
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/memory/namespaces",
+            "acme",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+
+        // Alice sees her own record and namespace, and not beta's.
+        let (st, ns) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/memory/namespaces",
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(ns["total"], 1, "acme sees only its own record count");
+        let (st, q) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/memory:query",
+            "acme",
+            "alice",
+            json!({ "text": "launch codes" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let found: Vec<&str> = q["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["content"].as_str())
+            .collect();
+        assert!(
+            found.iter().any(|c| c.contains("acme")),
+            "acme owner must find its own record: {found:?}"
+        );
     }
 
     #[tokio::test]
