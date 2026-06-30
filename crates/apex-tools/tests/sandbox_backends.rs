@@ -20,6 +20,7 @@ fn cmd(program: &str, args: &[&str]) -> SandboxCommand {
         program: program.into(),
         args: args.iter().map(|s| s.to_string()).collect(),
         workdir: ".".into(),
+        env: vec![],
         limits: ResourceLimits {
             timeout: Duration::from_secs(60),
             ..ResourceLimits::default()

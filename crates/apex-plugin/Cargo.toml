@@ -15,6 +15,7 @@ wasi = ["apex-tools/wasi"]
 [dependencies]
 apex-common.workspace = true
 apex-tools.workspace = true
+apex-secrets.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 serde_json.workspace = true

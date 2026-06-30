@@ -195,6 +195,9 @@ pub struct CapabilityCall<'a> {
     /// The directory the plugin's artifacts were staged into, if any. A disk-backed
     /// runtime resolves the artifact to run as `artifact_dir.join(entry)`.
     pub artifact_dir: Option<&'a Path>,
+    /// The plugin's declared permissions (incl. any `secret:read:<name>`), so the
+    /// runtime can resolve + inject the secrets the capability is entitled to.
+    pub declared_permissions: &'a [String],
     /// The tool execution context (correlation ids, workdir, grants).
     pub ctx: &'a ToolContext,
 }
@@ -269,6 +272,7 @@ impl Tool for PluginTool {
             entry: &self.entry,
             sandbox: &self.sandbox,
             artifact_dir: self.artifact_dir.as_deref(),
+            declared_permissions: &self.metadata.permissions,
             ctx,
         };
         self.runtime.invoke(&call, request).await
@@ -723,6 +727,62 @@ fn tool_metadata(manifest: &PluginManifest, cap: &CapabilityDescriptor) -> ToolM
         description,
     )
     .with_permissions(manifest.permissions.clone())
+}
+
+/// Resolve the secrets a capability is entitled to into environment variables for
+/// sandbox injection ([secret-management §5](../../docs/13-security/secret-management.md#5-injection-into-tools--plugins)).
+/// For each declared `secret:read:<name>` permission, the secret is resolved from `vault`
+/// within `tenant` (fail-closed: the vault rejects a missing grant, a cross-tenant
+/// reference, or an absent secret) and exposed to the guest as `APEX_SECRET_<NAME>`.
+///
+/// An empty `tenant` (no tenant context — e.g. the operator `plugin run` path) injects
+/// nothing; a wildcard grant (`secret:read:*`) is skipped, since no concrete secret name
+/// can be enumerated from it.
+///
+/// Compiled only where used — the WASM runtime (`wasi` feature) and tests.
+#[cfg(any(test, feature = "wasi"))]
+pub(crate) fn resolve_secret_env(
+    declared_permissions: &[String],
+    tenant: &str,
+    vault: &apex_secrets::Vault,
+) -> std::result::Result<Vec<(String, String)>, ToolError> {
+    if tenant.is_empty() {
+        return Ok(Vec::new());
+    }
+    let access = apex_secrets::SecretAccess::new(tenant, declared_permissions.to_vec());
+    let mut env = Vec::new();
+    for perm in declared_permissions {
+        let Some(name) = perm.strip_prefix("secret:read:") else {
+            continue;
+        };
+        if name.contains('*') {
+            continue;
+        }
+        let reference = apex_secrets::SecretRef::new(tenant, name)
+            .map_err(|e| ToolError::Internal(format!("secret reference: {e}")))?;
+        let value = vault
+            .resolve(&reference, &access)
+            .map_err(|e| ToolError::Internal(format!("resolve secret `{name}`: {e}")))?;
+        env.push((secret_env_var(name), value.expose().to_string()));
+    }
+    Ok(env)
+}
+
+/// Map a secret name to the env var it is injected as: `APEX_SECRET_<UPPER_SNAKE>`
+/// (non-alphanumeric characters become `_`).
+#[cfg(any(test, feature = "wasi"))]
+fn secret_env_var(name: &str) -> String {
+    let upper: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("APEX_SECRET_{upper}")
 }
 
 #[cfg(test)]
@@ -1266,5 +1326,67 @@ capabilities:
             .upgrade(&pkg(&kp, HTTP_V2), &[], &mut registry)
             .unwrap_err();
         assert!(format!("{err}").contains("not installed"));
+    }
+
+    // --- Secret resolution / injection -------------------------------------------
+
+    fn vault_with(tenant: &str, name: &str, value: &str) -> apex_secrets::Vault {
+        let store = std::sync::Arc::new(apex_secrets::InMemorySecretStore::new());
+        let vault = apex_secrets::Vault::new(store);
+        vault.create(tenant, name, value).unwrap();
+        vault
+    }
+
+    #[test]
+    fn resolves_declared_secret_into_env() {
+        let vault = vault_with("acme", "vpn-admin-token", "t0p-secret");
+        let perms = vec![
+            "net:egress:api.vpn.com".to_string(),
+            "secret:read:vpn-admin-token".to_string(),
+        ];
+        let env = resolve_secret_env(&perms, "acme", &vault).unwrap();
+        assert_eq!(
+            env,
+            vec![(
+                "APEX_SECRET_VPN_ADMIN_TOKEN".to_string(),
+                "t0p-secret".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn empty_tenant_injects_nothing() {
+        let vault = vault_with("acme", "token", "v");
+        let perms = vec!["secret:read:token".to_string()];
+        // No tenant context (e.g. operator `plugin run`) → no injection.
+        assert!(resolve_secret_env(&perms, "", &vault).unwrap().is_empty());
+    }
+
+    #[test]
+    fn wildcard_grant_is_skipped() {
+        let vault = vault_with("acme", "token", "v");
+        let perms = vec!["secret:read:*".to_string()];
+        // A wildcard can't be enumerated into a concrete env var.
+        assert!(
+            resolve_secret_env(&perms, "acme", &vault)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn missing_secret_fails_closed() {
+        let vault = vault_with("acme", "present", "v");
+        let perms = vec!["secret:read:absent".to_string()];
+        assert!(resolve_secret_env(&perms, "acme", &vault).is_err());
+    }
+
+    #[test]
+    fn cross_tenant_secret_is_forbidden() {
+        // The secret lives in acme; a beta workload that declares the same name must not
+        // resolve it (the vault rejects the cross-tenant reference fail-closed).
+        let vault = vault_with("acme", "token", "v");
+        let perms = vec!["secret:read:token".to_string()];
+        assert!(resolve_secret_env(&perms, "beta", &vault).is_err());
     }
 }

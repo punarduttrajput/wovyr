@@ -62,6 +62,9 @@ pub struct ToolContext {
     pub agent_id: String,
     /// Base directory tools may operate within.
     pub workdir: String,
+    /// The tenant the invocation acts in — the namespace a plugin's secret references
+    /// resolve within. Empty for the unscoped/single-node default.
+    pub tenant: String,
     /// Permissions granted to the caller. `None` means **unrestricted** (no policy);
     /// `Some(set)` enforces that a tool's declared permissions are a subset of it
     /// ([spec §47](../../docs/04-agent-framework/tool-framework.md)).

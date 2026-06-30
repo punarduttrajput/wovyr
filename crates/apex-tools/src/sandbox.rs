@@ -303,7 +303,7 @@ impl SandboxManager {
 }
 
 /// A command to execute inside a sandbox.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SandboxCommand {
     /// Program to run.
     pub program: String,
@@ -311,6 +311,9 @@ pub struct SandboxCommand {
     pub args: Vec<String>,
     /// Working directory (bind-mounted to `/workspace` for container backends).
     pub workdir: String,
+    /// Environment variables injected into the sandbox (e.g. resolved secrets, in
+    /// memory). Honored by the WASI backend; zeroed with the command on teardown.
+    pub env: Vec<(String, String)>,
     /// Resource limits.
     pub limits: ResourceLimits,
 }
@@ -1059,6 +1062,13 @@ impl WasiSandbox {
                     .map_err(|e| SandboxError::Internal(format!("wasi preopen: {e}")))?;
             }
         }
+        // Inject environment variables (e.g. resolved secrets) into the guest. They
+        // live only for this in-memory execution and are dropped with the command.
+        for (key, value) in &cmd.env {
+            builder
+                .env(key, value)
+                .map_err(|e| SandboxError::Internal(format!("wasi env: {e}")))?;
+        }
         let wasi = builder.build();
 
         let mut limits = StoreLimitsBuilder::new();
@@ -1289,6 +1299,7 @@ mod tests {
             program: "echo".into(),
             args: vec!["hi".into()],
             workdir: "/work".into(),
+            env: vec![],
             limits: ResourceLimits {
                 memory_bytes: Some(256 * 1024 * 1024),
                 cpu_millis: Some(1500),
@@ -1575,6 +1586,31 @@ mod tests {
     #[cfg(feature = "wasi")]
     const LOOP_WAT: &str = r#"(module (func (export "_start") (loop (br 0))))"#;
 
+    /// A WASI module that dumps its environment block to stdout: reads `environ_sizes_get`
+    /// then `environ_get` and writes the raw `KEY=VALUE\0…` buffer to fd 1. Used to prove
+    /// that `SandboxCommand.env` reaches the guest.
+    #[cfg(feature = "wasi")]
+    const ENVIRON_WAT: &str = r#"
+        (module
+          (import "wasi_snapshot_preview1" "environ_sizes_get"
+            (func $sizes (param i32 i32) (result i32)))
+          (import "wasi_snapshot_preview1" "environ_get"
+            (func $get (param i32 i32) (result i32)))
+          (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (func (export "_start")
+            ;; environ_sizes_get(count=@0, bufsize=@4)
+            (drop (call $sizes (i32.const 0) (i32.const 4)))
+            ;; environ_get(environ_ptrs=@8, environ_buf=@100)
+            (drop (call $get (i32.const 8) (i32.const 100)))
+            ;; iovec @200 -> { buf=100, len=mem[4] (total env buffer size) }
+            (i32.store (i32.const 200) (i32.const 100))
+            (i32.store (i32.const 204) (i32.load (i32.const 4)))
+            ;; fd_write(stdout, iovs=@200, 1, nwritten=@208)
+            (drop (call $fd_write (i32.const 1) (i32.const 200) (i32.const 1) (i32.const 208)))))
+    "#;
+
     #[cfg(feature = "wasi")]
     fn wasm_temp(wat_src: &str, tag: &str) -> std::path::PathBuf {
         let bytes = wat::parse_str(wat_src).expect("assemble wat");
@@ -1590,6 +1626,7 @@ mod tests {
             program: path.to_string_lossy().into_owned(),
             args: vec![],
             workdir: ".".into(),
+            env: vec![],
             limits,
         }
     }
@@ -1607,6 +1644,22 @@ mod tests {
         assert!(
             out.stdout.contains("apex_wasi_ok"),
             "stdout: {:?}",
+            out.stdout
+        );
+    }
+
+    #[cfg(feature = "wasi")]
+    #[tokio::test]
+    async fn wasi_injects_env_into_guest() {
+        let path = wasm_temp(ENVIRON_WAT, "environ");
+        let mut cmd = wasi_cmd(&path, ResourceLimits::default());
+        cmd.env = vec![("APEX_SECRET_DB_TOKEN".into(), "hunter2".into())];
+        let sb = WasiSandbox::new().unwrap();
+        let out = sb.execute(&cmd).await.unwrap();
+        assert_eq!(out.exit_code, Some(0), "stderr: {}", out.stderr);
+        assert!(
+            out.stdout.contains("APEX_SECRET_DB_TOKEN=hunter2"),
+            "injected env var should reach the guest; stdout: {:?}",
             out.stdout
         );
     }

@@ -273,6 +273,9 @@ async fn execute_tool_call(
         execution_id: format!("{}-s{step}-t{idx}", def.metadata.name),
         agent_id: def.metadata.name.clone(),
         workdir: ".".to_string(),
+        // Tenant threading into the agent run path (for plugin secret resolution) is a
+        // later slice; unset here means no tenant-scoped secret injection on this path.
+        tenant: String::new(),
         granted_permissions: def.spec.permissions.clone(),
     };
 

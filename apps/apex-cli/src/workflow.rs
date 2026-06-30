@@ -51,6 +51,7 @@ impl ActivityExecutor for PlatformExecutor {
                     execution_id: ctx.id.clone(),
                     agent_id: "workflow".to_string(),
                     workdir: ".".to_string(),
+                    tenant: String::new(),
                     granted_permissions: None,
                 };
                 let params = if inputs.is_null() {

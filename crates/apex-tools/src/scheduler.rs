@@ -259,6 +259,7 @@ mod tests {
                 program: "echo".into(),
                 args: vec![tag.clone()],
                 workdir: ".".into(),
+                env: vec![],
                 limits: ResourceLimits {
                     timeout: Duration::from_secs(5),
                     ..ResourceLimits::default()

@@ -317,6 +317,7 @@ pub async fn run_cmd(capability: &str, input: &str) -> Result<()> {
         execution_id: format!("plugin-run-{capability}"),
         agent_id: "apex-cli".to_string(),
         workdir: ".".to_string(),
+        tenant: String::new(),
         granted_permissions: grants,
     };
     let params: Value =

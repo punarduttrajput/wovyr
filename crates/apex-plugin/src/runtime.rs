@@ -29,6 +29,7 @@ use serde_json::Value;
 pub struct WasiCapabilityRuntime {
     sandbox: WasiSandbox,
     limits: ResourceLimits,
+    secrets: Option<apex_secrets::Vault>,
 }
 
 impl WasiCapabilityRuntime {
@@ -39,12 +40,21 @@ impl WasiCapabilityRuntime {
         Ok(Self {
             sandbox,
             limits: ResourceLimits::default(),
+            secrets: None,
         })
     }
 
     /// Set the per-invocation resource limits (timeout, memory, CPU/fuel).
     pub fn with_limits(mut self, limits: ResourceLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Resolve a capability's declared `secret:read:<name>` permissions from `vault` and
+    /// inject the values into the sandbox as `APEX_SECRET_<NAME>` env vars at invocation
+    /// ([secret-management §5](../../docs/13-security/secret-management.md#5-injection-into-tools--plugins)).
+    pub fn with_secrets(mut self, vault: apex_secrets::Vault) -> Self {
+        self.secrets = Some(vault);
         self
     }
 }
@@ -88,10 +98,22 @@ impl CapabilityRuntime for WasiCapabilityRuntime {
         let stdin = serde_json::to_vec(&request.parameters)
             .map_err(|e| ToolError::Internal(format!("encode request: {e}")))?;
 
+        // Resolve the secrets this capability is entitled to (within the caller's tenant)
+        // and inject them as env vars — in memory, dropped with the command on teardown.
+        let env = match &self.secrets {
+            Some(vault) => crate::engine::resolve_secret_env(
+                call.declared_permissions,
+                &call.ctx.tenant,
+                vault,
+            )?,
+            None => Vec::new(),
+        };
+
         let cmd = SandboxCommand {
             program: module.to_string_lossy().into_owned(),
             args: Vec::new(),
             workdir: dir.to_string_lossy().into_owned(),
+            env,
             limits: self.limits.clone(),
         };
 

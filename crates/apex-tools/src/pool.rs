@@ -265,6 +265,7 @@ mod tests {
             program: "echo".into(),
             args: vec!["hi".into()],
             workdir: ".".into(),
+            env: vec![],
             limits: crate::sandbox::ResourceLimits {
                 timeout: Duration::from_secs(5),
                 ..Default::default()

@@ -199,6 +199,7 @@ name = "apex-plugin"
 version = "0.1.0"
 dependencies = [
  "apex-common",
+ "apex-secrets",
  "apex-tools",
  "async-trait",
  "ring",
