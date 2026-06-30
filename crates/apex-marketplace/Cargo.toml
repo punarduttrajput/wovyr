@@ -7,6 +7,12 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Plugin Marketplace registry: the hosted discovery, publishing, governance, and ratings surface over signed plugin packages."
 
+[features]
+# Run the supply-chain end-to-end test's *execute* step through the real WASM
+# capability loader (`apex-plugin/wasi` → Wasmtime). Off by default (heavy compile);
+# the publish→discover→download→install half of the E2E test always runs.
+wasi = ["apex-plugin/wasi"]
+
 [dependencies]
 apex-common.workspace = true
 apex-plugin.workspace = true
@@ -21,3 +27,8 @@ semver = "1"
 [dev-dependencies]
 # Produces signed test packages (ed25519) without an external toolchain.
 ring = "0.17"
+# Drive the engine's async capability runtime in the E2E test's execute step.
+tokio = { workspace = true, features = ["macros", "rt"] }
+# Names the tool registry/context/request types the engine's enable+execute path uses
+# (the heavy `wasi` backend is pulled only when this crate's `wasi` feature is on).
+apex-tools.workspace = true

@@ -169,11 +169,13 @@ version = "0.1.0"
 dependencies = [
  "apex-common",
  "apex-plugin",
+ "apex-tools",
  "ring",
  "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
  "tracing",
 ]
 
