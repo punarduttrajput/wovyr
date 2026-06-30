@@ -1,0 +1,153 @@
+<section class="view">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">Operate / Home</div>
+      <h1>Monitoring</h1>
+      <p>Live platform health, request metrics, and spend — read from the platform
+        server's <code>/metrics</code>, <code>/healthz</code> and workflow visibility API.</p>
+    </div>
+    <div class="head-actions">
+      @if (reachable()) {
+        <span class="live"><span class="blip"></span>LIVE · polling {{ ticks() }}×</span>
+      } @else {
+        <span class="pill crit"><span class="pd"></span>SERVER UNREACHABLE</span>
+      }
+    </div>
+  </div>
+
+  @if (!reachable()) {
+    <div class="card empty">
+      <b>Can't reach the platform server.</b>
+      <span>Start it with <code>cargo run -p apex-cli -- dev</code> (binds 127.0.0.1:8080).
+        The dev server proxies <code>/metrics</code>, <code>/healthz</code> and <code>/api</code>.</span>
+    </div>
+  }
+
+  <!-- stat tiles -->
+  <div class="four tiles">
+    <div class="card stat">
+      <div class="lbl">Requests</div>
+      <div class="val tnum">{{ metrics()?.requestsTotal ?? 0 | number }}</div>
+      <div class="delta muted">{{ (perWindow().at(-1) ?? 0) }} in last {{ 5 }}s window</div>
+      <div class="spark">
+        @if (sparkline().ok) {
+          <svg viewBox="0 0 180 38" width="100%" height="38" preserveAspectRatio="none" fill="none">
+            <defs>
+              <linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="var(--accent)" stop-opacity=".22" />
+                <stop offset="1" stop-color="var(--accent)" stop-opacity="0" />
+              </linearGradient>
+            </defs>
+            <path [attr.d]="sparkline().area" fill="url(#sg)" />
+            <path [attr.d]="sparkline().line" stroke="var(--accent)" stroke-width="1.8"
+              stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        } @else {
+          <div class="spark-empty">gathering…</div>
+        }
+      </div>
+    </div>
+
+    <div class="card stat">
+      <div class="lbl">Error rate</div>
+      <div class="val tnum">{{ errorPct() }}<small>%</small></div>
+      <div class="delta" [class.ok-t]="(metrics()?.errorsTotal ?? 0) === 0">
+        {{ metrics()?.errorsTotal ?? 0 }} of {{ metrics()?.requestsTotal ?? 0 | number }} reqs
+      </div>
+    </div>
+
+    <div class="card stat">
+      <div class="lbl">Avg latency</div>
+      <div class="val tnum">{{ (metrics()?.avgLatencyMs ?? 0) | number: '1.0-1' }}<small>ms</small></div>
+      <div class="delta muted">across all routes</div>
+    </div>
+
+    <div class="card stat">
+      <div class="lbl">LLM spend</div>
+      <div class="val tnum">${{ (metrics()?.llmCostUsd ?? 0) | number: '1.4-4' }}</div>
+      <div class="delta muted">
+        {{ metrics()?.llmTokens ?? 0 | number }} tokens
+        @if ((metrics()?.cacheSavingsUsd ?? 0) > 0) {
+          · saved ${{ metrics()?.cacheSavingsUsd | number: '1.4-4' }}
+        }
+      </div>
+    </div>
+  </div>
+
+  <div class="cols">
+    <!-- health -->
+    <div class="card">
+      <div class="card-h"><h3>Platform health</h3>
+        <div class="right">
+          @if (health()) { <span class="pill ok"><span class="pd"></span>OK</span> }
+          @else { <span class="pill crit"><span class="pd"></span>DOWN</span> }
+        </div>
+      </div>
+      <div class="svc">
+        <span class="pill" [class.ok]="!!health()" [class.crit]="!health()"><span class="pd"></span>{{ health() ? 'UP' : 'DOWN' }}</span>
+        <span class="nm">API server</span>
+        <span class="meta">apex-server {{ health()?.version || '—' }}</span>
+      </div>
+      <div class="svc">
+        <span class="pill" [class.ok]="reachable()" [class.mut]="!reachable()"><span class="pd"></span>{{ reachable() ? 'UP' : '—' }}</span>
+        <span class="nm">Workflow store</span>
+        <span class="meta">{{ workflows().length }} executions</span>
+      </div>
+      <div class="svc">
+        <span class="pill mut"><span class="pd"></span>METRICS</span>
+        <span class="nm">Telemetry</span>
+        <span class="meta">{{ metrics()?.samples?.length ?? 0 }} samples scraped</span>
+      </div>
+    </div>
+
+    <!-- routes (RED per route) -->
+    <div class="card">
+      <div class="card-h"><h3>Requests by route</h3><span class="sub">RED · cumulative</span></div>
+      @if (metrics()?.routes?.length) {
+        <table>
+          <thead><tr><th>Route</th><th class="num">Requests</th><th class="num">Errors</th></tr></thead>
+          <tbody>
+            @for (r of metrics()!.routes; track r.route) {
+              <tr>
+                <td class="mono route">{{ r.route }}</td>
+                <td class="num tnum">{{ r.count | number }}</td>
+                <td class="num tnum" [class.has-err]="r.errors > 0">{{ r.errors }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      } @else {
+        <div class="muted pad">No route metrics yet — they appear as the API serves requests.</div>
+      }
+    </div>
+  </div>
+
+  <!-- live activity -->
+  <div class="card">
+    <div class="card-h"><h3>Workflow executions</h3><span class="sub">visibility API · /api/v1/workflows</span>
+      <div class="right">
+        @if (reachable()) { <span class="live"><span class="blip"></span>LIVE</span> }
+      </div>
+    </div>
+    @if (workflows().length) {
+      <table>
+        <thead><tr><th>Execution</th><th>Workflow</th><th>Version</th><th>Status</th><th class="num">Activities</th><th>Waiting on</th></tr></thead>
+        <tbody>
+          @for (w of workflows(); track w.execution_id) {
+            <tr>
+              <td class="rid">{{ w.execution_id }}</td>
+              <td><b>{{ w.workflow_name }}</b></td>
+              <td class="mono muted">{{ w.workflow_version }}</td>
+              <td><span class="pill {{ statusClass(w.status) }}"><span class="pd"></span>{{ w.status }}</span></td>
+              <td class="num tnum">{{ activityCount(w) }}</td>
+              <td class="mono muted">{{ w.waiting_on.length ? w.waiting_on.join(', ') : '—' }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    } @else {
+      <div class="muted pad">No workflow executions yet. Start one with
+        <code>apex workflows run</code> and it will appear here live.</div>
+    }
+  </div>
+</section>

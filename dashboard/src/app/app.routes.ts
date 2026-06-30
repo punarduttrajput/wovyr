@@ -15,8 +15,7 @@ export const routes: Routes = [
   {
     path: 'monitoring',
     title: 'Monitoring · Apex',
-    loadComponent: () => import('./features/placeholder/placeholder').then((m) => m.Placeholder),
-    data: { surface: 'Monitoring', eyebrow: 'Operate / Home' },
+    loadComponent: () => import('./features/monitoring/monitoring').then((m) => m.Monitoring),
   },
   {
     path: 'workflows',

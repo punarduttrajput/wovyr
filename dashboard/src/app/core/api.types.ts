@@ -26,6 +26,29 @@ export interface Page<T> {
   total_estimate?: number;
 }
 
+/** `GET /healthz`. */
+export interface Health {
+  status: string;
+  version: string;
+}
+
+/** A workflow execution summary (apex-workflow `ExecutionSummary`). */
+export interface WorkflowSummary {
+  execution_id: string;
+  workflow_name: string;
+  workflow_version: string;
+  status: string;
+  activities: Record<string, string>;
+  waiting_on: string[];
+}
+
+/** One parsed Prometheus sample line: `name{labels} value`. */
+export interface MetricSample {
+  name: string;
+  labels: Record<string, string>;
+  value: number;
+}
+
 /**
  * A normalized run-stream event. The server emits anonymous `data:` frames carrying a
  * `type` discriminator (start/memory/delta/tool_call/tool_result/done), then a terminal

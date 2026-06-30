@@ -1,0 +1,61 @@
+.view { padding:24px 26px 60px; }
+
+.four { display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; }
+.cols { display:grid; grid-template-columns:1fr 1.2fr; gap:16px; margin:16px 0; }
+@media (max-width:1080px) {
+  .four { grid-template-columns:repeat(2, 1fr); }
+  .cols { grid-template-columns:1fr; }
+}
+
+.tiles { margin-bottom:4px; }
+
+/* stat tiles */
+.stat { padding:15px 16px; }
+.stat .lbl {
+  font-family:var(--mono); font-size:10px; letter-spacing:.07em; text-transform:uppercase;
+  color:var(--ink-3);
+}
+.stat .val {
+  font-size:27px; font-weight:650; letter-spacing:-.02em; margin-top:6px;
+  font-variant-numeric:tabular-nums;
+}
+.stat .val small { font-size:14px; color:var(--ink-3); font-weight:500; }
+.stat .delta { font-family:var(--mono); font-size:11px; margin-top:4px; color:var(--ink-3); }
+.stat .delta.ok-t { color:var(--ok); }
+.stat .spark { margin-top:10px; height:38px; }
+.spark-empty { font-family:var(--mono); font-size:10.5px; color:var(--ink-3); padding-top:12px; }
+
+/* health rows */
+.svc {
+  display:flex; align-items:center; gap:12px; padding:11px 16px;
+  border-bottom:1px solid var(--line-2);
+}
+.svc:last-child { border-bottom:0; }
+.svc .nm { font-weight:600; font-size:13px; }
+.svc .meta { font-family:var(--mono); font-size:11px; color:var(--ink-3); margin-left:auto; }
+.svc .pill { padding:1px 7px; }
+
+/* tables */
+table { width:100%; border-collapse:collapse; font-size:13px; }
+thead th {
+  font-family:var(--mono); font-size:10px; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--ink-3); text-align:left; padding:9px 16px; border-bottom:1px solid var(--line-2); font-weight:600;
+}
+thead th.num, td.num { text-align:right; }
+tbody td { padding:10px 16px; border-bottom:1px solid var(--line-2); vertical-align:middle; }
+tbody tr:last-child td { border-bottom:0; }
+tbody tr:hover { background:var(--surface-2); }
+.route { color:var(--ink-2); }
+.has-err { color:var(--crit); font-weight:600; }
+.rid { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); }
+.pill { display:inline-flex; }
+
+.pad { padding:16px; font-size:13px; }
+code { font-family:var(--mono); font-size:12px; background:var(--neutral-bg); padding:1px 5px; border-radius:4px; }
+
+.empty {
+  display:flex; flex-direction:column; gap:4px; padding:18px 20px; margin-bottom:16px;
+  border-style:dashed;
+}
+.empty b { color:var(--ink); font-size:14px; }
+.empty span { color:var(--ink-3); font-size:12.5px; }

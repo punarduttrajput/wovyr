@@ -4,5 +4,15 @@
     "secure": false,
     "changeOrigin": true,
     "ws": true
+  },
+  "/metrics": {
+    "target": "http://127.0.0.1:8080",
+    "secure": false,
+    "changeOrigin": true
+  },
+  "/healthz": {
+    "target": "http://127.0.0.1:8080",
+    "secure": false,
+    "changeOrigin": true
   }
 }
