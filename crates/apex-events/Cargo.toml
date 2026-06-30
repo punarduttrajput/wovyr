@@ -1,0 +1,16 @@
+[package]
+name = "apex-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Domain events and outbound webhooks: event model, subscriptions, HMAC-SHA256 signing, topic matching, and retry/backoff."
+
+[dependencies]
+apex-common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Webhook payload signing (HMAC-SHA256). Both cached and already in the dep graph.
+hmac = "0.12"
+sha2 = "0.10"
