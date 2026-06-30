@@ -2,18 +2,25 @@
   <div class="page-head">
     <div>
       <div class="eyebrow">Extend / Marketplace</div>
-      <h1>Plugins</h1>
-      <p>Manage installed plugins — install, enable/disable, or uninstall. Each plugin's
-        requested permissions are shown so you can see what it can do.</p>
+      <h1>Marketplace</h1>
+      <p>Discover and install published plugins from the registry, or manage what's
+        already installed. Each plugin's requested permissions are shown up front so you
+        can see what you're granting.</p>
     </div>
     <div class="head-actions">
       <button class="btn" (click)="showTrust.set(!showTrust())">Trust publisher</button>
-      <button class="btn pri" (click)="showInstall.set(!showInstall())">+ Install</button>
-      <button class="btn" (click)="refresh()">Refresh</button>
+      <button class="btn pri" (click)="showInstall.set(!showInstall())">+ Install file</button>
     </div>
   </div>
 
-  <!-- Install panel -->
+  <div class="tabs">
+    <button class="tab" [class.on]="tab() === 'browse'" (click)="setTab('browse')">Browse</button>
+    <button class="tab" [class.on]="tab() === 'installed'" (click)="setTab('installed')">
+      Installed @if (plugins().length) { <span class="count">{{ plugins().length }}</span> }
+    </button>
+  </div>
+
+  <!-- Install-from-file panel (applies to both tabs) -->
   @if (showInstall()) {
     <div class="card install-panel">
       <div class="card-h"><h3>Install plugin from .apexpkg</h3></div>
@@ -54,8 +61,7 @@
         </label>
         <label class="field-label">
           Ed25519 public key (hex, 64 chars)
-          <input type="text" class="mono" [(ngModel)]="trustKeyHex"
-            placeholder="a1b2c3d4…" />
+          <input type="text" class="mono" [(ngModel)]="trustKeyHex" placeholder="a1b2c3d4…" />
         </label>
         <div class="install-actions">
           <button class="btn pri" (click)="addTrust()" [disabled]="busy() === 'trust'">
@@ -71,73 +77,187 @@
     <div class="status-bar" [class.err]="status().startsWith('Error')">{{ status() }}</div>
   }
 
-  <div class="note">
-    <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 8v5m0 3h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-    <span>This shows the <b>installed</b> plugin catalog. Hosted marketplace discovery
-      (browse/search published plugins) is a later platform slice — install today with
-      <code>apex plugin install &lt;dir&gt; --grant &lt;permission&gt;</code>.</span>
-  </div>
+  <!-- ══ BROWSE ══════════════════════════════════════════════════════════════════ -->
+  @if (tab() === 'browse') {
+    <form class="searchbar" (ngSubmit)="search()">
+      <input type="text" class="search-text" [(ngModel)]="searchText" name="q"
+        placeholder="Search plugins by name, publisher, description…" />
+      <input type="text" class="search-cat" [(ngModel)]="searchCategory" name="category"
+        placeholder="category" />
+      <select class="search-cap" [(ngModel)]="searchCapability" name="capability">
+        <option value="">any capability</option>
+        @for (k of capabilityKinds; track k) { <option [value]="k">{{ k }}</option> }
+      </select>
+      <button type="submit" class="btn pri">Search</button>
+      <button type="button" class="btn" (click)="clearFilters()">Clear</button>
+    </form>
 
-  @if (plugins().length) {
-    <div class="grid">
-      @for (p of plugins(); track p.id) {
-        <div class="card plug">
-          <div class="top">
-            <span class="logo">{{ initials(p.name) }}</span>
-            <div class="ident">
-              <h3>{{ p.name }} <span class="ver mono">{{ p.version }}</span></h3>
-              <div class="pub">{{ p.publisher }}</div>
-            </div>
-            <span class="pill" [class.ok]="p.state === 'enabled'" [class.mut]="p.state === 'disabled'">
-              <span class="pd"></span>{{ p.state }}
-            </span>
-          </div>
-
-          <p class="desc">{{ p.description || 'No description provided.' }}</p>
-
-          <div class="block">
-            <div class="eyebrow">Capabilities</div>
-            <div class="chips">
-              @for (c of p.capabilities; track c.id) {
-                <span class="chip"><b>{{ c.kind }}</b> {{ c.id }}</span>
-              } @empty { <span class="muted mini">none declared</span> }
-            </div>
-          </div>
-
-          <div class="block">
-            <div class="eyebrow">Permissions</div>
-            <div class="chips">
-              @for (perm of p.permissions; track perm) {
-                <span class="pill" [class.crit]="permRisk(perm) === 'high'"
-                  [class.warn]="permRisk(perm) === 'med'" [class.mut]="permRisk(perm) === 'low'">{{ perm }}</span>
-              } @empty { <span class="muted mini">none requested</span> }
-            </div>
-          </div>
-
-          <div class="foot">
-            <span class="mono mini muted">platform-api {{ p.platform_api }}</span>
-            <div class="foot-actions">
-              <button class="btn" [class.pri]="p.state === 'disabled'" [disabled]="busy() === p.id"
-                (click)="toggle(p)">
-                {{ busy() === p.id ? '…' : (p.state === 'enabled' ? 'Disable' : 'Enable') }}
-              </button>
-              <button class="btn danger" [disabled]="busy() === p.id" (click)="uninstall(p)">
-                Uninstall
-              </button>
-            </div>
+    <!-- Install-from-registry panel -->
+    @if (installTarget(); as t) {
+      <div class="card install-panel">
+        <div class="card-h"><h3>Install {{ t.name }}</h3></div>
+        <div class="install-body">
+          <label class="field-label">
+            Version
+            <select class="mono" [(ngModel)]="browseVersion">
+              @for (v of t.versions; track v) { <option [value]="v">{{ v }}</option> }
+            </select>
+          </label>
+          <label class="field-label">
+            Permissions to grant <span class="muted mini">(this plugin requests the following)</span>
+            <input type="text" class="mono" [(ngModel)]="browseGrants"
+              placeholder="no permissions requested" />
+          </label>
+          <div class="install-actions">
+            <button class="btn pri" (click)="confirmInstall()" [disabled]="busy() === t.id">
+              {{ busy() === t.id ? 'Installing…' : 'Install (disabled)' }}
+            </button>
+            <button class="btn" (click)="installTarget.set(null)">Cancel</button>
           </div>
         </div>
-      }
-    </div>
-  } @else {
-    <div class="card empty">
-      <svg viewBox="0 0 24 24" fill="none"><path d="M4 8h16l-1 11H5L4 8Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 8V6a4 4 0 018 0v2" stroke="currentColor" stroke-width="1.6"/></svg>
-      <div>
-        <b>No plugins installed</b>
-        <span>Install one with the CLI, e.g. the bundled echo example:</span>
-        <code class="block-code">apex plugin install examples/plugins/echo --grant net:egress:api.example.com</code>
-        <span>then it'll appear here to enable/disable.</span>
       </div>
-    </div>
+    }
+
+    @if (listings().length) {
+      <div class="grid">
+        @for (l of listings(); track l.id) {
+          <div class="card plug">
+            <div class="top">
+              <span class="logo">{{ initials(l.name) }}</span>
+              <div class="ident">
+                <h3>
+                  {{ l.name }} <span class="ver mono">{{ l.versions[0] }}</span>
+                  @if (l.verified) { <span class="pill ok verified">✓ verified</span> }
+                </h3>
+                <div class="pub">{{ l.publisher }}</div>
+              </div>
+            </div>
+
+            <p class="desc">{{ l.description || 'No description provided.' }}</p>
+
+            <div class="meta-row">
+              @if (l.rating != null) {
+                <span class="stars" [title]="l.rating.toFixed(1) + ' / 5'">{{ stars(l.rating) }}
+                  <span class="muted mini">({{ l.reviews }})</span></span>
+              } @else { <span class="muted mini">unrated</span> }
+              <span class="muted mini">{{ l.installs }} install{{ l.installs === 1 ? '' : 's' }}</span>
+              <span class="pill mut risk" [class.crit]="l.risk === 'high'"
+                [class.warn]="l.risk === 'medium'">{{ l.risk }} risk</span>
+            </div>
+
+            @if (l.categories.length) {
+              <div class="chips">
+                @for (c of l.categories; track c) { <span class="chip">{{ c }}</span> }
+              </div>
+            }
+
+            <div class="block">
+              <div class="eyebrow">Capabilities</div>
+              <div class="chips">
+                @for (c of l.capabilities; track c) { <span class="chip"><b>{{ c }}</b></span> }
+                @empty { <span class="muted mini">none declared</span> }
+              </div>
+            </div>
+
+            <div class="block">
+              <div class="eyebrow">Permissions</div>
+              <div class="chips">
+                @for (perm of l.permissions; track perm) {
+                  <span class="pill" [class.crit]="permRisk(perm) === 'high'"
+                    [class.warn]="permRisk(perm) === 'med'" [class.mut]="permRisk(perm) === 'low'">{{ perm }}</span>
+                } @empty { <span class="muted mini">none requested</span> }
+              </div>
+            </div>
+
+            <div class="foot">
+              <span class="mono mini muted">{{ l.versions.length }} version{{ l.versions.length === 1 ? '' : 's' }}</span>
+              <div class="foot-actions">
+                @if (isInstalled(l.id)) {
+                  <button class="btn" disabled>Installed</button>
+                } @else {
+                  <button class="btn pri" [disabled]="busy() === l.id" (click)="openInstall(l)">Install</button>
+                }
+              </div>
+            </div>
+          </div>
+        }
+      </div>
+    } @else {
+      <div class="card empty">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.6"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <div>
+          <b>{{ searched() ? 'No matching listings' : 'Search the registry' }}</b>
+          <span>Publish one with the CLI to see it here:</span>
+          <code class="block-code">apex plugin publish ./my-plugin --category devtools</code>
+          <span>then browse, then <code>apex plugin get &lt;publisher/name&gt;</code> or hit Install above.</span>
+        </div>
+      </div>
+    }
+  }
+
+  <!-- ══ INSTALLED ═══════════════════════════════════════════════════════════════ -->
+  @if (tab() === 'installed') {
+    @if (plugins().length) {
+      <div class="grid">
+        @for (p of plugins(); track p.id) {
+          <div class="card plug">
+            <div class="top">
+              <span class="logo">{{ initials(p.name) }}</span>
+              <div class="ident">
+                <h3>{{ p.name }} <span class="ver mono">{{ p.version }}</span></h3>
+                <div class="pub">{{ p.publisher }}</div>
+              </div>
+              <span class="pill" [class.ok]="p.state === 'enabled'" [class.mut]="p.state === 'disabled'">
+                <span class="pd"></span>{{ p.state }}
+              </span>
+            </div>
+
+            <p class="desc">{{ p.description || 'No description provided.' }}</p>
+
+            <div class="block">
+              <div class="eyebrow">Capabilities</div>
+              <div class="chips">
+                @for (c of p.capabilities; track c.id) {
+                  <span class="chip"><b>{{ c.kind }}</b> {{ c.id }}</span>
+                } @empty { <span class="muted mini">none declared</span> }
+              </div>
+            </div>
+
+            <div class="block">
+              <div class="eyebrow">Permissions</div>
+              <div class="chips">
+                @for (perm of p.permissions; track perm) {
+                  <span class="pill" [class.crit]="permRisk(perm) === 'high'"
+                    [class.warn]="permRisk(perm) === 'med'" [class.mut]="permRisk(perm) === 'low'">{{ perm }}</span>
+                } @empty { <span class="muted mini">none requested</span> }
+              </div>
+            </div>
+
+            <div class="foot">
+              <span class="mono mini muted">platform-api {{ p.platform_api }}</span>
+              <div class="foot-actions">
+                <button class="btn" [class.pri]="p.state === 'disabled'" [disabled]="busy() === p.id"
+                  (click)="toggle(p)">
+                  {{ busy() === p.id ? '…' : (p.state === 'enabled' ? 'Disable' : 'Enable') }}
+                </button>
+                <button class="btn danger" [disabled]="busy() === p.id" (click)="uninstall(p)">
+                  Uninstall
+                </button>
+              </div>
+            </div>
+          </div>
+        }
+      </div>
+    } @else {
+      <div class="card empty">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 8h16l-1 11H5L4 8Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 8V6a4 4 0 018 0v2" stroke="currentColor" stroke-width="1.6"/></svg>
+        <div>
+          <b>No plugins installed</b>
+          <span>Find one under <b>Browse</b> and click Install, or use the CLI:</span>
+          <code class="block-code">apex plugin get acme/hello --grant net:egress:api.example.com</code>
+          <span>then it'll appear here to enable/disable.</span>
+        </div>
+      </div>
+    }
   }
 </section>

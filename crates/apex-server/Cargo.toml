@@ -18,6 +18,7 @@ apex-tenancy.workspace = true
 apex-events.workspace = true
 apex-memory.workspace = true
 apex-plugin.workspace = true
+apex-marketplace.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true

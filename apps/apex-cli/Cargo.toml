@@ -30,6 +30,7 @@ apex-workflow.workspace = true
 apex-memory.workspace = true
 apex-telemetry.workspace = true
 apex-plugin.workspace = true
+apex-marketplace.workspace = true
 apex-server.workspace = true
 tokio.workspace = true
 serde.workspace = true

@@ -7,10 +7,15 @@ Document ID: PLG-007
 
 **Document ID:** PLG-007  
 **File Path:** `docs/08-plugin-sdk/marketplace.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Core implemented — the `apex-marketplace` registry crate provides the listing
+model, governance policy, ratings, and the publish → discover → download → install flow
+(durable `File`/`InMemory` stores), surfaced over the server's `/api/v1/marketplace*`
+routes and the `apex plugin publish|search|get` CLI. Deferred: automated security
+scanning + the full review workflow (only the operator `verify` toggle exists),
+recommendations, abuse-report workflow, and monetization (§9).  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-06-30
 
 ---
 
@@ -191,3 +196,4 @@ This is roadmap, not v1.
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-06-27 | Initial Plugin Marketplace specification |
+| 1.1.0 | 2026-06-30 | Core implemented: `apex-marketplace` crate (listing model, `RegistryPolicy` governance, ratings, signature-verified publish, discovery, download, install bridge; `File`/`InMemory` stores) + server `/api/v1/marketplace*` routes (publish/search/get/download/review/verify/install, emits `plugin.published`) + CLI `plugin publish|search|get` |

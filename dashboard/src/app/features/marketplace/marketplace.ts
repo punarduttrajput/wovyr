@@ -1,8 +1,17 @@
-import { Component, OnInit, inject, signal } from '@angular/core';
+import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MarketplaceService } from './marketplace.service';
-import { PluginInfo } from '../../core/api.types';
+import { MarketplaceListing, PluginInfo } from '../../core/api.types';
 import { ToastService } from '../../core/toast.service';
+
+/** Capability-kind filter options for browse (mirrors `apex_plugin::CapabilityKind`). */
+const CAPABILITY_KINDS = [
+  'tool',
+  'provider',
+  'memory_backend',
+  'policy',
+  'workflow_activity',
+] as const;
 
 @Component({
   selector: 'app-marketplace',
@@ -14,9 +23,29 @@ export class Marketplace implements OnInit {
   private svc = inject(MarketplaceService);
   private toast = inject(ToastService);
 
+  readonly capabilityKinds = CAPABILITY_KINDS;
+
   readonly plugins = signal<PluginInfo[]>([]);
   readonly status = signal('');
   readonly busy = signal<string | null>(null);
+
+  // ── tabs ─────────────────────────────────────────────────────────────────────
+  readonly tab = signal<'browse' | 'installed'>('browse');
+
+  // ── browse / discovery ─────────────────────────────────────────────────────────
+  readonly listings = signal<MarketplaceListing[]>([]);
+  readonly searched = signal(false);
+  searchText = '';
+  searchCategory = '';
+  searchCapability = '';
+
+  /** Qualified ids of installed plugins, for the "installed" badge on browse cards. */
+  readonly installedIds = computed(() => new Set(this.plugins().map((p) => p.id)));
+
+  // ── install-from-marketplace panel ─────────────────────────────────────────────
+  readonly installTarget = signal<MarketplaceListing | null>(null);
+  browseGrants = '';
+  browseVersion = '';
 
   // ── install panel ────────────────────────────────────────────────────────────
   readonly showInstall = signal(false);
@@ -31,6 +60,13 @@ export class Marketplace implements OnInit {
 
   ngOnInit(): void {
     this.refresh();
+    this.search();
+  }
+
+  setTab(t: 'browse' | 'installed'): void {
+    this.tab.set(t);
+    if (t === 'browse' && !this.searched()) this.search();
+    if (t === 'installed') this.refresh();
   }
 
   refresh(): void {
@@ -38,6 +74,66 @@ export class Marketplace implements OnInit {
       next: (p) => this.plugins.set(p),
       error: (e) => this.fail(e),
     });
+  }
+
+  // ── browse ─────────────────────────────────────────────────────────────────────
+
+  search(): void {
+    this.svc.searchListings(this.searchText, this.searchCategory, this.searchCapability).subscribe({
+      next: (ls) => {
+        this.listings.set(ls);
+        this.searched.set(true);
+      },
+      error: (e) => this.fail(e),
+    });
+  }
+
+  clearFilters(): void {
+    this.searchText = '';
+    this.searchCategory = '';
+    this.searchCapability = '';
+    this.search();
+  }
+
+  /** Open the install panel for a listing, pre-filling grants with its declared perms. */
+  openInstall(l: MarketplaceListing): void {
+    this.installTarget.set(l);
+    this.browseGrants = l.permissions.join(', ');
+    this.browseVersion = l.versions[0] ?? '';
+  }
+
+  confirmInstall(): void {
+    const l = this.installTarget();
+    if (!l) return;
+    const grants = this.browseGrants
+      .split(',')
+      .map((g) => g.trim())
+      .filter(Boolean);
+    this.busy.set(l.id);
+    this.svc.installFromMarketplace(l.id, this.browseVersion || undefined, grants).subscribe({
+      next: () => {
+        this.toast.show(`${l.name} installed (disabled)`);
+        this.busy.set(null);
+        this.installTarget.set(null);
+        this.refresh(); // updated installed set → browse cards reflect it
+        this.search(); // refreshed install counts
+      },
+      error: (e) => {
+        this.busy.set(null);
+        this.fail(e);
+      },
+    });
+  }
+
+  isInstalled(id: string): boolean {
+    return this.installedIds().has(id);
+  }
+
+  /** Filled/empty star glyphs for a 0–5 rating (rounded to nearest whole star). */
+  stars(rating: number | null): string {
+    if (rating == null) return '';
+    const filled = Math.round(rating);
+    return '★'.repeat(filled) + '☆'.repeat(Math.max(0, 5 - filled));
   }
 
   toggle(p: PluginInfo): void {

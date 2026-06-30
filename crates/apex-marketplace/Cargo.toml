@@ -1,0 +1,23 @@
+[package]
+name = "apex-marketplace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Plugin Marketplace registry: the hosted discovery, publishing, governance, and ratings surface over signed plugin packages."
+
+[dependencies]
+apex-common.workspace = true
+apex-plugin.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# Package content-addressing (sha256 of the published `.apexpkg`).
+sha2 = "0.10"
+# Version sorting / channel resolution.
+semver = "1"
+
+[dev-dependencies]
+# Produces signed test packages (ed25519) without an external toolchain.
+ring = "0.17"

@@ -15,6 +15,7 @@
 //! **idempotency keys** (§9) on runs, and a **request-id** on every response (§14).
 
 mod hardening;
+mod marketplace;
 mod memory;
 mod plugins;
 mod tenancy;
@@ -147,7 +148,9 @@ impl AppState {
         let metrics = Metrics::with_otlp_export("apex");
         // Cost events from the gateway become LLM token/cost/savings metrics.
         let gateway = Arc::new(Gateway::from_env().with_cost_observer(Arc::new(
-            MetricsCostObserver { metrics: metrics.clone() },
+            MetricsCostObserver {
+                metrics: metrics.clone(),
+            },
         )));
         let registry = ToolRegistry::with_builtins();
         let (memory, memory_store) = memory::default_engine();
@@ -329,6 +332,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(memory::routes())
         // Plugins: list the installed catalog, enable/disable.
         .merge(plugins::routes())
+        // Marketplace: publish, discover, download, rate, verify, install.
+        .merge(marketplace::routes())
         .with_state(state)
         // Stamp every response (incl. errors) with a request id (API overview §14).
         .layer(axum::middleware::from_fn(hardening::request_id))

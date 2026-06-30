@@ -5,7 +5,9 @@
 //! All reads/writes are to the same files `apex plugin *` CLI commands use, so
 //! changes made here are immediately visible to the CLI and vice versa.
 
-use apex_plugin::{CapabilityKind, InstalledPlugin, Package, PluginEngine, PluginState, TrustStore};
+use apex_plugin::{
+    CapabilityKind, InstalledPlugin, Package, PluginEngine, PluginState, TrustStore,
+};
 use apex_tools::ToolRegistry;
 use axum::{
     Json, Router,
@@ -56,7 +58,7 @@ fn load_catalog() -> Result<Vec<InstalledPlugin>, ApiError> {
     }
 }
 
-fn load_trust() -> Result<TrustStore, ApiError> {
+pub(crate) fn load_trust() -> Result<TrustStore, ApiError> {
     let path = match plugins_dir() {
         Some(dir) => dir.join("trust.json"),
         None => return Ok(TrustStore::new()),
@@ -113,12 +115,20 @@ fn save_trust(trust: &TrustStore) -> Result<(), ApiError> {
         )
     })?;
     let bytes = serde_json::to_vec_pretty(trust).map_err(|e| {
-        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e.to_string())
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            e.to_string(),
+        )
     })?;
     std::fs::create_dir_all(&dir)
         .and_then(|_| std::fs::write(dir.join("trust.json"), bytes))
         .map_err(|e| {
-            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e.to_string())
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                e.to_string(),
+            )
         })
 }
 
@@ -135,12 +145,27 @@ fn engine() -> Result<PluginEngine, ApiError> {
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/plugins", get(list_plugins))
-        .route("/api/v1/plugins:install", axum::routing::post(install_plugin))
+        .route(
+            "/api/v1/plugins:install",
+            axum::routing::post(install_plugin),
+        )
         .route("/api/v1/plugins:enable", axum::routing::post(enable_plugin))
-        .route("/api/v1/plugins:disable", axum::routing::post(disable_plugin))
-        .route("/api/v1/plugins:upgrade", axum::routing::post(upgrade_plugin))
-        .route("/api/v1/plugins:rollback", axum::routing::post(rollback_plugin))
-        .route("/api/v1/plugins:trust", axum::routing::post(trust_publisher))
+        .route(
+            "/api/v1/plugins:disable",
+            axum::routing::post(disable_plugin),
+        )
+        .route(
+            "/api/v1/plugins:upgrade",
+            axum::routing::post(upgrade_plugin),
+        )
+        .route(
+            "/api/v1/plugins:rollback",
+            axum::routing::post(rollback_plugin),
+        )
+        .route(
+            "/api/v1/plugins:trust",
+            axum::routing::post(trust_publisher),
+        )
         .route("/api/v1/plugins/{id}", delete(uninstall_plugin))
 }
 
@@ -221,11 +246,17 @@ struct InstallReq {
 async fn install_plugin(Json(req): Json<InstallReq>) -> Result<Json<Value>, ApiError> {
     let bytes = base64_decode(&req.apexpkg)?;
     let package = Package::from_apexpkg(&bytes)?;
+    Ok(Json(install_package(&package, &req.grants)?))
+}
+
+/// Install a verified [`Package`] into the durable catalog (disabled), returning its
+/// catalog JSON. Shared by the HTTP install route and the marketplace install bridge.
+pub(crate) fn install_package(package: &Package, grants: &[String]) -> Result<Value, ApiError> {
     let mut engine = engine()?;
-    let installed = engine.install(&package, &req.grants)?;
+    let installed = engine.install(package, grants)?;
     let resp = plugin_json(installed);
     save_catalog(&engine.catalog())?;
-    Ok(Json(resp))
+    Ok(resp)
 }
 
 /// `POST /api/v1/plugins:upgrade` — upgrade an installed plugin to a new version.
@@ -289,7 +320,9 @@ async fn trust_publisher(Json(req): Json<TrustReq>) -> Result<Json<Value>, ApiEr
     let mut trust = load_trust()?;
     trust.trust(req.publisher.clone(), key_bytes);
     save_trust(&trust)?;
-    Ok(Json(json!({ "publisher": req.publisher, "status": "trusted" })))
+    Ok(Json(
+        json!({ "publisher": req.publisher, "status": "trusted" }),
+    ))
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, ApiError> {

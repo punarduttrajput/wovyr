@@ -191,6 +191,48 @@ enum PluginCommand {
         /// Plugin id (`publisher/name`).
         id: String,
     },
+
+    /// Publish a signed package to the marketplace registry.
+    Publish {
+        /// Package directory or `.apexpkg` file to publish.
+        source: String,
+
+        /// Channel to publish to (default `stable`).
+        #[arg(long)]
+        channel: Option<String>,
+
+        /// Browse category (repeatable).
+        #[arg(long = "category")]
+        categories: Vec<String>,
+    },
+
+    /// Search the marketplace registry for published plugins.
+    Search {
+        /// Free-text query (matches name/publisher/description/categories).
+        query: Option<String>,
+
+        /// Filter by category.
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Filter by capability kind (tool/provider/memory_backend/policy/workflow_activity).
+        #[arg(long)]
+        capability: Option<String>,
+    },
+
+    /// Download a listed package from the marketplace and install it (disabled).
+    Get {
+        /// Listing id (`publisher/name`).
+        id: String,
+
+        /// Specific version (default: the latest stable).
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Permission to grant the plugin (repeatable); must cover all it requests.
+        #[arg(long = "grant")]
+        grants: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -530,6 +572,21 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
             PluginCommand::Enable { id } => plugin::enable_cmd(&id),
             PluginCommand::Disable { id } => plugin::disable_cmd(&id),
             PluginCommand::Uninstall { id } => plugin::uninstall_cmd(&id),
+            PluginCommand::Publish {
+                source,
+                channel,
+                categories,
+            } => plugin::publish_cmd(&source, channel, categories),
+            PluginCommand::Search {
+                query,
+                category,
+                capability,
+            } => plugin::search_cmd(query, category, capability),
+            PluginCommand::Get {
+                id,
+                version,
+                grants,
+            } => plugin::market_install_cmd(&id, version, grants),
         },
     }
 }

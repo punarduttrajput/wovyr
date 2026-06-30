@@ -14,6 +14,33 @@
 .note svg { width:15px; height:15px; flex:none; margin-top:1px; color:var(--accent); }
 .note b { color:var(--ink-2); }
 
+/* ── Tabs ──────────────────────────────────────────────────────────────────── */
+.tabs { display:flex; gap:4px; margin-bottom:18px; border-bottom:1px solid var(--line); }
+.tab {
+  appearance:none; background:none; border:none; cursor:pointer;
+  padding:8px 14px; font-size:13px; font-weight:500; color:var(--ink-3);
+  border-bottom:2px solid transparent; margin-bottom:-1px;
+}
+.tab:hover { color:var(--ink-2); }
+.tab.on { color:var(--accent); border-bottom-color:var(--accent); }
+.tab .count {
+  font-family:var(--mono); font-size:10.5px; padding:1px 6px; border-radius:10px;
+  background:var(--surface-2); border:1px solid var(--line); color:var(--ink-3); margin-left:2px;
+}
+
+/* ── Search bar ────────────────────────────────────────────────────────────── */
+.searchbar { display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }
+.searchbar input, .searchbar select {
+  border:1px solid var(--line); background:var(--surface-2); border-radius:var(--r-sm);
+  padding:8px 11px; font-size:13px; color:var(--ink); outline:none;
+}
+.searchbar input:focus, .searchbar select:focus {
+  border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-weak);
+}
+.search-text { flex:1; min-width:200px; }
+.search-cat { width:130px; font-family:var(--mono); font-size:12px; }
+.search-cap { font-size:12px; }
+
 .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:16px; }
 
 .plug { padding:16px; display:flex; flex-direction:column; gap:12px; }
@@ -30,6 +57,14 @@
 .plug .pub { font-size:11.5px; color:var(--ink-3); margin-top:2px; }
 .plug .top .pill { margin-left:auto; }
 .plug .desc { font-size:12.5px; color:var(--ink-2); line-height:1.5; margin:0; }
+
+.plug h3 .verified { font-size:9.5px; margin-left:4px; vertical-align:middle; }
+
+/* ── Browse meta row (rating / installs / risk) ────────────────────────────── */
+.meta-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.stars { font-size:13px; color:var(--warn, #d6a01a); letter-spacing:1px; line-height:1; }
+.stars .muted { letter-spacing:0; margin-left:2px; }
+.pill.risk { text-transform:capitalize; }
 
 .block .eyebrow { margin-bottom:6px; }
 .chips { display:flex; flex-wrap:wrap; gap:6px; }

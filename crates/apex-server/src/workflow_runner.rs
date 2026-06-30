@@ -59,13 +59,12 @@ impl ActivityExecutor for ServerExecutor {
     async fn execute(&self, ctx: &ActivityContext) -> Result<Value, ActivityError> {
         match ctx.activity_type.as_str() {
             "function" | "tool" => {
-                let tool_id = ctx
-                    .name
-                    .as_deref()
-                    .ok_or_else(|| ActivityError::Permanent(format!(
+                let tool_id = ctx.name.as_deref().ok_or_else(|| {
+                    ActivityError::Permanent(format!(
                         "activity `{}`: `name` required for function/tool type",
                         ctx.id
-                    )))?;
+                    ))
+                })?;
                 let tool_ctx = ToolContext::default();
                 let req = ToolRequest::new(ctx.inputs.clone());
                 self.registry
@@ -86,10 +85,7 @@ impl ActivityExecutor for ServerExecutor {
                 use apex_provider::{ChatRequest, Message};
                 let req = ChatRequest::new(
                     "default",
-                    vec![
-                        Message::system(instructions),
-                        Message::user(user_msg),
-                    ],
+                    vec![Message::system(instructions), Message::user(user_msg)],
                 );
                 let resp = self
                     .gateway
@@ -134,12 +130,9 @@ struct ValidateRequest {
 /// `POST /api/v1/workflows/validate` — parse the definition YAML and return a DAG
 /// summary (activity list, dependency edges, and the validated metadata), or a
 /// structured validation error without running anything.
-async fn validate_handler(
-    Json(req): Json<ValidateRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let def = Definition::from_yaml(&req.manifest).map_err(|e| {
-        ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
-    })?;
+async fn validate_handler(Json(req): Json<ValidateRequest>) -> Result<Json<Value>, ApiError> {
+    let def = Definition::from_yaml(&req.manifest)
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
 
     let activities: Vec<Value> = def
         .spec
@@ -184,9 +177,8 @@ async fn submit_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let def = Definition::from_yaml(&req.manifest).map_err(|e| {
-        ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
-    })?;
+    let def = Definition::from_yaml(&req.manifest)
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
 
     let input = if req.input.is_null() {
         json!({})
@@ -246,9 +238,8 @@ async fn signal_handler(
     Path(id): Path<String>,
     Json(req): Json<SignalRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let def = Definition::from_yaml(&req.manifest).map_err(|e| {
-        ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
-    })?;
+    let def = Definition::from_yaml(&req.manifest)
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
     let payload = if req.payload.is_null() {
         json!({})
     } else {
@@ -289,9 +280,8 @@ async fn approve_handler(
     Path(id): Path<String>,
     Json(req): Json<ApproveRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let def = Definition::from_yaml(&req.manifest).map_err(|e| {
-        ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
-    })?;
+    let def = Definition::from_yaml(&req.manifest)
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
     let decision = if req.decision.is_null() {
         json!({ "approved": true })
     } else {
@@ -361,11 +351,7 @@ mod tests {
         crate::router(Arc::new(AppState::from_env()))
     }
 
-    async fn post_json(
-        app: axum::Router,
-        uri: &str,
-        body: Value,
-    ) -> (StatusCode, Value) {
+    async fn post_json(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
         let resp = app
             .oneshot(
                 Request::builder()

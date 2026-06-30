@@ -87,6 +87,22 @@ impl Package {
         PluginManifest::from_yaml(&self.manifest_yaml)
     }
 
+    /// Verify the package's detached ed25519 signature against `trust` and return the
+    /// validated manifest. The signature must cover the exact manifest bytes, so any
+    /// tampering with declared permissions, capabilities, or digests is rejected
+    /// fail-closed. Artifact digests are **not** checked here — that happens at
+    /// install/stage time ([`PluginEngine::install`]); this is the standalone
+    /// supply-chain check a registry runs at publish, before any install.
+    pub fn verify(&self, trust: &TrustStore) -> Result<PluginManifest> {
+        let manifest = PluginManifest::from_yaml(&self.manifest_yaml)?;
+        trust.verify(
+            &manifest.metadata.publisher,
+            self.manifest_yaml.as_bytes(),
+            &self.signature,
+        )?;
+        Ok(manifest)
+    }
+
     /// Reconstruct a package from `.apexpkg` bytes (the inverse of
     /// [`to_apexpkg`](Self::to_apexpkg)). The signature and artifacts are re-verified
     /// at install, so a tampered envelope is rejected there.
@@ -833,6 +849,24 @@ artifacts:
         let restored = Package::from_apexpkg(&bytes).unwrap();
         engine.install(&restored, &grants()).unwrap();
         assert_eq!(engine.installed(), vec!["acme/github".to_string()]);
+    }
+
+    #[test]
+    fn package_verify_checks_signature_without_installing() {
+        let (package, engine) = signed_package();
+        // A package signed by a trusted publisher verifies and yields the manifest.
+        let manifest = package.verify(&engine.trust).unwrap();
+        assert_eq!(manifest.qualified_id(), "acme/github");
+
+        // Tampering with the manifest after signing breaks verification.
+        let mut tampered = package.clone();
+        tampered.manifest_yaml = tampered
+            .manifest_yaml
+            .replace("net:egress:api.github.com", "net:egress:*");
+        assert!(tampered.verify(&engine.trust).is_err());
+
+        // An untrusted publisher is rejected.
+        assert!(package.verify(&TrustStore::new()).is_err());
     }
 
     #[test]

@@ -16,6 +16,7 @@
 
 use crate::config;
 use apex_common::{Error, Result};
+use apex_marketplace::{FileRegistryStore, Registry, SearchQuery};
 use apex_plugin::{
     CapabilityKind, InstalledPlugin, Package, PluginEngine, PluginManifest, PluginState, TrustStore,
 };
@@ -395,6 +396,102 @@ pub fn uninstall_cmd(id: &str) -> Result<()> {
         let _ = std::fs::remove_dir_all(dir);
     }
     println!("Uninstalled {id}.");
+    Ok(())
+}
+
+// --- Marketplace -----------------------------------------------------------------
+//
+// The local registry mirrors the rest of the `apex plugin` surface: durable state
+// under `~/.apex/marketplace/registry.json`, sharing the plugin trust store so only
+// trusted publishers can list a plugin. (A remote registry server speaks the same
+// `/api/v1/marketplace` routes.)
+
+/// A registry over the durable local store, sharing the plugin trust store.
+fn marketplace_registry() -> Result<Registry<FileRegistryStore>> {
+    let store = FileRegistryStore::new(
+        config::config_dir()?
+            .join("marketplace")
+            .join("registry.json"),
+    );
+    Ok(Registry::new(store, load_trust()?))
+}
+
+fn parse_capability_kind(s: &str) -> Option<CapabilityKind> {
+    match s {
+        "tool" => Some(CapabilityKind::Tool),
+        "provider" => Some(CapabilityKind::Provider),
+        "memory_backend" => Some(CapabilityKind::MemoryBackend),
+        "policy" => Some(CapabilityKind::Policy),
+        "workflow_activity" => Some(CapabilityKind::WorkflowActivity),
+        _ => None,
+    }
+}
+
+/// `apex plugin publish <source> [--channel <c>] [--category <cat>]` — publish a signed
+/// package (directory or `.apexpkg`) to the local marketplace registry. The signature
+/// must verify against a trusted publisher.
+pub fn publish_cmd(source: &str, channel: Option<String>, categories: Vec<String>) -> Result<()> {
+    let (package, _manifest) = load_package(source)?;
+    let bytes = package.to_apexpkg()?;
+    let out = marketplace_registry()?.publish(&bytes, &categories, channel.as_deref())?;
+    println!("Published {} to channel `{}`.", out.reference, out.channel);
+    println!("Find it with `apex plugin search {}`.", out.listing_id);
+    Ok(())
+}
+
+/// `apex plugin search [<query>] [--category <cat>] [--capability <kind>]` — discover
+/// published listings in the marketplace registry.
+pub fn search_cmd(
+    query: Option<String>,
+    category: Option<String>,
+    capability: Option<String>,
+) -> Result<()> {
+    let listings = marketplace_registry()?.search(&SearchQuery {
+        text: query.unwrap_or_default(),
+        category,
+        capability: capability.as_deref().and_then(parse_capability_kind),
+    })?;
+    if listings.is_empty() {
+        println!("No matching listings.");
+        return Ok(());
+    }
+    for l in &listings {
+        let rating = l
+            .rating
+            .map(|r| format!("{r:.1}*"))
+            .unwrap_or_else(|| "unrated".to_string());
+        let verified = if l.verified { " (verified)" } else { "" };
+        let latest = l.versions.first().map(String::as_str).unwrap_or("?");
+        println!(
+            "{}  v{latest}  [{rating}, {} installs]{verified}",
+            l.id, l.installs
+        );
+        if !l.description.is_empty() {
+            println!("    {}", l.description);
+        }
+        if !l.categories.is_empty() {
+            println!("    categories: {}", l.categories.join(", "));
+        }
+        if !l.permissions.is_empty() {
+            println!("    permissions: {}", l.permissions.join(", "));
+        }
+    }
+    Ok(())
+}
+
+/// `apex plugin get <id> [--version <v>] [--grant <perm>]` — download a listed package
+/// from the marketplace and install it locally (disabled). `id` is `publisher/name`.
+pub fn market_install_cmd(id: &str, version: Option<String>, grants: Vec<String>) -> Result<()> {
+    let reg = marketplace_registry()?;
+    let bytes = reg.download(id, version.as_deref())?;
+    let package = Package::from_apexpkg(&bytes)?;
+    let mut engine = engine()?;
+    let installed = engine.install(&package, &grants)?;
+    let reference = installed.manifest.reference();
+    save_catalog(&engine.catalog())?;
+    reg.record_install(id)?;
+    println!("Installed {reference} from the marketplace (disabled).");
+    println!("Enable it with `apex plugin enable {id}`.");
     Ok(())
 }
 

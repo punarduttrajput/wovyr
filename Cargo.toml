@@ -9,6 +9,7 @@ members = [
     "crates/apex-memory",
     "crates/apex-telemetry",
     "crates/apex-plugin",
+    "crates/apex-marketplace",
     "crates/apex-tenancy",
     "crates/apex-events",
     "crates/apex-server",
@@ -32,6 +33,7 @@ apex-workflow = { path = "crates/apex-workflow" }
 apex-memory = { path = "crates/apex-memory" }
 apex-telemetry = { path = "crates/apex-telemetry" }
 apex-plugin = { path = "crates/apex-plugin" }
+apex-marketplace = { path = "crates/apex-marketplace" }
 apex-tenancy = { path = "crates/apex-tenancy" }
 apex-events = { path = "crates/apex-events" }
 apex-server = { path = "crates/apex-server" }

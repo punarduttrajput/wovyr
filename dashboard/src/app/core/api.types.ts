@@ -135,6 +135,32 @@ export interface PluginInfo {
   platform_api: string;
 }
 
+// ---- marketplace (apex-marketplace registry) ----
+
+/** Permission-risk classification of a listing's latest version. */
+export type PermissionRisk = 'low' | 'medium' | 'high';
+
+/**
+ * A marketplace listing projection (apex-marketplace `Listing`). `capabilities` are the
+ * latest version's capability kinds (snake_case strings, e.g. `tool`).
+ */
+export interface MarketplaceListing {
+  id: string;
+  publisher: string;
+  name: string;
+  description: string;
+  categories: string[];
+  capabilities: string[];
+  permissions: string[];
+  risk: PermissionRisk;
+  versions: string[];
+  channels: Record<string, string>;
+  rating: number | null;
+  reviews: number;
+  installs: number;
+  verified: boolean;
+}
+
 /**
  * A normalized run-stream event. The server emits anonymous `data:` frames carrying a
  * `type` discriminator (start/memory/delta/tool_call/tool_result/done), then a terminal

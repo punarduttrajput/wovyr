@@ -125,6 +125,7 @@ version = "0.1.0"
 dependencies = [
  "apex-agent",
  "apex-common",
+ "apex-marketplace",
  "apex-memory",
  "apex-plugin",
  "apex-provider",
@@ -160,6 +161,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "apex-marketplace"
+version = "0.1.0"
+dependencies = [
+ "apex-common",
+ "apex-plugin",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
 ]
 
 [[package]]
@@ -219,6 +234,7 @@ dependencies = [
  "apex-agent",
  "apex-common",
  "apex-events",
+ "apex-marketplace",
  "apex-memory",
  "apex-plugin",
  "apex-provider",
