@@ -113,6 +113,8 @@ pub struct AppState {
     workflows: Engine,
     /// Tenancy catalog backing the org/project/membership/quota routes (G: tenancy).
     pub(crate) tenancy: Arc<dyn TenancyStore>,
+    /// Per-project run-path quota usage (concurrent runs + daily LLM spend).
+    pub(crate) quota: tenancy::QuotaTracker,
 }
 
 impl AppState {
@@ -133,6 +135,7 @@ impl AppState {
             run_counter: AtomicU64::new(1),
             workflows: default_workflows_engine(),
             tenancy: default_tenancy_store(),
+            quota: tenancy::QuotaTracker::new(),
         }
     }
 
@@ -309,10 +312,11 @@ struct RunRequest {
 #[tracing::instrument(name = "api.agents_run", skip_all)]
 async fn run_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let start = Instant::now();
-    let result = run_inner(&state, req).await;
+    let result = run_inner(&state, tenancy::run_project(&headers), req).await;
 
     let status = match &result {
         Ok(_) => 200u16,
@@ -331,10 +335,14 @@ async fn run_handler(
 }
 
 /// Parse the inline manifest then run it ([Agents API §5](../../docs/09-api/agents.md)).
-async fn run_inner(state: &Arc<AppState>, req: RunRequest) -> Result<Json<Value>, ApiError> {
+async fn run_inner(
+    state: &Arc<AppState>,
+    project: Option<String>,
+    req: RunRequest,
+) -> Result<Json<Value>, ApiError> {
     let def = AgentDefinition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
-    run_definition(state, def, req.input).await
+    run_definition(state, def, req.input, project.as_deref()).await
 }
 
 /// A [`RunEventSink`] that forwards each run event to an SSE channel as a JSON frame.
@@ -373,6 +381,7 @@ impl RunEventSink for ChannelSink {
 /// (start / delta / tool_call / tool_result / done, then a final `result`) as SSE.
 async fn run_stream_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<RunRequest>,
 ) -> Response {
     let def = match AgentDefinition::from_yaml(&req.manifest) {
@@ -388,8 +397,17 @@ async fn run_stream_handler(
         req.input
     };
 
+    // Quota gate before streaming begins (429 if exceeded); the permit rides along in
+    // the run task and releases when it ends.
+    let project = tenancy::run_project(&headers);
+    let permit = match tenancy::admit_run(&state, project.as_deref()) {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
+
     let (tx, rx) = futures::channel::mpsc::unbounded::<Event>();
     tokio::spawn(async move {
+        let _permit = permit;
         let mut sink = ChannelSink { tx: tx.clone() };
         let frame = match run_agent(
             &def,
@@ -400,10 +418,13 @@ async fn run_stream_handler(
         )
         .await
         {
-            Ok(out) => Event::default().event("result").data(
-                json!({ "status": "succeeded", "output": { "message": out.text }, "steps": out.steps })
-                    .to_string(),
-            ),
+            Ok(out) => {
+                tenancy::record_run_cost(&state, project.as_deref(), out.usage.cost_usd);
+                Event::default().event("result").data(
+                    json!({ "status": "succeeded", "output": { "message": out.text }, "steps": out.steps })
+                        .to_string(),
+                )
+            }
             Err(e) => Event::default().event("error").data(e.to_string()),
         };
         let _ = tx.unbounded_send(frame);
@@ -414,14 +435,19 @@ async fn run_stream_handler(
 }
 
 /// Run a (parsed) agent definition with `input`, returning the run-response shape.
-/// Shared by the inline-manifest and stored-agent run endpoints.
+/// Shared by the inline-manifest and stored-agent run endpoints. Enforces the in-scope
+/// `project`'s quota (concurrent runs + daily LLM spend) when one is set.
 async fn run_definition(
     state: &Arc<AppState>,
     def: AgentDefinition,
     input: Value,
+    project: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
     let input = if input.is_null() { json!({}) } else { input };
 
+    // Quota gate: hold a concurrency slot for the duration of the run (released on
+    // drop), then record the run's cost against the project's daily budget.
+    let _permit = tenancy::admit_run(state, project)?;
     let out = run_agent(
         &def,
         &state.gateway,
@@ -431,6 +457,7 @@ async fn run_definition(
     )
     .await
     .map_err(ApiError::from)?;
+    tenancy::record_run_cost(state, project, out.usage.cost_usd);
 
     let run_id = format!("run_{}", state.run_counter.fetch_add(1, Ordering::SeqCst));
     Ok(Json(json!({
@@ -509,10 +536,12 @@ async fn delete_agent_handler(
 #[tracing::instrument(name = "api.agents_run_stored", skip_all)]
 async fn run_stored_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<RunStoredRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let start = Instant::now();
+    let project = tenancy::run_project(&headers);
     let def = state.agents.definition(&id).ok_or_else(|| {
         ApiError::new(
             StatusCode::NOT_FOUND,
@@ -521,7 +550,7 @@ async fn run_stored_handler(
         )
     });
     let result = match def {
-        Ok(def) => run_definition(&state, def, req.input).await,
+        Ok(def) => run_definition(&state, def, req.input, project.as_deref()).await,
         Err(e) => Err(e),
     };
 
@@ -695,6 +724,7 @@ load();
 </html>"#;
 
 /// An API error rendered as the standard envelope.
+#[derive(Debug)]
 pub(crate) struct ApiError {
     status: StatusCode,
     code: &'static str,
