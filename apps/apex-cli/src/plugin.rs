@@ -94,9 +94,25 @@ pub fn engine() -> Result<PluginEngine> {
 #[cfg(feature = "plugin-wasi")]
 fn with_runtime(engine: PluginEngine) -> PluginEngine {
     match apex_plugin::WasiCapabilityRuntime::new() {
-        Ok(rt) => engine.with_runtime(std::sync::Arc::new(rt)),
+        // Make the runtime secret-aware over the local vault (`~/.apex/secrets`), so a
+        // tenant-scoped run injects a plugin's `secret:read:<name>` grants into its sandbox.
+        Ok(rt) => engine.with_runtime(std::sync::Arc::new(rt.with_secrets(secrets_vault()))),
         Err(_) => engine,
     }
+}
+
+/// The local secret vault over `~/.apex/secrets` (falls back to in-memory if the home
+/// directory is unavailable).
+#[cfg(feature = "plugin-wasi")]
+fn secrets_vault() -> apex_secrets::Vault {
+    let store: std::sync::Arc<dyn apex_secrets::SecretStore> = match config::config_dir()
+        .ok()
+        .and_then(|d| apex_secrets::FileSecretStore::new(d.join("secrets")).ok())
+    {
+        Some(s) => std::sync::Arc::new(s),
+        None => std::sync::Arc::new(apex_secrets::InMemorySecretStore::new()),
+    };
+    apex_secrets::Vault::new(store)
 }
 
 #[cfg(not(feature = "plugin-wasi"))]

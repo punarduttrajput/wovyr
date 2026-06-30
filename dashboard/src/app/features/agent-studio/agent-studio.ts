@@ -2,7 +2,7 @@ import { Component, OnDestroy, OnInit, computed, inject, signal } from '@angular
 import { FormsModule } from '@angular/forms';
 import { Subscription } from 'rxjs';
 import { AgentService } from './agent.service';
-import { AgentDraft, StreamEvent } from '../../core/api.types';
+import { AgentDraft, StreamEvent, ToolInfo } from '../../core/api.types';
 
 @Component({
   selector: 'app-agent-studio',
@@ -26,10 +26,22 @@ export class AgentStudio implements OnInit, OnDestroy {
     memoryEnabled: false,
     namespace: 'product-kb',
   };
-  newTool = '';
+  pickTool = '';
   message = 'How do durable timers work?';
 
+  /** The tool catalog from the server (`GET /api/v1/tools` — built-ins + enabled plugin
+   *  tools). Seeded with the built-ins so the picker works before the fetch resolves or
+   *  if the server doesn't expose the endpoint. */
+  readonly toolCatalog = signal<ToolInfo[]>([
+    { id: 'fs_read', description: 'Read the contents of a text file at a given path.' },
+    { id: 'http_get', description: 'Fetch a URL and return its status and body.' },
+    { id: 'shell', description: 'Run a shell command; returns stdout, stderr, exit code.' },
+    { id: 'echo', description: 'Echo the input back unchanged — handy for testing.' },
+  ]);
+
   readonly agents = signal<string[]>([]);
+  /** The saved agent currently loaded into the designer (for highlighting), if any. */
+  readonly loadedId = signal<string | null>(null);
   readonly events = signal<StreamEvent[]>([]);
   readonly answer = signal('');
   readonly running = signal(false);
@@ -44,6 +56,13 @@ export class AgentStudio implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.refresh();
+    // Load the live tool catalog; keep the built-in fallback if the endpoint is absent.
+    this.svc.tools().subscribe({
+      next: (t) => {
+        if (t.length) this.toolCatalog.set(t);
+      },
+      error: () => {},
+    });
   }
 
   ngOnDestroy(): void {
@@ -61,10 +80,46 @@ export class AgentStudio implements OnInit, OnDestroy {
     });
   }
 
-  addTool(): void {
-    const t = this.newTool.trim();
-    if (t && !this.draft.tools.includes(t)) this.draft.tools.push(t);
-    this.newTool = '';
+  /** Reset the designer to a blank draft to author a new agent. */
+  newAgent(): void {
+    this.draft = this.svc.blankDraft();
+    this.loadedId.set(null);
+    this.events.set([]);
+    this.answer.set('');
+    this.usage.set(undefined);
+    this.status.set('New draft — edit and Save.');
+  }
+
+  /** Load a saved agent's manifest back into the designer for editing. */
+  load(id: string): void {
+    this.svc.getAgent(id).subscribe({
+      next: (r) => {
+        this.draft = this.svc.fromManifest(r.manifest);
+        this.loadedId.set(id);
+        this.events.set([]);
+        this.answer.set('');
+        this.usage.set(undefined);
+        this.status.set('Loaded · ' + id);
+      },
+      error: (e) => this.status.set('Error: ' + this.errText(e)),
+    });
+  }
+
+  /** Catalog tools not already on the draft — the dropdown's options. */
+  availableTools(): ToolInfo[] {
+    return this.toolCatalog().filter((t) => !this.draft.tools.includes(t.id));
+  }
+
+  /** Add the tool chosen from the dropdown, then reset it to the placeholder. */
+  addPicked(): void {
+    const id = this.pickTool;
+    if (id && !this.draft.tools.includes(id)) this.draft.tools.push(id);
+    this.pickTool = '';
+  }
+
+  /** A tool's description for chip/option tooltips. */
+  toolDesc(id: string): string {
+    return this.toolCatalog().find((t) => t.id === id)?.description ?? 'Plugin tool.';
   }
 
   removeTool(t: string): void {
@@ -99,6 +154,7 @@ export class AgentStudio implements OnInit, OnDestroy {
     this.svc.createAgent(this.manifest()).subscribe({
       next: (r) => {
         this.status.set('Saved · ' + r.id);
+        this.loadedId.set(r.id);
         this.refresh();
       },
       error: (e) => this.status.set('Error: ' + this.errText(e)),
@@ -106,6 +162,7 @@ export class AgentStudio implements OnInit, OnDestroy {
   }
 
   remove(id: string): void {
+    if (this.loadedId() === id) this.loadedId.set(null);
     this.svc.deleteAgent(id).subscribe({ next: () => this.refresh(), error: () => this.refresh() });
   }
 

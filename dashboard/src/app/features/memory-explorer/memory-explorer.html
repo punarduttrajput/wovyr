@@ -7,7 +7,7 @@
         Backed by the platform memory engine under <code>~/.apex/memory</code>.</p>
     </div>
     <div class="head-actions">
-      <button class="btn" (click)="showAdd.set(!showAdd())">{{ showAdd() ? 'Close' : '+ Add memory' }}</button>
+      <button class="btn" (click)="toggleAdd()">{{ showAdd() ? 'Close' : '+ Add / seed memory' }}</button>
     </div>
   </div>
 
@@ -35,9 +35,11 @@
     <div>
       @if (showAdd()) {
         <div class="card add-card">
-          <div class="card-h"><h3>Add memory</h3>
-            <span class="sub">→ {{ selectedNs() ?? 'pick a namespace' }}</span></div>
+          <div class="card-h"><h3>Add / seed memory</h3>
+            <span class="sub">→ {{ add.namespace.trim() || 'name a namespace' }}</span></div>
           <div class="add-b">
+            <input type="text" [(ngModel)]="add.namespace"
+              placeholder="namespace — type a new one to seed a knowledge base, e.g. product-kb" />
             <textarea [(ngModel)]="add.content" rows="2" placeholder="Memory content…"></textarea>
             <div class="add-row">
               <input type="text" [(ngModel)]="add.tags" placeholder="tags, comma-separated" />
@@ -107,7 +109,7 @@
         } @empty {
           <div class="pad muted">
             @if (mode() === 'search') { No matches. Try different terms or widen the namespace. }
-            @else { No records{{ selectedNs() ? ' in ' + selectedNs() : '' }}. Add one, or seed via <code>apex memory put</code>. }
+            @else { No records{{ selectedNs() ? ' in ' + selectedNs() : '' }}. Use <strong>+ Add / seed memory</strong> to create a knowledge base (e.g. <code>product-kb</code> for the RAG docs-bot), or seed from the CLI with <code>apex memory put</code>. }
           </div>
         }
       </div>

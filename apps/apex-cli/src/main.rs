@@ -258,6 +258,11 @@ enum AgentsCommand {
         /// Render the run as a live event stream (local mode only in v0.1).
         #[arg(long)]
         stream: bool,
+
+        /// Tenant the run acts in — scopes any plugin-tool secret resolution to this
+        /// tenant's vault namespace (local mode; requires the `plugin-wasi` build).
+        #[arg(long)]
+        tenant: Option<String>,
     },
 }
 
@@ -445,6 +450,11 @@ enum MemoryCommand {
         #[arg(long, default_value_t = 0.0)]
         diversity: f32,
 
+        /// Retrieval strategy: hybrid (default), vector, or keyword. Use `keyword`
+        /// offline — the mock embeddings make hybrid/vector noisy.
+        #[arg(long)]
+        strategy: Option<String>,
+
         /// Access scope the reader holds, for ABAC filtering (repeatable).
         #[arg(long = "grant")]
         grants: Vec<String>,
@@ -496,7 +506,8 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 local,
                 server,
                 stream,
-            } => run_agent_cmd(&file, &input, local, server, stream).await,
+                tenant,
+            } => run_agent_cmd(&file, &input, local, server, stream, tenant).await,
         },
         Command::Workflows { command } => match command {
             WorkflowsCommand::Validate { file } => workflow::validate_cmd(&file),
@@ -551,8 +562,9 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 namespace,
                 limit,
                 diversity,
+                strategy,
                 grants,
-            } => memory::query_cmd(&query, namespace, limit, diversity, grants).await,
+            } => memory::query_cmd(&query, namespace, limit, diversity, strategy, grants).await,
             MemoryCommand::Compact {
                 namespace,
                 max_importance,
@@ -641,25 +653,34 @@ async fn run_agent_cmd(
     local: bool,
     server: Option<String>,
     stream: bool,
+    tenant: Option<String>,
 ) -> apex_common::Result<()> {
     // Accept JSON input, or fall back to treating the argument as plain text.
     let input_value: Value =
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
 
     if local {
-        return run_local(file, input_value, stream).await;
+        return run_local(file, input_value, stream, tenant).await;
     }
     run_remote(file, input_value, server, stream).await
 }
 
 /// Run the agent in-process with the embedded runtime.
-async fn run_local(file: &str, input: Value, stream: bool) -> apex_common::Result<()> {
+async fn run_local(
+    file: &str,
+    input: Value,
+    stream: bool,
+    tenant: Option<String>,
+) -> apex_common::Result<()> {
     let def = AgentDefinition::from_file(file)?;
     let gateway = Gateway::from_env();
     let mut registry = ToolRegistry::with_builtins();
     // Make enabled plugins' tool capabilities callable by the agent.
     plugin::engine()?.register_enabled(&mut registry);
-    let opts = RunOptions::new(input);
+    let mut opts = RunOptions::new(input);
+    if let Some(t) = tenant {
+        opts = opts.with_tenant(t);
+    }
 
     // Open a memory retriever only when the agent enables it (RAG agents).
     let retriever = match &def.spec.memory {

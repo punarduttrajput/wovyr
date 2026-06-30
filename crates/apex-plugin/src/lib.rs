@@ -42,7 +42,7 @@ pub use engine::{
 };
 pub use manifest::{
     Artifact, CapabilityDescriptor, CapabilityKind, Compatibility, Dependency, Metadata,
-    PLUGIN_API_VERSION, PluginManifest,
+    PLUGIN_API_VERSION, PluginManifest, Provenance, ProvenancePolicy, Sbom, SbomComponent,
 };
 pub use permissions::{grant_covers, is_broad, missing_grants};
 #[cfg(feature = "wasi")]

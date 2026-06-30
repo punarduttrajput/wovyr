@@ -10,6 +10,7 @@
       <button class="btn" type="button" (click)="showDsl.set(!showDsl())">
         {{ showDsl() ? 'Hide YAML' : 'View YAML' }}
       </button>
+      <button class="btn" type="button" (click)="newAgent()">+ New</button>
       <button class="btn" type="button" (click)="save()">Save agent</button>
       @if (running()) {
         <button class="btn" type="button" (click)="stop()">Stop</button>
@@ -62,15 +63,23 @@
         </div>
 
         <div class="field">
-          <label>Tools <span class="muted">— project-enabled</span></label>
-          <div class="chiprow">
-            @for (t of draft.tools; track t) {
-              <span class="tool-chip">{{ t }}
-                <button type="button" class="x" (click)="removeTool(t)" aria-label="Remove tool">×</button>
-              </span>
-            }
-            <input class="tool-add" type="text" [(ngModel)]="newTool"
-              (keydown.enter)="addTool(); $event.preventDefault()" placeholder="+ add tool, ↵" />
+          <label>Tools <span class="muted">— what the agent is allowed to call</span></label>
+          @if (draft.tools.length) {
+            <div class="chiprow">
+              @for (t of draft.tools; track t) {
+                <span class="tool-chip" [title]="toolDesc(t)">{{ t }}
+                  <button type="button" class="x" (click)="removeTool(t)" aria-label="Remove tool">×</button>
+                </span>
+              }
+            </div>
+          }
+          <div class="tool-picker">
+            <select [(ngModel)]="pickTool" (change)="addPicked()" aria-label="Add a tool">
+              <option value="">+ add a tool…</option>
+              @for (t of availableTools(); track t.id) {
+                <option [value]="t.id" [title]="t.description">{{ t.id }} — {{ t.description }}</option>
+              }
+            </select>
           </div>
         </div>
 
@@ -87,10 +96,12 @@
 
       @if (agents().length) {
         <div class="saved">
-          <div class="eyebrow">Saved agents</div>
+          <div class="eyebrow">Saved agents <span class="muted">— click to edit</span></div>
           <div class="chiprow">
             @for (id of agents(); track id) {
-              <span class="tool-chip saved-chip">{{ id }}
+              <span class="tool-chip saved-chip" [class.on]="loadedId() === id">
+                <button type="button" class="chip-load" (click)="load(id)"
+                  title="Load into the designer">{{ id }}</button>
                 <button type="button" class="x" (click)="remove(id)" aria-label="Delete agent">×</button>
               </span>
             }

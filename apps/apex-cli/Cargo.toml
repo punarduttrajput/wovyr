@@ -18,8 +18,9 @@ tiered-memory = ["apex-memory/tiered"]
 # OpenTelemetry OTLP trace export (spans → OTEL_EXPORTER_OTLP_ENDPOINT).
 otlp = ["apex-telemetry/otlp"]
 # The WASM plugin capability loader, so enabled plugin tools actually execute on
-# `agents run --local`. Off by default (pulls Wasmtime via apex-plugin/wasi).
-plugin-wasi = ["apex-plugin/wasi"]
+# `agents run --local`. Off by default (pulls Wasmtime via apex-plugin/wasi). Pulls
+# the secret vault so a tenant-scoped run injects the plugin's secrets into the sandbox.
+plugin-wasi = ["apex-plugin/wasi", "dep:apex-secrets"]
 
 [dependencies]
 apex-common.workspace = true
@@ -32,6 +33,9 @@ apex-telemetry.workspace = true
 apex-plugin.workspace = true
 apex-marketplace.workspace = true
 apex-server.workspace = true
+# Secret vault — used (under `plugin-wasi`) to inject a run's tenant-scoped secrets into
+# plugin tool sandboxes; optional so the default CLI build stays lean.
+apex-secrets = { workspace = true, optional = true }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

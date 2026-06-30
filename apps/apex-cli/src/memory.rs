@@ -132,12 +132,22 @@ pub async fn query_cmd(
     namespace: Option<String>,
     limit: usize,
     diversity: f32,
+    strategy: Option<String>,
     grants: Vec<String>,
 ) -> apex_common::Result<()> {
     let mut query = MemoryQuery::new(text);
     query.namespace = namespace;
     query.limit = limit;
     query.diversity = diversity;
+    // Retrieval strategy (default hybrid). Pick `keyword` for offline use: the mock
+    // embeddings are non-semantic, so the vector half of hybrid is noise.
+    if let Some(s) = strategy {
+        query.strategy = match s.to_lowercase().as_str() {
+            "vector" => RetrievalStrategy::Vector,
+            "keyword" => RetrievalStrategy::Keyword,
+            _ => RetrievalStrategy::Hybrid,
+        };
+    }
     if !grants.is_empty() {
         query.access = Some(apex_memory::AccessContext::new(grants));
     }

@@ -19,7 +19,9 @@
 //! since the wasm/container loader is deferred to a later slice. Other capability
 //! kinds (provider/memory/policy/workflow_activity) are catalogued but not yet routed.
 
-use crate::manifest::{CapabilityDescriptor, CapabilityKind, PluginManifest, parse_version_req};
+use crate::manifest::{
+    CapabilityDescriptor, CapabilityKind, PluginManifest, ProvenancePolicy, parse_version_req,
+};
 use crate::permissions::missing_grants;
 use crate::resolve;
 use crate::verify::{TrustStore, verify_digest};
@@ -285,6 +287,7 @@ pub struct PluginEngine {
     platform_api: semver::Version,
     runtime: Arc<dyn CapabilityRuntime>,
     staging_dir: Option<PathBuf>,
+    provenance_policy: ProvenancePolicy,
     plugins: BTreeMap<String, InstalledPlugin>,
     events: Vec<PluginEvent>,
 }
@@ -297,9 +300,17 @@ impl PluginEngine {
             platform_api,
             runtime: Arc::new(NotLoadedRuntime),
             staging_dir: None,
+            provenance_policy: ProvenancePolicy::default(),
             plugins: BTreeMap::new(),
             events: Vec::new(),
         }
+    }
+
+    /// Enforce a supply-chain `policy` (provenance/SBOM) at install time
+    /// ([distribution §4](../../docs/08-plugin-sdk/distribution.md#4-provenance--sbom)).
+    pub fn with_provenance_policy(mut self, policy: ProvenancePolicy) -> Self {
+        self.provenance_policy = policy;
+        self
     }
 
     /// Use `runtime` to execute plugin capabilities (replaces [`NotLoadedRuntime`]).
@@ -641,6 +652,9 @@ impl PluginEngine {
                 missing.join(", ")
             )));
         }
+
+        // Supply-chain policy: required provenance/SBOM and trusted builders ([dist §4]).
+        self.provenance_policy.check(manifest)?;
 
         // Stage artifacts (content-addressed): each declared artifact must be present
         // and match its digest, then is written under the version-specific staging dir.
@@ -1388,5 +1402,32 @@ capabilities:
         let vault = vault_with("acme", "token", "v");
         let perms = vec!["secret:read:token".to_string()];
         assert!(resolve_secret_env(&perms, "beta", &vault).is_err());
+    }
+
+    // --- Supply-chain (provenance/SBOM) policy ----------------------------------
+
+    #[test]
+    fn install_enforces_provenance_policy() {
+        let (engine, kp) = dep_engine();
+        let mut engine = engine.with_provenance_policy(ProvenancePolicy {
+            require_provenance: true,
+            ..Default::default()
+        });
+        // BASE declares no provenance → install is rejected fail-closed.
+        let err = engine.install(&pkg(&kp, BASE), &[]).unwrap_err();
+        assert!(format!("{err}").contains("provenance"), "got {err}");
+        assert!(engine.installed().is_empty());
+
+        // A package whose (signed) manifest carries provenance installs.
+        let attested = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata: { name: http-core, version: 1.2.0, publisher: acme }
+provenance: { builder: github-actions, source: "github.com/acme/x@v1", built_at: "2026-06-30T00:00:00Z" }
+capabilities:
+  - { kind: tool, id: http.get }
+"#;
+        engine.install(&pkg(&kp, attested), &[]).unwrap();
+        assert_eq!(engine.installed(), vec!["acme/http-core".to_string()]);
     }
 }

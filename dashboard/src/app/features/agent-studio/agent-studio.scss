@@ -31,7 +31,14 @@
   font-size:12px; color:var(--ink); outline:none; font-family:var(--mono); min-width:120px;
 }
 .tool-add:focus { border-color:var(--accent); border-style:solid; }
+.tool-picker { margin-top:8px; }
+.tool-picker select { width:100%; }
 .saved-chip { background:var(--accent-weak); border-color:transparent; color:var(--accent-ink); }
+.saved-chip.on { outline:2px solid var(--accent); outline-offset:1px; }
+.saved-chip .chip-load {
+  border:0; background:transparent; color:inherit; font:inherit; padding:0; cursor:pointer;
+}
+.saved-chip .chip-load:hover { text-decoration:underline; }
 
 .memrow { display:flex; align-items:center; gap:12px; }
 .check {

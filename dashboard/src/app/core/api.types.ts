@@ -18,6 +18,14 @@ export interface AgentDraft {
   namespace: string;
 }
 
+/** A registered tool from `GET /api/v1/tools` (built-in or enabled plugin). */
+export interface ToolInfo {
+  id: string;
+  description: string;
+  category?: string;
+  permissions?: string[];
+}
+
 /** Cursor-paginated list envelope (overview §6). */
 export interface Page<T> {
   data: T[];

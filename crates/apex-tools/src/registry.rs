@@ -58,6 +58,12 @@ impl ToolRegistry {
         self.tools.keys().cloned().collect()
     }
 
+    /// Metadata for every registered tool, sorted by id — backs a tool-discovery API
+    /// (e.g. the dashboard's tool picker), covering built-ins **and** enabled plugin tools.
+    pub fn metadata(&self) -> Vec<crate::tool::ToolMetadata> {
+        self.tools.values().map(|t| t.metadata()).collect()
+    }
+
     /// Execute tool `id`, enforcing its declared permissions against the context's
     /// grants ([spec §47](../../docs/04-agent-framework/tool-framework.md)): an
     /// unknown tool is a validation error, and a tool requiring a permission the

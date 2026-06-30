@@ -1,7 +1,8 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { AgentDraft, Page, StreamEvent } from '../../core/api.types';
+import { map } from 'rxjs/operators';
+import { AgentDraft, Page, StreamEvent, ToolInfo } from '../../core/api.types';
 
 /**
  * Client for the Agents API on apex-server. CRUD goes over HttpClient; the run stream
@@ -18,14 +19,96 @@ export class AgentService {
     return this.http.get<Page<string>>('/api/v1/agents');
   }
 
+  /** The registered tool catalog (built-ins + enabled plugin tools), for the picker. */
+  tools(): Observable<ToolInfo[]> {
+    return this.http
+      .get<{ tools: ToolInfo[] }>('/api/v1/tools')
+      .pipe(map((r) => r.tools ?? []));
+  }
+
   /** Register an agent from its YAML manifest; returns its id. */
   createAgent(manifest: string): Observable<{ id: string }> {
     return this.http.post<{ id: string }>('/api/v1/agents', { manifest });
   }
 
+  /** Fetch a stored agent's manifest by id. */
+  getAgent(id: string): Observable<{ id: string; manifest: string }> {
+    return this.http.get<{ id: string; manifest: string }>(
+      `/api/v1/agents/${encodeURIComponent(id)}`,
+    );
+  }
+
   /** Remove a stored agent. */
   deleteAgent(id: string): Observable<void> {
     return this.http.delete<void>(`/api/v1/agents/${encodeURIComponent(id)}`);
+  }
+
+  /** A blank draft (the "+ New" starting point). */
+  blankDraft(): AgentDraft {
+    return {
+      name: '',
+      pinnedModel: '',
+      capability: 'chat',
+      class: 'balanced',
+      instructions: '',
+      tools: [],
+      memoryEnabled: false,
+      namespace: 'product-kb',
+    };
+  }
+
+  /**
+   * Parse a manifest back into an [`AgentDraft`] — the inverse of [`toManifest`]. It reads
+   * the fixed shape this studio emits (and the same shape the example agents use): name,
+   * `model` or `model_selector`, the `instructions: |` block, `tools: [...]`, and a
+   * `memory` block. Unknown/extra fields are ignored.
+   */
+  fromManifest(yaml: string): AgentDraft {
+    const d = this.blankDraft();
+    const lines = yaml.split('\n');
+    const firstMatch = (re: RegExp): string | undefined =>
+      lines.find((l) => re.test(l))?.match(re)?.[1]?.trim();
+
+    d.name = firstMatch(/^\s{2}name:\s*(.+)$/) ?? '';
+    const pinned = firstMatch(/^\s{2}model:\s*(.+)$/);
+    if (pinned) d.pinnedModel = pinned;
+    const selector = lines.find((l) => /^\s{2}model_selector:/.test(l));
+    if (selector) {
+      d.capability = selector.match(/capability:\s*([\w-]+)/)?.[1] ?? d.capability;
+      d.class = selector.match(/class:\s*([\w-]+)/)?.[1] ?? d.class;
+    }
+
+    const toolsLine = lines.find((l) => /^\s{2}tools:\s*\[/.test(l));
+    if (toolsLine) {
+      const inner = toolsLine.slice(toolsLine.indexOf('[') + 1, toolsLine.lastIndexOf(']'));
+      d.tools = inner
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+    }
+
+    if (lines.some((l) => /^\s{2}memory:/.test(l))) {
+      d.memoryEnabled = true;
+      d.namespace = firstMatch(/^\s{4}namespace:\s*(.+)$/) ?? d.namespace;
+    }
+
+    // The `instructions: |` block scalar — collect the 4-space-indented body lines.
+    const instrIdx = lines.findIndex((l) => /^\s{2}instructions:\s*\|/.test(l));
+    if (instrIdx >= 0) {
+      const body: string[] = [];
+      for (let i = instrIdx + 1; i < lines.length; i++) {
+        const l = lines[i];
+        if (l.trim() === '') {
+          body.push('');
+        } else if (/^\s{4}/.test(l)) {
+          body.push(l.slice(4));
+        } else {
+          break; // dedent → block ended
+        }
+      }
+      d.instructions = body.join('\n').trimEnd();
+    }
+    return d;
   }
 
   /** Serialize a draft to the k8s-style agent manifest the engine expects. */

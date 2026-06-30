@@ -43,7 +43,31 @@ async fn create_secret(
 ) -> Result<Json<Value>, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "secrets:write")?;
     let meta = state.secrets.create(&tenant, &req.name, &req.value)?;
+    audit_secret(&state, &headers, &tenant, "secret.create", &meta.reference);
     Ok(Json(json!(meta)))
+}
+
+/// Record a secret-management action against the audit log — by **reference**, never
+/// value ([audit §2 Secrets](../../docs/13-security/audit.md#2-what-is-audited)).
+fn audit_secret(
+    state: &AppState,
+    headers: &HeaderMap,
+    tenant: &str,
+    action: &str,
+    reference: &str,
+) {
+    let principal = crate::tenancy::principal(headers);
+    crate::audit::record(
+        state,
+        apex_audit::AuditEvent::new(
+            crate::audit::now_ms(),
+            principal,
+            tenant,
+            action,
+            "secret",
+            reference,
+        ),
+    );
 }
 
 /// `GET /api/v1/secrets` — list the caller's tenant's secrets (metadata only).
@@ -87,6 +111,7 @@ async fn rotate_secret(
 ) -> Result<Json<Value>, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "secrets:write")?;
     let meta = state.secrets.rotate(&tenant, &name, &req.value)?;
+    audit_secret(&state, &headers, &tenant, "secret.rotate", &meta.reference);
     Ok(Json(json!(meta)))
 }
 
@@ -98,6 +123,13 @@ async fn delete_secret(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "secrets:write")?;
     if state.secrets.delete(&tenant, &name)? {
+        audit_secret(
+            &state,
+            &headers,
+            &tenant,
+            "secret.delete",
+            &format!("secret://{tenant}/{name}"),
+        );
         Ok(axum::http::StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::new(

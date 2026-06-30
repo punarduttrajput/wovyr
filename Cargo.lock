@@ -120,6 +120,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-audit"
+version = "0.1.0"
+dependencies = [
+ "apex-common",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "apex-cli"
 version = "0.1.0"
 dependencies = [
@@ -129,6 +139,7 @@ dependencies = [
  "apex-memory",
  "apex-plugin",
  "apex-provider",
+ "apex-secrets",
  "apex-server",
  "apex-telemetry",
  "apex-tools",
@@ -244,6 +255,7 @@ name = "apex-server"
 version = "0.1.0"
 dependencies = [
  "apex-agent",
+ "apex-audit",
  "apex-common",
  "apex-events",
  "apex-marketplace",

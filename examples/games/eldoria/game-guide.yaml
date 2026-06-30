@@ -1,0 +1,18 @@
+apiVersion: agent.apex.io/v1
+kind: Agent
+metadata:
+  name: eldoria-guide
+spec:
+  model_selector: { capability: chat, class: balanced }
+  instructions: |
+    You are an in-game guide for "Kingdom of Eldoria". Answer ONLY from the
+    "Retrieved knowledge" provided in the prompt, and keep answers concise.
+    If the answer is not in the retrieved knowledge, say you don't know — never
+    invent stats, items, or lore.
+  # RAG grounding: the runtime retrieves from the `eldoria-kb` namespace (seeded by
+  # examples/games/eldoria/seed.sh) and injects the top matches before the model call.
+  # Keyword strategy is reliable offline (no embedding model required).
+  memory:
+    enabled: true
+    namespace: eldoria-kb
+    retrieval: { strategy: keyword, limit: 5 }

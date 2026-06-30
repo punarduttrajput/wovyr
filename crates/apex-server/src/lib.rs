@@ -14,12 +14,14 @@
 //! conventions in [`hardening`]: cursor **pagination** (§6) on list endpoints,
 //! **idempotency keys** (§9) on runs, and a **request-id** on every response (§14).
 
+mod audit;
 mod hardening;
 mod marketplace;
 mod memory;
 mod plugins;
 mod secrets;
 mod tenancy;
+mod tools;
 mod webhooks;
 mod workflow_runner;
 
@@ -149,6 +151,8 @@ pub struct AppState {
     pub(crate) memory_store: Arc<dyn apex_memory::MemoryStore>,
     /// Secret vault backing the `/api/v1/secrets` routes (tenant-scoped).
     pub(crate) secrets: apex_secrets::Vault,
+    /// Tamper-evident audit log; security-sensitive routes append to it.
+    pub(crate) audit: apex_audit::AuditLog,
 }
 
 impl AppState {
@@ -192,6 +196,7 @@ impl AppState {
             memory,
             memory_store,
             secrets,
+            audit: default_audit_log(),
         }
     }
 
@@ -248,6 +253,13 @@ impl AppState {
         self
     }
 
+    /// Override the audit log (tests inject an in-memory log).
+    #[cfg(test)]
+    pub(crate) fn with_audit(mut self, audit: apex_audit::AuditLog) -> Self {
+        self.audit = audit;
+        self
+    }
+
     /// Record the owning tenant of a workflow execution (called at submit).
     fn record_workflow_owner(&self, execution_id: &str, tenant: &str) {
         self.workflow_owners
@@ -299,6 +311,20 @@ fn default_secrets_vault() -> apex_secrets::Vault {
             None => Arc::new(apex_secrets::InMemorySecretStore::new()),
         };
     apex_secrets::Vault::new(store)
+}
+
+/// A tamper-evident [`AuditLog`](apex_audit::AuditLog) over a durable [`FileAuditSink`]
+/// at `~/.apex/audit`, falling back to an in-memory log.
+fn default_audit_log() -> apex_audit::AuditLog {
+    let sink = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| std::path::PathBuf::from(home).join(".apex").join("audit"))
+        .and_then(|dir| apex_audit::FileAuditSink::new(dir).ok());
+    match sink {
+        Some(s) => apex_audit::AuditLog::open(Box::new(s))
+            .unwrap_or_else(|_| apex_audit::AuditLog::in_memory()),
+        None => apex_audit::AuditLog::in_memory(),
+    }
 }
 
 /// A durable [`FileWebhookStore`] at `~/.apex/webhooks`, falling back to in-memory.
@@ -413,6 +439,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(marketplace::routes())
         // Secret vault: create/list/get/rotate/delete (tenant-scoped, RBAC-gated).
         .merge(secrets::routes())
+        // Audit trail: read the tenant's tamper-evident security records.
+        .merge(audit::routes())
+        // Tool discovery: list registered tools (built-ins + enabled plugin tools).
+        .merge(tools::routes())
         .with_state(state)
         // Stamp every response (incl. errors) with a request id (API overview §14).
         .layer(axum::middleware::from_fn(hardening::request_id))
@@ -1875,6 +1905,102 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::NO_CONTENT);
+    }
+
+    /// Secret-management actions are written to the tamper-evident audit log (by
+    /// reference, never value) and readable via the tenant-scoped audit route.
+    #[tokio::test]
+    async fn secret_mutations_are_audited() {
+        use apex_audit::AuditLog;
+        use apex_secrets::{InMemorySecretStore, Vault};
+        use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org_a = tenancy
+            .create_org(Organization::new("acme", "Acme"))
+            .unwrap();
+        let org_b = tenancy
+            .create_org(Organization::new("beta", "Beta"))
+            .unwrap();
+        let m = |u: &str, org: &str| Membership {
+            user: u.to_string(),
+            role: Role::OrgAdmin,
+            scope: MemberScope::Organization(org.to_string()),
+        };
+        tenancy.add_membership(m("alice", &org_a.id)).unwrap();
+        tenancy.add_membership(m("bob", &org_b.id)).unwrap();
+        let state = Arc::new(
+            AppState::from_env()
+                .with_tenancy(tenancy)
+                .with_secrets(Vault::new(Arc::new(InMemorySecretStore::new())))
+                .with_audit(AuditLog::in_memory()),
+        );
+
+        // Alice creates then rotates a secret.
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/secrets",
+            "acme",
+            "alice",
+            json!({ "name": "api-key", "value": "s3cr3t-value" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/secrets/api-key/rotate",
+            "acme",
+            "alice",
+            json!({ "value": "rotated-value" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+
+        // The audit trail records both actions, by reference and without the value.
+        let (st, audit) =
+            tenant_req(&state, "GET", "/api/v1/audit", "acme", "alice", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        let entries = audit["entries"].as_array().unwrap();
+        let actions: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e["event"]["action"].as_str())
+            .collect();
+        assert!(actions.contains(&"secret.create"), "actions: {actions:?}");
+        assert!(actions.contains(&"secret.rotate"), "actions: {actions:?}");
+        assert!(
+            !audit.to_string().contains("s3cr3t") && !audit.to_string().contains("rotated-value"),
+            "audit must not leak secret values: {audit}"
+        );
+        // Actor + resource are recorded (by reference).
+        assert_eq!(entries[0]["event"]["actor"]["principal"], "alice");
+        assert_eq!(
+            entries[0]["event"]["resource"]["id"],
+            "secret://acme/api-key"
+        );
+
+        // Tenant-scoped: a beta principal sees none of acme's audit records.
+        let (st, beta) =
+            tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(beta["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn tools_endpoint_lists_builtins_with_descriptions() {
+        let state = Arc::new(AppState::from_env());
+        let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        let tools = body["tools"].as_array().unwrap();
+        // The four built-ins are always registered.
+        let ids: Vec<&str> = tools.iter().filter_map(|t| t["id"].as_str()).collect();
+        for id in ["echo", "fs_read", "http_get", "shell"] {
+            assert!(ids.contains(&id), "missing built-in tool `{id}`: {ids:?}");
+        }
+        // Each entry carries a non-empty description (what the UI shows).
+        let fs_read = tools.iter().find(|t| t["id"] == "fs_read").unwrap();
+        assert!(!fs_read["description"].as_str().unwrap_or("").is_empty());
     }
 
     #[tokio::test]

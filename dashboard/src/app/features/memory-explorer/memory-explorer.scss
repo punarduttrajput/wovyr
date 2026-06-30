@@ -27,6 +27,11 @@
   padding:8px 10px; font-family:var(--mono); font-size:12px; color:var(--ink); outline:none; resize:vertical;
 }
 .add-b textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-weak); }
+.add-b > input[type=text] {
+  width:100%; border:1px solid var(--line); background:var(--surface-2); border-radius:var(--r-sm);
+  padding:8px 10px; font-family:var(--mono); font-size:12px; color:var(--ink); outline:none; margin-bottom:10px;
+}
+.add-b > input[type=text]:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-weak); }
 .add-row { display:flex; gap:9px; margin-top:10px; align-items:center; }
 .add-row input[type=text] {
   flex:1; border:1px solid var(--line); background:var(--surface-2); border-radius:var(--r-sm);

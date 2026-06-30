@@ -547,6 +547,15 @@ pub(crate) fn tenant_authorize(
     Ok(ctx.tenant)
 }
 
+/// The acting principal from `X-Apex-Principal` (or a bearer token); empty if anonymous.
+/// Used to attribute audit records to an actor.
+pub(crate) fn principal(headers: &HeaderMap) -> String {
+    header(headers, "x-apex-principal")
+        .or_else(|| header(headers, "authorization").and_then(|a| a.strip_prefix("Bearer ")))
+        .unwrap_or("")
+        .to_string()
+}
+
 /// The in-scope project for a run, from the `X-Apex-Project` request header.
 pub(crate) fn run_project(headers: &HeaderMap) -> Option<String> {
     header(headers, "x-apex-project").map(str::to_string)

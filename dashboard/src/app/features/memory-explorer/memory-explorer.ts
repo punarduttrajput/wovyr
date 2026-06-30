@@ -24,7 +24,7 @@ export class MemoryExplorer implements OnInit {
   strategy: 'hybrid' | 'vector' | 'keyword' = 'hybrid';
   weights = { relevance: 0.55, recency: 0.2, importance: 0.15 };
   diversity = 0;
-  add = { content: '', tags: '', importance: 0.5 };
+  add = { namespace: '', content: '', tags: '', importance: 0.5 };
 
   ngOnInit(): void {
     this.refresh();
@@ -77,10 +77,21 @@ export class MemoryExplorer implements OnInit {
     this.browse();
   }
 
+  /** Toggle the add/seed panel, prefilling the namespace with the current selection
+   *  (so seeding a brand-new knowledge base just means typing a new name). */
+  toggleAdd(): void {
+    if (this.showAdd()) {
+      this.showAdd.set(false);
+    } else {
+      this.add.namespace = this.selectedNs() ?? '';
+      this.showAdd.set(true);
+    }
+  }
+
   store(): void {
-    const ns = this.selectedNs();
+    const ns = this.add.namespace.trim();
     if (!ns || !this.add.content.trim()) {
-      this.status.set('Pick a namespace and enter content.');
+      this.status.set('Enter a namespace and content.');
       return;
     }
     const tags = this.add.tags.split(',').map((t) => t.trim()).filter(Boolean);
@@ -88,10 +99,12 @@ export class MemoryExplorer implements OnInit {
       .put({ namespace: ns, content: this.add.content.trim(), importance: this.add.importance, tags })
       .subscribe({
         next: () => {
-          this.status.set('Memory stored');
+          this.status.set(`Stored in "${ns}"`);
           this.add.content = '';
           this.add.tags = '';
           this.showAdd.set(false);
+          // Focus the (possibly new) namespace so the seeded record is visible.
+          this.selectedNs.set(ns);
           this.refresh();
           this.browse();
         },
