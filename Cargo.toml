@@ -12,6 +12,7 @@ members = [
     "crates/apex-marketplace",
     "crates/apex-tenancy",
     "crates/apex-events",
+    "crates/apex-secrets",
     "crates/apex-server",
     "apps/apex-cli",
 ]
@@ -36,6 +37,7 @@ apex-plugin = { path = "crates/apex-plugin" }
 apex-marketplace = { path = "crates/apex-marketplace" }
 apex-tenancy = { path = "crates/apex-tenancy" }
 apex-events = { path = "crates/apex-events" }
+apex-secrets = { path = "crates/apex-secrets" }
 apex-server = { path = "crates/apex-server" }
 
 # External

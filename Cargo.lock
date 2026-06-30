@@ -230,6 +230,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-secrets"
+version = "0.1.0"
+dependencies = [
+ "apex-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "apex-server"
 version = "0.1.0"
 dependencies = [
@@ -240,6 +249,7 @@ dependencies = [
  "apex-memory",
  "apex-plugin",
  "apex-provider",
+ "apex-secrets",
  "apex-telemetry",
  "apex-tenancy",
  "apex-tools",

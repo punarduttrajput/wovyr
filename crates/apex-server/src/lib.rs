@@ -18,6 +18,7 @@ mod hardening;
 mod marketplace;
 mod memory;
 mod plugins;
+mod secrets;
 mod tenancy;
 mod webhooks;
 mod workflow_runner;
@@ -146,6 +147,8 @@ pub struct AppState {
     /// The memory store the engine writes to, kept alongside for namespace/record
     /// enumeration (the engine does not expose its store).
     pub(crate) memory_store: Arc<dyn apex_memory::MemoryStore>,
+    /// Secret vault backing the `/api/v1/secrets` routes (tenant-scoped).
+    pub(crate) secrets: apex_secrets::Vault,
 }
 
 impl AppState {
@@ -182,6 +185,7 @@ impl AppState {
             idempotency: hardening::IdempotencyStore::default(),
             memory,
             memory_store,
+            secrets: default_secrets_vault(),
         }
     }
 
@@ -231,6 +235,13 @@ impl AppState {
         self
     }
 
+    /// Override the secret vault (tests inject an in-memory store).
+    #[cfg(test)]
+    pub(crate) fn with_secrets(mut self, vault: apex_secrets::Vault) -> Self {
+        self.secrets = vault;
+        self
+    }
+
     /// Record the owning tenant of a workflow execution (called at submit).
     fn record_workflow_owner(&self, execution_id: &str, tenant: &str) {
         self.workflow_owners
@@ -268,6 +279,20 @@ fn default_tenancy_store() -> Arc<dyn TenancyStore> {
         return Arc::new(store);
     }
     Arc::new(InMemoryTenancyStore::new())
+}
+
+/// A secret [`Vault`](apex_secrets::Vault) over a durable [`FileSecretStore`] at
+/// `~/.apex/secrets` (shared with the CLI), falling back to in-memory.
+fn default_secrets_vault() -> apex_secrets::Vault {
+    let dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| std::path::PathBuf::from(home).join(".apex").join("secrets"));
+    let store: Arc<dyn apex_secrets::SecretStore> =
+        match dir.and_then(|d| apex_secrets::FileSecretStore::new(d).ok()) {
+            Some(s) => Arc::new(s),
+            None => Arc::new(apex_secrets::InMemorySecretStore::new()),
+        };
+    apex_secrets::Vault::new(store)
 }
 
 /// A durable [`FileWebhookStore`] at `~/.apex/webhooks`, falling back to in-memory.
@@ -380,6 +405,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(plugins::routes())
         // Marketplace: publish, discover, download, rate, verify, install.
         .merge(marketplace::routes())
+        // Secret vault: create/list/get/rotate/delete (tenant-scoped, RBAC-gated).
+        .merge(secrets::routes())
         .with_state(state)
         // Stamp every response (incl. errors) with a request id (API overview §14).
         .layer(axum::middleware::from_fn(hardening::request_id))
@@ -1714,6 +1741,133 @@ mod tests {
             found.iter().any(|c| c.contains("acme")),
             "acme owner must find its own record: {found:?}"
         );
+    }
+
+    /// The secret vault is tenant-scoped, RBAC-gated, and never returns a value over the
+    /// API (values leave the vault only via the resolution/injection path).
+    #[tokio::test]
+    async fn secrets_are_isolated_masked_and_rbac_gated() {
+        use apex_secrets::{InMemorySecretStore, Vault};
+        use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org_a = tenancy
+            .create_org(Organization::new("acme", "Acme"))
+            .unwrap();
+        let org_b = tenancy
+            .create_org(Organization::new("beta", "Beta"))
+            .unwrap();
+        let m = |user: &str, role, org: &str| Membership {
+            user: user.to_string(),
+            role,
+            scope: MemberScope::Organization(org.to_string()),
+        };
+        tenancy
+            .add_membership(m("alice", Role::OrgAdmin, &org_a.id))
+            .unwrap();
+        tenancy
+            .add_membership(m("carol", Role::Viewer, &org_a.id))
+            .unwrap();
+        tenancy
+            .add_membership(m("bob", Role::OrgAdmin, &org_b.id))
+            .unwrap();
+        let state = Arc::new(
+            AppState::from_env()
+                .with_tenancy(tenancy)
+                .with_secrets(Vault::new(Arc::new(InMemorySecretStore::new()))),
+        );
+
+        // Alice creates a secret in acme — the response carries metadata, never the value.
+        let (st, body) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/secrets",
+            "acme",
+            "alice",
+            json!({ "name": "api-key", "value": "s3cr3t-value" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["reference"], "secret://acme/api-key");
+        assert_eq!(body["version"], 1);
+        assert!(
+            !body.to_string().contains("s3cr3t"),
+            "the value must never appear in a response: {body}"
+        );
+
+        // A viewer in acme may read but not write (RBAC).
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/secrets",
+            "acme",
+            "carol",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "viewer may list");
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/secrets",
+            "acme",
+            "carol",
+            json!({ "name": "x", "value": "y" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "viewer may not create");
+
+        // Bob (beta) cannot see or read acme's secret, and cannot spoof the tenant.
+        let (st, list) =
+            tenant_req(&state, "GET", "/api/v1/secrets", "beta", "bob", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(list["total"], 0, "beta has no secrets of its own");
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/secrets/api-key",
+            "beta",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/secrets/api-key",
+            "acme",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "spoofed tenant denied");
+
+        // Owner can rotate (version bumps) and the value is still never returned.
+        let (st, rotated) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/secrets/api-key/rotate",
+            "acme",
+            "alice",
+            json!({ "value": "rotated-value" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(rotated["version"], 2);
+        assert!(!rotated.to_string().contains("rotated-value"));
+
+        // Owner can delete.
+        let (st, _) = tenant_req(
+            &state,
+            "DELETE",
+            "/api/v1/secrets/api-key",
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
