@@ -7,6 +7,12 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Single-node HTTP server exposing the Apex Platform API (v0.1: agent runs)."
 
+[features]
+# Execute plugin tool capabilities in the WASM sandbox (with secret injection) on the
+# server's run path. Off by default (pulls Wasmtime via apex-plugin/wasi); without it,
+# enabled plugin tools register but error on call (the not-loaded placeholder).
+plugin-wasi = ["apex-plugin/wasi"]
+
 [dependencies]
 apex-common.workspace = true
 apex-provider.workspace = true

@@ -25,6 +25,9 @@ pub struct RunOptions {
     pub input: Value,
     /// Maximum model/tool iterations.
     pub max_steps: usize,
+    /// The tenant this run acts in — propagated to each tool's [`ToolContext`] so a
+    /// plugin tool's secret references resolve within it. Empty for the unscoped default.
+    pub tenant: String,
 }
 
 impl RunOptions {
@@ -33,7 +36,14 @@ impl RunOptions {
         Self {
             input,
             max_steps: DEFAULT_MAX_STEPS,
+            tenant: String::new(),
         }
+    }
+
+    /// Set the tenant the run acts in (for tenant-scoped plugin secret resolution).
+    pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = tenant.into();
+        self
     }
 }
 
@@ -196,7 +206,8 @@ async fn run_agent_inner(
                 arguments: &call.arguments,
             });
 
-            let result_text = execute_tool_call(def, registry, &model, step, idx, call, sink).await;
+            let result_text =
+                execute_tool_call(def, registry, &opts.tenant, step, idx, call, sink).await;
 
             messages.push(Message::tool_result(&call.id, &call.name, result_text));
         }
@@ -247,13 +258,12 @@ async fn stream_chat(
 async fn execute_tool_call(
     def: &AgentDefinition,
     registry: &ToolRegistry,
-    model: &str,
+    tenant: &str,
     step: usize,
     idx: usize,
     call: &apex_provider::ToolCall,
     sink: &mut dyn RunEventSink,
 ) -> String {
-    let _ = model;
     let tool = match registry.get(&call.name) {
         Some(t) => t,
         None => {
@@ -273,9 +283,8 @@ async fn execute_tool_call(
         execution_id: format!("{}-s{step}-t{idx}", def.metadata.name),
         agent_id: def.metadata.name.clone(),
         workdir: ".".to_string(),
-        // Tenant threading into the agent run path (for plugin secret resolution) is a
-        // later slice; unset here means no tenant-scoped secret injection on this path.
-        tenant: String::new(),
+        // The run's tenant — scopes plugin secret resolution to this tenant's namespace.
+        tenant: tenant.to_string(),
         granted_permissions: def.spec.permissions.clone(),
     };
 

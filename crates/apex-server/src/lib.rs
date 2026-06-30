@@ -163,7 +163,13 @@ impl AppState {
                 metrics: metrics.clone(),
             },
         )));
-        let registry = ToolRegistry::with_builtins();
+        let secrets = default_secrets_vault();
+        let mut registry = ToolRegistry::with_builtins();
+        // Register enabled plugin tools from the durable catalog into the run registry,
+        // routed through a secret-aware runtime (when built with `plugin-wasi`), so agent
+        // and workflow runs can invoke them with their tenant-scoped secrets injected.
+        // Done before the registry is shared with the workflow engine below.
+        plugins::register_enabled_tools(&mut registry, &secrets);
         let (memory, memory_store) = memory::default_engine();
         // Thread gateway + registry into the workflow engine so the ServerExecutor can
         // actually drive function/ai activities when the submit route runs a workflow.
@@ -185,7 +191,7 @@ impl AppState {
             idempotency: hardening::IdempotencyStore::default(),
             memory,
             memory_store,
-            secrets: default_secrets_vault(),
+            secrets,
         }
     }
 
@@ -577,6 +583,7 @@ async fn run_stream_handler(
     // Quota gate before streaming begins (429 if exceeded); the permit rides along in
     // the run task and releases when it ends.
     let project = tenancy::run_project(&headers);
+    let tenant = tenancy::run_tenant(&headers);
     let permit = match tenancy::admit_run(&state, project.as_deref()) {
         Ok(p) => p,
         Err(e) => return e.into_response(),
@@ -588,9 +595,9 @@ async fn run_stream_handler(
         let mut sink = ChannelSink { tx: tx.clone() };
         let frame = match run_agent(
             &def,
-            &*state.gateway,
+            &state.gateway,
             &state.registry,
-            RunOptions::new(input),
+            RunOptions::new(input).with_tenant(tenant),
             &mut sink,
         )
         .await
@@ -630,7 +637,7 @@ async fn run_definition(
         &def,
         &state.gateway,
         &state.registry,
-        RunOptions::new(input),
+        RunOptions::new(input).with_tenant(tenant),
         &mut NullSink,
     )
     .await

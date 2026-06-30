@@ -6,7 +6,8 @@
 //! changes made here are immediately visible to the CLI and vice versa.
 
 use apex_plugin::{
-    CapabilityKind, InstalledPlugin, Package, PluginEngine, PluginState, TrustStore,
+    CapabilityKind, CapabilityRuntime, InstalledPlugin, NotLoadedRuntime, Package, PluginEngine,
+    PluginState, TrustStore,
 };
 use apex_tools::ToolRegistry;
 use axum::{
@@ -140,6 +141,47 @@ fn engine() -> Result<PluginEngine, ApiError> {
         e = e.with_staging_dir(staging);
     }
     Ok(e)
+}
+
+/// The capability runtime plugin tools registered into the server's *run* registry use:
+/// the secret-aware WASM loader when built with `plugin-wasi`, else the not-loaded
+/// placeholder (tools are visible with correct metadata but error on call).
+fn run_capability_runtime(vault: &apex_secrets::Vault) -> Arc<dyn CapabilityRuntime> {
+    #[cfg(feature = "plugin-wasi")]
+    if let Ok(rt) = apex_plugin::WasiCapabilityRuntime::new() {
+        return Arc::new(rt.with_secrets(vault.clone()));
+    }
+    let _ = vault;
+    Arc::new(NotLoadedRuntime)
+}
+
+/// Register every **enabled** plugin's tool capabilities from the durable catalog into
+/// `registry`, routing execution through a [secret-aware](run_capability_runtime) runtime
+/// so an agent/workflow run can call them with their tenant-scoped secrets injected.
+/// Best-effort: a missing or corrupt catalog registers nothing (the server still starts).
+pub(crate) fn register_enabled_tools(registry: &mut ToolRegistry, vault: &apex_secrets::Vault) {
+    let trust = load_trust().unwrap_or_else(|_| TrustStore::new());
+    let catalog = load_catalog().unwrap_or_default();
+    register_catalog(registry, catalog, trust, staging_dir(), vault);
+}
+
+/// Register the enabled plugins of `catalog` into `registry` through the run runtime.
+/// Split out from [`register_enabled_tools`] (which sources the catalog from disk) so the
+/// registration path is unit-testable without touching `~/.apex/plugins`.
+fn register_catalog(
+    registry: &mut ToolRegistry,
+    catalog: Vec<InstalledPlugin>,
+    trust: TrustStore,
+    staging: Option<PathBuf>,
+    vault: &apex_secrets::Vault,
+) {
+    let mut engine = PluginEngine::new(semver::Version::new(1, 0, 0), trust)
+        .with_catalog(catalog)
+        .with_runtime(run_capability_runtime(vault));
+    if let Some(staging) = staging {
+        engine = engine.with_staging_dir(staging);
+    }
+    engine.register_enabled(registry);
 }
 
 pub(crate) fn routes() -> Router<Arc<AppState>> {
@@ -336,4 +378,64 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, ApiError> {
                 "apexpkg must be valid base64-encoded bytes",
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apex_plugin::PluginManifest;
+    use apex_secrets::{InMemorySecretStore, Vault};
+
+    fn vault() -> Vault {
+        Vault::new(Arc::new(InMemorySecretStore::new()))
+    }
+
+    fn enabled(manifest_yaml: &str) -> InstalledPlugin {
+        InstalledPlugin {
+            manifest: PluginManifest::from_yaml(manifest_yaml).unwrap(),
+            state: PluginState::Enabled,
+            granted_permissions: vec![],
+            artifact_dir: None,
+            previous: None,
+        }
+    }
+
+    const DEMO: &str = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata: { name: demo, version: 1.0.0, publisher: acme }
+capabilities:
+  - { kind: tool, id: demo.run }
+"#;
+
+    #[test]
+    fn registers_enabled_plugin_tools_into_the_run_registry() {
+        let mut registry = ToolRegistry::with_builtins();
+        register_catalog(
+            &mut registry,
+            vec![enabled(DEMO)],
+            TrustStore::new(),
+            None,
+            &vault(),
+        );
+        // The enabled plugin's tool capability is now callable from a run.
+        assert!(registry.contains("demo.run"));
+        // Built-ins remain.
+        assert!(registry.contains("echo"));
+    }
+
+    #[test]
+    fn disabled_plugins_are_not_registered() {
+        let mut plugin = enabled(DEMO);
+        plugin.state = PluginState::Disabled;
+        let mut registry = ToolRegistry::with_builtins();
+        register_catalog(
+            &mut registry,
+            vec![plugin],
+            TrustStore::new(),
+            None,
+            &vault(),
+        );
+        assert!(!registry.contains("demo.run"));
+    }
 }

@@ -10,10 +10,13 @@
 use apex_agent::{AgentDefinition, RunEvent, RunEventSink, RunOptions, run_agent};
 use apex_common::{Result, Usage};
 use apex_provider::{AIProvider, ChatRequest, ChatResponse, Gateway, Message, Role, ToolCall};
-use apex_tools::ToolRegistry;
+use apex_tools::{
+    Tool, ToolContext, ToolError, ToolMetadata, ToolRegistry, ToolRequest, ToolResponse,
+};
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A provider whose behavior is fixed for the test: ask for the `echo` tool once,
 /// then summarize the tool result. Deterministic — no clocks, no randomness.
@@ -131,6 +134,103 @@ async fn agent_completes_a_tool_round_trip() {
     assert!(capture.events.contains(&"toolresult:echo:true".to_string()));
     assert!(capture.events.contains(&"delta".to_string()));
     assert!(capture.events.contains(&"done".to_string()));
+}
+
+/// A tool that records the tenant it sees on its [`ToolContext`] — so we can assert the
+/// run's tenant is threaded all the way to tool execution (the input a plugin tool needs
+/// to resolve tenant-scoped secrets).
+struct RecordingTool {
+    seen_tenant: Arc<Mutex<String>>,
+}
+
+#[async_trait]
+impl Tool for RecordingTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new("recorder", "1.0.0", "test", "records the tenant it sees")
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        _request: ToolRequest,
+    ) -> std::result::Result<ToolResponse, ToolError> {
+        *self.seen_tenant.lock().unwrap() = ctx.tenant.clone();
+        Ok(ToolResponse::success(json!({ "ok": true })))
+    }
+}
+
+/// A provider that calls the `recorder` tool once, then answers.
+struct CallsRecorder {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl AIProvider for CallsRecorder {
+    fn name(&self) -> &str {
+        "scripted"
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if request.messages.iter().any(|m| m.role == Role::Tool) {
+            return Ok(ChatResponse {
+                message: Message::assistant("done"),
+                model: request.model,
+                usage: Usage::new(1, 1, 0.0),
+                finish_reason: "stop".to_string(),
+            });
+        }
+        Ok(ChatResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "recorder".to_string(),
+                    arguments: "{}".to_string(),
+                }],
+                tool_call_id: None,
+                name: None,
+            },
+            model: request.model,
+            usage: Usage::new(1, 0, 0.0),
+            finish_reason: "tool_calls".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn run_tenant_is_threaded_to_tool_context() {
+    let def = AgentDefinition::from_yaml(
+        "metadata:\n  name: tooler\nspec:\n  instructions: Use tools.\n  tools: [recorder]\n",
+    )
+    .unwrap();
+    let gateway = Gateway::new(Box::new(CallsRecorder {
+        calls: AtomicUsize::new(0),
+    }));
+    let seen = Arc::new(Mutex::new(String::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(RecordingTool {
+        seen_tenant: seen.clone(),
+    }));
+
+    let mut capture = Capture::default();
+    run_agent(
+        &def,
+        &gateway,
+        &registry,
+        RunOptions::new(json!({ "message": "go" })).with_tenant("acme"),
+        &mut capture,
+    )
+    .await
+    .unwrap();
+
+    // The run's tenant reached the tool's execution context.
+    assert_eq!(*seen.lock().unwrap(), "acme");
 }
 
 #[tokio::test]
