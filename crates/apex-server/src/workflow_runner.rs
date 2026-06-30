@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{delete, post},
 };
 use serde::Deserialize;
@@ -175,8 +175,10 @@ struct SubmitRequest {
 /// client can poll `GET /api/v1/workflows/{id}` for status.
 async fn submit_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<SubmitRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
     let def = Definition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
 
@@ -203,6 +205,8 @@ async fn submit_handler(
         .start(&def, &execution_id, input.clone())
         .await
         .map_err(ApiError::from)?;
+    // Stamp the owning tenant so reads/mutations of this execution are tenant-scoped.
+    state.record_workflow_owner(&execution_id, &tenant);
 
     {
         let engine = state.workflows.clone();
@@ -235,9 +239,12 @@ struct SignalRequest {
 /// execution and resume it.  Used for `wait: {event: …}` activities.
 async fn signal_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<SignalRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
+    crate::require_workflow_visible(&state, &id, &tenant)?;
     let def = Definition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
     let payload = if req.payload.is_null() {
@@ -277,9 +284,12 @@ struct ApproveRequest {
 /// the activity id, consistent with how the CLI's `workflows approve` command works.
 async fn approve_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<ApproveRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
+    crate::require_workflow_visible(&state, &id, &tenant)?;
     let def = Definition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
     let decision = if req.decision.is_null() {
@@ -312,8 +322,11 @@ async fn approve_handler(
 /// normally; only pending/waiting activities are skipped.
 async fn cancel_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:write")?;
+    crate::require_workflow_visible(&state, &id, &tenant)?;
     // Check the execution exists before attempting cancellation.
     state
         .workflows

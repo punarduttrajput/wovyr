@@ -55,7 +55,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
 
 // --- request context ------------------------------------------------------------
 
-const DEFAULT_TENANT: &str = "default";
+pub(crate) const DEFAULT_TENANT: &str = "default";
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
@@ -527,14 +527,14 @@ pub(crate) fn tenant_context(state: &AppState, headers: &HeaderMap) -> TenantCon
     }
 }
 
-/// Authorize an agents-surface operation in the caller's tenant and return that tenant
-/// (the key the [`AgentStore`](crate::AgentStore) is scoped by). Fail-closed: a named
+/// Authorize a tenant-scoped resource operation and return the caller's authorized
+/// tenant (the key resources like agents/workflows are scoped by). Fail-closed: a named
 /// tenant or any authenticated principal must hold a tenant-scoped role granting `scope`
 /// (→ `403`), which requires real membership — so `X-Apex-Tenant` cannot be spoofed.
 ///
 /// **Back-compat:** the anonymous `default` tenant (no principal) retains full
 /// single-node access, preserving the pre-tenancy behavior for local/dev use.
-pub(crate) fn agents_authorize(
+pub(crate) fn tenant_authorize(
     state: &AppState,
     headers: &HeaderMap,
     scope: &str,

@@ -122,6 +122,11 @@ pub struct AppState {
     /// Read-only engine over the durable workflow store — drives the `GET
     /// /api/v1/workflows*` visibility endpoints (G4). Its executor is never invoked.
     workflows: Engine,
+    /// Workflow execution id → owning tenant, stamped at submit so the workflow routes
+    /// enforce per-tenant isolation without the (tenant-agnostic) engine. An execution
+    /// with no recorded owner belongs to the anonymous `default` space (back-compat).
+    /// In-memory for now — durable backing tracks the agent store (a later slice).
+    workflow_owners: RwLock<BTreeMap<String, String>>,
     /// Tenancy catalog backing the org/project/membership/quota routes (G: tenancy).
     pub(crate) tenancy: Arc<dyn TenancyStore>,
     /// Per-project run-path quota usage (concurrent runs + daily LLM spend).
@@ -167,6 +172,7 @@ impl AppState {
             agents: AgentStore::default(),
             run_counter: AtomicU64::new(1),
             workflows,
+            workflow_owners: RwLock::new(BTreeMap::new()),
             tenancy: default_tenancy_store(),
             quota: tenancy::QuotaTracker::new(),
             webhooks: default_webhook_store(),
@@ -210,6 +216,30 @@ impl AppState {
     pub fn with_tenancy(mut self, store: Arc<dyn TenancyStore>) -> Self {
         self.tenancy = store;
         self
+    }
+
+    /// Record the owning tenant of a workflow execution (called at submit).
+    fn record_workflow_owner(&self, execution_id: &str, tenant: &str) {
+        self.workflow_owners
+            .write()
+            .expect("workflow owners poisoned")
+            .insert(execution_id.to_string(), tenant.to_string());
+    }
+
+    /// Whether `tenant` may see/act on workflow execution `execution_id`. An execution
+    /// with a recorded owner is visible only to that tenant; one with no recorded owner
+    /// belongs to the anonymous `default` space (back-compat for pre-existing or
+    /// CLI-created executions).
+    fn workflow_visible(&self, execution_id: &str, tenant: &str) -> bool {
+        match self
+            .workflow_owners
+            .read()
+            .expect("workflow owners poisoned")
+            .get(execution_id)
+        {
+            Some(owner) => owner == tenant,
+            None => tenant == tenancy::DEFAULT_TENANT,
+        }
     }
 }
 
@@ -618,7 +648,7 @@ async fn create_agent_handler(
     headers: HeaderMap,
     Json(req): Json<CreateAgentRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let tenant = tenancy::agents_authorize(&state, &headers, "agents:write")?;
+    let tenant = tenancy::tenant_authorize(&state, &headers, "agents:write")?;
     let id = state.agents.create(&tenant, req.manifest)?;
     Ok(Json(json!({ "id": id, "status": "created" })))
 }
@@ -630,7 +660,7 @@ async fn list_agents_handler(
     headers: HeaderMap,
     Query(page): Query<hardening::PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let tenant = tenancy::agents_authorize(&state, &headers, "agents:read")?;
+    let tenant = tenancy::tenant_authorize(&state, &headers, "agents:read")?;
     let items: Vec<Value> = state
         .agents
         .list(&tenant)
@@ -646,7 +676,7 @@ async fn get_agent_handler(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let tenant = tenancy::agents_authorize(&state, &headers, "agents:read")?;
+    let tenant = tenancy::tenant_authorize(&state, &headers, "agents:read")?;
     match state.agents.manifest(&tenant, &id) {
         Some(manifest) => Ok(Json(json!({ "id": id, "manifest": manifest }))),
         None => Err(ApiError::new(
@@ -663,7 +693,7 @@ async fn delete_agent_handler(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant = tenancy::agents_authorize(&state, &headers, "agents:write")?;
+    let tenant = tenancy::tenant_authorize(&state, &headers, "agents:write")?;
     if state.agents.delete(&tenant, &id) {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -687,7 +717,7 @@ async fn run_stored_handler(
     let project = tenancy::run_project(&headers);
     // Authorize the run in the caller's tenant, then resolve the agent *within* that
     // tenant — a caller can only run its own tenant's stored agents.
-    let result = match tenancy::agents_authorize(&state, &headers, "agents:run") {
+    let result = match tenancy::tenant_authorize(&state, &headers, "agents:run") {
         Ok(tenant) => match state.agents.definition(&tenant, &id) {
             Some(def) => run_definition(&state, def, req.input, &tenant, project.as_deref()).await,
             None => Err(ApiError::new(
@@ -734,8 +764,10 @@ struct WorkflowListQuery {
 /// cursor-paginated (overview §6).
 async fn list_workflows_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<WorkflowListQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    let tenant = tenancy::tenant_authorize(&state, &headers, "workflows:read")?;
     let status = match query
         .status
         .as_deref()
@@ -760,6 +792,8 @@ async fn list_workflows_handler(
     let executions = state.workflows.list(&filter).await?;
     let items: Vec<Value> = executions
         .into_iter()
+        // Tenant isolation: only show executions this tenant owns.
+        .filter(|e| state.workflow_visible(&e.execution_id, &tenant))
         .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
         .collect();
     Ok(Json(hardening::paginate(items, &query.page.page())))
@@ -768,17 +802,43 @@ async fn list_workflows_handler(
 /// `GET /api/v1/workflows/{id}` — an execution's status plus its event timeline (G4).
 async fn get_workflow_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let summary = state.workflows.status(&id).await?.ok_or_else(|| {
+    let tenant = tenancy::tenant_authorize(&state, &headers, "workflows:read")?;
+    // Hide cross-tenant executions behind the same 404 as a missing one.
+    let missing = || {
         ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
             format!("execution `{id}` not found"),
         )
-    })?;
+    };
+    if !state.workflow_visible(&id, &tenant) {
+        return Err(missing());
+    }
+    let summary = state.workflows.status(&id).await?.ok_or_else(missing)?;
     let events = state.workflows.history(&id).await?;
     Ok(Json(json!({ "execution": summary, "events": events })))
+}
+
+/// Reject access to a workflow execution the caller's tenant does not own, hiding its
+/// existence behind the same `404` a missing execution returns (used by the write-path
+/// signal/approve/cancel routes).
+pub(crate) fn require_workflow_visible(
+    state: &AppState,
+    id: &str,
+    tenant: &str,
+) -> Result<(), ApiError> {
+    if state.workflow_visible(id, tenant) {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("execution `{id}` not found"),
+        ))
+    }
 }
 
 /// `GET /workflows` — a minimal, read-only HTML UI over the visibility API (G4).
@@ -1358,6 +1418,143 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::NO_CONTENT);
+    }
+
+    /// Cross-tenant isolation for the workflow surface: an execution submitted in one
+    /// tenant is invisible and inaccessible (list/get/signal/cancel) to another tenant,
+    /// and a spoofed `X-Apex-Tenant` is rejected. (v0.3 exit criterion: zero
+    /// cross-tenant leakage — workflows surface.)
+    #[tokio::test]
+    async fn workflows_are_isolated_per_tenant() {
+        use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org_a = tenancy
+            .create_org(Organization::new("acme", "Acme"))
+            .unwrap();
+        let org_b = tenancy
+            .create_org(Organization::new("beta", "Beta"))
+            .unwrap();
+        let member = |user: &str, org: &str| Membership {
+            user: user.to_string(),
+            role: Role::OrgAdmin,
+            scope: MemberScope::Organization(org.to_string()),
+        };
+        tenancy.add_membership(member("alice", &org_a.id)).unwrap();
+        tenancy.add_membership(member("bob", &org_b.id)).unwrap();
+        let state = Arc::new(AppState::from_env().with_tenancy(tenancy));
+
+        let manifest = "metadata:\n  name: iso-wf\nspec:\n  activities:\n    - id: echo-step\n      type: function\n      name: echo\n      inputs:\n        message: hi\n";
+        let exec_id = "wf-iso-acme-1";
+
+        // Alice submits a workflow in tenant `acme`.
+        let (st, body) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/workflows",
+            "acme",
+            "alice",
+            json!({ "manifest": manifest, "execution_id": exec_id }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["execution_id"], exec_id);
+
+        // Bob (tenant `beta`) cannot see it in his list, nor read/signal/cancel it (404).
+        let (st, list) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/workflows",
+            "beta",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let beta_ids: Vec<&str> = list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["execution_id"].as_str())
+            .collect();
+        assert!(
+            !beta_ids.contains(&exec_id),
+            "beta must not see acme's execution: {beta_ids:?}"
+        );
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            &format!("/api/v1/workflows/{exec_id}"),
+            "beta",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            &format!("/api/v1/workflows/{exec_id}/signal"),
+            "beta",
+            "bob",
+            json!({ "manifest": manifest, "event": "go" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "signal must not cross tenants");
+        let (st, _) = tenant_req(
+            &state,
+            "DELETE",
+            &format!("/api/v1/workflows/{exec_id}"),
+            "beta",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "cancel must not cross tenants");
+
+        // Header spoofing: Bob claims `acme` but holds no membership there → 403.
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/workflows",
+            "acme",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "spoofed tenant must be denied");
+
+        // Alice (real member of acme) sees and can act on her execution.
+        let (st, alice_list) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/workflows",
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let acme_ids: Vec<&str> = alice_list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["execution_id"].as_str())
+            .collect();
+        assert!(
+            acme_ids.contains(&exec_id),
+            "acme must see its own execution: {acme_ids:?}"
+        );
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            &format!("/api/v1/workflows/{exec_id}"),
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "owner may read its execution");
     }
 
     #[tokio::test]
