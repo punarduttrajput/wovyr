@@ -17,7 +17,7 @@ use apex_telemetry::Metrics;
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{delete, get},
 };
@@ -186,16 +186,18 @@ struct RegisterWebhookRequest {
 async fn list_webhooks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(page): Query<crate::hardening::PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let ctx = crate::tenancy::context(&state, &headers, None);
     ctx.authorize("projects:read")?;
-    let hooks = state.webhooks.list(&ctx.tenant)?;
     // Redact secrets from the listing.
-    let hooks: Vec<Value> = hooks
+    let items: Vec<Value> = state
+        .webhooks
+        .list(&ctx.tenant)?
         .into_iter()
         .map(|h| json!({ "id": h.id, "url": h.url, "events": h.events, "active": h.active }))
         .collect();
-    Ok(Json(json!({ "webhooks": hooks })))
+    Ok(Json(crate::hardening::paginate(items, &page.page())))
 }
 
 async fn register_webhook(

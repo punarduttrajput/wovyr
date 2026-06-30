@@ -20,7 +20,7 @@ use apex_tenancy::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::get,
 };
@@ -128,11 +128,17 @@ struct CreateOrgRequest {
 async fn list_orgs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(page): Query<crate::hardening::PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let ctx = context(&state, &headers, None);
     ctx.authorize("projects:read")?;
-    let orgs = state.tenancy.list_orgs(&ctx.tenant)?;
-    Ok(Json(json!({ "organizations": orgs })))
+    let items = state
+        .tenancy
+        .list_orgs(&ctx.tenant)?
+        .into_iter()
+        .map(|o| serde_json::to_value(o).unwrap_or(Value::Null))
+        .collect();
+    Ok(Json(crate::hardening::paginate(items, &page.page())))
 }
 
 async fn create_org(
@@ -168,11 +174,17 @@ struct PatchProjectRequest {
 async fn list_projects(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(page): Query<crate::hardening::PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let ctx = context(&state, &headers, None);
     ctx.authorize("projects:read")?;
-    let projects = state.tenancy.list_projects(&ctx.tenant)?;
-    Ok(Json(json!({ "projects": projects })))
+    let items = state
+        .tenancy
+        .list_projects(&ctx.tenant)?
+        .into_iter()
+        .map(|p| serde_json::to_value(p).unwrap_or(Value::Null))
+        .collect();
+    Ok(Json(crate::hardening::paginate(items, &page.page())))
 }
 
 async fn create_project(
