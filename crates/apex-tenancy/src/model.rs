@@ -68,10 +68,20 @@ pub struct Project {
     /// Lifecycle status.
     #[serde(default)]
     pub status: ProjectStatus,
+    /// Monotonic version for optimistic concurrency (`ETag` / `If-Match`,
+    /// [overview §5/§10](../../docs/09-api/overview.md#10-concurrency-control)); bumped
+    /// on every update.
+    #[serde(default = "one")]
+    pub version: u64,
+}
+
+/// Default version for projects (and for catalogs written before versioning).
+fn one() -> u64 {
+    1
 }
 
 impl Project {
-    /// A new active project under `org`, with a derived id.
+    /// A new active project under `org`, with a derived id, at version 1.
     pub fn new(org: &Organization, name: impl Into<String>) -> Self {
         let name = name.into();
         let id = format!("prj-{}-{}", slug(&org.name), slug(&name));
@@ -82,6 +92,7 @@ impl Project {
             tenant: org.tenant.clone(),
             settings: BTreeMap::new(),
             status: ProjectStatus::Active,
+            version: 1,
         }
     }
 }

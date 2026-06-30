@@ -125,6 +125,23 @@ pub(crate) fn idempotency_key(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+// --- optimistic concurrency (overview §10) ---------------------------------------
+
+/// The `ETag` header value for a resource version (a quoted version number).
+pub(crate) fn etag(version: u64) -> String {
+    format!("\"{version}\"")
+}
+
+/// The version requested by an `If-Match` header, if present and parseable. Tolerates
+/// quotes and the weak-validator `W/` prefix (`If-Match: "3"` / `W/"3"` / `3`).
+pub(crate) fn if_match(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().trim_start_matches("W/").trim_matches('"'))
+        .and_then(|s| s.parse().ok())
+}
+
 // --- request id (overview §14) ---------------------------------------------------
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -260,6 +277,19 @@ mod tests {
         let last = paginate(items(5), &q3.page());
         assert_eq!(last["has_more"], false);
         assert_eq!(last["next_cursor"], Value::Null);
+    }
+
+    #[test]
+    fn if_match_parses_quoted_and_weak_validators() {
+        let mut h = HeaderMap::new();
+        assert_eq!(if_match(&h), None);
+        h.insert(header::IF_MATCH, "\"3\"".parse().unwrap());
+        assert_eq!(if_match(&h), Some(3));
+        h.insert(header::IF_MATCH, "W/\"7\"".parse().unwrap());
+        assert_eq!(if_match(&h), Some(7));
+        h.insert(header::IF_MATCH, "5".parse().unwrap());
+        assert_eq!(if_match(&h), Some(5));
+        assert_eq!(etag(42), "\"42\"");
     }
 
     #[test]
