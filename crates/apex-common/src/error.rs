@@ -25,6 +25,18 @@ pub enum Error {
     #[error("invalid input: {0}")]
     Invalid(String),
 
+    /// The principal lacks the scope/role required for the operation (authorization).
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
+    /// The operation conflicts with existing state (e.g. a duplicate name).
+    #[error("conflict: {0}")]
+    Conflict(String),
+
+    /// A tenant/project quota would be exceeded by the operation.
+    #[error("quota exceeded: {0}")]
+    QuotaExceeded(String),
+
     /// An LLM provider/gateway call failed.
     #[error("provider error: {0}")]
     Provider(String),
@@ -60,5 +72,20 @@ impl Error {
     /// Construct a [`Error::Provider`] from anything string-like.
     pub fn provider(msg: impl Into<String>) -> Self {
         Error::Provider(msg.into())
+    }
+
+    /// Construct a [`Error::Forbidden`] from anything string-like.
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Error::Forbidden(msg.into())
+    }
+
+    /// Construct a [`Error::Conflict`] from anything string-like.
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Error::Conflict(msg.into())
+    }
+
+    /// Construct a [`Error::QuotaExceeded`] from anything string-like.
+    pub fn quota_exceeded(msg: impl Into<String>) -> Self {
+        Error::QuotaExceeded(msg.into())
     }
 }

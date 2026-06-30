@@ -690,6 +690,11 @@ impl From<Error> for ApiError {
                 ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", m)
             }
             Error::NotFound(m) => ApiError::new(StatusCode::NOT_FOUND, "not_found", m),
+            Error::Forbidden(m) => ApiError::new(StatusCode::FORBIDDEN, "forbidden", m),
+            Error::Conflict(m) => ApiError::new(StatusCode::CONFLICT, "conflict", m),
+            Error::QuotaExceeded(m) => {
+                ApiError::new(StatusCode::TOO_MANY_REQUESTS, "quota_exceeded", m)
+            }
             Error::Provider(m) => ApiError::new(StatusCode::BAD_GATEWAY, "provider_error", m),
             other => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,

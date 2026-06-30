@@ -234,6 +234,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-tenancy"
+version = "0.1.0"
+dependencies = [
+ "apex-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "apex-tools"
 version = "0.1.0"
 dependencies = [
