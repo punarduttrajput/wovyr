@@ -31,11 +31,14 @@ apex/
 ├── apps/          # service binaries: api-gateway, agent-runtime, ...
 ├── sdk/           # public Rust SDK (+ generated clients)
 ├── plugins/       # first-party plugins
-├── dashboard/     # Angular UI + NestJS BFF
+├── dashboard/     # Angular SPA (built; calls apex-server directly — NestJS BFF deferred)
 └── deployment/    # Docker, Helm, Terraform
 ```
 
-Shared logic lives in `crates/`; each deployable is a thin binary over them.
+Shared logic lives in `crates/`; each deployable is a thin binary over them. The
+`dashboard/` Angular workspace (npm) builds with `ng build`; its dev server proxies
+`/api` to `apex-server` (`dashboard/proxy.conf.json`). The NestJS BFF is deferred —
+see [dashboard/overview.md](../10-dashboard/overview.md).
 
 ---
 

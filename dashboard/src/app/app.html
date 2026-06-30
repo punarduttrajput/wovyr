@@ -1,0 +1,81 @@
+<div class="app">
+  <aside class="rail">
+    <div class="brand">
+      <span class="mark">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 3L21 19H3L12 3Z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>
+      </span>
+      <b>Apex</b>
+      <span class="env">v0.3</span>
+    </div>
+
+    <button class="scope" type="button" title="Switch tenant / project">
+      <span class="lbl">Tenant · Project</span>
+      <span class="row"><span class="dot"></span><b>Acme · production</b>
+        <svg viewBox="0 0 24 24" fill="none"><path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </span>
+    </button>
+
+    <nav>
+      <div class="nav-sec">Operate</div>
+      @for (item of operate; track item.path) {
+        <a class="navi" [routerLink]="item.path" routerLinkActive="on">
+          <svg viewBox="0 0 24 24" fill="none" [innerHTML]="item.icon | safeSvg"></svg>
+          {{ item.label }}
+          @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
+        </a>
+      }
+      <div class="nav-sec">Build</div>
+      @for (item of build; track item.path) {
+        <a class="navi" [routerLink]="item.path" routerLinkActive="on">
+          <svg viewBox="0 0 24 24" fill="none" [innerHTML]="item.icon | safeSvg"></svg>
+          {{ item.label }}
+          @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
+        </a>
+      }
+      <div class="nav-sec">Extend</div>
+      @for (item of extend; track item.path) {
+        <a class="navi" [routerLink]="item.path" routerLinkActive="on">
+          <svg viewBox="0 0 24 24" fill="none" [innerHTML]="item.icon | safeSvg"></svg>
+          {{ item.label }}
+          @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
+        </a>
+      }
+    </nav>
+
+    <div class="rail-foot">
+      <span class="ava">PR</span>
+      <div class="who"><b>Punar R.</b><span>org.admin</span></div>
+      <button class="icon-btn theme-toggle" type="button" (click)="theme.toggle()"
+              [attr.aria-label]="'Switch to ' + (theme.theme() === 'dark' ? 'light' : 'dark') + ' theme'">
+        @if (theme.theme() === 'dark') {
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        } @else {
+          <svg viewBox="0 0 24 24" fill="none"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        }
+      </button>
+    </div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <div class="crumb">
+        <span>{{ crumb().root }}</span>
+        <svg viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <b>{{ crumb().leaf }}</b>
+      </div>
+      <div class="search">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input placeholder="Search agents, workflows, runs, memory…" aria-label="Search" />
+        <kbd>⌘K</kbd>
+      </div>
+      <div class="top-actions">
+        <button class="icon-btn" type="button" title="Alerts" aria-label="Alerts">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.7 21a2 2 0 01-3.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </header>
+    <div class="content">
+      <router-outlet />
+    </div>
+  </main>
+</div>
