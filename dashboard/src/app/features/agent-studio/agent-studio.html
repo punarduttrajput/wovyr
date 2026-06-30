@@ -1,0 +1,182 @@
+<section class="view">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">Build / Agent Studio</div>
+      <h1>{{ draft.name || 'untitled' }} <span class="pill mut">DRAFT</span></h1>
+      <p>Design, test and save agents — a form over the agent definition with a live test
+        console streaming every step from the platform run loop.</p>
+    </div>
+    <div class="head-actions">
+      <button class="btn" type="button" (click)="showDsl.set(!showDsl())">
+        {{ showDsl() ? 'Hide YAML' : 'View YAML' }}
+      </button>
+      <button class="btn" type="button" (click)="save()">Save agent</button>
+      @if (running()) {
+        <button class="btn" type="button" (click)="stop()">Stop</button>
+      } @else {
+        <button class="btn pri" type="button" (click)="run()">Run ▸</button>
+      }
+    </div>
+  </div>
+
+  @if (status()) {
+    <div class="status-bar" [class.err]="status().startsWith('Error')">{{ status() }}</div>
+  }
+
+  <div class="studio">
+    <!-- ===== Designer ===== -->
+    <div class="card designer">
+      <div class="card-h"><h3>Designer</h3><span class="sub">agent definition</span></div>
+      <div class="designer-b">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" [(ngModel)]="draft.name" placeholder="docs-bot" />
+        </div>
+
+        <div class="two">
+          <div class="field">
+            <label>Capability</label>
+            <select [(ngModel)]="draft.capability" [disabled]="!!draft.pinnedModel.trim()">
+              <option value="chat">chat</option>
+              <option value="reasoning">reasoning</option>
+              <option value="embedding">embedding</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Class</label>
+            <select [(ngModel)]="draft.class" [disabled]="!!draft.pinnedModel.trim()">
+              <option value="fast">fast</option>
+              <option value="balanced">balanced</option>
+              <option value="frontier">frontier</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Pinned model <span class="muted">— overrides the selector</span></label>
+          <input type="text" [(ngModel)]="draft.pinnedModel" placeholder="(optional) e.g. claude-opus-4-8" />
+        </div>
+
+        <div class="field">
+          <label>Instructions</label>
+          <textarea [(ngModel)]="draft.instructions" rows="5"></textarea>
+        </div>
+
+        <div class="field">
+          <label>Tools <span class="muted">— project-enabled</span></label>
+          <div class="chiprow">
+            @for (t of draft.tools; track t) {
+              <span class="tool-chip">{{ t }}
+                <button type="button" class="x" (click)="removeTool(t)" aria-label="Remove tool">×</button>
+              </span>
+            }
+            <input class="tool-add" type="text" [(ngModel)]="newTool"
+              (keydown.enter)="addTool(); $event.preventDefault()" placeholder="+ add tool, ↵" />
+          </div>
+        </div>
+
+        <div class="field memrow">
+          <label class="check">
+            <input type="checkbox" [(ngModel)]="draft.memoryEnabled" />
+            Ground with memory (RAG)
+          </label>
+          @if (draft.memoryEnabled) {
+            <input class="ns" type="text" [(ngModel)]="draft.namespace" placeholder="namespace" />
+          }
+        </div>
+      </div>
+
+      @if (agents().length) {
+        <div class="saved">
+          <div class="eyebrow">Saved agents</div>
+          <div class="chiprow">
+            @for (id of agents(); track id) {
+              <span class="tool-chip saved-chip">{{ id }}
+                <button type="button" class="x" (click)="remove(id)" aria-label="Delete agent">×</button>
+              </span>
+            }
+          </div>
+        </div>
+      }
+
+      @if (showDsl()) {
+        <div class="dsl">
+          <div class="eyebrow">Manifest (YAML)</div>
+          <pre>{{ manifest() }}</pre>
+        </div>
+      }
+    </div>
+
+    <!-- ===== Test console ===== -->
+    <div class="console-col">
+      <div class="console">
+        <div class="console-h">
+          @if (running()) {
+            <span class="live"><span class="blip"></span>STREAMING</span>
+          } @else {
+            <span class="idle">● idle</span>
+          }
+          <span class="t">Test Console</span>
+        </div>
+        <div class="console-b">
+          @for (e of steps(); track $index) {
+            <div class="ln" [class]="e.kind">
+              @switch (e.kind) {
+                @case ('start') {
+                  <span class="tag">start</span>
+                  <span class="bod">model {{ e.model || '—' }} · provider {{ e.provider || '—' }}</span>
+                }
+                @case ('memory') {
+                  <span class="tag">memory</span>
+                  <span class="bod">retrieved {{ e.source || '' }} <span class="dim">score {{ e.score ?? '—' }}</span></span>
+                }
+                @case ('tool_call') {
+                  <span class="tag">tool</span>
+                  <span class="bod">{{ e.name }}() <span class="dim">calling…</span></span>
+                }
+                @case ('tool_result') {
+                  <span class="tag">tool</span>
+                  <span class="bod">{{ e.name }} → <span [class]="e.ok ? 'ok' : 'err'">{{ e.ok ? 'ok' : 'error' }}</span></span>
+                }
+                @case ('done') {
+                  <span class="tag">done</span>
+                  <span class="bod dim">{{ e.usage?.total_tokens ?? 0 }} tokens · ${{ (e.usage?.cost_usd ?? 0).toFixed(4) }}</span>
+                }
+                @case ('result') {
+                  <span class="tag">result</span>
+                  <span class="bod">status {{ e.status }} · {{ e.steps ?? 0 }} steps</span>
+                }
+                @case ('error') {
+                  <span class="tag err">error</span>
+                  <span class="bod err">{{ e.message }}</span>
+                }
+              }
+            </div>
+          }
+          @if (answer()) {
+            <div class="answer">{{ answer() }}<span class="caret" [class.on]="running()">▌</span></div>
+          }
+          @if (!steps().length && !answer() && !running()) {
+            <div class="placeholder-line">Run the agent to stream its planner, tool calls, and answer here.</div>
+          }
+        </div>
+        @if (usage()) {
+          <div class="est">
+            <div><div class="k">Tokens</div><div class="v tnum">{{ usage()?.total_tokens ?? 0 }}</div></div>
+            <div><div class="k">Cost</div><div class="v tnum">${{ (usage()?.cost_usd ?? 0).toFixed(4) }}</div></div>
+            <div><div class="k">Steps</div><div class="v tnum">{{ steps().length }}</div></div>
+          </div>
+        }
+      </div>
+
+      <div class="run-row">
+        <input type="text" [(ngModel)]="message" (keydown.enter)="run()"
+          placeholder="Ask the agent…" aria-label="Test input" />
+        @if (running()) {
+          <button class="btn" type="button" (click)="stop()">Stop</button>
+        } @else {
+          <button class="btn pri" type="button" (click)="run()">Run ▸</button>
+        }
+      </div>
+    </div>
+  </div>
+</section>

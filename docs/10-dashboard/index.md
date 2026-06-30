@@ -28,13 +28,19 @@ authorized API call.
 
 | Layer | Technology | Role |
 |-------|-----------|------|
-| Dashboard UI | Angular | Single-page application (c4-container §4.9) |
-| Dashboard Backend | NestJS | Backend-for-frontend (BFF): session, aggregation, websockets |
-| Platform API | REST/gRPC | Source of truth for all resources |
+| Dashboard UI | Angular | Single-page application (c4-container §4.9). **Built** — `dashboard/`, first surface: Agent Studio. |
+| Dashboard Backend | NestJS | Backend-for-frontend (BFF): session, aggregation, websockets. **Deferred** — see below. |
+| Platform API | REST/gRPC | Source of truth for all resources (`apex-server`). |
 
-The BFF never bypasses platform authorization — it forwards the user's identity to
-the [Platform API](../09-api/index.md) and the
-[Policy Engine](../04-agent-framework/policy-engine.md) enforces access.
+> **Status (v0.3):** the SPA currently calls **`apex-server` directly** (it already
+> serves `/api/v1` + SSE), so the **NestJS BFF is deferred** until production auth
+> (server-side sessions / OAuth2-PKCE) and view aggregation are needed. See
+> [`overview.md`](overview.md) for the rationale and the deferred BFF responsibilities.
+
+When introduced, the BFF never bypasses platform authorization — it forwards the
+user's identity to the [Platform API](../09-api/index.md) and the
+[Policy Engine](../04-agent-framework/policy-engine.md) enforces access. Until then,
+the same enforcement happens at `apex-server`.
 
 ---
 
