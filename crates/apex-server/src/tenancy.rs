@@ -26,15 +26,13 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 /// The tenancy sub-router, merged into the main app router.
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route(
-            "/api/v1/organizations",
-            get(list_orgs).post(create_org),
-        )
+        .route("/api/v1/organizations", get(list_orgs).post(create_org))
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route(
             "/api/v1/projects/{id}",
@@ -72,12 +70,10 @@ fn is_platform_admin(principal: &str) -> bool {
 
 /// Build the [`TenantContext`] for a request, resolving the principal's effective roles
 /// against the tenancy store (narrowed to `project` and its org when project-scoped).
-fn context(
-    state: &AppState,
-    headers: &HeaderMap,
-    project: Option<String>,
-) -> TenantContext {
-    let tenant = header(headers, "x-apex-tenant").unwrap_or(DEFAULT_TENANT).to_string();
+fn context(state: &AppState, headers: &HeaderMap, project: Option<String>) -> TenantContext {
+    let tenant = header(headers, "x-apex-tenant")
+        .unwrap_or(DEFAULT_TENANT)
+        .to_string();
     let principal = header(headers, "x-apex-principal")
         .or_else(|| header(headers, "authorization").and_then(|a| a.strip_prefix("Bearer ")))
         .unwrap_or("")
@@ -92,7 +88,11 @@ fn context(
             .as_deref()
             .and_then(|p| state.tenancy.get_project(p).ok().flatten())
             .map(|p| p.organization);
-        for m in state.tenancy.memberships_for_user(&principal).unwrap_or_default() {
+        for m in state
+            .tenancy
+            .memberships_for_user(&principal)
+            .unwrap_or_default()
+        {
             let applies = match &m.scope {
                 MemberScope::Project(p) => project.as_deref() == Some(p.as_str()),
                 // Org roles apply to the in-scope project's org, and to org-level
@@ -177,10 +177,9 @@ async fn create_project(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let ctx = context(&state, &headers, None);
     ctx.authorize("projects:admin")?;
-    let org = state
-        .tenancy
-        .get_org(&req.organization)?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found", "organization not found"))?;
+    let org = state.tenancy.get_org(&req.organization)?.ok_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, "not_found", "organization not found")
+    })?;
     let project = state.tenancy.create_project(Project::new(&org, req.name))?;
     Ok((StatusCode::CREATED, Json(json!(project))))
 }
@@ -247,9 +246,7 @@ async fn list_members(
 ) -> Result<Json<Value>, ApiError> {
     let ctx = context(&state, &headers, Some(id.clone()));
     ctx.authorize("projects:read")?;
-    let members = state
-        .tenancy
-        .list_memberships(&MemberScope::Project(id))?;
+    let members = state.tenancy.list_memberships(&MemberScope::Project(id))?;
     Ok(Json(json!({ "members": members })))
 }
 
@@ -309,6 +306,118 @@ async fn set_quota(
     Ok(Json(json!({ "scope": "project", "limits": limits })))
 }
 
+// --- run-path quota enforcement --------------------------------------------------
+
+/// Per-project runtime usage: in-flight agent runs and the current day's LLM spend.
+#[derive(Default)]
+struct QuotaUsage {
+    /// In-flight agent runs, by project id.
+    concurrent: BTreeMap<String, u64>,
+    /// `(day, usd)` LLM spend for the current rolling day, by project id.
+    cost: BTreeMap<String, (u64, f64)>,
+}
+
+/// Tracks per-project quota usage for the run path ([Projects API §5](../../docs/09-api/projects.md#5-quotas)).
+#[derive(Default)]
+pub(crate) struct QuotaTracker {
+    usage: Mutex<QuotaUsage>,
+}
+
+impl QuotaTracker {
+    /// A fresh tracker.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// The current rolling-day bucket (UTC days since the epoch). Wall-clock is read only
+/// here, at the server boundary — never in core engine logic.
+fn current_day() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86_400)
+        .unwrap_or(0)
+}
+
+/// Releases a project's concurrency slot when dropped (after the run completes, succeeds
+/// or fails). A no-op when the run was unmetered (no project / no quota).
+pub(crate) struct RunPermit {
+    state: Arc<AppState>,
+    project: String,
+    metered: bool,
+}
+
+impl Drop for RunPermit {
+    fn drop(&mut self) {
+        if !self.metered {
+            return;
+        }
+        if let Ok(mut u) = self.state.quota.usage.lock()
+            && let Some(c) = u.concurrent.get_mut(&self.project)
+        {
+            *c = c.saturating_sub(1);
+        }
+    }
+}
+
+/// Admit an agent run for the optional in-scope `project`, enforcing its quota
+/// (concurrent runs + the day's LLM spend). Returns a [`RunPermit`] holding the
+/// concurrency slot until dropped; `Err` ([`Error::QuotaExceeded`] → `429`) if a limit
+/// is hit. Unmetered (returns a no-op permit) when there is no project or no quota.
+pub(crate) fn admit_run(
+    state: &Arc<AppState>,
+    project: Option<&str>,
+) -> Result<RunPermit, ApiError> {
+    let unmetered = |project: String| RunPermit {
+        state: state.clone(),
+        project,
+        metered: false,
+    };
+    let Some(project) = project else {
+        return Ok(unmetered(String::new()));
+    };
+    let Some(limits) = state.tenancy.get_quota(project)? else {
+        return Ok(unmetered(project.to_string()));
+    };
+
+    let day = current_day();
+    let mut u = state.quota.usage.lock().expect("quota mutex poisoned");
+    let current = u.concurrent.get(project).copied().unwrap_or(0);
+    limits.check_concurrent_runs(current)?;
+    let spent = match u.cost.get(project) {
+        Some((d, c)) if *d == day => *c,
+        _ => 0.0,
+    };
+    // Admit while the day's spend is still within budget; the run's own cost is
+    // recorded afterwards, so the *next* run is blocked once the limit is crossed.
+    limits.check_llm_cost(spent, 0.0)?;
+    *u.concurrent.entry(project.to_string()).or_insert(0) += 1;
+    Ok(RunPermit {
+        state: state.clone(),
+        project: project.to_string(),
+        metered: true,
+    })
+}
+
+/// Record `cost` USD of LLM spend against `project`'s current-day budget (after a run).
+pub(crate) fn record_run_cost(state: &Arc<AppState>, project: Option<&str>, cost: f64) {
+    let Some(project) = project else {
+        return;
+    };
+    let day = current_day();
+    let mut u = state.quota.usage.lock().expect("quota mutex poisoned");
+    let entry = u.cost.entry(project.to_string()).or_insert((day, 0.0));
+    if entry.0 != day {
+        *entry = (day, 0.0);
+    }
+    entry.1 += cost;
+}
+
+/// The in-scope project for a run, from the `X-Apex-Project` request header.
+pub(crate) fn run_project(headers: &HeaderMap) -> Option<String> {
+    header(headers, "x-apex-project").map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,13 +448,16 @@ mod tests {
             .unwrap();
         let status = resp.status();
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     fn state() -> Arc<AppState> {
-        Arc::new(AppState::from_env().with_tenancy(Arc::new(
-            apex_tenancy::InMemoryTenancyStore::new(),
-        )))
+        Arc::new(
+            AppState::from_env().with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new())),
+        )
     }
 
     #[tokio::test]
@@ -355,11 +467,25 @@ mod tests {
         let st = state();
 
         // A non-admin principal cannot create an org (default-deny → 403).
-        let (s, _) = req(&st, "POST", "/api/v1/organizations", "nobody", json!({"name":"Platform"})).await;
+        let (s, _) = req(
+            &st,
+            "POST",
+            "/api/v1/organizations",
+            "nobody",
+            json!({"name":"Platform"}),
+        )
+        .await;
         assert_eq!(s, StatusCode::FORBIDDEN);
 
         // The platform admin can.
-        let (s, org) = req(&st, "POST", "/api/v1/organizations", "root", json!({"name":"Platform"})).await;
+        let (s, org) = req(
+            &st,
+            "POST",
+            "/api/v1/organizations",
+            "root",
+            json!({"name":"Platform"}),
+        )
+        .await;
         assert_eq!(s, StatusCode::CREATED);
         let org_id = org["id"].as_str().unwrap().to_string();
 
@@ -387,13 +513,34 @@ mod tests {
         assert_eq!(s, StatusCode::CREATED);
 
         // alice (editor) may read the project, but not delete it (needs projects:admin).
-        let (s, _) = req(&st, "GET", &format!("/api/v1/projects/{prj_id}"), "alice", Value::Null).await;
+        let (s, _) = req(
+            &st,
+            "GET",
+            &format!("/api/v1/projects/{prj_id}"),
+            "alice",
+            Value::Null,
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
-        let (s, _) = req(&st, "DELETE", &format!("/api/v1/projects/{prj_id}"), "alice", Value::Null).await;
+        let (s, _) = req(
+            &st,
+            "DELETE",
+            &format!("/api/v1/projects/{prj_id}"),
+            "alice",
+            Value::Null,
+        )
+        .await;
         assert_eq!(s, StatusCode::FORBIDDEN);
 
         // A stranger can't even read it.
-        let (s, _) = req(&st, "GET", &format!("/api/v1/projects/{prj_id}"), "mallory", Value::Null).await;
+        let (s, _) = req(
+            &st,
+            "GET",
+            &format!("/api/v1/projects/{prj_id}"),
+            "mallory",
+            Value::Null,
+        )
+        .await;
         assert_eq!(s, StatusCode::FORBIDDEN);
 
         // Quota: set (org.admin = root) then read (projects:read = alice).
@@ -406,18 +553,114 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::OK);
-        let (s, q) = req(&st, "GET", &format!("/api/v1/projects/{prj_id}/quota"), "alice", Value::Null).await;
+        let (s, q) = req(
+            &st,
+            "GET",
+            &format!("/api/v1/projects/{prj_id}/quota"),
+            "alice",
+            Value::Null,
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(q["limits"]["concurrent_agent_runs"], 5);
+    }
+
+    #[test]
+    fn quota_tracker_enforces_concurrency() {
+        let st = state();
+        st.tenancy
+            .set_quota(
+                "prj-x",
+                QuotaLimits {
+                    concurrent_agent_runs: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let permit = admit_run(&st, Some("prj-x")).expect("first run admitted");
+        // A second concurrent run is rejected.
+        assert!(matches!(
+            admit_run(&st, Some("prj-x")),
+            Err(e) if e.status == StatusCode::TOO_MANY_REQUESTS
+        ));
+        // Releasing the slot lets the next run in.
+        drop(permit);
+        assert!(admit_run(&st, Some("prj-x")).is_ok());
+
+        // A project with no quota, and a run with no project, are unmetered.
+        assert!(admit_run(&st, Some("prj-none")).is_ok());
+        assert!(admit_run(&st, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_endpoint_returns_429_when_quota_exceeded() {
+        let st = state();
+        // A restrictive quota (no concurrent runs allowed) blocks every metered run.
+        st.tenancy
+            .set_quota(
+                "prj-block",
+                QuotaLimits {
+                    concurrent_agent_runs: Some(0),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let manifest = "metadata:\n  name: q\nspec:\n  instructions: Hi.\n";
+        let body = json!({ "manifest": manifest, "input": {"message": "hi"} });
+
+        // With the project header → quota enforced → 429.
+        let resp = crate::router(st.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents:run")
+                    .header("content-type", "application/json")
+                    .header("x-apex-project", "prj-block")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Without the project header → unmetered → runs normally (200).
+        let resp = crate::router(st.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents:run")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn duplicate_org_is_conflict() {
         unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
         let st = state();
-        let (s, _) = req(&st, "POST", "/api/v1/organizations", "root", json!({"name":"Dup"})).await;
+        let (s, _) = req(
+            &st,
+            "POST",
+            "/api/v1/organizations",
+            "root",
+            json!({"name":"Dup"}),
+        )
+        .await;
         assert_eq!(s, StatusCode::CREATED);
-        let (s, _) = req(&st, "POST", "/api/v1/organizations", "root", json!({"name":"Dup"})).await;
+        let (s, _) = req(
+            &st,
+            "POST",
+            "/api/v1/organizations",
+            "root",
+            json!({"name":"Dup"}),
+        )
+        .await;
         assert_eq!(s, StatusCode::CONFLICT);
     }
 }
