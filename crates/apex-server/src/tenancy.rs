@@ -472,6 +472,81 @@ pub(crate) fn record_run_cost(state: &Arc<AppState>, project: Option<&str>, cost
     entry.1 += cost;
 }
 
+/// Resolve the request's effective roles **narrowed to the asserted tenant**: an org
+/// membership counts only if its org belongs to `X-Apex-Tenant`, and a project
+/// membership only if the project's org does. This is the isolation primitive for
+/// resources owned by a *tenant* (rather than a specific project) — it stops a principal
+/// from authorizing against a tenant it merely *names* in the header but holds no
+/// membership in. (Platform admins are unconditionally in-scope.)
+pub(crate) fn tenant_context(state: &AppState, headers: &HeaderMap) -> TenantContext {
+    let tenant = header(headers, "x-apex-tenant")
+        .unwrap_or(DEFAULT_TENANT)
+        .to_string();
+    let principal = header(headers, "x-apex-principal")
+        .or_else(|| header(headers, "authorization").and_then(|a| a.strip_prefix("Bearer ")))
+        .unwrap_or("")
+        .to_string();
+
+    let mut roles = Vec::new();
+    if is_platform_admin(&principal) {
+        roles.push(Role::PlatformAdmin);
+    }
+    if !principal.is_empty() {
+        // The orgs that actually belong to the asserted tenant.
+        let tenant_orgs: std::collections::BTreeSet<String> = state
+            .tenancy
+            .list_orgs(&tenant)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+        for m in state
+            .tenancy
+            .memberships_for_user(&principal)
+            .unwrap_or_default()
+        {
+            let in_tenant = match &m.scope {
+                MemberScope::Organization(o) => tenant_orgs.contains(o),
+                MemberScope::Project(p) => state
+                    .tenancy
+                    .get_project(p)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|pr| tenant_orgs.contains(&pr.organization)),
+            };
+            if in_tenant {
+                roles.push(m.role);
+            }
+        }
+    }
+    TenantContext {
+        tenant,
+        project: None,
+        principal,
+        roles,
+    }
+}
+
+/// Authorize an agents-surface operation in the caller's tenant and return that tenant
+/// (the key the [`AgentStore`](crate::AgentStore) is scoped by). Fail-closed: a named
+/// tenant or any authenticated principal must hold a tenant-scoped role granting `scope`
+/// (→ `403`), which requires real membership — so `X-Apex-Tenant` cannot be spoofed.
+///
+/// **Back-compat:** the anonymous `default` tenant (no principal) retains full
+/// single-node access, preserving the pre-tenancy behavior for local/dev use.
+pub(crate) fn agents_authorize(
+    state: &AppState,
+    headers: &HeaderMap,
+    scope: &str,
+) -> std::result::Result<String, ApiError> {
+    let ctx = tenant_context(state, headers);
+    if ctx.principal.is_empty() && ctx.tenant == DEFAULT_TENANT {
+        return Ok(ctx.tenant);
+    }
+    ctx.authorize(scope)?;
+    Ok(ctx.tenant)
+}
+
 /// The in-scope project for a run, from the `X-Apex-Project` request header.
 pub(crate) fn run_project(headers: &HeaderMap) -> Option<String> {
     header(headers, "x-apex-project").map(str::to_string)

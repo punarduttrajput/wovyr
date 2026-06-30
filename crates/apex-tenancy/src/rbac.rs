@@ -57,7 +57,10 @@ fn is_read(scope: &str) -> bool {
 
 /// Whether `scope` is a (non-admin) write/action scope.
 fn is_write(scope: &str) -> bool {
-    scope.ends_with(":write") || scope == "workflows:run" || scope == "tools:invoke"
+    scope.ends_with(":write")
+        || scope == "workflows:run"
+        || scope == "tools:invoke"
+        || scope == "agents:run"
 }
 
 /// Whether any of `roles` grants `scope` (the effective-scope union).
@@ -116,6 +119,8 @@ mod tests {
         let r = Role::Editor;
         assert!(r.grants("agents:read") && r.grants("agents:write"));
         assert!(r.grants("workflows:run") && r.grants("tools:invoke"));
+        assert!(r.grants("agents:run"));
+        assert!(!Role::Viewer.grants("agents:run"));
         assert!(!r.grants("memory:admin") && !r.grants("projects:admin"));
         assert!(!r.grants("org.admin"));
     }

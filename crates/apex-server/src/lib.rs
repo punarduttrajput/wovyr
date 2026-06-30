@@ -52,16 +52,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-/// In-memory registry of stored agent manifests, keyed by agent id (`metadata.name`).
+/// In-memory registry of stored agent manifests, keyed by `(tenant, agent id)` so a
+/// tenant only ever sees and mutates its own agents (the `metadata.name` is the id,
+/// unique *within* a tenant — two tenants may reuse a name without colliding).
 /// Manifests are validated on create; durability (file/db) is a later slice.
 #[derive(Default)]
 struct AgentStore {
-    inner: RwLock<BTreeMap<String, String>>,
+    inner: RwLock<BTreeMap<(String, String), String>>,
 }
 
 impl AgentStore {
-    /// Validate and store a manifest, returning the agent id.
-    fn create(&self, manifest: String) -> Result<String, ApiError> {
+    /// Validate and store a manifest under `tenant`, returning the agent id.
+    fn create(&self, tenant: &str, manifest: String) -> Result<String, ApiError> {
         let def = AgentDefinition::from_yaml(&manifest).map_err(|e| {
             ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
         })?;
@@ -69,41 +71,42 @@ impl AgentStore {
         self.inner
             .write()
             .expect("agent store poisoned")
-            .insert(id.clone(), manifest);
+            .insert((tenant.to_string(), id.clone()), manifest);
         Ok(id)
     }
 
-    /// The stored manifest for `id`, if any.
-    fn manifest(&self, id: &str) -> Option<String> {
+    /// The stored manifest for `id` within `tenant`, if any.
+    fn manifest(&self, tenant: &str, id: &str) -> Option<String> {
         self.inner
             .read()
             .expect("agent store poisoned")
-            .get(id)
+            .get(&(tenant.to_string(), id.to_string()))
             .cloned()
     }
 
-    /// The parsed definition for `id` (manifests are validated on create).
-    fn definition(&self, id: &str) -> Option<AgentDefinition> {
-        self.manifest(id)
+    /// The parsed definition for `id` within `tenant` (manifests are validated on create).
+    fn definition(&self, tenant: &str, id: &str) -> Option<AgentDefinition> {
+        self.manifest(tenant, id)
             .and_then(|m| AgentDefinition::from_yaml(&m).ok())
     }
 
-    /// All stored agent ids, sorted.
-    fn list(&self) -> Vec<String> {
+    /// All stored agent ids in `tenant`, sorted.
+    fn list(&self, tenant: &str) -> Vec<String> {
         self.inner
             .read()
             .expect("agent store poisoned")
-            .keys()
-            .cloned()
+            .iter()
+            .filter(|((t, _), _)| t == tenant)
+            .map(|((_, id), _)| id.clone())
             .collect()
     }
 
-    /// Remove `id`; returns whether it existed.
-    fn delete(&self, id: &str) -> bool {
+    /// Remove `id` within `tenant`; returns whether it existed.
+    fn delete(&self, tenant: &str, id: &str) -> bool {
         self.inner
             .write()
             .expect("agent store poisoned")
-            .remove(id)
+            .remove(&(tenant.to_string(), id.to_string()))
             .is_some()
     }
 }
@@ -612,27 +615,39 @@ struct RunStoredRequest {
 /// `POST /api/v1/agents` — register an agent; returns its id.
 async fn create_agent_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<CreateAgentRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let id = state.agents.create(req.manifest)?;
+    let tenant = tenancy::agents_authorize(&state, &headers, "agents:write")?;
+    let id = state.agents.create(&tenant, req.manifest)?;
     Ok(Json(json!({ "id": id, "status": "created" })))
 }
 
-/// `GET /api/v1/agents` — list stored agent ids (cursor-paginated, overview §6).
+/// `GET /api/v1/agents` — list the caller's tenant's agent ids (cursor-paginated,
+/// overview §6).
 async fn list_agents_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(page): Query<hardening::PageQuery>,
-) -> Json<Value> {
-    let items: Vec<Value> = state.agents.list().into_iter().map(Value::String).collect();
-    Json(hardening::paginate(items, &page.page()))
+) -> Result<Json<Value>, ApiError> {
+    let tenant = tenancy::agents_authorize(&state, &headers, "agents:read")?;
+    let items: Vec<Value> = state
+        .agents
+        .list(&tenant)
+        .into_iter()
+        .map(Value::String)
+        .collect();
+    Ok(Json(hardening::paginate(items, &page.page())))
 }
 
-/// `GET /api/v1/agents/{id}` — fetch a stored agent's manifest.
+/// `GET /api/v1/agents/{id}` — fetch a stored agent's manifest (within the caller's tenant).
 async fn get_agent_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    match state.agents.manifest(&id) {
+    let tenant = tenancy::agents_authorize(&state, &headers, "agents:read")?;
+    match state.agents.manifest(&tenant, &id) {
         Some(manifest) => Ok(Json(json!({ "id": id, "manifest": manifest }))),
         None => Err(ApiError::new(
             StatusCode::NOT_FOUND,
@@ -642,12 +657,14 @@ async fn get_agent_handler(
     }
 }
 
-/// `DELETE /api/v1/agents/{id}` — remove a stored agent.
+/// `DELETE /api/v1/agents/{id}` — remove a stored agent (within the caller's tenant).
 async fn delete_agent_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    if state.agents.delete(&id) {
+    let tenant = tenancy::agents_authorize(&state, &headers, "agents:write")?;
+    if state.agents.delete(&tenant, &id) {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::new(
@@ -667,17 +684,18 @@ async fn run_stored_handler(
     Json(req): Json<RunStoredRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let start = Instant::now();
-    let tenant = tenancy::run_tenant(&headers);
     let project = tenancy::run_project(&headers);
-    let def = state.agents.definition(&id).ok_or_else(|| {
-        ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            format!("agent `{id}` not found"),
-        )
-    });
-    let result = match def {
-        Ok(def) => run_definition(&state, def, req.input, &tenant, project.as_deref()).await,
+    // Authorize the run in the caller's tenant, then resolve the agent *within* that
+    // tenant — a caller can only run its own tenant's stored agents.
+    let result = match tenancy::agents_authorize(&state, &headers, "agents:run") {
+        Ok(tenant) => match state.agents.definition(&tenant, &id) {
+            Some(def) => run_definition(&state, def, req.input, &tenant, project.as_deref()).await,
+            None => Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("agent `{id}` not found"),
+            )),
+        },
         Err(e) => Err(e),
     };
 
@@ -1171,6 +1189,175 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, v)
+    }
+
+    /// Issue an agent request as `principal` acting in `tenant` (with project header),
+    /// returning (status, body).
+    async fn tenant_req(
+        state: &Arc<AppState>,
+        method: &str,
+        uri: &str,
+        tenant: &str,
+        principal: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let resp = raw(
+            state,
+            method,
+            uri,
+            &[("x-apex-tenant", tenant), ("x-apex-principal", principal)],
+            body,
+        )
+        .await;
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// Cross-tenant isolation: a stored agent created in one tenant is invisible and
+    /// inaccessible to a principal of another tenant, and the `X-Apex-Tenant` header
+    /// cannot be spoofed by a principal lacking a membership in the claimed tenant.
+    /// (v0.3 exit criterion: zero cross-tenant leakage — agents surface.)
+    #[tokio::test]
+    async fn agents_are_isolated_per_tenant() {
+        use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+        // Two tenants, each with an org-admin and (in acme) a read-only viewer.
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org_a = tenancy
+            .create_org(Organization::new("acme", "Acme"))
+            .unwrap();
+        let org_b = tenancy
+            .create_org(Organization::new("beta", "Beta"))
+            .unwrap();
+        let member = |user: &str, role, org: &str| Membership {
+            user: user.to_string(),
+            role,
+            scope: MemberScope::Organization(org.to_string()),
+        };
+        tenancy
+            .add_membership(member("alice", Role::OrgAdmin, &org_a.id))
+            .unwrap();
+        tenancy
+            .add_membership(member("carol", Role::Viewer, &org_a.id))
+            .unwrap();
+        tenancy
+            .add_membership(member("bob", Role::OrgAdmin, &org_b.id))
+            .unwrap();
+        let state = Arc::new(AppState::from_env().with_tenancy(tenancy));
+
+        let manifest = "metadata:\n  name: secret-agent\nspec:\n  instructions: Be terse.\n";
+
+        // Alice creates an agent in tenant `acme`.
+        let (st, body) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/agents",
+            "acme",
+            "alice",
+            json!({ "manifest": manifest }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["id"], "secret-agent");
+
+        // Bob (tenant `beta`) sees an empty list and cannot read/run it by id (404).
+        let (st, list) =
+            tenant_req(&state, "GET", "/api/v1/agents", "beta", "bob", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(list["data"], json!([]), "beta must not see acme's agents");
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/agents/secret-agent",
+            "beta",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/agents/secret-agent/run",
+            "beta",
+            "bob",
+            json!({ "input": {} }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+
+        // Header spoofing: Bob claims tenant `acme` but holds no membership there → 403,
+        // for both read and the more dangerous delete.
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/agents/secret-agent",
+            "acme",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "spoofed tenant must be denied");
+        let (st, _) = tenant_req(
+            &state,
+            "DELETE",
+            "/api/v1/agents/secret-agent",
+            "acme",
+            "bob",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+
+        // A viewer in acme may read but not create or run (scope granularity).
+        let (st, _) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/agents/secret-agent",
+            "acme",
+            "carol",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "viewer may read");
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/agents/secret-agent/run",
+            "acme",
+            "carol",
+            json!({ "input": {} }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "viewer may not run");
+
+        // Alice (real member of acme) retains full access; the agent survived every
+        // cross-tenant attempt above.
+        let (st, list) = tenant_req(
+            &state,
+            "GET",
+            "/api/v1/agents",
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(list["data"], json!(["secret-agent"]));
+        let (st, _) = tenant_req(
+            &state,
+            "DELETE",
+            "/api/v1/agents/secret-agent",
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
