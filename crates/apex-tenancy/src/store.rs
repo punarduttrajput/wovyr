@@ -120,6 +120,8 @@ pub trait TenancyStore: Send + Sync {
     fn remove_membership(&self, user: &str, scope: &MemberScope) -> Result<()>;
     /// All role assignments for `user`.
     fn memberships_for_user(&self, user: &str) -> Result<Vec<Membership>>;
+    /// All role assignments in a given scope (e.g. a project's members).
+    fn list_memberships(&self, scope: &MemberScope) -> Result<Vec<Membership>>;
 
     /// Set the quota limits for a target (org or project id).
     fn set_quota(&self, target: &str, limits: QuotaLimits) -> Result<()>;
@@ -193,6 +195,15 @@ impl TenancyStore for InMemoryTenancyStore {
             .memberships
             .iter()
             .filter(|m| m.user == user)
+            .cloned()
+            .collect())
+    }
+    fn list_memberships(&self, scope: &MemberScope) -> Result<Vec<Membership>> {
+        Ok(self
+            .lock()
+            .memberships
+            .iter()
+            .filter(|m| &m.scope == scope)
             .cloned()
             .collect())
     }
@@ -295,6 +306,15 @@ impl TenancyStore for FileTenancyStore {
             s.memberships
                 .iter()
                 .filter(|m| m.user == user)
+                .cloned()
+                .collect()
+        })
+    }
+    fn list_memberships(&self, scope: &MemberScope) -> Result<Vec<Membership>> {
+        self.with_ref(|s| {
+            s.memberships
+                .iter()
+                .filter(|m| &m.scope == scope)
                 .cloned()
                 .collect()
         })

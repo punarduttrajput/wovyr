@@ -209,6 +209,7 @@ dependencies = [
  "apex-common",
  "apex-provider",
  "apex-telemetry",
+ "apex-tenancy",
  "apex-tools",
  "apex-workflow",
  "axum 0.8.9",

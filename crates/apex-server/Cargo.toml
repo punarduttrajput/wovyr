@@ -14,6 +14,7 @@ apex-tools.workspace = true
 apex-agent.workspace = true
 apex-workflow.workspace = true
 apex-telemetry.workspace = true
+apex-tenancy.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
