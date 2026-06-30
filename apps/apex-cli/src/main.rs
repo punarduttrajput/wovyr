@@ -115,6 +115,16 @@ enum PluginCommand {
         out: Option<String>,
     },
 
+    /// Bundle a package directory into a single distributable `.apexpkg` file.
+    Pack {
+        /// Path to the plugin package directory.
+        dir: String,
+
+        /// Output file (defaults to `<name>-<version>.apexpkg`).
+        #[arg(long)]
+        out: Option<String>,
+    },
+
     /// Trust a publisher's public key so its packages verify on install.
     Trust {
         /// Publisher name to trust.
@@ -133,6 +143,32 @@ enum PluginCommand {
         /// Permission to grant the plugin (repeatable); must cover all it requests.
         #[arg(long = "grant")]
         grants: Vec<String>,
+    },
+
+    /// Upgrade an installed plugin to the version in a package directory.
+    Upgrade {
+        /// Path to the new plugin package directory.
+        dir: String,
+
+        /// Permission to grant for the new version (repeatable); covers any new perms.
+        #[arg(long = "grant")]
+        grants: Vec<String>,
+    },
+
+    /// Roll a plugin back to its previous version.
+    Rollback {
+        /// Plugin id (`publisher/name`).
+        id: String,
+    },
+
+    /// Invoke an enabled plugin tool capability directly (operator test path).
+    Run {
+        /// Capability id to invoke (e.g. `echo.run`).
+        capability: String,
+
+        /// Request parameters as JSON (plain text also accepted).
+        #[arg(long, default_value = "{}")]
+        input: String,
     },
 
     /// List installed plugins.
@@ -484,8 +520,12 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
         Command::Plugin { command } => match command {
             PluginCommand::Keygen { publisher, dir } => plugin::keygen_cmd(&publisher, &dir),
             PluginCommand::Sign { key, manifest, out } => plugin::sign_cmd(&key, &manifest, out),
+            PluginCommand::Pack { dir, out } => plugin::pack_cmd(&dir, out),
             PluginCommand::Trust { publisher, key } => plugin::trust_cmd(&publisher, &key),
             PluginCommand::Install { dir, grants } => plugin::install_cmd(&dir, grants),
+            PluginCommand::Upgrade { dir, grants } => plugin::upgrade_cmd(&dir, grants),
+            PluginCommand::Rollback { id } => plugin::rollback_cmd(&id),
+            PluginCommand::Run { capability, input } => plugin::run_cmd(&capability, &input).await,
             PluginCommand::List => plugin::list_cmd(),
             PluginCommand::Enable { id } => plugin::enable_cmd(&id),
             PluginCommand::Disable { id } => plugin::disable_cmd(&id),

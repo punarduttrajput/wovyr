@@ -134,6 +134,33 @@ pub(crate) fn dependents(target: &str, catalog: &Catalog) -> Vec<String> {
         .collect()
 }
 
+/// The installed dependents of `target` whose version requirement would **not** be
+/// met if `target` were at `new_version` — i.e. dependents an upgrade would break.
+/// Sorted by qualified id. (Plugin name/publisher are stable across versions, so name
+/// matching uses the currently-installed `target`.)
+pub(crate) fn dependents_broken_by(
+    target: &str,
+    new_version: &semver::Version,
+    catalog: &Catalog,
+) -> Vec<String> {
+    let Some(target_plugin) = catalog.get(target) else {
+        return Vec::new();
+    };
+    catalog
+        .iter()
+        .filter(|(id, _)| id.as_str() != target)
+        .filter(|(_, p)| {
+            p.manifest.dependencies.iter().any(|dep| {
+                name_matches(dep, target_plugin)
+                    && parse_version_req(&dep.version)
+                        .map(|req| !req.matches(new_version))
+                        .unwrap_or(true)
+            })
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +184,7 @@ mod tests {
             state: PluginState::Disabled,
             granted_permissions: Vec::new(),
             artifact_dir: None,
+            previous: None,
         }
     }
 

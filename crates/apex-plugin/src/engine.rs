@@ -62,6 +62,55 @@ impl Package {
         self.artifacts.insert(path.into(), bytes);
         self
     }
+
+    /// Serialize to the single-file **`.apexpkg`** distribution format
+    /// ([distribution §2](../../docs/08-plugin-sdk/distribution.md#2-package-format-apexpkg)):
+    /// a self-contained JSON envelope bundling the manifest YAML, the detached
+    /// signature, and every artifact blob (hex-encoded). Content-address the resulting
+    /// bytes (sha256) for a stable package identity.
+    pub fn to_apexpkg(&self) -> Result<Vec<u8>> {
+        let envelope = ApexPkg {
+            manifest: self.manifest_yaml.clone(),
+            signature: crate::verify::hex::encode(&self.signature),
+            artifacts: self
+                .artifacts
+                .iter()
+                .map(|(p, b)| (p.clone(), crate::verify::hex::encode(b)))
+                .collect(),
+        };
+        serde_json::to_vec_pretty(&envelope).map_err(Error::from)
+    }
+
+    /// Parse and validate the package's manifest (e.g. to read its identity before
+    /// install).
+    pub fn manifest(&self) -> Result<PluginManifest> {
+        PluginManifest::from_yaml(&self.manifest_yaml)
+    }
+
+    /// Reconstruct a package from `.apexpkg` bytes (the inverse of
+    /// [`to_apexpkg`](Self::to_apexpkg)). The signature and artifacts are re-verified
+    /// at install, so a tampered envelope is rejected there.
+    pub fn from_apexpkg(bytes: &[u8]) -> Result<Self> {
+        let envelope: ApexPkg = serde_json::from_slice(bytes)
+            .map_err(|e| Error::invalid(format!("invalid .apexpkg: {e}")))?;
+        let mut package = Package::new(
+            envelope.manifest,
+            crate::verify::hex::decode(&envelope.signature)?,
+        );
+        for (path, hex) in envelope.artifacts {
+            package = package.with_artifact(path, crate::verify::hex::decode(&hex)?);
+        }
+        Ok(package)
+    }
+}
+
+/// The on-disk `.apexpkg` envelope: manifest YAML + hex signature + hex artifact blobs.
+#[derive(Serialize, Deserialize)]
+struct ApexPkg {
+    manifest: String,
+    signature: String,
+    #[serde(default)]
+    artifacts: BTreeMap<String, String>,
 }
 
 /// Whether an installed plugin's capabilities are live in their hosts.
@@ -90,6 +139,10 @@ pub struct InstalledPlugin {
     /// staging directory configured. `None` means artifacts were verified but not
     /// persisted (so a disk-backed runtime can't load them).
     pub artifact_dir: Option<PathBuf>,
+    /// The version this one replaced, retained for [`rollback`](PluginEngine::rollback)
+    /// (single-level rollback window). `None` for a fresh install or after a rollback.
+    #[serde(default)]
+    pub previous: Option<Box<InstalledPlugin>>,
 }
 
 /// A lifecycle event emitted by the engine, mirroring the platform `plugin.*` events
@@ -103,6 +156,10 @@ pub enum PluginEvent {
     Enabled(String),
     /// `plugin.disabled` — capabilities withdrawn, state retained.
     Disabled(String),
+    /// `plugin.upgraded` — active version swapped (carries the new reference).
+    Upgraded(String),
+    /// `plugin.rolled_back` — reverted to the prior version (carries its reference).
+    RolledBack(String),
     /// `plugin.uninstalled` — withdrawn and dropped from the catalog.
     Uninstalled(String),
 }
@@ -260,56 +317,8 @@ impl PluginEngine {
             )));
         }
 
-        // 2. Verify signature over the raw manifest bytes (fail-closed on untrusted
-        //    publisher or tampering).
-        self.trust.verify(
-            &manifest.metadata.publisher,
-            package.manifest_yaml.as_bytes(),
-            &package.signature,
-        )?;
-
-        // 4. Platform-API compatibility.
-        self.check_compatibility(&manifest)?;
-
-        // 5. Resolve dependencies against the installed catalog (deps install first):
-        //    each declared dependency must already be installed and version-compatible.
-        for dep in &manifest.dependencies {
-            resolve::resolve_dep(dep, &self.plugins)?;
-        }
-
-        // 6. Permission grants/consent: every requested permission must be granted.
-        let missing = missing_grants(&manifest.permissions, grants);
-        if !missing.is_empty() {
-            return Err(Error::invalid(format!(
-                "plugin `{id}` requests ungranted permission(s): {}",
-                missing.join(", ")
-            )));
-        }
-
-        // 7. Stage artifacts (content-addressed): each declared artifact must be
-        //    present in the package and match its digest, then (if a staging dir is
-        //    configured) is written to disk so a disk-backed runtime can load it.
-        let artifact_dir = self.staging_dir.as_ref().map(|root| {
-            root.join(&manifest.metadata.publisher)
-                .join(&manifest.metadata.name)
-                .join(&manifest.metadata.version)
-        });
-        for artifact in &manifest.artifacts {
-            let bytes = package.artifacts.get(&artifact.path).ok_or_else(|| {
-                Error::invalid(format!(
-                    "plugin `{id}` declares artifact `{}` but the package omits its bytes",
-                    artifact.path
-                ))
-            })?;
-            verify_digest(&artifact.digest, bytes)?;
-            if let Some(dir) = &artifact_dir {
-                let dest = dir.join(&artifact.path);
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&dest, bytes)?;
-            }
-        }
+        // 2,4,5,6,7. Verify (signature/compat/deps/permissions) + stage artifacts.
+        let artifact_dir = self.verify_and_stage(package, &manifest, grants)?;
 
         // 8. Register (disabled).
         let reference = manifest.reference();
@@ -320,10 +329,122 @@ impl PluginEngine {
                 state: PluginState::Disabled,
                 granted_permissions: grants.to_vec(),
                 artifact_dir,
+                previous: None,
             },
         );
         self.events.push(PluginEvent::Installed(reference));
         Ok(&self.plugins[&id])
+    }
+
+    /// Upgrade an installed plugin to the version in `package`
+    /// ([versioning §7/§8](../../docs/08-plugin-sdk/versioning.md#8-upgrade-safety)).
+    /// Verifies the new package (signature/compat/deps), requires `grants` (unioned
+    /// with the grants already on file) to cover the new version's permissions, stages
+    /// the new artifacts alongside the old, atomically swaps the active version —
+    /// re-registering tool capabilities if the plugin was enabled — and retains the
+    /// prior version for [`rollback`](Self::rollback). Fail-closed: on any failure the
+    /// old version stays active. Refuses an upgrade that would break an installed
+    /// dependent's version requirement.
+    pub fn upgrade(
+        &mut self,
+        package: &Package,
+        grants: &[String],
+        registry: &mut ToolRegistry,
+    ) -> Result<()> {
+        let manifest = PluginManifest::from_yaml(&package.manifest_yaml)?;
+        let id = manifest.qualified_id();
+
+        let current = self.plugins.get(&id).ok_or_else(|| {
+            Error::NotFound(format!("plugin `{id}` is not installed (use install)"))
+        })?;
+        let from_version = current.manifest.metadata.version.clone();
+        if manifest.metadata.version == from_version {
+            return Err(Error::invalid(format!(
+                "plugin `{id}` is already at version {from_version}"
+            )));
+        }
+
+        // Reverse-dependency safety: the new version must still satisfy every installed
+        // dependent's requirement, so an upgrade never breaks a dependent.
+        let new_version = semver::Version::parse(&manifest.metadata.version)
+            .map_err(|e| Error::invalid(format!("new version is not valid semver: {e}")))?;
+        let broken = resolve::dependents_broken_by(&id, &new_version, &self.plugins);
+        if !broken.is_empty() {
+            return Err(Error::invalid(format!(
+                "cannot upgrade `{id}` to {new_version}: would break dependent(s): {}",
+                broken.join(", ")
+            )));
+        }
+
+        // Carry forward previously-granted permissions so only *new* permissions need a
+        // fresh grant ([versioning §8 step 2]).
+        let mut effective = current.granted_permissions.clone();
+        for g in grants {
+            if !effective.contains(g) {
+                effective.push(g.clone());
+            }
+        }
+
+        // Verify + stage the new version (fail-closed before any swap).
+        let artifact_dir = self.verify_and_stage(package, &manifest, &effective)?;
+
+        // Atomically swap: preserve liveness, retain the prior version (single-level
+        // rollback window), and re-route tools if enabled.
+        let mut prior = self.plugins.remove(&id).expect("checked present above");
+        let state = prior.state;
+        if state == PluginState::Enabled {
+            for cap in prior.manifest.tool_capabilities() {
+                registry.unregister(&cap.id);
+            }
+        }
+        prior.previous = None; // bound the rollback chain to one level
+        let reference = manifest.reference();
+        let upgraded = InstalledPlugin {
+            manifest,
+            state,
+            granted_permissions: effective,
+            artifact_dir,
+            previous: Some(Box::new(prior)),
+        };
+        if state == PluginState::Enabled {
+            register_tools(&upgraded, &self.runtime, registry);
+        }
+        self.plugins.insert(id, upgraded);
+        self.events.push(PluginEvent::Upgraded(reference));
+        Ok(())
+    }
+
+    /// Roll a plugin back to its retained previous version
+    /// ([versioning §7](../../docs/08-plugin-sdk/versioning.md#7-lifecycle-operations)).
+    /// Re-activates the prior version (preserving the current liveness), re-routing tool
+    /// capabilities if enabled. Errors if no previous version is retained.
+    pub fn rollback(&mut self, qualified_id: &str, registry: &mut ToolRegistry) -> Result<()> {
+        let current = self
+            .plugins
+            .get(qualified_id)
+            .ok_or_else(|| Error::NotFound(format!("plugin `{qualified_id}` is not installed")))?;
+        if current.previous.is_none() {
+            return Err(Error::invalid(format!(
+                "plugin `{qualified_id}` has no previous version to roll back to"
+            )));
+        }
+
+        let mut current = self.plugins.remove(qualified_id).expect("checked present");
+        let state = current.state;
+        if state == PluginState::Enabled {
+            for cap in current.manifest.tool_capabilities() {
+                registry.unregister(&cap.id);
+            }
+        }
+        let mut restored = *current.previous.take().expect("checked Some above");
+        restored.state = state; // preserve liveness across the revert
+        if state == PluginState::Enabled {
+            register_tools(&restored, &self.runtime, registry);
+        }
+        let reference = restored.manifest.reference();
+        self.plugins.insert(qualified_id.to_string(), restored);
+        self.events.push(PluginEvent::RolledBack(reference));
+        Ok(())
     }
 
     /// Enable plugin `qualified_id`: route its capabilities to their hosts and go live.
@@ -462,6 +583,69 @@ impl PluginEngine {
     /// The lifecycle events emitted so far, in order.
     pub fn events(&self) -> &[PluginEvent] {
         &self.events
+    }
+
+    /// Shared install/upgrade verification (overview §6 steps 2,4–7): verify the
+    /// signature, platform-API compatibility, dependency satisfaction, and permission
+    /// grants, then stage (digest-verified) artifacts to disk. Returns the staged
+    /// artifact directory, if a staging dir is configured. Fail-closed and side-effect
+    /// free except for writing verified artifact bytes.
+    fn verify_and_stage(
+        &self,
+        package: &Package,
+        manifest: &PluginManifest,
+        grants: &[String],
+    ) -> Result<Option<PathBuf>> {
+        let id = manifest.qualified_id();
+
+        // Verify signature over the raw manifest bytes (untrusted publisher / tamper).
+        self.trust.verify(
+            &manifest.metadata.publisher,
+            package.manifest_yaml.as_bytes(),
+            &package.signature,
+        )?;
+
+        // Platform-API compatibility.
+        self.check_compatibility(manifest)?;
+
+        // Dependencies must be installed + version-compatible.
+        for dep in &manifest.dependencies {
+            resolve::resolve_dep(dep, &self.plugins)?;
+        }
+
+        // Every requested permission must be granted.
+        let missing = missing_grants(&manifest.permissions, grants);
+        if !missing.is_empty() {
+            return Err(Error::invalid(format!(
+                "plugin `{id}` requests ungranted permission(s): {}",
+                missing.join(", ")
+            )));
+        }
+
+        // Stage artifacts (content-addressed): each declared artifact must be present
+        // and match its digest, then is written under the version-specific staging dir.
+        let artifact_dir = self.staging_dir.as_ref().map(|root| {
+            root.join(&manifest.metadata.publisher)
+                .join(&manifest.metadata.name)
+                .join(&manifest.metadata.version)
+        });
+        for artifact in &manifest.artifacts {
+            let bytes = package.artifacts.get(&artifact.path).ok_or_else(|| {
+                Error::invalid(format!(
+                    "plugin `{id}` declares artifact `{}` but the package omits its bytes",
+                    artifact.path
+                ))
+            })?;
+            verify_digest(&artifact.digest, bytes)?;
+            if let Some(dir) = &artifact_dir {
+                let dest = dir.join(&artifact.path);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&dest, bytes)?;
+            }
+        }
+        Ok(artifact_dir)
     }
 
     /// Refuse a plugin whose declared `platform_api` range excludes the running
@@ -638,6 +822,17 @@ artifacts:
         let mut fresh = ToolRegistry::new();
         rebuilt.register_enabled(&mut fresh);
         assert!(fresh.contains("github.create_issue"));
+    }
+
+    #[test]
+    fn apexpkg_round_trips_and_installs() {
+        // Pack a signed package to .apexpkg bytes, reconstruct it, and install — the
+        // reconstructed package must verify (signature + artifact digest) intact.
+        let (package, mut engine) = signed_package();
+        let bytes = package.to_apexpkg().unwrap();
+        let restored = Package::from_apexpkg(&bytes).unwrap();
+        engine.install(&restored, &grants()).unwrap();
+        assert_eq!(engine.installed(), vec!["acme/github".to_string()]);
     }
 
     #[test]
@@ -909,5 +1104,133 @@ dependencies:
 "#;
         let err = engine.install(&pkg(&kp, needs_v2), &[]).unwrap_err();
         assert!(format!("{err}").contains("do not satisfy"), "got {err}");
+    }
+
+    // --- Upgrade / rollback ------------------------------------------------------
+
+    const HTTP_V2: &str = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata: { name: http-core, version: 2.0.0, publisher: acme }
+capabilities:
+  - { kind: tool, id: http.get2 }
+"#;
+
+    #[test]
+    fn upgrade_swaps_active_version_and_reroutes_tools() {
+        let (mut engine, kp) = dep_engine();
+        engine.install(&pkg(&kp, BASE), &[]).unwrap(); // http-core 1.2.0
+        let mut registry = ToolRegistry::new();
+        engine.enable("acme/http-core", &mut registry).unwrap();
+        assert!(registry.contains("http.get"));
+
+        engine
+            .upgrade(&pkg(&kp, HTTP_V2), &[], &mut registry)
+            .unwrap();
+
+        // Active version swapped, liveness preserved, tools re-routed.
+        let p = engine.get("acme/http-core").unwrap();
+        assert_eq!(p.manifest.metadata.version, "2.0.0");
+        assert_eq!(p.state, PluginState::Enabled);
+        assert!(!registry.contains("http.get") && registry.contains("http.get2"));
+        assert!(p.previous.is_some(), "prior version retained for rollback");
+        assert!(matches!(
+            engine.events().last(),
+            Some(PluginEvent::Upgraded(r)) if r == "acme/http-core@2.0.0"
+        ));
+    }
+
+    #[test]
+    fn rollback_restores_prior_version() {
+        let (mut engine, kp) = dep_engine();
+        engine.install(&pkg(&kp, BASE), &[]).unwrap();
+        let mut registry = ToolRegistry::new();
+        engine.enable("acme/http-core", &mut registry).unwrap();
+        engine
+            .upgrade(&pkg(&kp, HTTP_V2), &[], &mut registry)
+            .unwrap();
+
+        engine.rollback("acme/http-core", &mut registry).unwrap();
+        let p = engine.get("acme/http-core").unwrap();
+        assert_eq!(p.manifest.metadata.version, "1.2.0");
+        assert_eq!(p.state, PluginState::Enabled);
+        assert!(registry.contains("http.get") && !registry.contains("http.get2"));
+        assert!(p.previous.is_none(), "single-level rollback window");
+
+        // Nothing left to roll back to.
+        assert!(engine.rollback("acme/http-core", &mut registry).is_err());
+    }
+
+    #[test]
+    fn upgrade_refuses_to_break_a_dependent() {
+        let (mut engine, kp) = dep_engine();
+        engine.install(&pkg(&kp, BASE), &[]).unwrap(); // http-core 1.2.0
+        engine.install(&pkg(&kp, DEPENDENT), &[]).unwrap(); // app needs http-core ^1.0.0
+        let mut registry = ToolRegistry::new();
+
+        // Upgrading http-core to 2.0.0 would break app's `^1.0.0` requirement.
+        let err = engine
+            .upgrade(&pkg(&kp, HTTP_V2), &[], &mut registry)
+            .unwrap_err();
+        assert!(format!("{err}").contains("would break dependent(s): acme/app"));
+        // Old version remains active.
+        assert_eq!(
+            engine
+                .get("acme/http-core")
+                .unwrap()
+                .manifest
+                .metadata
+                .version,
+            "1.2.0"
+        );
+    }
+
+    #[test]
+    fn upgrade_requires_grants_for_new_permissions() {
+        let (mut engine, kp) = dep_engine();
+        engine.install(&pkg(&kp, BASE), &[]).unwrap();
+        let v2_perm = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata: { name: http-core, version: 2.0.0, publisher: acme }
+permissions:
+  - net:egress:api.example.com
+capabilities:
+  - { kind: tool, id: http.get2 }
+"#;
+        let mut registry = ToolRegistry::new();
+        // No grant for the newly-requested permission → fail-closed.
+        assert!(
+            engine
+                .upgrade(&pkg(&kp, v2_perm), &[], &mut registry)
+                .is_err()
+        );
+        // Granting it lets the upgrade through.
+        engine
+            .upgrade(
+                &pkg(&kp, v2_perm),
+                &["net:egress:*".to_string()],
+                &mut registry,
+            )
+            .unwrap();
+        assert_eq!(
+            engine
+                .get("acme/http-core")
+                .unwrap()
+                .manifest
+                .metadata
+                .version,
+            "2.0.0"
+        );
+    }
+
+    #[test]
+    fn upgrade_requires_an_installed_plugin() {
+        let (mut engine, kp) = dep_engine();
+        let mut registry = ToolRegistry::new();
+        let err = engine
+            .upgrade(&pkg(&kp, HTTP_V2), &[], &mut registry)
+            .unwrap_err();
+        assert!(format!("{err}").contains("not installed"));
     }
 }

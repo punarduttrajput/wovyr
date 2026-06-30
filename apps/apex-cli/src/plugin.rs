@@ -19,7 +19,8 @@ use apex_common::{Error, Result};
 use apex_plugin::{
     CapabilityKind, InstalledPlugin, Package, PluginEngine, PluginManifest, PluginState, TrustStore,
 };
-use apex_tools::ToolRegistry;
+use apex_tools::{ToolContext, ToolRegistry, ToolRequest};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// The platform-API version the engine checks plugin `compatibility` ranges against.
@@ -173,11 +174,23 @@ pub fn trust_cmd(publisher: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// `apex plugin install <dir> [--grant <perm>]` — read a package directory
-/// (`plugin.yaml` + `plugin.sig` + artifacts), verify its signature, stage artifacts,
-/// and register it (disabled). `grants` must cover every permission the manifest requests.
-pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
-    let dir = Path::new(dir);
+/// Load a plugin package from `source`: either a package **directory** (holding
+/// `plugin.yaml`, `plugin.sig`, and artifacts) or a single **`.apexpkg`** file.
+/// Returns the package alongside its parsed manifest.
+fn load_package(source: &str) -> Result<(Package, PluginManifest)> {
+    let path = Path::new(source);
+    if path.is_file() {
+        let bytes = std::fs::read(path)
+            .map_err(|e| Error::config(format!("could not read {source}: {e}")))?;
+        let package = Package::from_apexpkg(&bytes)?;
+        let manifest = package.manifest()?;
+        return Ok((package, manifest));
+    }
+    read_package_dir(path)
+}
+
+/// Read a package directory (`plugin.yaml` + `plugin.sig` + declared artifacts).
+fn read_package_dir(dir: &Path) -> Result<(Package, PluginManifest)> {
     let manifest_yaml = std::fs::read_to_string(dir.join("plugin.yaml"))
         .map_err(|e| Error::config(format!("could not read {}/plugin.yaml: {e}", dir.display())))?;
     let signature = std::fs::read(dir.join("plugin.sig")).map_err(|e| {
@@ -186,8 +199,6 @@ pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
             dir.display()
         ))
     })?;
-
-    // Parse the manifest to learn which artifact blobs the package must carry.
     let manifest = PluginManifest::from_yaml(&manifest_yaml)?;
     let mut package = Package::new(manifest_yaml, signature);
     for artifact in &manifest.artifacts {
@@ -200,7 +211,29 @@ pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
         })?;
         package = package.with_artifact(artifact.path.clone(), bytes);
     }
+    Ok((package, manifest))
+}
 
+/// `apex plugin pack <dir> [--out <file.apexpkg>]` — bundle a package directory into a
+/// single content-addressed `.apexpkg` file for distribution.
+pub fn pack_cmd(dir: &str, out: Option<String>) -> Result<()> {
+    let (package, manifest) = read_package_dir(Path::new(dir))?;
+    let out = out.unwrap_or_else(|| {
+        format!(
+            "{}-{}.apexpkg",
+            manifest.metadata.name, manifest.metadata.version
+        )
+    });
+    std::fs::write(&out, package.to_apexpkg()?)?;
+    println!("Packed {} -> {out}", manifest.reference());
+    Ok(())
+}
+
+/// `apex plugin install <source> [--grant <perm>]` — install from a package directory
+/// or a `.apexpkg` file: verify its signature, stage artifacts, and register it
+/// (disabled). `grants` must cover every permission the manifest requests.
+pub fn install_cmd(source: &str, grants: Vec<String>) -> Result<()> {
+    let (package, manifest) = load_package(source)?;
     let mut engine = engine()?;
     let installed = engine.install(&package, &grants)?;
     let reference = installed.manifest.reference();
@@ -220,6 +253,79 @@ pub fn install_cmd(dir: &str, grants: Vec<String>) -> Result<()> {
         "Enable it with `apex plugin enable {}`.",
         manifest.qualified_id()
     );
+    Ok(())
+}
+
+/// `apex plugin upgrade <source> [--grant <perm>]` — swap an installed plugin to the
+/// version in a package directory or `.apexpkg`, retaining the prior version for
+/// rollback. New permissions must be granted; refused if it would break a dependent.
+pub fn upgrade_cmd(source: &str, grants: Vec<String>) -> Result<()> {
+    let (package, manifest) = load_package(source)?;
+    let id = manifest.qualified_id();
+    let mut engine = engine()?;
+    let from = engine
+        .get(&id)
+        .map(|p| p.manifest.metadata.version.clone())
+        .unwrap_or_default();
+    let mut registry = ToolRegistry::new();
+    engine.upgrade(&package, &grants, &mut registry)?;
+    save_catalog(&engine.catalog())?;
+    println!("Upgraded {id} {from} -> {}.", manifest.metadata.version);
+    println!("Roll back with `apex plugin rollback {id}`.");
+    Ok(())
+}
+
+/// `apex plugin rollback <id>` — revert a plugin to its retained previous version.
+pub fn rollback_cmd(id: &str) -> Result<()> {
+    let mut engine = engine()?;
+    let mut registry = ToolRegistry::new();
+    engine.rollback(id, &mut registry)?;
+    save_catalog(&engine.catalog())?;
+    let now = engine
+        .get(id)
+        .map(|p| p.manifest.metadata.version.clone())
+        .unwrap_or_default();
+    println!("Rolled back {id} to {now}.");
+    Ok(())
+}
+
+/// `apex plugin run <capability> [--input <json>]` — invoke an enabled plugin tool
+/// capability directly through the engine's runtime (an operator test path; the same
+/// route an agent uses). Enforces the owning plugin's granted permissions. Requires the
+/// CLI built with `--features plugin-wasi` for the capability to actually execute.
+pub async fn run_cmd(capability: &str, input: &str) -> Result<()> {
+    let engine = engine()?;
+    let mut registry = ToolRegistry::new();
+    engine.register_enabled(&mut registry);
+    if !registry.contains(capability) {
+        return Err(Error::config(format!(
+            "no enabled plugin capability `{capability}` (install + enable a plugin that provides it)"
+        )));
+    }
+
+    // Run with the owning plugin's granted permissions, so the registry's permission
+    // check reflects what the operator consented to at install.
+    let grants = engine.catalog().into_iter().find_map(|p| {
+        p.manifest
+            .capabilities
+            .iter()
+            .any(|c| c.id == capability)
+            .then_some(p.granted_permissions)
+    });
+    let ctx = ToolContext {
+        execution_id: format!("plugin-run-{capability}"),
+        agent_id: "apex-cli".to_string(),
+        workdir: ".".to_string(),
+        granted_permissions: grants,
+    };
+    let params: Value =
+        serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
+
+    let resp = registry
+        .execute(capability, &ctx, ToolRequest::new(params))
+        .await
+        .map_err(|e| Error::Tool(format!("capability `{capability}` failed: {e}")))?;
+    println!("{}", serde_json::to_string_pretty(&resp.payload)?);
     Ok(())
 }
 
