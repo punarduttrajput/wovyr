@@ -19,6 +19,7 @@ mod memory;
 mod plugins;
 mod tenancy;
 mod webhooks;
+mod workflow_runner;
 
 use apex_agent::{AgentDefinition, NullSink, RunEvent, RunEventSink, RunOptions, run_agent};
 use apex_common::Error;
@@ -28,8 +29,7 @@ use apex_telemetry::Metrics;
 use apex_tenancy::{FileTenancyStore, InMemoryTenancyStore, TenancyStore};
 use apex_tools::ToolRegistry;
 use apex_workflow::{
-    CheckpointStore, ClosureExecutor, Engine, EventLog, ExecutionFilter, FileStore, InMemoryStore,
-    WorkflowState,
+    CheckpointStore, Engine, EventLog, ExecutionFilter, FileStore, InMemoryStore, WorkflowState,
 };
 use axum::{
     Json, Router,
@@ -110,7 +110,7 @@ impl AgentStore {
 /// Shared server state: the LLM gateway, tool registry, metrics, a run counter, and a
 /// read-only workflow engine over the durable store (for visibility endpoints).
 pub struct AppState {
-    gateway: Gateway,
+    gateway: Arc<Gateway>,
     registry: ToolRegistry,
     metrics: Metrics,
     agents: AgentStore,
@@ -146,17 +146,21 @@ impl AppState {
         // set; otherwise an in-process-only registry (see `Metrics::with_otlp_export`).
         let metrics = Metrics::with_otlp_export("apex");
         // Cost events from the gateway become LLM token/cost/savings metrics.
-        let gateway = Gateway::from_env().with_cost_observer(Arc::new(MetricsCostObserver {
-            metrics: metrics.clone(),
-        }));
+        let gateway = Arc::new(Gateway::from_env().with_cost_observer(Arc::new(
+            MetricsCostObserver { metrics: metrics.clone() },
+        )));
+        let registry = ToolRegistry::with_builtins();
         let (memory, memory_store) = memory::default_engine();
+        // Thread gateway + registry into the workflow engine so the ServerExecutor can
+        // actually drive function/ai activities when the submit route runs a workflow.
+        let workflows = default_workflows_engine(gateway.clone(), registry.clone());
         Self {
             gateway,
-            registry: ToolRegistry::with_builtins(),
+            registry,
             metrics,
             agents: AgentStore::default(),
             run_counter: AtomicU64::new(1),
-            workflows: default_workflows_engine(),
+            workflows,
             tenancy: default_tenancy_store(),
             quota: tenancy::QuotaTracker::new(),
             webhooks: default_webhook_store(),
@@ -234,11 +238,13 @@ fn default_webhook_store() -> Arc<dyn WebhookStore> {
     Arc::new(InMemoryWebhookStore::new())
 }
 
-/// A read-only [`Engine`] over the durable workflow store at `~/.apex/workflows`
-/// (the same directory the CLI writes to), falling back to an empty in-memory store
-/// if that directory is unavailable. The executor is a no-op — only the read paths
-/// (`list`/`status`/`history`) are used.
-fn default_workflows_engine() -> Engine {
+/// An [`Engine`] over the durable workflow store at `~/.apex/workflows` (the same
+/// directory the CLI writes to), falling back to an empty in-memory store if that
+/// directory is unavailable.  The executor is a [`ServerExecutor`] that handles
+/// `function`/`ai`/`human` activities so the write-path submit route can actually
+/// drive workflow runs.  The read paths (`list`/`status`/`history`) are unaffected.
+fn default_workflows_engine(gateway: Arc<Gateway>, registry: ToolRegistry) -> Engine {
+    let executor = Arc::new(workflow_runner::ServerExecutor::new(gateway, registry));
     let dir = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|home| {
@@ -251,12 +257,12 @@ fn default_workflows_engine() -> Engine {
     {
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
         let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
-        return Engine::new(events, checkpoints, Arc::new(ClosureExecutor::new()));
+        return Engine::new(events, checkpoints, executor);
     }
     let store = InMemoryStore::new();
     let events: Arc<dyn EventLog> = Arc::new(store.clone());
     let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
-    Engine::new(events, checkpoints, Arc::new(ClosureExecutor::new()))
+    Engine::new(events, checkpoints, executor)
 }
 
 /// Translates gateway [`CostEvent`]s into Prometheus metrics
@@ -313,6 +319,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/workflows", get(list_workflows_handler))
         .route("/api/v1/workflows/{id}", get(get_workflow_handler))
         .route("/workflows", get(workflows_ui_handler))
+        // Workflow builder write-path: validate, submit, signal, approve, cancel.
+        .merge(workflow_runner::routes())
         // Multi-tenancy: organizations, projects, memberships, quotas (RBAC-gated).
         .merge(tenancy::routes())
         // Webhooks: register/list/delete subscriptions (RBAC-gated).
@@ -502,7 +510,7 @@ async fn run_stream_handler(
         let mut sink = ChannelSink { tx: tx.clone() };
         let frame = match run_agent(
             &def,
-            &state.gateway,
+            &*state.gateway,
             &state.registry,
             RunOptions::new(input),
             &mut sink,
@@ -930,7 +938,7 @@ mod tests {
 
     /// Build a router whose workflow engine is seeded with one completed execution.
     async fn workflow_app() -> Router {
-        use apex_workflow::Definition;
+        use apex_workflow::{ClosureExecutor, Definition};
         let store = InMemoryStore::new();
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
         let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
