@@ -1,0 +1,158 @@
+<section class="view">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">Administer / Settings</div>
+      <h1>Settings</h1>
+      <p>Organizations, projects, members, quotas and integrations — backed by the
+        platform tenancy and webhooks APIs. Visibility follows your RBAC scopes.</p>
+    </div>
+    <div class="head-actions">
+      <span class="pill mut"><span class="pd"></span>{{ tenant }} · {{ principal }}</span>
+    </div>
+  </div>
+
+  @if (forbidden()) {
+    <div class="status-bar err">
+      <b>403 — not authorized.</b> The server authorizes by <code>X-Apex-Principal</code>.
+      Run it with <code>APEX_PLATFORM_ADMINS={{ principal }}</code> so this identity can administer the tenant.
+    </div>
+  } @else if (status()) {
+    <div class="status-bar" [class.err]="status().startsWith('Error')">{{ status() }}</div>
+  }
+
+  <div class="tabs">
+    <button [class.on]="tab() === 'projects'" (click)="setTab('projects')">Organizations &amp; Projects</button>
+    <button [class.on]="tab() === 'members'" (click)="setTab('members')">Members &amp; Roles</button>
+    <button [class.on]="tab() === 'quotas'" (click)="setTab('quotas')">Quotas</button>
+    <button [class.on]="tab() === 'integrations'" (click)="setTab('integrations')">Integrations</button>
+  </div>
+
+  <!-- ===== Projects & Orgs ===== -->
+  @if (tab() === 'projects') {
+    <div class="two">
+      <div class="card">
+        <div class="card-h"><h3>Organizations</h3><span class="sub">{{ orgs().length }}</span></div>
+        @for (o of orgs(); track o.id) {
+          <div class="row">
+            <b>{{ o.name }}</b>
+            <span class="rid">{{ o.id }}</span>
+          </div>
+        } @empty {
+          <div class="pad muted">No organizations yet.</div>
+        }
+        <div class="inline-form">
+          <input type="text" [(ngModel)]="newOrg" placeholder="New organization name" (keydown.enter)="createOrg()" />
+          <button class="btn pri" (click)="createOrg()">Create</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h3>Projects</h3><span class="sub">{{ projects().length }}</span>
+          <div class="right"><span class="muted mono mini">click to manage →</span></div></div>
+        @for (p of projects(); track p.id) {
+          <div class="row pick" [class.sel]="selected()?.id === p.id" (click)="select(p)">
+            <div>
+              <b>{{ p.name }}</b>
+              <span class="rid">{{ p.id }}</span>
+            </div>
+            <span class="pill mut">v{{ p.version }}</span>
+            @if (p.status) { <span class="pill" [class.ok]="p.status === 'active'" [class.mut]="p.status !== 'active'">{{ p.status }}</span> }
+            <button class="del" title="Delete project" (click)="removeProject(p); $event.stopPropagation()">×</button>
+          </div>
+        } @empty {
+          <div class="pad muted">No projects yet — create an org, then a project.</div>
+        }
+        <div class="inline-form col">
+          <input type="text" [(ngModel)]="newProject.name" placeholder="New project name" />
+          <div class="inline-form">
+            <select [(ngModel)]="newProject.organization">
+              @for (o of orgs(); track o.id) { <option [value]="o.id">{{ o.name }}</option> }
+            </select>
+            <button class="btn pri" (click)="createProject()">Create</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- ===== Members ===== -->
+  @if (tab() === 'members') {
+    @if (selected(); as p) {
+      <div class="card">
+        <div class="card-h"><h3>Members of {{ p.name }}</h3><span class="sub">{{ p.id }}</span></div>
+        <table>
+          <thead><tr><th>User</th><th>Role</th><th></th></tr></thead>
+          <tbody>
+            @for (m of members(); track m.user) {
+              <tr>
+                <td><b>{{ m.user }}</b></td>
+                <td><span class="role-tag">{{ roleLabel(m.role) }}</span></td>
+                <td class="num"><button class="btn danger mini" (click)="removeMember(m)">Remove</button></td>
+              </tr>
+            } @empty { <tr><td colspan="3" class="muted">No members yet.</td></tr> }
+          </tbody>
+        </table>
+        <div class="inline-form">
+          <input type="text" [(ngModel)]="newMember.user" placeholder="user id / email" (keydown.enter)="addMember()" />
+          <select [(ngModel)]="newMember.role">
+            @for (r of roles; track r) { <option [value]="r">{{ roleLabel(r) }}</option> }
+          </select>
+          <button class="btn pri" (click)="addMember()">Add member</button>
+        </div>
+      </div>
+    } @else {
+      <div class="card empty"><b>Select a project</b><span>Pick a project under <b>Organizations &amp; Projects</b> to manage its members.</span></div>
+    }
+  }
+
+  <!-- ===== Quotas ===== -->
+  @if (tab() === 'quotas') {
+    @if (selected(); as p) {
+      <div class="card">
+        <div class="card-h"><h3>Quotas — {{ p.name }}</h3><span class="sub">limits enforced at the run boundary</span></div>
+        <div class="quota-grid">
+          <div class="field"><label>LLM cost / day (USD)</label><input type="number" step="0.01" [(ngModel)]="quota.llm_cost_per_day_usd" placeholder="unlimited" /></div>
+          <div class="field"><label>Concurrent agent runs</label><input type="number" [(ngModel)]="quota.concurrent_agent_runs" placeholder="unlimited" /></div>
+          <div class="field"><label>Tool executions / min</label><input type="number" [(ngModel)]="quota.tool_executions_per_minute" placeholder="unlimited" /></div>
+          <div class="field"><label>Memory records</label><input type="number" [(ngModel)]="quota.memory_records" placeholder="unlimited" /></div>
+        </div>
+        <div class="card-foot"><span class="muted mono mini">empty = unlimited</span><button class="btn pri" (click)="saveQuota()">Save quota</button></div>
+      </div>
+    } @else {
+      <div class="card empty"><b>Select a project</b><span>Pick a project to view and edit its quotas.</span></div>
+    }
+  }
+
+  <!-- ===== Integrations (webhooks) ===== -->
+  @if (tab() === 'integrations') {
+    <div class="card">
+      <div class="card-h"><h3>Webhooks</h3><span class="sub">HMAC-signed event delivery · secrets never shown</span></div>
+      <table>
+        <thead><tr><th>Endpoint</th><th>Events</th><th>State</th><th></th></tr></thead>
+        <tbody>
+          @for (w of webhooks(); track w.id) {
+            <tr>
+              <td><div class="mono">{{ w.url }}</div><span class="rid">{{ w.id }}</span></td>
+              <td>@for (e of w.events; track e) { <span class="role-tag">{{ e }}</span> }</td>
+              <td><span class="pill" [class.ok]="w.active !== false" [class.mut]="w.active === false"><span class="pd"></span>{{ w.active === false ? 'paused' : 'active' }}</span></td>
+              <td class="num"><button class="btn danger mini" (click)="removeWebhook(w)">Delete</button></td>
+            </tr>
+          } @empty { <tr><td colspan="4" class="muted">No webhooks registered.</td></tr> }
+        </tbody>
+      </table>
+      <div class="inline-form col">
+        <input type="text" [(ngModel)]="newWebhook.url" placeholder="https://example.com/hooks/apex" />
+        <div class="inline-form">
+          <input type="text" [(ngModel)]="newWebhook.events" placeholder="event patterns, comma-separated" />
+          <input type="text" [(ngModel)]="newWebhook.secret" placeholder="signing secret" />
+          <button class="btn pri" (click)="createWebhook()">Register</button>
+        </div>
+      </div>
+    </div>
+    <div class="note">
+      <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 8v5m0 3h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span><b>API Keys</b> and <b>Audit log</b> are specified in the settings spec but have no
+        platform API endpoint yet — they'll be wired when the users/audit routes land on apex-server.</span>
+    </div>
+  }
+</section>
