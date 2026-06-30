@@ -21,7 +21,8 @@ use apex_tenancy::{
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use serde::Deserialize;
@@ -191,7 +192,7 @@ async fn create_project(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<CreateProjectRequest>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
+) -> Result<Response, ApiError> {
     let ctx = context(&state, &headers, None);
     ctx.authorize("projects:admin")?;
     let org = state.tenancy.get_org(&req.organization)?.ok_or_else(|| {
@@ -199,21 +200,29 @@ async fn create_project(
     })?;
     let project = state.tenancy.create_project(Project::new(&org, req.name))?;
     crate::webhooks::emit(&state, "project.created", &ctx.tenant, json!(project));
-    Ok((StatusCode::CREATED, Json(json!(project))))
+    let etag = crate::hardening::etag(project.version);
+    Ok((
+        StatusCode::CREATED,
+        [(header::ETAG, etag)],
+        Json(json!(project)),
+    )
+        .into_response())
 }
 
 async fn get_project(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let ctx = context(&state, &headers, Some(id.clone()));
     ctx.authorize("projects:read")?;
     let project = state
         .tenancy
         .get_project(&id)?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found", "project not found"))?;
-    Ok(Json(json!(project)))
+    // Reads return an ETag (the resource version) for optimistic concurrency (§10).
+    let etag = crate::hardening::etag(project.version);
+    Ok(([(header::ETAG, etag)], Json(json!(project))).into_response())
 }
 
 async fn patch_project(
@@ -221,22 +230,39 @@ async fn patch_project(
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<PatchProjectRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let ctx = context(&state, &headers, Some(id.clone()));
     ctx.authorize("projects:admin")?;
     let mut project = state
         .tenancy
         .get_project(&id)?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found", "project not found"))?;
+
+    // Optimistic concurrency (§10): a stale `If-Match` loses to a concurrent update.
+    if let Some(expected) = crate::hardening::if_match(&headers)
+        && expected != project.version
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            format!(
+                "project `{id}` is at version {}, but If-Match was {expected}",
+                project.version
+            ),
+        ));
+    }
+
     if let Some(settings) = req.settings {
         project.settings = settings;
     }
     if let Some(status) = req.status {
         project.status = status;
     }
+    project.version += 1;
     state.tenancy.update_project(project.clone())?;
     crate::webhooks::emit(&state, "project.updated", &ctx.tenant, json!(project));
-    Ok(Json(json!(project)))
+    let etag = crate::hardening::etag(project.version);
+    Ok(([(header::ETAG, etag)], Json(json!(project))).into_response())
 }
 
 async fn delete_project(
@@ -702,5 +728,120 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn project_updates_use_etag_optimistic_concurrency() {
+        unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
+        let st = state();
+
+        // Issue a request with optional extra headers, returning (status, ETag, body).
+        async fn send(
+            st: &Arc<AppState>,
+            method: &str,
+            uri: &str,
+            extra: &[(&str, &str)],
+            body: Value,
+        ) -> (StatusCode, Option<String>, Value) {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("x-apex-tenant", "acme")
+                .header("x-apex-principal", "root");
+            for (k, v) in extra {
+                builder = builder.header(*k, *v);
+            }
+            let resp = crate::router(st.clone())
+                .oneshot(
+                    builder
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let etag = resp
+                .headers()
+                .get(header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+            (
+                status,
+                etag,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        let (_, org) = req(
+            &st,
+            "POST",
+            "/api/v1/organizations",
+            "root",
+            json!({"name":"Org"}),
+        )
+        .await;
+        let org_id = org["id"].as_str().unwrap().to_string();
+        let (s, etag, prj) = send(
+            &st,
+            "POST",
+            "/api/v1/projects",
+            &[],
+            json!({"name":"p","organization":org_id}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        assert_eq!(etag.as_deref(), Some("\"1\""));
+        assert_eq!(prj["version"], 1);
+        let prj_id = prj["id"].as_str().unwrap().to_string();
+        let uri = format!("/api/v1/projects/{prj_id}");
+
+        // A read returns the current ETag.
+        let (s, etag, _) = send(&st, "GET", &uri, &[], Value::Null).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(etag.as_deref(), Some("\"1\""));
+
+        // A stale If-Match loses → 409 conflict.
+        let (s, _, body) = send(
+            &st,
+            "PATCH",
+            &uri,
+            &[("if-match", "\"0\"")],
+            json!({"status":"suspended"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "conflict");
+
+        // The matching If-Match succeeds and bumps the version (new ETag "2").
+        let (s, etag, prj) = send(
+            &st,
+            "PATCH",
+            &uri,
+            &[("if-match", "\"1\"")],
+            json!({"status":"suspended"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(etag.as_deref(), Some("\"2\""));
+        assert_eq!(prj["version"], 2);
+        assert_eq!(prj["status"], "suspended");
+
+        // Re-using the now-stale version fails again.
+        let (s, _, _) = send(
+            &st,
+            "PATCH",
+            &uri,
+            &[("if-match", "\"1\"")],
+            json!({"status":"active"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT);
+
+        // Without If-Match, the update is unconditional (no lost-update protection).
+        let (s, etag, _) = send(&st, "PATCH", &uri, &[], json!({"status":"active"})).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(etag.as_deref(), Some("\"3\""));
     }
 }
