@@ -20,8 +20,8 @@ export const routes: Routes = [
   {
     path: 'workflows',
     title: 'Workflow Builder · Apex',
-    loadComponent: () => import('./features/placeholder/placeholder').then((m) => m.Placeholder),
-    data: { surface: 'Workflow Builder', eyebrow: 'Build / Workflow Builder' },
+    loadComponent: () =>
+      import('./features/workflow-builder/workflow-builder').then((m) => m.WorkflowBuilder),
   },
   {
     path: 'executions/:id',

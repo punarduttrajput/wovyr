@@ -1,0 +1,180 @@
+<section class="view">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">Build / Workflow Builder</div>
+      <h1>Workflow Builder</h1>
+      <p>Author YAML workflow definitions, validate the DAG, submit runs, and
+        monitor live execution status. Signal waiting activities or approve human tasks.</p>
+    </div>
+    <div class="head-actions">
+      <button class="btn" (click)="validate()">Validate</button>
+      <button class="btn pri" (click)="submit()" [disabled]="busy()">
+        {{ busy() ? 'Submitting…' : 'Run ▸' }}
+      </button>
+    </div>
+  </div>
+
+  @if (status()) {
+    <div class="status-bar" [class.err]="status().startsWith('Error')">{{ status() }}</div>
+  }
+
+  <div class="wb">
+    <!-- ── LEFT: editor + DAG preview ───────────────────────────────────────── -->
+    <div class="left-col">
+
+      <!-- Editor -->
+      <div class="card">
+        <div class="card-h">
+          <h3>Definition</h3>
+          <span class="sub mono">YAML</span>
+        </div>
+        <div class="editor-wrap">
+          <textarea class="editor mono" [(ngModel)]="manifest" spellcheck="false"
+            placeholder="Paste or type your workflow YAML…"></textarea>
+        </div>
+      </div>
+
+      <!-- Validation result -->
+      @if (validErr()) {
+        <div class="card val-err">
+          <div class="card-h err-h"><h3>Validation error</h3></div>
+          <pre class="err-pre">{{ validErr() }}</pre>
+        </div>
+      }
+      @if (validation()) {
+        <div class="card val-ok">
+          <div class="card-h">
+            <h3>Valid ✓ &nbsp;<span class="sub">{{ validation()!.name }} · v{{ validation()!.version }}</span></h3>
+          </div>
+          <div class="dag">
+            @for (a of validation()!.activities; track a.id) {
+              <div class="dag-node">
+                <span class="dag-id mono">{{ a.id }}</span>
+                <span class="pill mut">{{ a.type }}</span>
+                @if (a.name) { <span class="pill info mono">{{ a.name }}</span> }
+              </div>
+            }
+            @if (validation()!.edges.length) {
+              <div class="dag-edges eyebrow">Transitions</div>
+              @for (e of validation()!.edges; track e.from + e.to) {
+                <div class="dag-edge mono">
+                  {{ e.from }} → {{ e.to }}
+                  @if (e.when) { <span class="pill warn">if {{ e.when }}</span> }
+                </div>
+              }
+            }
+          </div>
+        </div>
+      }
+
+      <!-- Submit options -->
+      <div class="card opts-card">
+        <div class="card-h"><h3>Run options</h3></div>
+        <div class="opts-b">
+          <label class="opt-label">
+            Input JSON
+            <textarea class="mono" rows="3" [(ngModel)]="execInput"
+              placeholder='{ "key": "value" }'></textarea>
+          </label>
+          <label class="opt-label">
+            Execution ID <span class="muted">(optional)</span>
+            <input type="text" class="mono" [(ngModel)]="customExecId"
+              placeholder="auto-generated if blank" />
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── RIGHT: execution list + detail ────────────────────────────────────── -->
+    <div class="right-col">
+
+      <!-- Execution list -->
+      <div class="card">
+        <div class="card-h">
+          <h3>Executions</h3>
+          <span class="sub">{{ executions().length }} recent</span>
+          <div class="right"><button class="icon-btn" (click)="refresh()" title="Refresh">↺</button></div>
+        </div>
+        @for (ex of executions(); track ex.execution_id) {
+          <div class="exec-row" [class.sel]="selected()?.execution_id === ex.execution_id"
+            (click)="select(ex)">
+            <div class="exec-id mono">{{ ex.execution_id }}</div>
+            <div class="exec-meta">
+              <span class="pill {{ statusClass(ex.status) }}">{{ ex.status }}</span>
+              <span class="muted mini">{{ ex.workflow_name }}</span>
+            </div>
+          </div>
+        } @empty {
+          <div class="pad muted">No executions yet. Submit a workflow run above.</div>
+        }
+      </div>
+
+      <!-- Execution detail -->
+      @if (selected()) {
+        <div class="card detail-card">
+          <div class="card-h">
+            <h3 class="mono">{{ selected()!.execution_id }}</h3>
+            <span class="pill {{ statusClass(selected()!.status) }}">{{ selected()!.status }}</span>
+            <div class="right">
+              <a class="btn" [routerLink]="['/executions', selected()!.execution_id]">Full detail →</a>
+            </div>
+          </div>
+
+          <!-- Activity states -->
+          <div class="acts">
+            @for (a of activities(); track a.id) {
+              <div class="act-row">
+                <span class="mono act-id">{{ a.id }}</span>
+                <span class="pill {{ statusClass(a.state) }}">{{ a.state }}</span>
+              </div>
+            }
+          </div>
+
+          <!-- Signal / Approve panel -->
+          @if (isWaiting(selected()!)) {
+            <div class="sig-toggle-row">
+              <button class="btn" (click)="showSignal.set(!showSignal())">
+                {{ showSignal() ? 'Hide' : 'Signal / Approve' }}
+              </button>
+            </div>
+          }
+
+          @if (showSignal()) {
+            <div class="sig-panel">
+              <div class="eyebrow pad-sm">Signal event</div>
+              <div class="sig-row">
+                <input type="text" [(ngModel)]="signalEvent" class="mono"
+                  placeholder="event name (e.g. user-input)" />
+                <textarea class="mono" rows="2" [(ngModel)]="signalPayload"
+                  placeholder='{ "key": "value" }'></textarea>
+                <button class="btn pri" (click)="sendSignal()" [disabled]="!signalEvent.trim() || busy()">
+                  Send
+                </button>
+              </div>
+              <div class="eyebrow pad-sm">Approve human activity</div>
+              <div class="sig-row">
+                <input type="text" [(ngModel)]="approveActivity" class="mono"
+                  placeholder="activity id (e.g. review)" />
+                <textarea class="mono" rows="2" [(ngModel)]="approveDecision"
+                  placeholder='{"approved": true}'></textarea>
+                <button class="btn pri" (click)="approve()" [disabled]="!approveActivity.trim() || busy()">
+                  Approve
+                </button>
+              </div>
+            </div>
+          }
+
+          <!-- Event timeline (last 8) -->
+          @if (events().length) {
+            <div class="timeline">
+              <div class="eyebrow pad-sm">Timeline</div>
+              @for (ev of events().slice(-8); track $index) {
+                <div class="tl-row mono">{{ ev | json }}</div>
+              }
+            </div>
+          }
+        </div>
+      }
+    </div>
+  </div>
+</section>
