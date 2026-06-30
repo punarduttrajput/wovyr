@@ -13,9 +13,11 @@
 //! idempotency arrive in later milestones.
 
 mod tenancy;
+mod webhooks;
 
 use apex_agent::{AgentDefinition, NullSink, RunEvent, RunEventSink, RunOptions, run_agent};
 use apex_common::Error;
+use apex_events::{BackoffPolicy, FileWebhookStore, InMemoryWebhookStore, WebhookStore};
 use apex_provider::{CostEvent, CostObserver, Gateway};
 use apex_telemetry::Metrics;
 use apex_tenancy::{FileTenancyStore, InMemoryTenancyStore, TenancyStore};
@@ -115,6 +117,14 @@ pub struct AppState {
     pub(crate) tenancy: Arc<dyn TenancyStore>,
     /// Per-project run-path quota usage (concurrent runs + daily LLM spend).
     pub(crate) quota: tenancy::QuotaTracker,
+    /// Webhook subscriptions; events emitted on mutations are delivered to matches.
+    pub(crate) webhooks: Arc<dyn WebhookStore>,
+    /// Sends signed webhook payloads (swappable for tests).
+    pub(crate) webhook_sender: Arc<dyn webhooks::WebhookSender>,
+    /// Retry/backoff policy for webhook delivery.
+    pub(crate) webhook_policy: BackoffPolicy,
+    /// Monotonic counter for emitted event ids.
+    pub(crate) event_counter: AtomicU64,
 }
 
 impl AppState {
@@ -136,7 +146,31 @@ impl AppState {
             workflows: default_workflows_engine(),
             tenancy: default_tenancy_store(),
             quota: tenancy::QuotaTracker::new(),
+            webhooks: default_webhook_store(),
+            webhook_sender: Arc::new(webhooks::ReqwestSender::default()),
+            webhook_policy: BackoffPolicy::default(),
+            event_counter: AtomicU64::new(1),
         }
+    }
+
+    /// Override the webhook subscription store (tests inject an in-memory store).
+    pub fn with_webhooks(mut self, store: Arc<dyn WebhookStore>) -> Self {
+        self.webhooks = store;
+        self
+    }
+
+    /// Override the webhook sender (tests inject a recording sender).
+    #[cfg(test)]
+    pub(crate) fn with_webhook_sender(mut self, sender: Arc<dyn webhooks::WebhookSender>) -> Self {
+        self.webhook_sender = sender;
+        self
+    }
+
+    /// Override the webhook retry/backoff policy (tests use a zero-delay policy).
+    #[cfg(test)]
+    pub(crate) fn with_webhook_policy(mut self, policy: BackoffPolicy) -> Self {
+        self.webhook_policy = policy;
+        self
     }
 
     /// Override the read-only workflow engine (used by tests to inject a seeded
@@ -165,6 +199,23 @@ fn default_tenancy_store() -> Arc<dyn TenancyStore> {
         return Arc::new(store);
     }
     Arc::new(InMemoryTenancyStore::new())
+}
+
+/// A durable [`FileWebhookStore`] at `~/.apex/webhooks`, falling back to in-memory.
+fn default_webhook_store() -> Arc<dyn WebhookStore> {
+    let dir = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| {
+            std::path::PathBuf::from(home)
+                .join(".apex")
+                .join("webhooks")
+        });
+    if let Some(dir) = dir
+        && let Ok(store) = FileWebhookStore::new(dir)
+    {
+        return Arc::new(store);
+    }
+    Arc::new(InMemoryWebhookStore::new())
 }
 
 /// A read-only [`Engine`] over the durable workflow store at `~/.apex/workflows`
@@ -248,6 +299,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/workflows", get(workflows_ui_handler))
         // Multi-tenancy: organizations, projects, memberships, quotas (RBAC-gated).
         .merge(tenancy::routes())
+        // Webhooks: register/list/delete subscriptions (RBAC-gated).
+        .merge(webhooks::routes())
         .with_state(state)
 }
 
@@ -316,7 +369,13 @@ async fn run_handler(
     Json(req): Json<RunRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let start = Instant::now();
-    let result = run_inner(&state, tenancy::run_project(&headers), req).await;
+    let result = run_inner(
+        &state,
+        tenancy::run_tenant(&headers),
+        tenancy::run_project(&headers),
+        req,
+    )
+    .await;
 
     let status = match &result {
         Ok(_) => 200u16,
@@ -337,12 +396,13 @@ async fn run_handler(
 /// Parse the inline manifest then run it ([Agents API §5](../../docs/09-api/agents.md)).
 async fn run_inner(
     state: &Arc<AppState>,
+    tenant: String,
     project: Option<String>,
     req: RunRequest,
 ) -> Result<Json<Value>, ApiError> {
     let def = AgentDefinition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
-    run_definition(state, def, req.input, project.as_deref()).await
+    run_definition(state, def, req.input, &tenant, project.as_deref()).await
 }
 
 /// A [`RunEventSink`] that forwards each run event to an SSE channel as a JSON frame.
@@ -441,6 +501,7 @@ async fn run_definition(
     state: &Arc<AppState>,
     def: AgentDefinition,
     input: Value,
+    tenant: &str,
     project: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
     let input = if input.is_null() { json!({}) } else { input };
@@ -448,7 +509,7 @@ async fn run_definition(
     // Quota gate: hold a concurrency slot for the duration of the run (released on
     // drop), then record the run's cost against the project's daily budget.
     let _permit = tenancy::admit_run(state, project)?;
-    let out = run_agent(
+    let out = match run_agent(
         &def,
         &state.gateway,
         &state.registry,
@@ -456,10 +517,27 @@ async fn run_definition(
         &mut NullSink,
     )
     .await
-    .map_err(ApiError::from)?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            webhooks::emit(
+                state,
+                "agent.run.failed",
+                tenant,
+                json!({ "error": e.to_string() }),
+            );
+            return Err(ApiError::from(e));
+        }
+    };
     tenancy::record_run_cost(state, project, out.usage.cost_usd);
 
     let run_id = format!("run_{}", state.run_counter.fetch_add(1, Ordering::SeqCst));
+    webhooks::emit(
+        state,
+        "agent.run.completed",
+        tenant,
+        json!({ "run_id": run_id, "total_tokens": out.usage.total_tokens }),
+    );
     Ok(Json(json!({
         "run_id": run_id,
         "status": "succeeded",
@@ -541,6 +619,7 @@ async fn run_stored_handler(
     Json(req): Json<RunStoredRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let start = Instant::now();
+    let tenant = tenancy::run_tenant(&headers);
     let project = tenancy::run_project(&headers);
     let def = state.agents.definition(&id).ok_or_else(|| {
         ApiError::new(
@@ -550,7 +629,7 @@ async fn run_stored_handler(
         )
     });
     let result = match def {
-        Ok(def) => run_definition(&state, def, req.input, project.as_deref()).await,
+        Ok(def) => run_definition(&state, def, req.input, &tenant, project.as_deref()).await,
         Err(e) => Err(e),
     };
 

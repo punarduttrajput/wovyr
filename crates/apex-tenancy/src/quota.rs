@@ -13,7 +13,12 @@ use apex_common::{Error, Result};
 impl QuotaLimits {
     /// Admit one more concurrent agent run given `current` already running.
     pub fn check_concurrent_runs(&self, current: u64) -> Result<()> {
-        check_count("concurrent_agent_runs", self.concurrent_agent_runs, current, 1)
+        check_count(
+            "concurrent_agent_runs",
+            self.concurrent_agent_runs,
+            current,
+            1,
+        )
     }
 
     /// Admit `adding` new memory records given `current` already stored.

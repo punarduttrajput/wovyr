@@ -7,7 +7,7 @@
 //! and updating/deleting an absent resource is
 //! [`Error::NotFound`](apex_common::Error::NotFound).
 
-use crate::model::{Membership, MemberScope, Organization, Project, ProjectStatus, QuotaLimits};
+use crate::model::{MemberScope, Membership, Organization, Project, ProjectStatus, QuotaLimits};
 use apex_common::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -58,7 +58,10 @@ impl TenancyState {
 
     fn update_project(&mut self, project: Project) -> Result<()> {
         if !self.projects.contains_key(&project.id) {
-            return Err(Error::NotFound(format!("project `{}` not found", project.id)));
+            return Err(Error::NotFound(format!(
+                "project `{}` not found",
+                project.id
+            )));
         }
         self.projects.insert(project.id.clone(), project);
         Ok(())
@@ -272,7 +275,13 @@ impl TenancyStore for FileTenancyStore {
         self.with_ref(|s| s.orgs.get(id).cloned())
     }
     fn list_orgs(&self, tenant: &str) -> Result<Vec<Organization>> {
-        self.with_ref(|s| s.orgs.values().filter(|o| o.tenant == tenant).cloned().collect())
+        self.with_ref(|s| {
+            s.orgs
+                .values()
+                .filter(|o| o.tenant == tenant)
+                .cloned()
+                .collect()
+        })
     }
     fn create_project(&self, project: Project) -> Result<Project> {
         self.with_mut(|s| s.create_project(project))
@@ -336,7 +345,9 @@ mod tests {
     use crate::rbac::Role;
 
     fn seeded(store: &dyn TenancyStore) -> (Organization, Project) {
-        let org = store.create_org(Organization::new("acme", "Platform")).unwrap();
+        let org = store
+            .create_org(Organization::new("acme", "Platform"))
+            .unwrap();
         let prj = store
             .create_project(Project::new(&org, "support-bot"))
             .unwrap();
@@ -399,7 +410,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            store.get_quota(&prj.id).unwrap().unwrap().concurrent_agent_runs,
+            store
+                .get_quota(&prj.id)
+                .unwrap()
+                .unwrap()
+                .concurrent_agent_runs,
             Some(5)
         );
 

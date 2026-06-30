@@ -25,8 +25,6 @@ pub mod quota;
 pub mod rbac;
 pub mod store;
 
-pub use model::{
-    MemberScope, Membership, Organization, Project, ProjectStatus, QuotaLimits,
-};
+pub use model::{MemberScope, Membership, Organization, Project, ProjectStatus, QuotaLimits};
 pub use rbac::{Role, TenantContext, any_grants};
 pub use store::{FileTenancyStore, InMemoryTenancyStore, TenancyState, TenancyStore};
