@@ -44,7 +44,27 @@
   display:flex; align-items:center; gap:10px; margin-top:auto; padding-top:6px;
   border-top:1px solid var(--line-2);
 }
-.foot .btn { margin-left:auto; }
+.foot-actions { margin-left:auto; display:flex; gap:8px; }
+
+.btn.danger { color:var(--crit); border-color:color-mix(in srgb, var(--crit) 30%, var(--line)); }
+.btn.danger:hover { background:var(--crit-bg); }
+
+/* ── Install / Trust panels ────────────────────────────────────────────────── */
+.install-panel { margin-bottom:16px; }
+.install-body { padding:14px 16px; display:flex; flex-direction:column; gap:14px; }
+.field-label {
+  display:flex; flex-direction:column; gap:6px;
+  font-family:var(--mono); font-size:11px; color:var(--ink-3);
+  text-transform:uppercase; letter-spacing:.08em;
+}
+.field-label input[type=text] {
+  border:1px solid var(--line); background:var(--surface-2); border-radius:var(--r-sm);
+  padding:8px 10px; font-family:var(--mono); font-size:12px; color:var(--ink); outline:none;
+}
+.field-label input[type=text]:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-weak); }
+.file-row { display:flex; align-items:center; gap:10px; }
+.file-btn { cursor:pointer; }
+.install-actions { display:flex; gap:10px; }
 
 .empty { display:flex; gap:16px; padding:34px; border-style:dashed; align-items:flex-start; }
 .empty svg { width:34px; height:34px; flex:none; color:var(--ink-3); opacity:.6; }

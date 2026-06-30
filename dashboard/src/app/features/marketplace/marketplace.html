@@ -3,13 +3,69 @@
     <div>
       <div class="eyebrow">Extend / Marketplace</div>
       <h1>Plugins</h1>
-      <p>Manage installed plugins — enable or disable their capabilities. Each plugin's
+      <p>Manage installed plugins — install, enable/disable, or uninstall. Each plugin's
         requested permissions are shown so you can see what it can do.</p>
     </div>
     <div class="head-actions">
+      <button class="btn" (click)="showTrust.set(!showTrust())">Trust publisher</button>
+      <button class="btn pri" (click)="showInstall.set(!showInstall())">+ Install</button>
       <button class="btn" (click)="refresh()">Refresh</button>
     </div>
   </div>
+
+  <!-- Install panel -->
+  @if (showInstall()) {
+    <div class="card install-panel">
+      <div class="card-h"><h3>Install plugin from .apexpkg</h3></div>
+      <div class="install-body">
+        <label class="field-label">
+          Package file
+          <div class="file-row">
+            <label class="btn file-btn">
+              Choose file
+              <input type="file" accept=".apexpkg" (change)="onFileSelected($event)" style="display:none" />
+            </label>
+            <span class="mono mini muted">{{ installFileName || 'no file selected' }}</span>
+          </div>
+        </label>
+        <label class="field-label">
+          Permissions to grant <span class="muted mini">(comma-separated, e.g. net:egress:example.com)</span>
+          <input type="text" class="mono" [(ngModel)]="installGrants"
+            placeholder="net:egress:api.example.com, fs:read:/tmp" />
+        </label>
+        <div class="install-actions">
+          <button class="btn pri" (click)="installPlugin()" [disabled]="busy() === 'install' || !installFileName">
+            {{ busy() === 'install' ? 'Installing…' : 'Install' }}
+          </button>
+          <button class="btn" (click)="showInstall.set(false)">Cancel</button>
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- Trust publisher panel -->
+  @if (showTrust()) {
+    <div class="card install-panel">
+      <div class="card-h"><h3>Trust a publisher</h3></div>
+      <div class="install-body">
+        <label class="field-label">
+          Publisher name
+          <input type="text" class="mono" [(ngModel)]="trustPublisher" placeholder="acme-corp" />
+        </label>
+        <label class="field-label">
+          Ed25519 public key (hex, 64 chars)
+          <input type="text" class="mono" [(ngModel)]="trustKeyHex"
+            placeholder="a1b2c3d4…" />
+        </label>
+        <div class="install-actions">
+          <button class="btn pri" (click)="addTrust()" [disabled]="busy() === 'trust'">
+            {{ busy() === 'trust' ? 'Saving…' : 'Trust' }}
+          </button>
+          <button class="btn" (click)="showTrust.set(false)">Cancel</button>
+        </div>
+      </div>
+    </div>
+  }
 
   @if (status()) {
     <div class="status-bar" [class.err]="status().startsWith('Error')">{{ status() }}</div>
@@ -60,10 +116,15 @@
 
           <div class="foot">
             <span class="mono mini muted">platform-api {{ p.platform_api }}</span>
-            <button class="btn" [class.pri]="p.state === 'disabled'" [disabled]="busy() === p.id"
-              (click)="toggle(p)">
-              {{ busy() === p.id ? '…' : (p.state === 'enabled' ? 'Disable' : 'Enable') }}
-            </button>
+            <div class="foot-actions">
+              <button class="btn" [class.pri]="p.state === 'disabled'" [disabled]="busy() === p.id"
+                (click)="toggle(p)">
+                {{ busy() === p.id ? '…' : (p.state === 'enabled' ? 'Disable' : 'Enable') }}
+              </button>
+              <button class="btn danger" [disabled]="busy() === p.id" (click)="uninstall(p)">
+                Uninstall
+              </button>
+            </div>
           </div>
         </div>
       }
