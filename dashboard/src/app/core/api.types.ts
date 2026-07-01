@@ -16,6 +16,8 @@ export interface AgentDraft {
   tools: string[];
   memoryEnabled: boolean;
   namespace: string;
+  /** Default model/tool iteration cap for runs of this agent; `null` = runtime default (8). */
+  maxSteps: number | null;
 }
 
 /** A registered tool from `GET /api/v1/tools` (built-in or enabled plugin). */

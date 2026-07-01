@@ -114,6 +114,17 @@
                   <label class="fld">Instructions
                     <input [(ngModel)]="sn.name" placeholder="You are a helpful assistant…" /></label>
                 }
+                @case ('agent') {
+                  <label class="fld">Agent id
+                    <input [(ngModel)]="sn.name" list="agent-catalog" placeholder="e.g. greeter" />
+                    <datalist id="agent-catalog">
+                      @for (id of agentCatalog(); track id) { <option [value]="id"></option> }
+                    </datalist>
+                  </label>
+                  @if (!agentCatalog().length) {
+                    <p class="mut mini">No stored agents yet — create one in Agent Studio first.</p>
+                  }
+                }
                 @case ('wait') {
                   <label class="fld">Event name <input [(ngModel)]="sn.name" placeholder="user-input" /></label>
                 }

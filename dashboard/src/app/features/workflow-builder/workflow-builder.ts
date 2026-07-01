@@ -88,9 +88,13 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
     { id: 'shell', description: 'Run a shell command.' },
   ]);
 
+  /** Stored agent ids (`GET /api/v1/agents`), for the `agent` node's picker. */
+  readonly agentCatalog = signal<string[]>([]);
+
   readonly activityTypes: { value: WfActivityType; label: string }[] = [
     { value: 'function', label: 'Run a tool' },
     { value: 'ai', label: 'Ask the model (AI)' },
+    { value: 'agent', label: 'Run an agent' },
     { value: 'human', label: 'Wait for human approval' },
     { value: 'wait', label: 'Wait for an event' },
   ];
@@ -150,6 +154,10 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
       next: (t) => {
         if (t.length) this.toolCatalog.set(t);
       },
+      error: () => {},
+    });
+    this.svc.agents().subscribe({
+      next: (a) => this.agentCatalog.set(a),
       error: () => {},
     });
     this.pollSub = interval(5000)
@@ -219,7 +227,12 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
   // ── nodes ─────────────────────────────────────────────────────────────────────
   addNode(type: WfActivityType): void {
     const n = this.draft.activities.length + 1;
-    const defaultName = type === 'function' ? (this.toolCatalog()[0]?.id ?? 'echo') : '';
+    const defaultName =
+      type === 'function'
+        ? (this.toolCatalog()[0]?.id ?? 'echo')
+        : type === 'agent'
+          ? (this.agentCatalog()[0] ?? '')
+          : '';
     this.draft.activities.push({
       id: `step-${n}`,
       type,
@@ -384,7 +397,7 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
 
   // ── config panel helpers ────────────────────────────────────────────────────────
   hasInputs(a: WfActivity): boolean {
-    return a.type === 'function' || a.type === 'ai';
+    return a.type === 'function' || a.type === 'ai' || a.type === 'agent';
   }
   typeLabel(t: WfActivityType): string {
     return this.activityTypes.find((x) => x.value === t)?.label ?? t;

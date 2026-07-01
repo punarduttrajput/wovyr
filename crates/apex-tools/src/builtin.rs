@@ -190,6 +190,58 @@ const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Maximum allowed shell timeout, in seconds.
 const SHELL_MAX_TIMEOUT_SECS: u64 = 300;
 
+/// Printed as the last line of every shell invocation so the caller can learn the
+/// command's ending working directory (e.g. after a `cd`) without a persistent shell
+/// session. Deliberately plain text rather than a control character so it survives
+/// every shell's quoting rules; a real command printing this exact token as its own
+/// last line is astronomically unlikely.
+const CWD_MARKER: &str = ">>>APEX_CWD>>>";
+
+/// Wrap `command` so it unconditionally prints `CWD_MARKER<ending dir>` as its very
+/// last line while preserving the *original* command's exit code (not the marker
+/// print's) — each shell has its own way to run a follow-up statement regardless of
+/// the prior one's success and to recover that prior exit code.
+fn wrap_with_cwd_marker(command: &str, shell: &str) -> String {
+    match shell {
+        "powershell" => format!(
+            "{command}\n\
+             $__apexExit = if ($null -ne $LASTEXITCODE) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }}\n\
+             Write-Output \"{CWD_MARKER}$($PWD.Path)\"\n\
+             exit $__apexExit"
+        ),
+        "cmd" => format!(
+            "{command} & set __apexExit=!ERRORLEVEL! & echo {CWD_MARKER}!CD! & exit /b !__apexExit!"
+        ),
+        _ => format!(
+            "{command}\n\
+             __apex_exit=$?\n\
+             printf '%s%s\\n' '{CWD_MARKER}' \"$PWD\"\n\
+             exit \"$__apex_exit\""
+        ),
+    }
+}
+
+/// Pull the trailing `CWD_MARKER<dir>` line out of `stdout`, returning the cleaned
+/// output (marker line removed) and the reported directory, if the marker is present.
+/// Absent when the process was killed (e.g. timeout) before reaching it — callers
+/// should then leave the working directory unchanged.
+fn extract_cwd_marker(stdout: &str) -> (String, Option<String>) {
+    let Some(marker_at) = stdout.rfind(CWD_MARKER) else {
+        return (stdout.to_string(), None);
+    };
+    let line_start = stdout[..marker_at].rfind('\n').map_or(0, |p| p + 1);
+    let line_end = stdout[marker_at..]
+        .find('\n')
+        .map_or(stdout.len(), |p| marker_at + p + 1);
+    let cwd = stdout[marker_at + CWD_MARKER.len()..line_end]
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    let mut cleaned = String::with_capacity(stdout.len() - (line_end - line_start));
+    cleaned.push_str(&stdout[..line_start]);
+    cleaned.push_str(&stdout[line_end..]);
+    (cleaned, Some(cwd).filter(|c| !c.is_empty()))
+}
+
 /// Run a shell command through the sandbox.
 ///
 /// `shell` is a first-party tool, so backend selection resolves to the native
@@ -219,6 +271,12 @@ impl Tool for ShellTool {
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Optional execution timeout in seconds (default 30, max 300)."
+                },
+                "shell": {
+                    "type": "string",
+                    "enum": ["powershell", "cmd", "sh"],
+                    "description": "Which shell to run the command through. Windows: `powershell` \
+                        (default) or `cmd`. Non-Windows: `sh` (the only supported value there)."
                 }
             }
         })
@@ -250,6 +308,8 @@ impl Tool for ShellTool {
             ctx.workdir.as_str()
         };
 
+        let shell = request.parameters.get("shell").and_then(Value::as_str);
+
         // Resolve the isolation backend (first-party → native on this node).
         SandboxManager::native_only()
             .select(SandboxBackend::Native, TrustClass::FirstParty)
@@ -261,11 +321,37 @@ impl Tool for ShellTool {
         };
         let sandbox = NativeSandbox::with_limits(limits);
 
-        // Run via the platform shell so users can write normal command lines.
+        // Run via the requested (or platform-default) shell so users can write normal
+        // command lines. PowerShell is the Windows default — it's what an interactive
+        // session actually uses, unlike bare `cmd.exe`.
         let run = if cfg!(windows) {
-            sandbox.run("cmd", &["/C", command], workdir).await
+            match shell.unwrap_or("powershell") {
+                "powershell" => {
+                    sandbox
+                        .run(
+                            "powershell",
+                            &["-NoProfile", "-NonInteractive", "-Command", command],
+                            workdir,
+                        )
+                        .await
+                }
+                "cmd" => sandbox.run("cmd", &["/C", command], workdir).await,
+                other => {
+                    return Err(ToolError::Validation(format!(
+                        "unsupported `shell` value `{other}` on Windows; expected \
+                         `powershell` or `cmd`"
+                    )));
+                }
+            }
         } else {
-            sandbox.run("sh", &["-c", command], workdir).await
+            match shell {
+                None | Some("sh") => sandbox.run("sh", &["-c", command], workdir).await,
+                Some(other) => {
+                    return Err(ToolError::Validation(format!(
+                        "unsupported `shell` value `{other}` on this platform; expected `sh`"
+                    )));
+                }
+            }
         };
         let outcome = run.map_err(|e| ToolError::Internal(e.to_string()))?;
 
@@ -348,6 +434,80 @@ mod tests {
         let ctx = ToolContext::default();
         let err = t
             .execute(&ctx, ToolRequest::new(json!({})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn shell_defaults_to_powershell_on_windows() {
+        let t = ShellTool;
+        let ctx = ToolContext::default();
+        // `if ($true) { ... }` is PowerShell syntax; cmd.exe would fail to parse it.
+        let resp = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"command": "if ($true) { Write-Output ps_marker }"})),
+            )
+            .await
+            .unwrap();
+        assert!(resp.success, "{resp:?}");
+        assert!(
+            resp.payload["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("ps_marker")
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn shell_can_request_cmd_explicitly() {
+        let t = ShellTool;
+        let ctx = ToolContext::default();
+        // `if 1==1 echo ...` is cmd.exe syntax; PowerShell would fail to parse it.
+        let resp = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"command": "if 1==1 echo cmd_marker", "shell": "cmd"})),
+            )
+            .await
+            .unwrap();
+        assert!(resp.success, "{resp:?}");
+        assert!(
+            resp.payload["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("cmd_marker")
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn shell_rejects_unknown_shell_value_on_windows() {
+        let t = ShellTool;
+        let ctx = ToolContext::default();
+        let err = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"command": "echo hi", "shell": "bash"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn shell_rejects_unknown_shell_value_on_unix() {
+        let t = ShellTool;
+        let ctx = ToolContext::default();
+        let err = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"command": "echo hi", "shell": "cmd"})),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Validation(_)));

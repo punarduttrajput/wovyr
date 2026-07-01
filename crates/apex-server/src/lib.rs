@@ -120,7 +120,7 @@ pub struct AppState {
     gateway: Arc<Gateway>,
     registry: ToolRegistry,
     metrics: Metrics,
-    agents: AgentStore,
+    agents: Arc<AgentStore>,
     run_counter: AtomicU64,
     /// Read-only engine over the durable workflow store — drives the `GET
     /// /api/v1/workflows*` visibility endpoints (G4). Its executor is never invoked.
@@ -175,14 +175,16 @@ impl AppState {
         // Done before the registry is shared with the workflow engine below.
         plugins::register_enabled_tools(&mut registry, &secrets);
         let (memory, memory_store) = memory::default_engine();
-        // Thread gateway + registry into the workflow engine so the ServerExecutor can
-        // actually drive function/ai activities when the submit route runs a workflow.
-        let workflows = default_workflows_engine(gateway.clone(), registry.clone());
+        let agents = Arc::new(AgentStore::default());
+        // Thread gateway + registry + the agent store into the workflow engine so the
+        // ServerExecutor can actually drive function/ai/agent activities when the submit
+        // route runs a workflow (an `agent` activity looks up a stored agent by id here).
+        let workflows = default_workflows_engine(gateway.clone(), registry.clone(), agents.clone());
         Self {
             gateway,
             registry,
             metrics,
-            agents: AgentStore::default(),
+            agents,
             run_counter: AtomicU64::new(1),
             workflows,
             workflow_owners: RwLock::new(BTreeMap::new()),
@@ -347,10 +349,17 @@ fn default_webhook_store() -> Arc<dyn WebhookStore> {
 /// An [`Engine`] over the durable workflow store at `~/.apex/workflows` (the same
 /// directory the CLI writes to), falling back to an empty in-memory store if that
 /// directory is unavailable.  The executor is a [`ServerExecutor`] that handles
-/// `function`/`ai`/`human` activities so the write-path submit route can actually
-/// drive workflow runs.  The read paths (`list`/`status`/`history`) are unaffected.
-fn default_workflows_engine(gateway: Arc<Gateway>, registry: ToolRegistry) -> Engine {
-    let executor = Arc::new(workflow_runner::ServerExecutor::new(gateway, registry));
+/// `function`/`ai`/`agent`/`human` activities so the write-path submit route can
+/// actually drive workflow runs.  The read paths (`list`/`status`/`history`) are
+/// unaffected.
+fn default_workflows_engine(
+    gateway: Arc<Gateway>,
+    registry: ToolRegistry,
+    agents: Arc<AgentStore>,
+) -> Engine {
+    let executor = Arc::new(workflow_runner::ServerExecutor::new(
+        gateway, registry, agents,
+    ));
     let dir = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|home| {
@@ -502,6 +511,9 @@ struct RunRequest {
     /// Run input (e.g. `{"message": "..."}`).
     #[serde(default)]
     input: Value,
+    /// Override the model/tool iteration cap (default: [`apex_agent::RunOptions`]'s).
+    #[serde(default)]
+    max_steps: Option<usize>,
 }
 
 /// Run an agent, recording RED golden-signal metrics for the route. Instrumented so
@@ -555,7 +567,15 @@ async fn run_inner(
 ) -> Result<Json<Value>, ApiError> {
     let def = AgentDefinition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
-    run_definition(state, def, req.input, &tenant, project.as_deref()).await
+    run_definition(
+        state,
+        def,
+        req.input,
+        &tenant,
+        project.as_deref(),
+        req.max_steps,
+    )
+    .await
 }
 
 /// A [`RunEventSink`] that forwards each run event to an SSE channel as a JSON frame.
@@ -619,19 +639,17 @@ async fn run_stream_handler(
         Err(e) => return e.into_response(),
     };
 
+    let mut opts = RunOptions::new(input).with_tenant(tenant);
+    // An explicit per-run override wins; otherwise fall back to the agent's own default.
+    if let Some(n) = req.max_steps.or(def.spec.max_steps) {
+        opts = opts.with_max_steps(n);
+    }
+
     let (tx, rx) = futures::channel::mpsc::unbounded::<Event>();
     tokio::spawn(async move {
         let _permit = permit;
         let mut sink = ChannelSink { tx: tx.clone() };
-        let frame = match run_agent(
-            &def,
-            &state.gateway,
-            &state.registry,
-            RunOptions::new(input).with_tenant(tenant),
-            &mut sink,
-        )
-        .await
-        {
+        let frame = match run_agent(&def, &state.gateway, &state.registry, opts, &mut sink).await {
             Ok(out) => {
                 tenancy::record_run_cost(&state, project.as_deref(), out.usage.cost_usd);
                 Event::default().event("result").data(
@@ -657,21 +675,19 @@ async fn run_definition(
     input: Value,
     tenant: &str,
     project: Option<&str>,
+    max_steps: Option<usize>,
 ) -> Result<Json<Value>, ApiError> {
     let input = if input.is_null() { json!({}) } else { input };
 
     // Quota gate: hold a concurrency slot for the duration of the run (released on
     // drop), then record the run's cost against the project's daily budget.
     let _permit = tenancy::admit_run(state, project)?;
-    let out = match run_agent(
-        &def,
-        &state.gateway,
-        &state.registry,
-        RunOptions::new(input).with_tenant(tenant),
-        &mut NullSink,
-    )
-    .await
-    {
+    let mut opts = RunOptions::new(input).with_tenant(tenant);
+    // An explicit per-run override wins; otherwise fall back to the agent's own default.
+    if let Some(n) = max_steps.or(def.spec.max_steps) {
+        opts = opts.with_max_steps(n);
+    }
+    let out = match run_agent(&def, &state.gateway, &state.registry, opts, &mut NullSink).await {
         Ok(out) => out,
         Err(e) => {
             webhooks::emit(
@@ -717,6 +733,9 @@ struct RunStoredRequest {
     /// Run input (e.g. `{"message": "..."}`).
     #[serde(default)]
     input: Value,
+    /// Override the model/tool iteration cap (default: [`apex_agent::RunOptions`]'s).
+    #[serde(default)]
+    max_steps: Option<usize>,
 }
 
 /// `POST /api/v1/agents` — register an agent; returns its id.
@@ -796,7 +815,17 @@ async fn run_stored_handler(
     // tenant — a caller can only run its own tenant's stored agents.
     let result = match tenancy::tenant_authorize(&state, &headers, "agents:run") {
         Ok(tenant) => match state.agents.definition(&tenant, &id) {
-            Some(def) => run_definition(&state, def, req.input, &tenant, project.as_deref()).await,
+            Some(def) => {
+                run_definition(
+                    &state,
+                    def,
+                    req.input,
+                    &tenant,
+                    project.as_deref(),
+                    req.max_steps,
+                )
+                .await
+            }
             None => Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "not_found",
@@ -1206,6 +1235,98 @@ mod tests {
         assert_eq!(v["status"], "succeeded");
         assert!(v["run_id"].as_str().unwrap().starts_with("run_"));
         assert!(v["output"]["message"].as_str().unwrap().contains("ping"));
+    }
+
+    /// A caller-supplied `max_steps` reaches [`apex_agent::RunOptions`] rather than
+    /// always falling back to the crate default. `max_steps: 0` can't complete even one
+    /// model turn, so it must fail instead of silently running with the default budget.
+    #[tokio::test]
+    async fn max_steps_override_is_honored() {
+        let state = Arc::new(AppState::from_env());
+        let manifest = "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n";
+
+        let (st, body) = req(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            json!({ "manifest": manifest, "input": { "message": "ping" }, "max_steps": 0 }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("0 steps"),
+            "{body}"
+        );
+
+        // Omitting the field keeps the existing default-budget behavior.
+        let (st, body) = req(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            json!({ "manifest": manifest, "input": { "message": "ping" } }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+    }
+
+    /// An agent's own `spec.max_steps` (settable from the Agent Studio UI) is used as
+    /// the run's default budget, but a caller-supplied request-level override still
+    /// takes precedence over it — checked via the stored-agent run path too, since that
+    /// resolves the definition server-side rather than trusting a request field.
+    #[tokio::test]
+    async fn agent_level_max_steps_is_a_default_not_a_floor() {
+        let state = Arc::new(AppState::from_env());
+        let manifest =
+            "metadata:\n  name: zero-budget\nspec:\n  instructions: Be friendly.\n  max_steps: 0\n";
+
+        // No request-level override → the agent's own (unworkable) budget applies and fails.
+        let (st, body) = req(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            json!({ "manifest": manifest, "input": { "message": "ping" } }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("0 steps"),
+            "{body}"
+        );
+
+        // A request-level override wins over the agent's own default.
+        let (st, body) = req(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            json!({ "manifest": manifest, "input": { "message": "ping" }, "max_steps": 5 }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        // Same precedence via the stored-agent path (POST /api/v1/agents/{id}/run), which
+        // resolves the definition from the store rather than the inline request body.
+        let (_, created) = req(
+            &state,
+            "POST",
+            "/api/v1/agents",
+            json!({ "manifest": manifest }),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap();
+        let (st, body) = req(
+            &state,
+            "POST",
+            &format!("/api/v1/agents/{id}/run"),
+            json!({ "input": { "message": "ping" } }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     }
 
     #[tokio::test]

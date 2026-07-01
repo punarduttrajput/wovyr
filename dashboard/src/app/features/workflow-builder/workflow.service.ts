@@ -5,15 +5,15 @@ import { map } from 'rxjs/operators';
 import { Page, ToolInfo, WorkflowSummary } from '../../core/api.types';
 
 /** Activity type the visual builder supports. */
-export type WfActivityType = 'function' | 'ai' | 'human' | 'wait';
+export type WfActivityType = 'function' | 'ai' | 'agent' | 'human' | 'wait';
 
 /** One step in the visual workflow draft (a node on the canvas). */
 export interface WfActivity {
   id: string;
   type: WfActivityType;
-  /** function → tool id · ai → instructions · wait → event name · human → (unused). */
+  /** function → tool id · ai → instructions · agent → stored agent id · wait → event name · human → (unused). */
   name: string;
-  /** Inputs as a JSON object string (function/ai). */
+  /** Inputs as a JSON object string (function/ai/agent). */
   inputs: string;
   /** Canvas position (px). Cosmetic — not serialized to the manifest. */
   x: number;
@@ -118,11 +118,18 @@ export class WorkflowService {
       .pipe(map((r) => r.tools ?? []));
   }
 
+  /** The caller's stored agent ids (for `agent` activities' agent picker). */
+  agents(): Observable<string[]> {
+    return this.http.get<Page<string>>('/api/v1/agents?limit=100').pipe(map((p) => p.data ?? []));
+  }
+
   /**
    * Serialize a visual [`WorkflowDraft`] to the workflow-engine YAML DSL, so a user never
    * has to write YAML. Field mapping per activity `type`:
    * - `function` → `name` is the tool id, `inputs` its params.
    * - `ai`       → `name` is the system prompt (instructions), `inputs.message` the input.
+   * - `agent`    → `name` is a *stored* agent id (registered via `POST /api/v1/agents`),
+   *   `inputs.message` its run input — runs the full model/tool loop, not a bare chat call.
    * - `wait`     → suspends on an event named by `name` (`inputs: { event: <name> }`).
    * - `human`    → suspends for approval (no fields).
    */

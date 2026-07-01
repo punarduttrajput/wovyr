@@ -16,6 +16,7 @@
 //! `function` activities via the tool registry, `ai` activities via the gateway,
 //! and `human` activities by suspending durably (returning `Interrupted`).
 
+use apex_agent::{NullSink, RunOptions, run_agent};
 use apex_provider::Gateway;
 use apex_tools::{ToolContext, ToolRegistry, ToolRequest};
 use apex_workflow::{ActivityContext, ActivityError, ActivityExecutor, Definition};
@@ -30,7 +31,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::{ApiError, AppState};
+use crate::{AgentStore, ApiError, AppState};
 
 // ── ServerExecutor ────────────────────────────────────────────────────────────
 
@@ -40,17 +41,29 @@ use crate::{ApiError, AppState};
 /// - `ai`                — calls the gateway with the activity's `name` as the
 ///   system prompt and its `inputs.message` (or the whole inputs JSON) as the
 ///   user message.
+/// - `agent`             — runs a *stored* agent (created via `POST /api/v1/agents`)
+///   end to end through [`run_agent`] — the real model/tool loop, not a bare chat
+///   call. The activity's `name` is the agent id; `inputs` is the run input (an
+///   `inputs.message` field becomes the user turn, same convention as `ai`). The
+///   agent is looked up in the *submitting tenant's* store (via the `__tenant`
+///   marker `submit_handler` stamps into the run input), so a workflow can never
+///   reach another tenant's agent.
 /// - `human`             — returns [`ActivityError::Interrupted`] so the engine
 ///   durably suspends; the run is resumed by `POST …/{id}/approve`.
 /// - anything else       — permanent failure (activity type unknown to server).
 pub struct ServerExecutor {
     gateway: Arc<Gateway>,
     registry: ToolRegistry,
+    agents: Arc<AgentStore>,
 }
 
 impl ServerExecutor {
-    pub fn new(gateway: Arc<Gateway>, registry: ToolRegistry) -> Self {
-        Self { gateway, registry }
+    pub fn new(gateway: Arc<Gateway>, registry: ToolRegistry, agents: Arc<AgentStore>) -> Self {
+        Self {
+            gateway,
+            registry,
+            agents,
+        }
     }
 }
 
@@ -94,6 +107,39 @@ impl ActivityExecutor for ServerExecutor {
                     .map_err(|e| ActivityError::Retryable(e.to_string()))?;
                 let text = resp.message.content.unwrap_or_default();
                 Ok(json!({ "message": text }))
+            }
+            "agent" => {
+                let agent_id = ctx.name.as_deref().ok_or_else(|| {
+                    ActivityError::Permanent(format!(
+                        "activity `{}`: `name` required for agent type (the stored agent id)",
+                        ctx.id
+                    ))
+                })?;
+                let tenant = ctx
+                    .variables
+                    .get("__tenant")
+                    .and_then(Value::as_str)
+                    .unwrap_or(crate::tenancy::DEFAULT_TENANT);
+                let def = self.agents.definition(tenant, agent_id).ok_or_else(|| {
+                    ActivityError::Permanent(format!(
+                        "activity `{}`: no agent `{agent_id}` found",
+                        ctx.id
+                    ))
+                })?;
+                let input = if ctx.inputs.is_null() {
+                    json!({})
+                } else {
+                    ctx.inputs.clone()
+                };
+                let mut opts = RunOptions::new(input).with_tenant(tenant);
+                if let Some(n) = def.spec.max_steps {
+                    opts = opts.with_max_steps(n);
+                }
+                let mut sink = NullSink;
+                let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
+                    .await
+                    .map_err(|e| ActivityError::Retryable(e.to_string()))?;
+                Ok(json!({ "message": output.text, "steps": output.steps }))
             }
             "human" => {
                 // Suspend durably; the caller resumes via POST …/{id}/approve.
@@ -182,11 +228,17 @@ async fn submit_handler(
     let def = Definition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
 
-    let input = if req.input.is_null() {
+    let mut input = if req.input.is_null() {
         json!({})
     } else {
         req.input
     };
+    // Stamp the submitting tenant into the run input so an `agent` activity resolves
+    // stored agents from the *submitter's* agent store, not cross-tenant. Reserved
+    // (`__`-prefixed) key: hidden from variable listings same as other internal markers.
+    if let Value::Object(map) = &mut input {
+        map.insert("__tenant".to_string(), json!(tenant));
+    }
 
     // Derive an execution id from the workflow name + a monotonic counter.
     let execution_id = req.execution_id.unwrap_or_else(|| {
@@ -427,5 +479,107 @@ metadata:\n  name: test-wf\nspec:\n  activities:\n    - id: echo-step\n      typ
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(body["execution_id"], "test-exec-1");
         assert_eq!(body["status"], "submitted");
+    }
+
+    const AGENT_YAML: &str = "\
+metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: agent\n      name: greeter\n      inputs:\n        message: hi\n";
+
+    /// Poll `GET /api/v1/workflows/{id}` (on the shared `state`) until the execution
+    /// leaves `Running`/`Scheduled`/`Created`, or the attempt budget runs out. The
+    /// submit route drives the run on a spawned task, so completion isn't synchronous
+    /// with the submit response.
+    async fn wait_for_terminal(state: &Arc<AppState>, execution_id: &str) -> Value {
+        for _ in 0..100 {
+            let (st, body) =
+                post_json_state_get(state, &format!("/api/v1/workflows/{execution_id}")).await;
+            if st == StatusCode::OK {
+                let status = body["execution"]["status"].as_str().unwrap_or("");
+                if !matches!(status, "Created" | "Scheduled" | "Running" | "Resumed") {
+                    return body;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("execution `{execution_id}` did not reach a terminal state in time");
+    }
+
+    async fn post_json_state_get(state: &Arc<AppState>, uri: &str) -> (StatusCode, Value) {
+        let resp = crate::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, v)
+    }
+
+    /// End-to-end: a workflow `agent` activity runs a *stored* agent (registered via
+    /// `POST /api/v1/agents`) through the real model/tool loop, and its text output
+    /// lands in the activity's `ActivityCompleted` event.
+    #[tokio::test]
+    async fn agent_activity_runs_a_stored_agent() {
+        let state = Arc::new(AppState::from_env());
+
+        let (st, body) = post_json(
+            crate::router(state.clone()),
+            "/api/v1/agents",
+            json!({ "manifest": "metadata:\n  name: greeter\nspec:\n  instructions: Be friendly.\n" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["id"], "greeter");
+
+        let (st, body) = post_json(
+            crate::router(state.clone()),
+            "/api/v1/workflows",
+            json!({ "manifest": AGENT_YAML, "execution_id": "agent-wf-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        let detail = wait_for_terminal(&state, "agent-wf-test").await;
+        assert_eq!(
+            detail["execution"]["status"], "Completed",
+            "execution did not complete: {detail}"
+        );
+
+        let completed = detail["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["type"] == "ActivityCompleted" && e["id"] == "greet")
+            .unwrap_or_else(|| panic!("no ActivityCompleted event for `greet`: {detail}"));
+        let message = completed["output"]["message"].as_str().unwrap_or("");
+        assert!(
+            !message.is_empty(),
+            "expected non-empty agent output: {detail}"
+        );
+    }
+
+    /// A workflow `agent` activity referencing an id that was never registered fails
+    /// the activity (permanent — no such agent to retry into existence) instead of
+    /// panicking or hanging.
+    #[tokio::test]
+    async fn agent_activity_fails_for_unknown_agent() {
+        let state = Arc::new(AppState::from_env());
+        let (st, body) = post_json(
+            crate::router(state.clone()),
+            "/api/v1/workflows",
+            json!({ "manifest": AGENT_YAML, "execution_id": "agent-wf-missing" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        let detail = wait_for_terminal(&state, "agent-wf-missing").await;
+        assert_eq!(
+            detail["execution"]["status"], "Failed",
+            "execution should fail when the referenced agent doesn't exist: {detail}"
+        );
     }
 }

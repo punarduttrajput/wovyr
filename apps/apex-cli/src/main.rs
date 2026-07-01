@@ -263,6 +263,12 @@ enum AgentsCommand {
         /// tenant's vault namespace (local mode; requires the `plugin-wasi` build).
         #[arg(long)]
         tenant: Option<String>,
+
+        /// Override the model/tool iteration cap (default: 8). Raise this for tasks
+        /// that need many tool calls to finish; a run that hits the cap without a
+        /// final answer errors with "did not finish within N steps".
+        #[arg(long = "max-steps")]
+        max_steps: Option<usize>,
     },
 }
 
@@ -507,7 +513,8 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 server,
                 stream,
                 tenant,
-            } => run_agent_cmd(&file, &input, local, server, stream, tenant).await,
+                max_steps,
+            } => run_agent_cmd(&file, &input, local, server, stream, tenant, max_steps).await,
         },
         Command::Workflows { command } => match command {
             WorkflowsCommand::Validate { file } => workflow::validate_cmd(&file),
@@ -654,15 +661,16 @@ async fn run_agent_cmd(
     server: Option<String>,
     stream: bool,
     tenant: Option<String>,
+    max_steps: Option<usize>,
 ) -> apex_common::Result<()> {
     // Accept JSON input, or fall back to treating the argument as plain text.
     let input_value: Value =
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
 
     if local {
-        return run_local(file, input_value, stream, tenant).await;
+        return run_local(file, input_value, stream, tenant, max_steps).await;
     }
-    run_remote(file, input_value, server, stream).await
+    run_remote(file, input_value, server, stream, max_steps).await
 }
 
 /// Run the agent in-process with the embedded runtime.
@@ -671,6 +679,7 @@ async fn run_local(
     input: Value,
     stream: bool,
     tenant: Option<String>,
+    max_steps: Option<usize>,
 ) -> apex_common::Result<()> {
     let def = AgentDefinition::from_file(file)?;
     let gateway = Gateway::from_env();
@@ -680,6 +689,10 @@ async fn run_local(
     let mut opts = RunOptions::new(input);
     if let Some(t) = tenant {
         opts = opts.with_tenant(t);
+    }
+    // An explicit --max-steps wins; otherwise fall back to the agent's own default.
+    if let Some(n) = max_steps.or(def.spec.max_steps) {
+        opts = opts.with_max_steps(n);
     }
 
     // Open a memory retriever only when the agent enables it (RAG agents).
@@ -716,6 +729,7 @@ async fn run_remote(
     input: Value,
     server: Option<String>,
     stream: bool,
+    max_steps: Option<usize>,
 ) -> apex_common::Result<()> {
     if stream {
         eprintln!("note: --stream is local-only in v0.1; performing a non-streaming remote run");
@@ -737,7 +751,10 @@ async fn run_remote(
         apex_common::Error::config(format!("could not read agent file {file}: {e}"))
     })?;
 
-    let body = serde_json::json!({ "manifest": manifest, "input": input });
+    let mut body = serde_json::json!({ "manifest": manifest, "input": input });
+    if let Some(n) = max_steps {
+        body["max_steps"] = serde_json::json!(n);
+    }
     let url = format!("{base}/api/v1/agents:run");
 
     let mut request = reqwest::Client::new().post(&url).json(&body);

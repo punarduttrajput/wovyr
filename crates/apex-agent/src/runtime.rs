@@ -45,6 +45,12 @@ impl RunOptions {
         self.tenant = tenant.into();
         self
     }
+
+    /// Override the model/tool iteration cap (default [`DEFAULT_MAX_STEPS`]).
+    pub fn with_max_steps(mut self, max_steps: usize) -> Self {
+        self.max_steps = max_steps;
+        self
+    }
 }
 
 /// The result of an agent run.
@@ -347,6 +353,20 @@ mod tests {
         assert_eq!(out.steps, 1);
         assert!(out.text.contains("hi there"));
         assert!(out.usage.total_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn with_max_steps_overrides_the_default_budget() {
+        let def = hello_def();
+        let gw = Gateway::new(Box::new(MockProvider::new()));
+        let reg = ToolRegistry::with_builtins();
+        // 0 steps can't complete even the mock's single-turn reply.
+        let opts = RunOptions::new(json!({"message": "hi"})).with_max_steps(0);
+        assert_eq!(opts.max_steps, 0);
+        let err = run_agent(&def, &gw, &reg, opts, &mut NullSink)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("0 steps"), "{err}");
     }
 
     #[tokio::test]

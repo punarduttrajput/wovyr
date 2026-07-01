@@ -1,0 +1,24 @@
+apiVersion: workflow.apex.io/v1
+kind: Workflow
+metadata:
+  name: agent-review
+  version: 1.0.0
+spec:
+  # `agent` activities run a *stored* agent (register one first, e.g.:
+  #   apex agents run --local -f examples/agents/hello.yaml  (to try it standalone), or
+  #   POST /api/v1/agents { "manifest": "<the hello.yaml contents>" }  (to store it as `hello`)
+  # This activity type is handled by the apex-server ServerExecutor only — it is not yet
+  # supported by the CLI's local `workflows run --local` executor.
+  activities:
+    - id: draft
+      type: agent
+      name: hello
+      inputs: { message: "${input.ticketText}" }
+
+    - id: postReply
+      type: tool
+      name: echo
+      inputs: { action: send_reply, body: "${draft.message}" }
+
+  transitions:
+    - { from: draft, to: postReply }

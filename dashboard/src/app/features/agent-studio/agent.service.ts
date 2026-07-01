@@ -54,14 +54,15 @@ export class AgentService {
       tools: [],
       memoryEnabled: false,
       namespace: 'product-kb',
+      maxSteps: null,
     };
   }
 
   /**
    * Parse a manifest back into an [`AgentDraft`] — the inverse of [`toManifest`]. It reads
    * the fixed shape this studio emits (and the same shape the example agents use): name,
-   * `model` or `model_selector`, the `instructions: |` block, `tools: [...]`, and a
-   * `memory` block. Unknown/extra fields are ignored.
+   * `model` or `model_selector`, the `instructions: |` block, `tools: [...]`, `max_steps`,
+   * and a `memory` block. Unknown/extra fields are ignored.
    */
   fromManifest(yaml: string): AgentDraft {
     const d = this.blankDraft();
@@ -91,6 +92,9 @@ export class AgentService {
       d.memoryEnabled = true;
       d.namespace = firstMatch(/^\s{4}namespace:\s*(.+)$/) ?? d.namespace;
     }
+
+    const maxSteps = firstMatch(/^\s{2}max_steps:\s*(\d+)$/);
+    d.maxSteps = maxSteps ? Number(maxSteps) : null;
 
     // The `instructions: |` block scalar — collect the 4-space-indented body lines.
     const instrIdx = lines.findIndex((l) => /^\s{2}instructions:\s*\|/.test(l));
@@ -133,6 +137,7 @@ export class AgentService {
     ];
     const tools = d.tools.filter((t) => t.trim());
     if (tools.length) lines.push(`  tools: [${tools.join(', ')}]`);
+    if (d.maxSteps != null && d.maxSteps > 0) lines.push(`  max_steps: ${Math.floor(d.maxSteps)}`);
     if (d.memoryEnabled) {
       lines.push(
         '  memory:',

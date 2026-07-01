@@ -166,6 +166,7 @@ Supported activity types:
 | http       | REST request             |
 | grpc       | gRPC call                |
 | ai         | LLM inference            |
+| agent      | Run a stored agent       |
 | tool       | Registered platform tool |
 | script     | Sandboxed script         |
 | human      | Human approval           |
@@ -280,6 +281,28 @@ Optional fields:
 * costLimit
 * fallbackModel
 * timeout
+
+---
+
+# 14a. Agent Activity
+
+Runs a *stored* agent (registered via `POST /api/v1/agents`) through its full
+model/tool loop — unlike `ai` (a single bare chat call), an `agent` activity can call
+tools, loop, and return a multi-step result.
+
+```yaml
+type: agent
+
+name: greeter        # the stored agent's id
+
+inputs:
+  message: "${input.text}"
+```
+
+The activity's output is `{ message: <agent's final text>, steps: <model call count> }`.
+The agent is resolved from the *submitting tenant's* store — a workflow can never reach
+another tenant's agent. If no agent with that id exists in the tenant, the activity fails
+permanently (no retry).
 
 ---
 

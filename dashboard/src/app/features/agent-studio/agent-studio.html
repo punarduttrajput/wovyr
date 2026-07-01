@@ -83,6 +83,11 @@
           </div>
         </div>
 
+        <div class="field">
+          <label>Max steps <span class="muted">— model/tool iteration cap per run</span></label>
+          <input type="number" min="1" step="1" [(ngModel)]="draft.maxSteps" placeholder="8 (default)" />
+        </div>
+
         <div class="field memrow">
           <label class="check">
             <input type="checkbox" [(ngModel)]="draft.memoryEnabled" />

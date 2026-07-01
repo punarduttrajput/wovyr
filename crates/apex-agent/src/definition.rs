@@ -50,6 +50,11 @@ pub struct Spec {
     /// Max output tokens.
     #[serde(default, alias = "maxTokens")]
     pub max_tokens: Option<u32>,
+    /// Default cap on model/tool iterations for a run of this agent (overrides the
+    /// runtime's built-in default; a caller-supplied [`crate::RunOptions::max_steps`]
+    /// still takes precedence over this).
+    #[serde(default, alias = "maxSteps")]
+    pub max_steps: Option<usize>,
     /// Tool ids this agent is allowed to call (must exist in the registry).
     #[serde(default)]
     pub tools: Vec<String>,
@@ -165,5 +170,26 @@ spec:
     fn rejects_empty_instructions() {
         let yaml = "metadata:\n  name: x\nspec:\n  instructions: \"  \"\n";
         assert!(AgentDefinition::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn parses_max_steps_and_its_camel_case_alias() {
+        let def = AgentDefinition::from_yaml(
+            "metadata:\n  name: x\nspec:\n  instructions: hi\n  max_steps: 20\n",
+        )
+        .unwrap();
+        assert_eq!(def.spec.max_steps, Some(20));
+
+        let def = AgentDefinition::from_yaml(
+            "metadata:\n  name: x\nspec:\n  instructions: hi\n  maxSteps: 12\n",
+        )
+        .unwrap();
+        assert_eq!(def.spec.max_steps, Some(12));
+
+        // Absent → no agent-level override.
+        assert_eq!(
+            AgentDefinition::from_yaml(HELLO).unwrap().spec.max_steps,
+            None
+        );
     }
 }

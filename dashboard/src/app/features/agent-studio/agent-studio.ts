@@ -25,6 +25,7 @@ export class AgentStudio implements OnInit, OnDestroy {
     tools: ['fs_read', 'http_get'],
     memoryEnabled: false,
     namespace: 'product-kb',
+    maxSteps: null,
   };
   pickTool = '';
   message = 'How do durable timers work?';

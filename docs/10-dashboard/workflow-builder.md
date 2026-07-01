@@ -20,6 +20,42 @@ This document specifies the **Workflow Builder** — the visual studio for autho
 
 ---
 
+# 1a. Implementation Status (v0.3)
+
+The Angular dashboard (`dashboard/`) implements a working subset of this spec; the rest
+of the vision (§6, §8–§10, and the deeper §4/§5 items) is deferred.
+
+**Implemented:**
+- **Visual node canvas** (`features/workflow-builder/`): a pan/zoom SVG canvas of
+  draggable step **nodes** wired by **bezier edges** (transitions). Wiring is drag from a
+  node's **output port** onto another node's **input port**; edges are click-to-remove.
+- **Node palette + config**: add steps of type *Run a tool* (`function`), *Ask the model*
+  (`ai`), *Run an agent* (`agent`), *Wait for approval* (`human`), *Wait for an event*
+  (`wait`). A per-node panel edits its id, type, tool/instructions/agent id/event, and
+  inputs. `function` nodes pick their tool from a live catalog (`GET /api/v1/tools` —
+  built-ins + enabled plugin tools); `agent` nodes pick a stored agent id from
+  `GET /api/v1/agents` (agents created in Agent Studio), and run it end to end through the
+  real model/tool loop rather than a bare chat call (see
+  [workflow-dsl.md §14a](../03-workflow-engine/workflow-dsl.md#14a-agent-activity)).
+- **Canvas → DSL (one-way)** generation to the [DSL YAML](../03-workflow-engine/workflow-dsl.md),
+  with a **Generated YAML** preview and an advanced raw-**YAML** mode toggle. (Full
+  two-way canvas⇄DSL round-trip from arbitrary YAML — §2 — is not yet built; editing raw
+  YAML doesn't re-lay-out the canvas.)
+- **Validate / Run / Observe**: `:validate` shows the DAG; `:run` submits with an input
+  form; an executions panel polls status, shows per-activity state, and offers
+  **signal**/**approve** for waiting/human steps (§7, minus canvas animation).
+- **Save / load**: workflows (steps, wiring, **and canvas layout**) persist **browser-local**
+  (localStorage) and reload onto the canvas. Durable, team-shared, RBAC-scoped, versioned
+  persistence (§6, §9) is a later server-backed slice — workflow *definitions* aren't yet
+  stored server-side (only executions are).
+
+**Not yet implemented:** HTTP/gRPC/script/timer/subprocess node types (§3, beyond
+function/ai/agent/human/wait), schema-driven input forms, expression autocomplete,
+versioning & diff (§6), templates/sub-workflow extraction (§8), collaboration/comments
+(§9), and accessibility affordances (§10).
+
+---
+
 # 2. Core Idea: Canvas ⇄ DSL
 
 The builder maintains a **two-way mapping** between a visual graph and the DSL:
