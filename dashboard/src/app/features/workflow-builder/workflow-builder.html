@@ -3,10 +3,11 @@
     <div>
       <div class="eyebrow">Build / Workflow Builder</div>
       <h1>Workflow Builder</h1>
-      <p>Author YAML workflow definitions, validate the DAG, submit runs, and
-        monitor live execution status. Signal waiting activities or approve human tasks.</p>
+      <p>Drag steps onto the canvas and wire them together — no YAML required. Validate the
+        DAG, submit runs, and monitor live execution.</p>
     </div>
     <div class="head-actions">
+      <button class="btn" (click)="saveWorkflow()">Save</button>
       <button class="btn" (click)="validate()">Validate</button>
       <button class="btn pri" (click)="submit()" [disabled]="busy()">
         {{ busy() ? 'Submitting…' : 'Run ▸' }}
@@ -19,19 +20,126 @@
   }
 
   <div class="wb">
-    <!-- ── LEFT: editor + DAG preview ───────────────────────────────────────── -->
+    <!-- ── LEFT: canvas + options ───────────────────────────────────────────── -->
     <div class="left-col">
-
-      <!-- Editor -->
       <div class="card">
         <div class="card-h">
           <h3>Definition</h3>
-          <span class="sub mono">YAML</span>
+          <div class="right seg">
+            <button class="seg-btn" [class.on]="mode() === 'design'" (click)="mode.set('design')">Canvas</button>
+            <button class="seg-btn" [class.on]="mode() === 'yaml'" (click)="editYaml()">YAML</button>
+          </div>
         </div>
-        <div class="editor-wrap">
-          <textarea class="editor mono" [(ngModel)]="manifest" spellcheck="false"
-            placeholder="Paste or type your workflow YAML…"></textarea>
-        </div>
+
+        @if (mode() === 'design') {
+          <!-- palette -->
+          <div class="palette">
+            <span class="eyebrow">Add step:</span>
+            @for (t of activityTypes; track t.value) {
+              <button class="chip-btn" (click)="addNode(t.value)">+ {{ t.label }}</button>
+            }
+          </div>
+
+          @if (savedNames().length) {
+            <div class="palette">
+              <span class="eyebrow">Saved:</span>
+              @for (n of savedNames(); track n) {
+                <span class="saved-wf">
+                  <button class="chip-btn" (click)="loadWorkflow(n)" title="Load into canvas">{{ n }}</button>
+                  <button class="x" (click)="deleteWorkflow(n)" title="Delete saved workflow">×</button>
+                </span>
+              }
+            </div>
+          }
+
+          <!-- canvas -->
+          <div class="canvas-wrap" #viewport (wheel)="onWheel($event)" (pointerdown)="startPan($event)">
+            <div class="zoom-ctl" (pointerdown)="$event.stopPropagation()">
+              <button (click)="zoomBy(1.1)" title="Zoom in">+</button>
+              <button (click)="zoomBy(0.9)" title="Zoom out">−</button>
+              <button (click)="resetView()" title="Reset view">⟲</button>
+            </div>
+            <div class="canvas" [style.transform]="transformStyle()">
+              <svg class="edges">
+                @for (e of draft.transitions; track $index) {
+                  <path class="edge" [attr.d]="edgePath(e.from, e.to)" (click)="removeEdge($index)">
+                    <title>{{ e.from }} → {{ e.to }} — click to remove</title>
+                  </path>
+                }
+                @if (connectFrom) { <path class="edge temp" [attr.d]="tempPath()"></path> }
+              </svg>
+
+              @for (a of draft.activities; track $index) {
+                <div class="node" [class.sel]="selected() === $index"
+                  [style.left.px]="a.x" [style.top.px]="a.y"
+                  (pointerdown)="startNodeDrag($index, $event); $event.stopPropagation()">
+                  <div class="node-h">
+                    <span class="node-id mono">{{ a.id }}</span>
+                    <button class="x" (pointerdown)="$event.stopPropagation()"
+                      (click)="removeNode($index)" title="Delete step">×</button>
+                  </div>
+                  <div class="node-type">{{ typeLabel(a.type) }}</div>
+                  @if (a.name) { <div class="node-sub mono">{{ a.name }}</div> }
+                  <span class="port in" title="input" (pointerup)="endConnect(a.id, $event)"></span>
+                  <span class="port out" title="drag to connect"
+                    (pointerdown)="startConnect(a.id, $event)"></span>
+                </div>
+              }
+            </div>
+          </div>
+
+          <!-- node config / hint -->
+          @if (selectedNode(); as sn) {
+            <div class="cfg">
+              <div class="eyebrow">Editing step <span class="mono">{{ sn.id }}</span></div>
+              <div class="two">
+                <label class="fld">Step id <input [(ngModel)]="sn.id" /></label>
+                <label class="fld">Type
+                  <select [(ngModel)]="sn.type">
+                    @for (t of activityTypes; track t.value) { <option [value]="t.value">{{ t.label }}</option> }
+                  </select>
+                </label>
+              </div>
+              @switch (sn.type) {
+                @case ('function') {
+                  <label class="fld">Tool
+                    <select [(ngModel)]="sn.name">
+                      @for (t of toolCatalog(); track t.id) {
+                        <option [value]="t.id" [title]="t.description">{{ t.id }} — {{ t.description }}</option>
+                      }
+                    </select>
+                  </label>
+                }
+                @case ('ai') {
+                  <label class="fld">Instructions
+                    <input [(ngModel)]="sn.name" placeholder="You are a helpful assistant…" /></label>
+                }
+                @case ('wait') {
+                  <label class="fld">Event name <input [(ngModel)]="sn.name" placeholder="user-input" /></label>
+                }
+                @default { <p class="mut mini">Suspends until approved from the execution panel on the right.</p> }
+              }
+              @if (hasInputs(sn)) {
+                <label class="fld">Inputs <span class="muted">(JSON)</span>
+                  <input class="mono" [(ngModel)]="sn.inputs" placeholder='{ "message": "hi" }' /></label>
+              }
+            </div>
+          } @else {
+            <p class="cfg-hint mut mini">
+              Click a step to edit it · drag a step's right dot onto another step's left dot to connect · click an edge to remove it.
+            </p>
+          }
+
+          <details class="yaml-preview">
+            <summary>Generated YAML</summary>
+            <pre class="mono">{{ currentManifest() }}</pre>
+          </details>
+        } @else {
+          <div class="editor-wrap">
+            <textarea class="editor mono" [(ngModel)]="manifest" spellcheck="false"
+              placeholder="Paste or type your workflow YAML…"></textarea>
+          </div>
+        }
       </div>
 
       <!-- Validation result -->
@@ -73,13 +181,11 @@
         <div class="opts-b">
           <label class="opt-label">
             Input JSON
-            <textarea class="mono" rows="3" [(ngModel)]="execInput"
-              placeholder='{ "key": "value" }'></textarea>
+            <textarea class="mono" rows="3" [(ngModel)]="execInput" placeholder='{ "key": "value" }'></textarea>
           </label>
           <label class="opt-label">
             Execution ID <span class="muted">(optional)</span>
-            <input type="text" class="mono" [(ngModel)]="customExecId"
-              placeholder="auto-generated if blank" />
+            <input type="text" class="mono" [(ngModel)]="customExecId" placeholder="auto-generated if blank" />
           </label>
         </div>
       </div>
@@ -87,8 +193,6 @@
 
     <!-- ── RIGHT: execution list + detail ────────────────────────────────────── -->
     <div class="right-col">
-
-      <!-- Execution list -->
       <div class="card">
         <div class="card-h">
           <h3>Executions</h3>
@@ -96,7 +200,7 @@
           <div class="right"><button class="icon-btn" (click)="refresh()" title="Refresh">↺</button></div>
         </div>
         @for (ex of executions(); track ex.execution_id) {
-          <div class="exec-row" [class.sel]="selected()?.execution_id === ex.execution_id"
+          <div class="exec-row" [class.sel]="selectedExec()?.execution_id === ex.execution_id"
             (click)="select(ex)">
             <div class="exec-id mono">{{ ex.execution_id }}</div>
             <div class="exec-meta">
@@ -109,18 +213,16 @@
         }
       </div>
 
-      <!-- Execution detail -->
-      @if (selected()) {
+      @if (selectedExec()) {
         <div class="card detail-card">
           <div class="card-h">
-            <h3 class="mono">{{ selected()!.execution_id }}</h3>
-            <span class="pill {{ statusClass(selected()!.status) }}">{{ selected()!.status }}</span>
+            <h3 class="mono">{{ selectedExec()!.execution_id }}</h3>
+            <span class="pill {{ statusClass(selectedExec()!.status) }}">{{ selectedExec()!.status }}</span>
             <div class="right">
-              <a class="btn" [routerLink]="['/executions', selected()!.execution_id]">Full detail →</a>
+              <a class="btn" [routerLink]="['/executions', selectedExec()!.execution_id]">Full detail →</a>
             </div>
           </div>
 
-          <!-- Activity states -->
           <div class="acts">
             @for (a of activities(); track a.id) {
               <div class="act-row">
@@ -130,8 +232,7 @@
             }
           </div>
 
-          <!-- Signal / Approve panel -->
-          @if (isWaiting(selected()!)) {
+          @if (isWaiting(selectedExec()!)) {
             <div class="sig-toggle-row">
               <button class="btn" (click)="showSignal.set(!showSignal())">
                 {{ showSignal() ? 'Hide' : 'Signal / Approve' }}
@@ -143,28 +244,19 @@
             <div class="sig-panel">
               <div class="eyebrow pad-sm">Signal event</div>
               <div class="sig-row">
-                <input type="text" [(ngModel)]="signalEvent" class="mono"
-                  placeholder="event name (e.g. user-input)" />
-                <textarea class="mono" rows="2" [(ngModel)]="signalPayload"
-                  placeholder='{ "key": "value" }'></textarea>
-                <button class="btn pri" (click)="sendSignal()" [disabled]="!signalEvent.trim() || busy()">
-                  Send
-                </button>
+                <input type="text" [(ngModel)]="signalEvent" class="mono" placeholder="event name (e.g. user-input)" />
+                <textarea class="mono" rows="2" [(ngModel)]="signalPayload" placeholder='{ "key": "value" }'></textarea>
+                <button class="btn pri" (click)="sendSignal()" [disabled]="!signalEvent.trim() || busy()">Send</button>
               </div>
               <div class="eyebrow pad-sm">Approve human activity</div>
               <div class="sig-row">
-                <input type="text" [(ngModel)]="approveActivity" class="mono"
-                  placeholder="activity id (e.g. review)" />
-                <textarea class="mono" rows="2" [(ngModel)]="approveDecision"
-                  placeholder='{"approved": true}'></textarea>
-                <button class="btn pri" (click)="approve()" [disabled]="!approveActivity.trim() || busy()">
-                  Approve
-                </button>
+                <input type="text" [(ngModel)]="approveActivity" class="mono" placeholder="activity id (e.g. review)" />
+                <textarea class="mono" rows="2" [(ngModel)]="approveDecision" placeholder='{"approved": true}'></textarea>
+                <button class="btn pri" (click)="approve()" [disabled]="!approveActivity.trim() || busy()">Approve</button>
               </div>
             </div>
           }
 
-          <!-- Event timeline (last 8) -->
           @if (events().length) {
             <div class="timeline">
               <div class="eyebrow pad-sm">Timeline</div>

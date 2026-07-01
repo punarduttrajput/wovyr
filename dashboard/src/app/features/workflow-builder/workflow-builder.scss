@@ -126,3 +126,52 @@
   font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
   text-transform: uppercase; color: var(--ink-3);
 }
+
+/* ── Visual node canvas ──────────────────────────────────────── */
+.seg { display:flex; gap:2px; background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-sm); padding:2px; }
+.seg-btn { border:0; background:transparent; color:var(--ink-2); font:inherit; font-size:12px; padding:3px 12px; border-radius:6px; cursor:pointer; }
+.seg-btn.on { background:var(--surface); color:var(--ink); }
+
+.palette { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:10px 14px 0; }
+.chip-btn { border:1px dashed var(--line); background:transparent; border-radius:20px; padding:4px 11px; font-size:12px; color:var(--ink); cursor:pointer; }
+.chip-btn:hover { border-color:var(--accent); color:var(--accent-ink); }
+.saved-wf { display:inline-flex; align-items:center; gap:2px; }
+.saved-wf .x { border:0; background:transparent; color:var(--ink-3); font-size:14px; line-height:1; cursor:pointer; }
+.saved-wf .x:hover { color:var(--crit); }
+
+.canvas-wrap { position:relative; margin:10px 14px; border:1px solid var(--line); border-radius:var(--r-sm); background:var(--surface-2); overflow:hidden; height:460px; touch-action:none; cursor:grab; }
+.canvas-wrap:active { cursor:grabbing; }
+.canvas { position:absolute; top:0; left:0; width:2000px; height:1400px; transform-origin:0 0;
+  background-image:radial-gradient(var(--line) 1px, transparent 1px); background-size:18px 18px; }
+.zoom-ctl { position:absolute; top:8px; right:8px; z-index:5; display:flex; flex-direction:column; gap:4px; }
+.zoom-ctl button { width:26px; height:26px; border:1px solid var(--line); background:var(--surface); color:var(--ink); border-radius:6px; cursor:pointer; font-size:15px; line-height:1; }
+.zoom-ctl button:hover { border-color:var(--accent); color:var(--accent-ink); }
+.edges { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
+.edge { fill:none; stroke:var(--ink-3); stroke-width:2; pointer-events:stroke; cursor:pointer; }
+.edge:hover { stroke:var(--crit); }
+.edge.temp { stroke:var(--accent); stroke-dasharray:5 4; }
+
+.node { position:absolute; width:190px; background:var(--surface); border:1px solid var(--line);
+  border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,.08); cursor:grab; user-select:none; }
+.node.sel { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-weak); }
+.node-h { display:flex; align-items:center; justify-content:space-between; padding:6px 8px 4px; }
+.node-id { font-size:12px; font-weight:600; color:var(--ink); }
+.node-h .x { border:0; background:transparent; color:var(--ink-3); font-size:15px; line-height:1; cursor:pointer; }
+.node-h .x:hover { color:var(--crit); }
+.node-type { font-size:11px; color:var(--accent-ink); background:var(--accent-weak); display:inline-block; margin:0 8px; padding:1px 7px; border-radius:10px; }
+.node-sub { font-size:11px; color:var(--ink-2); padding:4px 8px 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.port { position:absolute; top:24px; width:12px; height:12px; border-radius:50%; background:var(--surface); border:2px solid var(--ink-3); }
+.port.in { left:-7px; }
+.port.out { right:-7px; cursor:crosshair; }
+.port.out:hover, .port.in:hover { border-color:var(--accent); background:var(--accent-weak); }
+
+.two { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.fld { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--ink-2); }
+.fld input, .fld select { border:1px solid var(--line); background:var(--surface-2); border-radius:var(--r-sm); padding:6px 10px; font-size:13px; color:var(--ink); outline:none; }
+.fld input:focus, .fld select:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-weak); }
+.cfg { margin:0 14px; padding:12px; border:1px solid var(--line); border-radius:var(--r-sm); display:flex; flex-direction:column; gap:8px; }
+.cfg-hint { margin:2px 14px 10px; }
+.mut { color:var(--ink-3); } .mini { font-size:12px; }
+.yaml-preview { margin:0 14px 12px; }
+.yaml-preview summary { cursor:pointer; font-size:12px; color:var(--ink-2); }
+.yaml-preview pre { margin-top:8px; background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-sm); padding:10px; font-size:12px; overflow-x:auto; color:var(--ink); }
