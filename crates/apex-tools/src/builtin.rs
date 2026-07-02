@@ -222,22 +222,23 @@ fn wrap_with_cwd_marker(command: &str, shell: &str) -> String {
 }
 
 /// Pull the trailing `CWD_MARKER<dir>` line out of `stdout`, returning the cleaned
-/// output (marker line removed) and the reported directory, if the marker is present.
+/// output (marker removed) and the reported directory, if the marker is present.
 /// Absent when the process was killed (e.g. timeout) before reaching it — callers
-/// should then leave the working directory unchanged.
+/// should then leave the working directory unchanged. Only the marker itself through
+/// its line end is stripped, so a command whose output has no trailing newline (the
+/// marker then shares its line) keeps that output intact.
 fn extract_cwd_marker(stdout: &str) -> (String, Option<String>) {
     let Some(marker_at) = stdout.rfind(CWD_MARKER) else {
         return (stdout.to_string(), None);
     };
-    let line_start = stdout[..marker_at].rfind('\n').map_or(0, |p| p + 1);
     let line_end = stdout[marker_at..]
         .find('\n')
         .map_or(stdout.len(), |p| marker_at + p + 1);
     let cwd = stdout[marker_at + CWD_MARKER.len()..line_end]
         .trim_end_matches(['\r', '\n'])
         .to_string();
-    let mut cleaned = String::with_capacity(stdout.len() - (line_end - line_start));
-    cleaned.push_str(&stdout[..line_start]);
+    let mut cleaned = String::with_capacity(stdout.len() - (line_end - marker_at));
+    cleaned.push_str(&stdout[..marker_at]);
     cleaned.push_str(&stdout[line_end..]);
     (cleaned, Some(cwd).filter(|c| !c.is_empty()))
 }
@@ -257,7 +258,8 @@ impl Tool for ShellTool {
             "shell",
             "1.0.0",
             "system",
-            "Run a shell command and return its stdout, stderr, and exit code.",
+            "Run a shell command and return its stdout, stderr, exit code, and ending \
+             working directory (`cwd`, reflecting any `cd` the command performed).",
         )
         .with_permissions(["shell.execute"])
     }
@@ -323,19 +325,29 @@ impl Tool for ShellTool {
 
         // Run via the requested (or platform-default) shell so users can write normal
         // command lines. PowerShell is the Windows default — it's what an interactive
-        // session actually uses, unlike bare `cmd.exe`.
+        // session actually uses, unlike bare `cmd.exe`. Each command is wrapped so it
+        // reports its ending working directory (see `CWD_MARKER`), letting the caller
+        // observe a `cd` without a persistent shell session.
         let run = if cfg!(windows) {
             match shell.unwrap_or("powershell") {
                 "powershell" => {
+                    let wrapped = wrap_with_cwd_marker(command, "powershell");
                     sandbox
                         .run(
                             "powershell",
-                            &["-NoProfile", "-NonInteractive", "-Command", command],
+                            &["-NoProfile", "-NonInteractive", "-Command", &wrapped],
                             workdir,
                         )
                         .await
                 }
-                "cmd" => sandbox.run("cmd", &["/C", command], workdir).await,
+                "cmd" => {
+                    let wrapped = wrap_with_cwd_marker(command, "cmd");
+                    // `/V:ON` enables the delayed `!ERRORLEVEL!`/`!CD!` expansion the
+                    // wrapper relies on.
+                    sandbox
+                        .run("cmd", &["/V:ON", "/C", &wrapped], workdir)
+                        .await
+                }
                 other => {
                     return Err(ToolError::Validation(format!(
                         "unsupported `shell` value `{other}` on Windows; expected \
@@ -345,7 +357,10 @@ impl Tool for ShellTool {
             }
         } else {
             match shell {
-                None | Some("sh") => sandbox.run("sh", &["-c", command], workdir).await,
+                None | Some("sh") => {
+                    let wrapped = wrap_with_cwd_marker(command, "sh");
+                    sandbox.run("sh", &["-c", &wrapped], workdir).await
+                }
                 Some(other) => {
                     return Err(ToolError::Validation(format!(
                         "unsupported `shell` value `{other}` on this platform; expected `sh`"
@@ -355,15 +370,20 @@ impl Tool for ShellTool {
         };
         let outcome = run.map_err(|e| ToolError::Internal(e.to_string()))?;
 
+        // Strip the marker from the visible output; `cwd` is null when the process
+        // died before printing it (e.g. timeout) — the directory is then unknown.
+        let (stdout, cwd) = extract_cwd_marker(&outcome.stdout);
+
         Ok(ToolResponse {
             // A non-zero exit or timeout is reported as success=false so the model
             // can react, while still receiving the captured output.
             success: outcome.exit_code == Some(0) && !outcome.timed_out,
             payload: json!({
                 "exit_code": outcome.exit_code,
-                "stdout": outcome.stdout,
+                "stdout": stdout,
                 "stderr": outcome.stderr,
                 "timed_out": outcome.timed_out,
+                "cwd": cwd,
             }),
         })
     }
@@ -426,6 +446,74 @@ mod tests {
                 .unwrap()
                 .contains("apex_shell_ok")
         );
+    }
+
+    #[test]
+    fn extract_cwd_marker_strips_marker_line() {
+        let (out, cwd) = extract_cwd_marker(&format!("hi\n{CWD_MARKER}/tmp\n"));
+        assert_eq!(out, "hi\n");
+        assert_eq!(cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn extract_cwd_marker_absent_leaves_output_unchanged() {
+        let (out, cwd) = extract_cwd_marker("plain output\n");
+        assert_eq!(out, "plain output\n");
+        assert!(cwd.is_none());
+    }
+
+    #[test]
+    fn extract_cwd_marker_preserves_unterminated_last_line() {
+        // A command whose output has no trailing newline shares the marker's line;
+        // only the marker is removed, never the command's own text.
+        let (out, cwd) = extract_cwd_marker(&format!("partial{CWD_MARKER}/home/x\n"));
+        assert_eq!(out, "partial");
+        assert_eq!(cwd.as_deref(), Some("/home/x"));
+    }
+
+    #[test]
+    fn extract_cwd_marker_empty_dir_is_none() {
+        let (out, cwd) = extract_cwd_marker(&format!("{CWD_MARKER}\n"));
+        assert_eq!(out, "");
+        assert!(cwd.is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn shell_reports_ending_working_directory_after_cd() {
+        let t = ShellTool;
+        let ctx = ToolContext::default();
+        let resp = t
+            .execute(&ctx, ToolRequest::new(json!({"command": "cd /tmp"})))
+            .await
+            .unwrap();
+        assert!(resp.success, "{resp:?}");
+        assert_eq!(resp.payload["cwd"], "/tmp");
+        // The marker never leaks into the model-visible output.
+        assert!(
+            !resp.payload["stdout"]
+                .as_str()
+                .unwrap()
+                .contains(CWD_MARKER)
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn shell_preserves_command_exit_code_despite_cwd_marker() {
+        // The wrapper's marker print must not mask the command's own failure code.
+        // (`false` fails without exiting the shell, so the wrapper's follow-up lines
+        // still run — unlike an explicit `exit`, which skips the marker entirely.)
+        let t = ShellTool;
+        let ctx = ToolContext::default();
+        let resp = t
+            .execute(&ctx, ToolRequest::new(json!({"command": "false"})))
+            .await
+            .unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.payload["exit_code"], 1);
+        // The marker still ran, so the ending directory is known even on failure.
+        assert!(resp.payload["cwd"].is_string());
     }
 
     #[tokio::test]

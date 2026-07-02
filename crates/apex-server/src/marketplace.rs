@@ -1,5 +1,8 @@
-//! Marketplace routes: the hosted plugin registry — publish, discover, download, rate,
-//! verify, and a publish→install bridge ([Marketplace](../../docs/08-plugin-sdk/marketplace.md)).
+//! Marketplace routes: the hosted plugin registry — publish, discover, download,
+//! attest, rate, verify, and a publish→install bridge
+//! ([Marketplace](../../docs/08-plugin-sdk/marketplace.md)). The **attestation** route
+//! surfaces a version's supply-chain posture (permission risk, SBOM, build provenance,
+//! content digest, signature verification) so an operator sees it before granting.
 //!
 //! Listings persist to a durable [`FileRegistryStore`] at `~/.apex/marketplace/registry.json`.
 //! Publishing re-verifies the package signature against the **same** trust store the
@@ -9,8 +12,10 @@
 //! install bridge downloads a listed package and installs it into the local plugin
 //! catalog via the shared [`plugins::install_package`](crate::plugins) helper.
 
-use apex_marketplace::{FileRegistryStore, Registry, RegistryPolicy, Review, SearchQuery};
-use apex_plugin::{CapabilityKind, Package};
+use apex_marketplace::{
+    FileRegistryStore, PermissionRisk, Registry, RegistryPolicy, Review, SearchQuery,
+};
+use apex_plugin::{CapabilityKind, Package, TrustStore};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -19,6 +24,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -73,6 +79,10 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/marketplace/listings/{id}/download",
             get(download_version),
+        )
+        .route(
+            "/api/v1/marketplace/listings/{id}/attestation",
+            get(version_attestation),
         )
         .route(
             "/api/v1/marketplace/listings/{id}/reviews",
@@ -189,6 +199,64 @@ async fn download_version(
     Ok(Json(json!({ "id": id, "apexpkg": base64_encode(&bytes) })))
 }
 
+/// `GET /api/v1/marketplace/listings/{id}/attestation?version=` — the supply-chain
+/// attestation for a version: permission risk, SBOM, build provenance, content digest,
+/// the operator verified badge, and whether the package signature verifies against the
+/// trust store. Derived on demand from the stored (signed) package, so it reflects
+/// exactly what `download` serves. Latest stable version if `version` is omitted.
+async fn version_attestation(
+    Path(id): Path<String>,
+    Query(params): Query<DownloadParams>,
+) -> Result<Json<Value>, ApiError> {
+    let reg = registry()?;
+    let listing = reg.get(&id)?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("listing `{id}` not found"),
+        )
+    })?;
+    let bytes = reg.download(&id, params.version.as_deref())?;
+    let trust = plugins::load_trust()?;
+    Ok(Json(attestation_json(
+        &id,
+        &bytes,
+        &trust,
+        listing.verified,
+    )?))
+}
+
+/// Build the supply-chain attestation JSON for a package: permission risk, SBOM, build
+/// provenance, content digest, and whether the signature verifies against `trust`. Pure
+/// over its inputs (no registry store, HTTP, or `HOME`), so it is unit-testable directly.
+fn attestation_json(
+    id: &str,
+    apexpkg: &[u8],
+    trust: &TrustStore,
+    verified: bool,
+) -> Result<Value, ApiError> {
+    let package = Package::from_apexpkg(apexpkg)?;
+    // `verify` re-checks the detached signature against the trust store; a failure here
+    // (untrusted/unknown publisher, tampered manifest) is surfaced, not fatal — the panel
+    // shows the package as unverified rather than hiding the attestation.
+    let signature_verified = package.verify(trust).is_ok();
+    let manifest = package.manifest()?;
+    let risk = PermissionRisk::classify(&manifest.permissions);
+    let package_digest = format!("sha256:{:x}", Sha256::digest(apexpkg));
+    Ok(json!({
+        "id": id,
+        "version": manifest.metadata.version,
+        "publisher": manifest.metadata.publisher,
+        "verified": verified,
+        "signature_verified": signature_verified,
+        "risk": risk,
+        "permissions": manifest.permissions,
+        "package_digest": package_digest,
+        "sbom": manifest.sbom,
+        "provenance": manifest.provenance,
+    }))
+}
+
 #[derive(Deserialize)]
 struct ReviewReq {
     author: String,
@@ -271,4 +339,64 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, ApiError> {
 fn base64_encode(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A manifest requesting a wildcard permission (⇒ High risk) and carrying both SBOM
+    /// and build provenance — the attestation surface the panel renders.
+    const ATTESTED: &str = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata: { name: hello, version: 2.1.0, publisher: acme }
+permissions:
+  - net:egress:*
+provenance:
+  builder: github-actions
+  source: github.com/acme/hello@v2.1.0
+  built_at: "2026-07-02T09:00:00Z"
+sbom:
+  components:
+    - { name: serde, version: "1.0.0", license: MIT }
+    - { name: reqwest, version: "0.12.0" }
+"#;
+
+    #[test]
+    fn attestation_extracts_risk_sbom_provenance_and_digest() {
+        // Unsigned package (empty signature) checked against an empty trust store: the
+        // attestation is still produced, just flagged unverified.
+        let apexpkg = Package::new(ATTESTED, Vec::new()).to_apexpkg().unwrap();
+        let v = attestation_json("acme/hello", &apexpkg, &TrustStore::new(), true).unwrap();
+
+        assert_eq!(v["id"], "acme/hello");
+        assert_eq!(v["version"], "2.1.0");
+        assert_eq!(v["publisher"], "acme");
+        assert_eq!(v["verified"], true); // operator badge, passed through
+        assert_eq!(v["signature_verified"], false); // untrusted signer
+        assert_eq!(v["risk"], "high"); // wildcard permission
+        assert_eq!(v["permissions"][0], "net:egress:*");
+        assert_eq!(v["provenance"]["builder"], "github-actions");
+        assert_eq!(v["sbom"]["components"].as_array().unwrap().len(), 2);
+        assert_eq!(v["sbom"]["components"][0]["name"], "serde");
+        assert!(
+            v["package_digest"].as_str().unwrap().starts_with("sha256:"),
+            "digest is content-addressed"
+        );
+    }
+
+    #[test]
+    fn attestation_without_sbom_or_provenance_is_null() {
+        const BARE: &str = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata: { name: bare, version: 1.0.0, publisher: acme }
+"#;
+        let apexpkg = Package::new(BARE, Vec::new()).to_apexpkg().unwrap();
+        let v = attestation_json("acme/bare", &apexpkg, &TrustStore::new(), false).unwrap();
+        assert_eq!(v["risk"], "low"); // no permissions
+        assert!(v["sbom"].is_null());
+        assert!(v["provenance"].is_null());
+    }
 }

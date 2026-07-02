@@ -2,7 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
-import { MarketplaceListing, PluginInfo } from '../../core/api.types';
+import { MarketplaceListing, PluginAttestation, PluginInfo } from '../../core/api.types';
 
 /**
  * Client for the plugin + marketplace routes on apex-server: the installed catalog and
@@ -64,6 +64,16 @@ export class MarketplaceService {
   getListing(id: string): Observable<MarketplaceListing> {
     return this.http.get<MarketplaceListing>(
       `/api/v1/marketplace/listings/${encodeURIComponent(id)}`,
+    );
+  }
+
+  /** A version's supply-chain attestation (risk + SBOM + provenance + signature status). */
+  attestation(id: string, version = ''): Observable<PluginAttestation> {
+    let params = new HttpParams();
+    if (version.trim()) params = params.set('version', version.trim());
+    return this.http.get<PluginAttestation>(
+      `/api/v1/marketplace/listings/${encodeURIComponent(id)}/attestation`,
+      { params },
     );
   }
 

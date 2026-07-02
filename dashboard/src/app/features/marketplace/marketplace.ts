@@ -1,7 +1,7 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MarketplaceService } from './marketplace.service';
-import { MarketplaceListing, PluginInfo } from '../../core/api.types';
+import { MarketplaceListing, PluginAttestation, PluginInfo } from '../../core/api.types';
 import { ToastService } from '../../core/toast.service';
 
 /** Capability-kind filter options for browse (mirrors `apex_plugin::CapabilityKind`). */
@@ -46,6 +46,10 @@ export class Marketplace implements OnInit {
   readonly installTarget = signal<MarketplaceListing | null>(null);
   browseGrants = '';
   browseVersion = '';
+
+  /** Supply-chain attestation for the selected install target/version. */
+  readonly attestation = signal<PluginAttestation | null>(null);
+  readonly attestationBusy = signal(false);
 
   // ── install panel ────────────────────────────────────────────────────────────
   readonly showInstall = signal(false);
@@ -100,6 +104,29 @@ export class Marketplace implements OnInit {
     this.installTarget.set(l);
     this.browseGrants = l.permissions.join(', ');
     this.browseVersion = l.versions[0] ?? '';
+    this.loadAttestation();
+  }
+
+  /** Close the install panel and clear the loaded attestation. */
+  closeInstall(): void {
+    this.installTarget.set(null);
+    this.attestation.set(null);
+  }
+
+  /** Fetch the attestation for the current install target + selected version. */
+  loadAttestation(): void {
+    const l = this.installTarget();
+    if (!l) return;
+    this.attestation.set(null);
+    this.attestationBusy.set(true);
+    this.svc.attestation(l.id, this.browseVersion).subscribe({
+      next: (a) => {
+        this.attestation.set(a);
+        this.attestationBusy.set(false);
+      },
+      // A missing/unreadable attestation is non-fatal — install stays available.
+      error: () => this.attestationBusy.set(false),
+    });
   }
 
   confirmInstall(): void {
@@ -115,6 +142,7 @@ export class Marketplace implements OnInit {
         this.toast.show(`${l.name} installed (disabled)`);
         this.busy.set(null);
         this.installTarget.set(null);
+        this.attestation.set(null);
         this.refresh(); // updated installed set → browse cards reflect it
         this.search(); // refreshed install counts
       },

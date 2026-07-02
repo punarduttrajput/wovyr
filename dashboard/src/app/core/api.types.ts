@@ -171,6 +171,38 @@ export interface MarketplaceListing {
   verified: boolean;
 }
 
+/** One SBOM component a package bundles (apex-plugin `SbomComponent`). */
+export interface SbomComponent {
+  name: string;
+  version: string;
+  license?: string;
+}
+
+/** Build provenance for a package (apex-plugin `Provenance`). */
+export interface Provenance {
+  builder: string;
+  source: string;
+  built_at: string;
+}
+
+/**
+ * A version's supply-chain attestation (`/marketplace/listings/{id}/attestation`):
+ * permission risk, SBOM, build provenance, content digest, the operator verified badge,
+ * and whether the package signature verifies against the trust store.
+ */
+export interface PluginAttestation {
+  id: string;
+  version: string;
+  publisher: string;
+  verified: boolean;
+  signature_verified: boolean;
+  risk: PermissionRisk;
+  permissions: string[];
+  package_digest: string;
+  sbom: { components: SbomComponent[] } | null;
+  provenance: Provenance | null;
+}
+
 /**
  * A normalized run-stream event. The server emits anonymous `data:` frames carrying a
  * `type` discriminator (start/memory/delta/tool_call/tool_result/done), then a terminal
