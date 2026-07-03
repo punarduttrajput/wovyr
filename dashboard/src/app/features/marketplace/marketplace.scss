@@ -118,6 +118,7 @@
 .sbom { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:3px; }
 .sbom li { display:flex; align-items:center; gap:6px; }
 .chip.mini { padding:0 5px; font-size:10px; }
+.pill.mini { padding:1px 7px; font-size:10px; }
 
 .empty { display:flex; gap:16px; padding:34px; border-style:dashed; align-items:flex-start; }
 .empty svg { width:34px; height:34px; flex:none; color:var(--ink-3); opacity:.6; }

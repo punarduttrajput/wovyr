@@ -50,6 +50,7 @@ Status is one of: `Proposed`, `Accepted`, `Superseded by ADR-XXXX`, `Deprecated`
 | [ADR-0006](ADR-0006-clean-architecture.md) | Clean Architecture + DDD | Accepted |
 | [ADR-0007](ADR-0007-plugin-system.md) | Plugin-first extensibility | Accepted |
 | [ADR-0008](ADR-0008-subworkflows.md) | Child workflows as activities (not inline expansion) | Accepted |
+| [ADR-0009](ADR-0009-keyless-signing.md) | Apex-native keyless signing (Sigstore-shaped, offline-verifiable) | Accepted |
 
 ---
 

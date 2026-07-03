@@ -46,6 +46,7 @@ pub struct Package {
     manifest_yaml: String,
     signature: Vec<u8>,
     artifacts: BTreeMap<String, Vec<u8>>,
+    keyless: Option<crate::keyless::KeylessBundle>,
 }
 
 impl Package {
@@ -55,6 +56,7 @@ impl Package {
             manifest_yaml: manifest_yaml.into(),
             signature,
             artifacts: BTreeMap::new(),
+            keyless: None,
         }
     }
 
@@ -79,6 +81,7 @@ impl Package {
                 .iter()
                 .map(|(p, b)| (p.clone(), crate::verify::hex::encode(b)))
                 .collect(),
+            keyless: self.keyless.clone(),
         };
         serde_json::to_vec_pretty(&envelope).map_err(Error::from)
     }
@@ -87,6 +90,50 @@ impl Package {
     /// install).
     pub fn manifest(&self) -> Result<PluginManifest> {
         PluginManifest::from_yaml(&self.manifest_yaml)
+    }
+
+    /// The bundled artifact blob at `path` (a manifest artifact path), if present —
+    /// e.g. for a registry to digest-check content at publish, before any install.
+    pub fn artifact_bytes(&self, path: &str) -> Option<&[u8]> {
+        self.artifacts.get(path).map(Vec::as_slice)
+    }
+
+    /// Attach a keyless signature bundle ([ADR-0009]) — the identity-based
+    /// alternative to the detached publisher-key signature.
+    pub fn with_keyless(mut self, bundle: crate::keyless::KeylessBundle) -> Self {
+        self.keyless = Some(bundle);
+        self
+    }
+
+    /// The keyless signature bundle, when the package was keyless-signed.
+    pub fn keyless_bundle(&self) -> Option<&crate::keyless::KeylessBundle> {
+        self.keyless.as_ref()
+    }
+
+    /// Verify the package's **keyless** signature ([ADR-0009]) against a pinned
+    /// [`KeylessRoot`](crate::keyless::KeylessRoot) and
+    /// [`IdentityPolicy`](crate::keyless::IdentityPolicy), and return the validated
+    /// manifest. The policy is checked against the manifest's declared publisher, so
+    /// an allowed identity cannot sign for a namespace it was not granted.
+    /// Fail-closed: a package without a keyless bundle is rejected here (use
+    /// [`verify`](Self::verify) for the publisher-key mode).
+    pub fn verify_keyless(
+        &self,
+        root: &crate::keyless::KeylessRoot,
+        policy: &crate::keyless::IdentityPolicy,
+    ) -> Result<PluginManifest> {
+        let manifest = PluginManifest::from_yaml(&self.manifest_yaml)?;
+        let bundle = self.keyless.as_ref().ok_or_else(|| {
+            Error::invalid("package carries no keyless signature bundle".to_string())
+        })?;
+        crate::keyless::verify_keyless(
+            self.manifest_yaml.as_bytes(),
+            bundle,
+            root,
+            policy,
+            &manifest.metadata.publisher,
+        )?;
+        Ok(manifest)
     }
 
     /// Verify the package's detached ed25519 signature against `trust` and return the
@@ -118,17 +165,21 @@ impl Package {
         for (path, hex) in envelope.artifacts {
             package = package.with_artifact(path, crate::verify::hex::decode(&hex)?);
         }
+        package.keyless = envelope.keyless;
         Ok(package)
     }
 }
 
-/// The on-disk `.apexpkg` envelope: manifest YAML + hex signature + hex artifact blobs.
+/// The on-disk `.apexpkg` envelope: manifest YAML + hex signature + hex artifact
+/// blobs, plus the optional keyless signature bundle ([ADR-0009]).
 #[derive(Serialize, Deserialize)]
 struct ApexPkg {
     manifest: String,
     signature: String,
     #[serde(default)]
     artifacts: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keyless: Option<crate::keyless::KeylessBundle>,
 }
 
 /// Whether an installed plugin's capabilities are live in their hosts.

@@ -268,6 +268,7 @@ mod tests {
             permissions: vec![],
             capabilities: vec![],
             risk: PermissionRisk::Low,
+            scan: Default::default(),
             package_digest: "sha256:00".into(),
             package: "{}".into(),
         }

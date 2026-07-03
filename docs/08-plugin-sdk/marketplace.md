@@ -7,15 +7,21 @@ Document ID: PLG-007
 
 **Document ID:** PLG-007  
 **File Path:** `docs/08-plugin-sdk/marketplace.md`  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Core implemented — the `apex-marketplace` registry crate provides the listing
 model, governance policy, ratings, and the publish → discover → download → install flow
 (durable `File`/`InMemory` stores), surfaced over the server's `/api/v1/marketplace*`
-routes and the `apex plugin publish|search|get` CLI. Deferred: automated security
-scanning + the full review workflow (only the operator `verify` toggle exists),
-recommendations, abuse-report workflow, and monetization (§9).  
+routes and the `apex plugin publish|search|get` CLI. **Automated security scanning (§6)
+implemented**: a deterministic static scan at publish (`scan.rs` — artifact integrity,
+permission sanity, sandbox posture, SBOM deny-list/licensing, provenance presence)
+produces a coded `ScanReport` stored with the version, summarized on the listing,
+re-run live by the attestation route, and optionally gating publish fail-closed via
+`RegistryPolicy.block_scan_severity` (+ `deny_components`). Deferred: the full
+human-review workflow (only the operator `verify` toggle exists), undeclared-usage
+detection / CVE feeds for the scanner, recommendations, abuse-report workflow, and
+monetization (§9).  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-30
+**Last Updated:** 2026-07-03
 
 ---
 

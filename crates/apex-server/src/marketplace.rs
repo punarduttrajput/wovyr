@@ -155,7 +155,9 @@ struct PublishReq {
 /// `POST /api/v1/marketplace:publish` — publish a signed package to the registry.
 ///
 /// The package must carry a valid signature from a trusted publisher and satisfy the
-/// operator policy (allow-list, permission-risk ceiling, blocklist). Emits
+/// operator policy (allow-list, permission-risk ceiling, blocklist, and — when a
+/// `block_scan_severity` ceiling is configured — the security scan). The response
+/// carries the scan report so the publisher sees advisory findings. Emits
 /// `plugin.published` on success.
 async fn publish_listing(
     State(state): State<Arc<AppState>>,
@@ -181,6 +183,7 @@ async fn publish_listing(
         "reference": out.reference,
         "channel": out.channel,
         "status": "published",
+        "scan": out.scan,
     })))
 }
 
@@ -201,8 +204,9 @@ async fn download_version(
 
 /// `GET /api/v1/marketplace/listings/{id}/attestation?version=` — the supply-chain
 /// attestation for a version: permission risk, SBOM, build provenance, content digest,
-/// the operator verified badge, and whether the package signature verifies against the
-/// trust store. Derived on demand from the stored (signed) package, so it reflects
+/// the operator verified badge, whether the package signature verifies against the
+/// trust store, and a live security-scan report (against the current operator
+/// deny-list). Derived on demand from the stored (signed) package, so it reflects
 /// exactly what `download` serves. Latest stable version if `version` is omitted.
 async fn version_attestation(
     Path(id): Path<String>,
@@ -223,17 +227,21 @@ async fn version_attestation(
         &bytes,
         &trust,
         listing.verified,
+        &reg.policy().deny_components,
     )?))
 }
 
 /// Build the supply-chain attestation JSON for a package: permission risk, SBOM, build
-/// provenance, content digest, and whether the signature verifies against `trust`. Pure
-/// over its inputs (no registry store, HTTP, or `HOME`), so it is unit-testable directly.
+/// provenance, content digest, whether the signature verifies against `trust`, and the
+/// security-scan report (re-run live so it reflects the *current* `deny_components`,
+/// not the list at publish time). Pure over its inputs (no registry store, HTTP, or
+/// `HOME`), so it is unit-testable directly.
 fn attestation_json(
     id: &str,
     apexpkg: &[u8],
     trust: &TrustStore,
     verified: bool,
+    deny_components: &[String],
 ) -> Result<Value, ApiError> {
     let package = Package::from_apexpkg(apexpkg)?;
     // `verify` re-checks the detached signature against the trust store; a failure here
@@ -242,6 +250,7 @@ fn attestation_json(
     let signature_verified = package.verify(trust).is_ok();
     let manifest = package.manifest()?;
     let risk = PermissionRisk::classify(&manifest.permissions);
+    let scan = apex_marketplace::scan(&package, &manifest, deny_components);
     let package_digest = format!("sha256:{:x}", Sha256::digest(apexpkg));
     Ok(json!({
         "id": id,
@@ -254,6 +263,7 @@ fn attestation_json(
         "package_digest": package_digest,
         "sbom": manifest.sbom,
         "provenance": manifest.provenance,
+        "scan": scan,
     }))
 }
 
@@ -368,7 +378,7 @@ sbom:
         // Unsigned package (empty signature) checked against an empty trust store: the
         // attestation is still produced, just flagged unverified.
         let apexpkg = Package::new(ATTESTED, Vec::new()).to_apexpkg().unwrap();
-        let v = attestation_json("acme/hello", &apexpkg, &TrustStore::new(), true).unwrap();
+        let v = attestation_json("acme/hello", &apexpkg, &TrustStore::new(), true, &[]).unwrap();
 
         assert_eq!(v["id"], "acme/hello");
         assert_eq!(v["version"], "2.1.0");
@@ -384,6 +394,31 @@ sbom:
             v["package_digest"].as_str().unwrap().starts_with("sha256:"),
             "digest is content-addressed"
         );
+        // Live scan: the wildcard permission and the unlicensed `reqwest` component.
+        let codes: Vec<&str> = v["scan"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["permission.broad", "component.unlicensed"]);
+
+        // A deny-listed SBOM component surfaces as a critical finding.
+        let v = attestation_json(
+            "acme/hello",
+            &apexpkg,
+            &TrustStore::new(),
+            true,
+            &["serde@1.0.0".to_string()],
+        )
+        .unwrap();
+        assert!(
+            v["scan"]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "component.denied" && f["severity"] == "critical")
+        );
     }
 
     #[test]
@@ -394,9 +429,17 @@ kind: Plugin
 metadata: { name: bare, version: 1.0.0, publisher: acme }
 "#;
         let apexpkg = Package::new(BARE, Vec::new()).to_apexpkg().unwrap();
-        let v = attestation_json("acme/bare", &apexpkg, &TrustStore::new(), false).unwrap();
+        let v = attestation_json("acme/bare", &apexpkg, &TrustStore::new(), false, &[]).unwrap();
         assert_eq!(v["risk"], "low"); // no permissions
         assert!(v["sbom"].is_null());
         assert!(v["provenance"].is_null());
+        // The missing attestation shows up as advisory scan findings.
+        let codes: Vec<&str> = v["scan"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["sbom.missing", "provenance.missing"]);
     }
 }

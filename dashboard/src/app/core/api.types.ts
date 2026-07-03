@@ -163,12 +163,26 @@ export interface MarketplaceListing {
   capabilities: string[];
   permissions: string[];
   risk: PermissionRisk;
+  /** Most severe scan finding on the latest version (absent/null ⇒ clean scan). */
+  scan_severity?: ScanSeverity | null;
+  /** Number of scan findings on the latest version. */
+  scan_findings?: number;
   versions: string[];
   channels: Record<string, string>;
   rating: number | null;
   reviews: number;
   installs: number;
   verified: boolean;
+}
+
+/** Severity of a security-scan finding (apex-marketplace `Severity`). */
+export type ScanSeverity = 'info' | 'warning' | 'critical';
+
+/** One coded security-scan finding (apex-marketplace `Finding`). */
+export interface ScanFinding {
+  code: string;
+  severity: ScanSeverity;
+  message: string;
 }
 
 /** One SBOM component a package bundles (apex-plugin `SbomComponent`). */
@@ -201,6 +215,8 @@ export interface PluginAttestation {
   package_digest: string;
   sbom: { components: SbomComponent[] } | null;
   provenance: Provenance | null;
+  /** Live security-scan report (re-run against the current operator deny-list). */
+  scan: { findings: ScanFinding[] };
 }
 
 /**

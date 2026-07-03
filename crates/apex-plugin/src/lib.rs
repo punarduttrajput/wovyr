@@ -22,6 +22,11 @@
 //!   the WASI sandbox (request JSON on stdin → response JSON on stdout). Without the
 //!   feature, the engine's default [`NotLoadedRuntime`] registers capabilities but
 //!   errors on call.
+//! - [`keyless`] — identity-based (Sigstore-shaped) signing ([ADR-0009]): short-lived
+//!   [`IdentityCert`]s from a [`CertificateAuthority`], transparency-log-witnessed
+//!   [`KeylessBundle`]s, and fully-offline verification against a pinned
+//!   [`KeylessRoot`] + [`IdentityPolicy`]. The `rekor` feature adds [`rekor`], a
+//!   [`TransparencyLog`] backed by a real Rekor server (`deployment/rekor/`).
 //!
 //! Deferred to later slices (see [overview §15](../../docs/08-plugin-sdk/overview.md#15-future-enhancements)):
 //! container/microVM capability loaders (only the WASM loader exists today),
@@ -29,8 +34,11 @@
 //! — dependency *resolution* against the installed catalog is implemented).
 
 pub mod engine;
+pub mod keyless;
 pub mod manifest;
 pub mod permissions;
+#[cfg(feature = "rekor")]
+pub mod rekor;
 mod resolve;
 #[cfg(feature = "wasi")]
 pub mod runtime;
@@ -39,6 +47,11 @@ pub mod verify;
 pub use engine::{
     CapabilityCall, CapabilityRuntime, InstalledPlugin, NotLoadedRuntime, Package, PluginEngine,
     PluginEvent, PluginState, PluginTool,
+};
+pub use keyless::{
+    CertificateAuthority, IdentityCert, IdentityPolicy, IdentityRule, InMemoryCa,
+    InMemoryTransparencyLog, KeylessBundle, KeylessRoot, LogEntryRef, SignerIdentity,
+    TransparencyLog, sign_keyless, verify_keyless,
 };
 pub use manifest::{
     Artifact, CapabilityDescriptor, CapabilityKind, Compatibility, Dependency, Metadata,

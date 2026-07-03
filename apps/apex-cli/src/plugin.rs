@@ -452,6 +452,12 @@ pub fn publish_cmd(source: &str, channel: Option<String>, categories: Vec<String
     let bytes = package.to_apexpkg()?;
     let out = marketplace_registry()?.publish(&bytes, &categories, channel.as_deref())?;
     println!("Published {} to channel `{}`.", out.reference, out.channel);
+    if !out.scan.findings.is_empty() {
+        println!("Security scan ({} finding(s)):", out.scan.findings.len());
+        for f in &out.scan.findings {
+            println!("  [{:?}] {}: {}", f.severity, f.code, f.message);
+        }
+    }
     println!("Find it with `apex plugin search {}`.", out.listing_id);
     Ok(())
 }

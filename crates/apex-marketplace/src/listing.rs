@@ -7,6 +7,7 @@
 //! version strings, aggregated capability kinds, average rating — computed from the
 //! record so the stored shape and the wire shape can evolve independently.
 
+use crate::scan::{ScanReport, Severity};
 use apex_plugin::{CapabilityKind, is_broad};
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +55,10 @@ pub struct PublishedVersion {
     pub capabilities: Vec<CapabilityKind>,
     /// Permission-risk classification of this version.
     pub risk: PermissionRisk,
+    /// Automated security-scan report recorded at publish ([Marketplace §6]).
+    /// Defaults empty for versions published before scanning existed.
+    #[serde(default)]
+    pub scan: ScanReport,
     /// `sha256:<hex>` content digest of the stored package bytes.
     pub package_digest: String,
     /// The published package as `.apexpkg` JSON text (the install artifact). Held as a
@@ -152,6 +157,8 @@ impl ListingRecord {
             capabilities,
             permissions: latest.map(|v| v.permissions.clone()).unwrap_or_default(),
             risk: latest.map(|v| v.risk).unwrap_or(PermissionRisk::Low),
+            scan_severity: latest.and_then(|v| v.scan.max_severity()),
+            scan_findings: latest.map(|v| v.scan.findings.len() as u64).unwrap_or(0),
             versions: self.versions.iter().map(|v| v.version.clone()).collect(),
             channels: self.channels.clone(),
             rating: self.rating(),
@@ -181,6 +188,12 @@ pub struct Listing {
     pub permissions: Vec<String>,
     /// Permission risk of the latest version.
     pub risk: PermissionRisk,
+    /// Most severe security-scan finding on the latest version (`None` ⇒ clean scan).
+    #[serde(default)]
+    pub scan_severity: Option<Severity>,
+    /// Number of security-scan findings on the latest version.
+    #[serde(default)]
+    pub scan_findings: u64,
     /// All published versions, newest first.
     pub versions: Vec<String>,
     /// Channel → version.

@@ -10,6 +10,7 @@
 //! signature-trust check in [`crate::Registry`] is the always-on supply-chain floor.
 
 use crate::listing::PermissionRisk;
+use crate::scan::{ScanReport, Severity};
 use apex_common::{Error, Result};
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +30,15 @@ pub struct RegistryPolicy {
     /// When true, only verified listings are returned from discovery and downloadable.
     #[serde(default)]
     pub require_verified: bool,
+    /// SBOM components (`name` or `name@version`, e.g. known-vulnerable releases) the
+    /// scanner flags as [`Severity::Critical`] `component.denied` findings.
+    #[serde(default)]
+    pub deny_components: Vec<String>,
+    /// Block publish when the security scan reports a finding **at or above** this
+    /// severity. `None` ⇒ scanning is advisory only (the report is still stored with
+    /// the version, but never blocks).
+    #[serde(default)]
+    pub block_scan_severity: Option<Severity>,
 }
 
 fn default_max_risk() -> PermissionRisk {
@@ -42,6 +52,8 @@ impl Default for RegistryPolicy {
             max_permission_risk: PermissionRisk::High,
             blocklist: Vec::new(),
             require_verified: false,
+            deny_components: Vec::new(),
+            block_scan_severity: None,
         }
     }
 }
@@ -85,6 +97,29 @@ impl RegistryPolicy {
         }
         Ok(())
     }
+
+    /// Enforce the scan-gating rule: when a [`block_scan_severity`](Self) ceiling is
+    /// configured and `report` carries a finding at or above it, publish is refused
+    /// fail-closed, naming the blocking findings. `None` ⇒ always passes (advisory).
+    pub fn check_scan(&self, report: &ScanReport) -> Result<()> {
+        let Some(ceiling) = self.block_scan_severity else {
+            return Ok(());
+        };
+        let blocking: Vec<String> = report
+            .findings
+            .iter()
+            .filter(|f| f.severity >= ceiling)
+            .map(|f| format!("{} ({:?}): {}", f.code, f.severity, f.message))
+            .collect();
+        if blocking.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Forbidden(format!(
+                "security scan blocks publish (policy blocks at `{ceiling:?}` and above): {}",
+                blocking.join("; ")
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +143,7 @@ mod tests {
             max_permission_risk: PermissionRisk::Medium,
             blocklist: vec!["acme/bad".into()],
             require_verified: true,
+            ..Default::default()
         };
         // Not allow-listed.
         assert!(
@@ -128,6 +164,47 @@ mod tests {
         assert!(
             p.check_publish("acme", "acme/x", PermissionRisk::Medium)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn scan_gate_blocks_at_or_above_the_ceiling() {
+        use crate::scan::Finding;
+        let report = ScanReport {
+            findings: vec![
+                Finding {
+                    code: "sbom.missing".into(),
+                    severity: Severity::Info,
+                    message: "no SBOM".into(),
+                },
+                Finding {
+                    code: "permission.broad".into(),
+                    severity: Severity::Warning,
+                    message: "wildcard".into(),
+                },
+            ],
+        };
+
+        // No ceiling ⇒ advisory only, never blocks.
+        assert!(RegistryPolicy::default().check_scan(&report).is_ok());
+
+        // Critical ceiling ⇒ a Warning finding does not block.
+        let critical_gate = RegistryPolicy {
+            block_scan_severity: Some(Severity::Critical),
+            ..Default::default()
+        };
+        assert!(critical_gate.check_scan(&report).is_ok());
+
+        // Warning ceiling ⇒ the Warning finding blocks, and the error names it.
+        let warning_gate = RegistryPolicy {
+            block_scan_severity: Some(Severity::Warning),
+            ..Default::default()
+        };
+        let err = warning_gate.check_scan(&report).unwrap_err();
+        assert!(err.to_string().contains("permission.broad"), "{err}");
+        assert!(
+            !err.to_string().contains("sbom.missing"),
+            "sub-ceiling findings are not blamed: {err}"
         );
     }
 }

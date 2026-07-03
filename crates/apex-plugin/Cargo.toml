@@ -11,6 +11,9 @@ description = "Plugin Engine: manifest, signature verification, permission grant
 # The WASM capability loader (`WasiCapabilityRuntime`). Off by default: it enables
 # apex-tools' `wasi` backend, which pulls Wasmtime (a heavy dependency).
 wasi = ["apex-tools/wasi"]
+# A Rekor-backed `TransparencyLog` for keyless signing (ADR-0009). Off by default:
+# pulls reqwest's blocking client. Live-tested against `deployment/rekor/`.
+rekor = ["dep:reqwest"]
 
 [dependencies]
 apex-common.workspace = true
@@ -27,6 +30,8 @@ ring = "0.17"
 sha2 = "0.10"
 # Platform-API compatibility ranges.
 semver = "1"
+# Rekor REST client (behind the `rekor` feature).
+reqwest = { workspace = true, features = ["blocking"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1,0 +1,115 @@
+# A local Rekor transparency log (Rekor + Trillian + MySQL + Redis) for developing and
+# testing the keyless-signing slice against real infrastructure, without depending on
+# the public rekor.sigstore.dev.
+#
+# Derived from sigstore/rekor's docker-compose.yml (v1.4.2, Apache-2.0), with three
+# changes for this repo's offline-first workflow:
+#   1. Released images are pinned instead of `build:` targets — no Go source builds
+#      (and no Go module downloads) on the dev box.
+#   2. The attestation store is a named volume, not a root-owned host path.
+#   3. Only the Rekor API (3000) and its metrics (2112) are exposed to the host;
+#      MySQL/Redis/Trillian stay on the compose network.
+#
+# Usage:
+#   docker compose -f deployment/rekor/docker-compose.yml up -d --wait
+#   curl -s http://localhost:3000/api/v1/log     # log info ⇒ the stack is healthy
+#
+# The signer is in-memory (`--rekor_server.signer=memory`): the log's key rotates on
+# restart, so this is a *dev/test* log — treat entries as disposable.
+
+services:
+  mysql:
+    platform: linux/amd64
+    image: gcr.io/trillian-opensource-ci/db_server:v1.4.0
+    environment:
+      - MYSQL_ROOT_PASSWORD=zaphod
+      - MYSQL_DATABASE=test
+      - MYSQL_USER=test
+      - MYSQL_PASSWORD=zaphod
+    restart: always
+    healthcheck:
+      # See https://github.com/docker-library/mysql/issues/930.
+      test: "mysqladmin -h 127.0.0.1 --user=$$MYSQL_USER --password=$$MYSQL_ROOT_PASSWORD -s ping"
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 90s
+
+  redis-server:
+    image: docker.io/redis:6.2
+    command: ["--bind", "0.0.0.0", "--appendonly", "yes", "--requirepass", "test"]
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "test", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # NOTE: the trillian/rekor release images are distroless (no shell, no curl), so the
+  # upstream compose's in-container curl healthchecks cannot run; health is verified
+  # from the host instead (`curl localhost:3000/api/v1/log`, see README).
+  trillian-log-server:
+    image: gcr.io/trillian-opensource-ci/log_server:v1.4.0
+    command: [
+      "--quota_system=noop",
+      "--storage_system=mysql",
+      "--mysql_uri=test:zaphod@tcp(mysql:3306)/test",
+      "--rpc_endpoint=0.0.0.0:8090",
+      "--http_endpoint=0.0.0.0:8091",
+      "--alsologtostderr",
+    ]
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  trillian-log-signer:
+    image: gcr.io/trillian-opensource-ci/log_signer:v1.4.0
+    command: [
+      "--quota_system=noop",
+      "--storage_system=mysql",
+      "--mysql_uri=test:zaphod@tcp(mysql:3306)/test",
+      "--rpc_endpoint=0.0.0.0:8090",
+      "--http_endpoint=0.0.0.0:8091",
+      "--force_master",
+      "--alsologtostderr",
+    ]
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  rekor-server:
+    # ko-built release image: the entrypoint is the rekor-server binary, so the
+    # command starts at `serve` (upstream's compose repeats the binary name because
+    # it builds its own image with a shell entrypoint).
+    image: gcr.io/projectsigstore/rekor-server:v1.4.2
+    environment:
+      # Workaround for https://github.com/google/go-cloud/issues/3294.
+      - TMPDIR=/var/run/attestations
+    command: [
+      "serve",
+      "--trillian_log_server.address=trillian-log-server",
+      "--trillian_log_server.port=8090",
+      "--rekor_server.address=0.0.0.0",
+      "--rekor_server.signer=memory",
+      "--enable_attestation_storage",
+      "--attestation_storage_bucket=file:///var/run/attestations",
+      "--search_index.storage_provider=mysql",
+      "--search_index.mysql.dsn=test:zaphod@tcp(mysql:3306)/test",
+    ]
+    volumes:
+      - attestations:/var/run/attestations
+    restart: always
+    ports:
+      - "3000:3000"
+      - "2112:2112"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      trillian-log-server:
+        condition: service_started
+
+volumes:
+  attestations:

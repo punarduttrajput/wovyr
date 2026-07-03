@@ -19,6 +19,7 @@
 
 use crate::listing::{Listing, ListingRecord, PermissionRisk, PublishedVersion, Review};
 use crate::policy::RegistryPolicy;
+use crate::scan::{self, ScanReport};
 use crate::store::RegistryStore;
 use apex_common::{Error, Result};
 use apex_plugin::{CapabilityKind, Package, TrustStore};
@@ -37,6 +38,9 @@ pub struct PublishOutcome {
     pub reference: String,
     /// The channel the version was published to.
     pub channel: String,
+    /// The security-scan report ([§6]) — advisory findings the publisher should see
+    /// even when the policy admitted the version.
+    pub scan: ScanReport,
 }
 
 /// A discovery query ([§4](../../docs/08-plugin-sdk/marketplace.md#4-discovery)).
@@ -101,6 +105,12 @@ impl<S: RegistryStore> Registry<S> {
         self.policy
             .check_publish(&manifest.metadata.publisher, &listing_id, risk)?;
 
+        // 3. Automated security scan ([§6]) — the report is stored with the version
+        // (consumers see it before install); a configured severity ceiling gates
+        // publish fail-closed.
+        let scan = scan::scan(&package, &manifest, &self.policy.deny_components);
+        self.policy.check_scan(&scan)?;
+
         let channel = channel.unwrap_or(DEFAULT_CHANNEL).to_string();
         let package_digest = format!("sha256:{:x}", Sha256::digest(apexpkg));
         let capabilities: Vec<CapabilityKind> =
@@ -113,6 +123,7 @@ impl<S: RegistryStore> Registry<S> {
             permissions: manifest.permissions.clone(),
             capabilities,
             risk,
+            scan: scan.clone(),
             package_digest,
             package: String::from_utf8(apexpkg.to_vec())
                 .map_err(|_| Error::invalid("`.apexpkg` is not valid UTF-8 JSON"))?,
@@ -130,6 +141,7 @@ impl<S: RegistryStore> Registry<S> {
             reference: manifest.reference(),
             listing_id,
             channel,
+            scan,
         })
     }
 
@@ -271,6 +283,7 @@ fn relevance(rec: &ListingRecord, needle: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::Severity;
     use crate::store::InMemoryRegistryStore;
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -493,5 +506,54 @@ capabilities:
         assert_eq!(reg.download("acme/github", None).unwrap(), p2);
         assert_eq!(reg.download("acme/github", Some("1.4.0")).unwrap(), p1);
         assert!(reg.download("acme/github", Some("9.9.9")).is_err());
+    }
+
+    #[test]
+    fn publish_stores_the_scan_report_and_projects_its_summary() {
+        let (pkg, public) = signed_pkg(GITHUB);
+        let reg = Registry::new(InMemoryRegistryStore::new(), trust_for("acme", public));
+
+        // GITHUB declares neither an SBOM nor provenance → two advisory findings,
+        // returned to the publisher and stored with the version.
+        let out = reg.publish(&pkg, &[], None).unwrap();
+        let codes: Vec<&str> = out.scan.findings.iter().map(|f| f.code.as_str()).collect();
+        assert_eq!(codes, ["sbom.missing", "provenance.missing"]);
+        assert_eq!(out.scan.max_severity(), Some(Severity::Info));
+
+        // The consumer-facing projection carries the summary.
+        let l = reg.get("acme/github").unwrap().unwrap();
+        assert_eq!(l.scan_severity, Some(Severity::Info));
+        assert_eq!(l.scan_findings, 2);
+    }
+
+    #[test]
+    fn scan_severity_ceiling_blocks_publish_fail_closed() {
+        // A wildcard permission is a Warning finding; a policy blocking at Warning
+        // refuses the publish and indexes nothing.
+        let broad = GITHUB.replace("net:egress:api.github.com", "net:egress:*");
+        let (pkg, public) = signed_pkg(&broad);
+        let reg = Registry::new(InMemoryRegistryStore::new(), trust_for("acme", public))
+            .with_policy(RegistryPolicy {
+                block_scan_severity: Some(Severity::Warning),
+                ..Default::default()
+            });
+
+        let err = reg.publish(&pkg, &[], None).unwrap_err();
+        assert!(err.to_string().contains("permission.broad"), "{err}");
+        assert!(
+            reg.get("acme/github").unwrap().is_none(),
+            "a blocked publish must index nothing"
+        );
+
+        // The same package publishes fine under the default (advisory-only) policy.
+        let (pkg, public) = signed_pkg(&broad);
+        let advisory = Registry::new(InMemoryRegistryStore::new(), trust_for("acme", public));
+        let out = advisory.publish(&pkg, &[], None).unwrap();
+        assert!(
+            out.scan
+                .findings
+                .iter()
+                .any(|f| f.code == "permission.broad")
+        );
     }
 }

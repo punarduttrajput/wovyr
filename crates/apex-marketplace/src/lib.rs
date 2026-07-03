@@ -15,18 +15,27 @@
 //! - [`store`] — the [`RegistryStore`] durability port with [`InMemoryRegistryStore`]
 //!   and [`FileRegistryStore`] backends.
 //! - [`registry`] — the [`Registry`] control plane: publish (signature-verified +
-//!   policy-gated), search/discover, download, rate, verify, install-count.
+//!   policy-gated + security-scanned), search/discover, download, rate, verify,
+//!   install-count.
+//! - [`scan`] — automated static security scanning at publish
+//!   ([§6](../../docs/08-plugin-sdk/marketplace.md#6-review--quality)): artifact
+//!   integrity, permission sanity, sandbox posture, SBOM deny-list/licensing, and
+//!   provenance presence, reported as coded [`Finding`]s and optionally gating publish
+//!   via [`RegistryPolicy::block_scan_severity`](policy::RegistryPolicy).
 //!
 //! Deferred (later slices, [§6/§9](../../docs/08-plugin-sdk/marketplace.md#6-review--quality)):
-//! automated security scanning + the full review workflow (only the operator `verify`
-//! toggle exists), recommendations, and monetization/billing.
+//! the full human-review workflow (only the operator `verify` toggle exists),
+//! undeclared-usage detection / CVE feeds for the scanner, recommendations, and
+//! monetization/billing.
 
 pub mod listing;
 pub mod policy;
 pub mod registry;
+pub mod scan;
 pub mod store;
 
 pub use listing::{Listing, ListingRecord, PermissionRisk, PublishedVersion, Review};
 pub use policy::RegistryPolicy;
 pub use registry::{DEFAULT_CHANNEL, PublishOutcome, Registry, SearchQuery};
+pub use scan::{Finding, ScanReport, Severity, scan};
 pub use store::{FileRegistryStore, InMemoryRegistryStore, RegistryState, RegistryStore};

@@ -151,6 +151,25 @@
               } @else {
                 <div class="attest-kv muted mini">No SBOM declared.</div>
               }
+
+              <div class="attest-block">
+                <div class="eyebrow mini">Security scan</div>
+                @if (a.scan.findings.length) {
+                  <ul class="sbom">
+                    @for (f of a.scan.findings; track f.code + f.message) {
+                      <li class="mini">
+                        <span class="pill mini" [class.crit]="f.severity === 'critical'"
+                          [class.warn]="f.severity === 'warning'"
+                          [class.mut]="f.severity === 'info'">{{ f.severity }}</span>
+                        <span class="mono">{{ f.code }}</span>
+                        <span class="muted">{{ f.message }}</span>
+                      </li>
+                    }
+                  </ul>
+                } @else {
+                  <span class="pill ok mini">✓ no findings</span>
+                }
+              </div>
             } @else {
               <span class="muted mini">No attestation available for this version.</span>
             }
@@ -196,6 +215,12 @@
               <span class="muted mini">{{ l.installs }} install{{ l.installs === 1 ? '' : 's' }}</span>
               <span class="pill mut risk" [class.crit]="l.risk === 'high'"
                 [class.warn]="l.risk === 'medium'">{{ l.risk }} risk</span>
+              @if (l.scan_findings) {
+                <span class="pill mut" [class.crit]="l.scan_severity === 'critical'"
+                  [class.warn]="l.scan_severity === 'warning'"
+                  [title]="'Latest version has ' + l.scan_findings + ' security-scan finding(s)'">
+                  scan: {{ l.scan_findings }}</span>
+              }
             </div>
 
             @if (l.categories.length) {
