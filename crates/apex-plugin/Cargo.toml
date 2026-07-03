@@ -38,3 +38,6 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 # Assembles tiny WASI test modules from WAT in-process (cached: wat 1.x), so the
 # WASM capability-loader tests need no external wasm toolchain.
 wat = "1"
+# Property/fuzz testing for the manifest YAML and `.apexpkg` envelope parsers
+# (security-testing.md §8): arbitrary input must never panic.
+proptest = "1"

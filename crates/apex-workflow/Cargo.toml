@@ -24,3 +24,6 @@ tokio-postgres = { version = "0.7", optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
+# Property/fuzz testing for the workflow DSL and cron-expression parsers
+# (security-testing.md §8): arbitrary input must never panic.
+proptest = "1"

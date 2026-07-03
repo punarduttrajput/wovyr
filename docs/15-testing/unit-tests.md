@@ -7,10 +7,11 @@ Document ID: TEST-001
 
 **Document ID:** TEST-001  
 **File Path:** `docs/15-testing/unit-tests.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — §7 (Property & Fuzz Testing) reflects the current
+implementation; other sections remain directional  
 **Owner:** Quality Engineering Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-03
 
 ---
 
@@ -89,6 +90,20 @@ feasible.
 - Fuzzing targets parsers and schema validators for robustness against malformed
   input (ties to [security testing](security-testing.md)).
 
+**Implemented:** `proptest`-based fuzz targets for the parsers most exposed to
+untrusted input — a plugin package can be downloaded and parsed before its
+signature is ever checked, so these are the first code a malicious payload
+reaches. `apex-plugin/tests/fuzz_targets.rs`: `PluginManifest::from_yaml` (raw
+text + structurally-plausible manifests) and `Package::from_apexpkg` (raw bytes
++ plausible JSON envelopes) — arbitrary input must only ever return `Ok`/`Err`,
+never panic. `apex-workflow/tests/fuzz_targets.rs`: `Definition::from_yaml` (the
+workflow DSL) and `Cron::parse`/`Cron::next_after` (including `after_ms` values
+near `u64::MAX`, where naive minute-granularity arithmetic could in principle
+overflow — verified it doesn't). These are property tests run under ordinary
+`cargo test` (proptest generates + shrinks cases, no separate fuzzing harness or
+corpus); true coverage-guided fuzzing (`cargo-fuzz`/libFuzzer, continuous/
+out-of-band execution) is a heavier follow-on, not yet set up.
+
 ---
 
 # 8. Coverage & Gating
@@ -117,4 +132,5 @@ feasible.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-03 | §7 Property & Fuzz Testing landed: `proptest` fuzz targets for `apex-plugin` (`PluginManifest::from_yaml`, `Package::from_apexpkg` — the parsers an untrusted download hits before signature verification) and `apex-workflow` (`Definition::from_yaml`, `Cron::parse`/`next_after`). All assert arbitrary input never panics; `cron_next_after_never_panics` specifically probed `after_ms` near `u64::MAX` for arithmetic overflow and found none. True coverage-guided fuzzing (`cargo-fuzz`) remains a heavier follow-on |
 | 1.0.0 | 2026-06-27 | Initial Unit Testing specification |

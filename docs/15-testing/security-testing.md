@@ -7,15 +7,15 @@ Document ID: TEST-006
 
 **Document ID:** TEST-006  
 **File Path:** `docs/15-testing/security-testing.md`  
-**Version:** 1.4.0  
-**Status:** Partially implemented — automated coverage exists for the authorization
-matrix, tenant isolation, secrets, the supply chain, adversarial sandbox/isolation
-testing including true in-guest escape attempts against the strong backends
-(egress-proxy bypass, filesystem escape, PID/forkbomb containment, plugin
-host-call denial, gVisor mount/`/proc/kcore` escape denial, Firecracker guest-OOM
-containment — §5 fully covered), and the CI scanning pipeline (§8: dependency
-audit, secret scanning, container image scanning — see the per-section
-**Implemented** notes). Remaining: fuzz-target infrastructure (§8's last open row).  
+**Version:** 1.5.0  
+**Status:** Substantially implemented — automated coverage exists for the
+authorization matrix, tenant isolation, secrets, the supply chain, adversarial
+sandbox/isolation testing including true in-guest escape attempts against the
+strong backends (§5 fully covered), and the CI scanning pipeline including
+fuzz-target infrastructure (§8 fully covered — see the per-section
+**Implemented** notes). Remaining: none blocking; §5/§8 are complete, and the
+document's own exit bar (RBAC, isolation, secrets, supply chain, sandbox escape,
+CI scanning) is met in full.  
 **Owner:** Quality Engineering Team · Security Team  
 **Last Updated:** 2026-07-03
 
@@ -192,13 +192,17 @@ organizational-use license gate); **`container-scan`** builds
 `deployment/docker/Dockerfile` (the single-binary image's first real CI build —
 previously only built manually) and runs `aquasecurity/trivy-action` against it,
 failing on HIGH/CRITICAL vulnerabilities with a known fix available
-(`ignore-unfixed: true`, since an unfixed CVE isn't actionable). Fuzzing remains
-deferred (no proptest/fuzz-target infrastructure exists yet — see
-[unit-tests.md §7](unit-tests.md#7-property--fuzz-testing)); this is the one row
-still open. Not yet run against a live GitHub Actions environment (developed and
-reasoned about offline) — the first real run should be watched for false
-positives, particularly gitleaks against the crypto test fixtures in
-`apex-plugin`'s `keyless`/`verify` modules and `deployment/rekor/`.
+(`ignore-unfixed: true`, since an unfixed CVE isn't actionable). Not yet run
+against a live GitHub Actions environment (developed and reasoned about offline)
+— the first real run should be watched for false positives, particularly
+gitleaks against the crypto test fixtures in `apex-plugin`'s `keyless`/`verify`
+modules and `deployment/rekor/`. **Fuzzing (§8's last open row) has now landed**
+too, as `proptest`-based property tests (see
+[unit-tests.md §7](unit-tests.md#7-property--fuzz-testing) for detail): the
+manifest/`.apexpkg` parsers (`apex-plugin`) and the workflow-DSL/cron parsers
+(`apex-workflow`) — the untrusted-input surfaces this section calls out — never
+panic under arbitrary input. True coverage-guided fuzzing (`cargo-fuzz`) remains
+a heavier follow-on; §8 is otherwise fully covered.
 
 ---
 
@@ -230,6 +234,7 @@ positives, particularly gitleaks against the crypto test fixtures in
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.5.0 | 2026-07-03 | Fuzz-target infrastructure landed (§8's last open row, see [unit-tests.md §7](unit-tests.md#7-property--fuzz-testing) for detail): `proptest`-based fuzz tests for `apex-plugin` (`PluginManifest::from_yaml`, `Package::from_apexpkg`) and `apex-workflow` (`Definition::from_yaml`, `Cron::parse`/`next_after`) prove arbitrary input never panics on the parsers an untrusted plugin download or workflow definition hits first. §8 is now fully covered; true coverage-guided fuzzing (`cargo-fuzz`) remains a heavier, separate follow-on |
 | 1.4.0 | 2026-07-03 | True in-guest escape attempts against the strong backends (§5, closing the section): `gvisor_denies_privileged_mount_syscall` and `gvisor_denies_reading_host_physical_memory_via_proc_kcore` (`sandbox_backends.rs`) prove gVisor's sentry denies a compromised guest's `mount` attempt and blocks `/proc/kcore` physical-memory disclosure; `firecracker_memory_ceiling_contains_a_guest_oom` proves the microVM's `mem_size_mib` is a real hardware-virtualized ceiling (guest-kernel OOM, not a hang). §5 is now fully covered; remaining work is entirely in §8 (fuzzing) |
 | 1.3.0 | 2026-07-03 | CI scanning pipeline (§8) landed: `.github/workflows/ci.yml` gained a `security` job (RustSec `cargo-audit` dependency check + a standalone `gitleaks --no-git` secret scan) and a `container-scan` job (builds `deployment/docker/Dockerfile` — its first real CI build — and runs Trivy against the image, failing on HIGH/CRITICAL fixable CVEs). Static analysis was already covered by the existing clippy gate. Not yet run against live GitHub Actions; fuzzing remains the one open row in §8 |
 | 1.2.0 | 2026-07-03 | First slice of adversarial sandbox-escape tests (§5): egress-proxy bypass attempts (`apex-tools` `egress_adversarial.rs` — IP-literal hostname bypass, non-CONNECT method smuggling, malformed CONNECT, oversized header flood), filesystem escape (`sandbox_backends.rs` — read-only rootfs write, workspace sibling-directory traversal), a PID/forkbomb containment test, and a plugin host-call-without-a-grant denial test (`apex-plugin` `engine.rs`, proving zero runtime invocations on denial). Documented the known L3 egress-bypass gap (bridge-networked container ignoring `HTTPS_PROXY`) rather than asserting a protection that doesn't exist. Remaining: true in-guest escape attempts against gVisor/Firecracker themselves |
