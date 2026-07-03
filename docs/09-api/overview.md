@@ -7,10 +7,20 @@ Document ID: API-001
 
 **Document ID:** API-001  
 **File Path:** `docs/09-api/overview.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — this document describes the **target-state** convention;
+the machine-readable, ground-truth contract for what `apex-server` actually
+implements today is [`openapi.yaml`](openapi.yaml) (hand-authored from the
+Axum routes, v1.0 "Stability" deliverable). Notable gaps between the two: the
+real API has no opaque `agt_01H...`-style ids (resources use their natural
+key — agent name, workflow `execution_id`, `publisher/name`, …), no OAuth2/
+JWT/mTLS (plain `X-Apex-Tenant`/`X-Apex-Principal` headers), and no generic
+`/operations/{id}` polling resource. Pagination, the `Idempotency-Key` header,
+`If-Match`/`ETag` concurrency, and the error envelope below *are* implemented
+as documented. A first TypeScript client generated against `openapi.yaml` lives
+at [`sdks/typescript`](../../sdks/typescript).  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-03
 
 ---
 
@@ -241,4 +251,5 @@ signed, retried with backoff, and mirror Event Bus topics.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-03 | Added `openapi.yaml` as the hand-authored, ground-truth machine-readable contract (v1.0 "Stability" workstream), noting where this convention doc describes target-state behavior the real API doesn't implement (opaque ids, OAuth2/JWT, `/operations/{id}`). First TypeScript client (`sdks/typescript`) landed against the spec, integration-tested against a live `apex dev` server |
 | 1.0.0 | 2026-06-27 | Initial Platform API Overview & Conventions |

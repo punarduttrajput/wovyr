@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "dashboard", "start", "--", "--port", "4300"],
       "port": 4300
+    },
+    {
+      "name": "apex-server",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-p", "apex-cli", "--", "dev", "--addr", "127.0.0.1:8080"],
+      "port": 8080
     }
   ]
 }
