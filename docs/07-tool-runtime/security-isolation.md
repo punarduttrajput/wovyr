@@ -7,10 +7,12 @@ Document ID: TRT-005
 
 **Document ID:** TRT-005  
 **File Path:** `docs/07-tool-runtime/security-isolation.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — the network-isolation section (§5) reflects the current
+implementation; other sections (filesystem, secrets, tenant isolation) are still
+directional  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-03
 
 ---
 
@@ -90,6 +92,25 @@ network:
     - api.example.com
   inbound: deny
 ```
+
+**Implemented:** `apex-tools`' [`EgressProxy`](../../crates/apex-tools/src/egress.rs)
+is a host-side HTTP `CONNECT` tunnel enforcing the host allow-list; the container
+backend points a sandboxed workload at it via `HTTPS_PROXY`. That alone was only
+**cooperative** — a workload that ignored the env var and dialed out directly had
+full `--network bridge` connectivity underneath it (the "L3 egress bypass"
+gap noted in earlier revisions of this platform). This is now closed: before the
+real command ever runs, the *host* attaches to the container's network namespace
+via `nsenter` and applies an `iptables` default-deny to its `OUTPUT` chain,
+allowing only loopback and the egress proxy's address
+([`egress_lockdown`](../../crates/apex-tools/src/egress_lockdown.rs)) — so ignoring
+`HTTPS_PROXY` now reaches nothing. The container starts running an inert
+placeholder and only receives the real command via `docker exec` once the
+lockdown is confirmed in place, so there is no window where untrusted code runs
+before the restriction applies. Linux/Docker-specific (needs `nsenter` + `iptables`
+on the host); fails closed if either is unavailable. Not yet extended to Podman
+(its `network inspect` output shape differs) or to DNS-level restriction (the
+lockdown allows only the literal egress-proxy IP, so DNS is moot for this path —
+the container needs no DNS lookup to reach it).
 
 ---
 
@@ -210,4 +231,5 @@ referenced, never valued.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-03 | §5 Network Isolation: closed the "L3 egress bypass" gap — `apex-tools`' container backend now applies a host-side `iptables` default-deny (via `nsenter` into the container's network namespace, before the real command runs) restricting `OUTPUT` to loopback + the egress proxy's address, so a workload ignoring `HTTPS_PROXY` no longer reaches anything. Linux/Docker-specific; not yet extended to Podman. Not run against a live Docker/nsenter/iptables environment in the authoring session — flagged for verification on first real use |
 | 1.0.0 | 2026-06-27 | Initial Tool Runtime Security & Isolation specification |

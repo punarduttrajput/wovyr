@@ -10,14 +10,16 @@
 //! [`FirecrackerSandbox`], and (under the `wasi` cargo feature) a `WasiSandbox`
 //! that runs `wasm32-wasi` modules in an in-process Wasmtime VM.
 //!
-//! Still deferred (per the [roadmap](../../docs/18-roadmap/v0.2.md)): an egress
-//! proxy for per-host network allow-listing, a Firecracker guest agent for in-VM
-//! execution, warm pooling, distributed execution, and streaming. The `permissions`
-//! a tool declares are surfaced but not yet enforced; command-executing tools are
-//! gated by an agent's explicit allowed-tools list.
+//! The allow-listing egress proxy ([`EgressProxy`]) enforces per-host egress at the
+//! application layer; the container backend additionally closes the L3 bypass a
+//! workload could otherwise use to skip the proxy — a host-side network-namespace
+//! `iptables` lockdown (`egress_lockdown`, Linux/Docker-specific) restricts a
+//! sandboxed container's `OUTPUT` chain to loopback + the proxy address before the
+//! real command ever runs, so ignoring `HTTPS_PROXY` no longer reaches anything.
 
 mod builtin;
 mod egress;
+mod egress_lockdown;
 mod pool;
 mod registry;
 mod sandbox;

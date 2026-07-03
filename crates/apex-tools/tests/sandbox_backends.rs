@@ -227,13 +227,47 @@ async fn egress_proxy_denies_non_allowlisted_host_from_container() {
     };
     let sb = ContainerSandbox::docker(IMAGE).with_network(policy);
 
-    // Inside the container: extract the proxy port from HTTPS_PROXY and CONNECT to a
+    // Inside the container: extract the proxy host:port from HTTPS_PROXY (a literal
+    // gateway IP under the egress-lockdown flow, not a hostname) and CONNECT to a
     // host that is NOT allow-listed; the proxy must refuse it with 403 (no TLS needed).
-    let script = r#"p=${HTTPS_PROXY##*:}; printf 'CONNECT 10.255.255.1:443 HTTP/1.1\r\n\r\n' | nc -w 3 host.docker.internal "$p" | head -1"#;
+    let script = r#"p=${HTTPS_PROXY#http://}; h=${p%%:*}; port=${p##*:}; printf 'CONNECT 10.255.255.1:443 HTTP/1.1\r\n\r\n' | nc -w 3 "$h" "$port" | head -1"#;
     let out = run(&sb, &cmd("sh", &["-c", script])).await;
     assert!(
         out.stdout.contains("403"),
         "proxy should deny a non-allow-listed host; stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+}
+
+#[tokio::test]
+async fn container_egress_lockdown_blocks_direct_bypass_of_the_proxy() {
+    if !has(SandboxBackend::Container).await {
+        return;
+    }
+    // The core L3-bypass fix: a workload that simply ignores `HTTPS_PROXY` and
+    // dials out directly must still be blocked. Previously this only had
+    // `--network bridge` underneath it — fully open — so a direct connection
+    // reached the internet just fine. Now the host applies an `iptables`
+    // default-deny to the container's own `OUTPUT` chain (via `nsenter`, before
+    // the real command ever runs), so nothing but loopback and the proxy's
+    // address is reachable at all, regardless of whether the workload cooperates
+    // with the proxy env vars.
+    let policy = NetworkPolicy {
+        default_deny: true,
+        outbound_allow: vec!["example.com".to_string()],
+    };
+    let sb = ContainerSandbox::docker(IMAGE).with_network(policy);
+
+    let out = run(
+        &sb,
+        &cmd("sh", &["-c", "nc -w 3 -z 1.1.1.1 443; echo EXIT=$?"]),
+    )
+    .await;
+    assert!(
+        !out.stdout.contains("EXIT=0"),
+        "a direct connection bypassing HTTPS_PROXY must be blocked by the host-side \
+         egress lockdown, got stdout: {:?} stderr: {:?}",
         out.stdout,
         out.stderr
     );
