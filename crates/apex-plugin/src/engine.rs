@@ -1345,6 +1345,57 @@ artifacts:
         assert!(matches!(err, ToolError::Internal(m) if m.contains("sandbox loader")));
     }
 
+    #[tokio::test]
+    async fn ungranted_capability_is_denied_before_the_runtime_is_ever_invoked() {
+        // An adversarial or misconfigured caller invokes a capability without the
+        // grant its declared permission requires. The registry must fail closed
+        // *before* touching the capability runtime, proving the host-call itself
+        // never happens rather than merely discarding its result afterward
+        // (security-testing §5: "plugin host-call without a grant → denied").
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingRuntime(Arc<AtomicUsize>);
+        #[async_trait]
+        impl CapabilityRuntime for CountingRuntime {
+            async fn invoke(
+                &self,
+                _call: &CapabilityCall<'_>,
+                _request: ToolRequest,
+            ) -> std::result::Result<ToolResponse, ToolError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ToolResponse::success(json!({"ran": true})))
+            }
+        }
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let (package, engine) = signed_package();
+        let mut engine = engine.with_runtime(Arc::new(CountingRuntime(invocations.clone())));
+        let mut registry = ToolRegistry::new();
+        engine.install(&package, &grants()).unwrap();
+        engine.enable("acme/github", &mut registry).unwrap();
+
+        // The capability declares `net:egress:api.github.com`; this caller was
+        // granted nothing at all.
+        let ctx = ToolContext {
+            granted_permissions: Some(vec![]),
+            ..ToolContext::default()
+        };
+        let err = registry
+            .execute("github.create_issue", &ctx, ToolRequest::new(json!({})))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, ToolError::PermissionDenied(m) if m.contains("net:egress:api.github.com")),
+            "expected a permission denial naming the missing grant, got {err:?}"
+        );
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "the capability runtime must never be invoked when the caller lacks the grant"
+        );
+    }
+
     // --- Dependency resolution ---------------------------------------------------
 
     const BASE: &str = r#"

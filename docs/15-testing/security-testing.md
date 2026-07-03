@@ -7,11 +7,15 @@ Document ID: TEST-006
 
 **Document ID:** TEST-006  
 **File Path:** `docs/15-testing/security-testing.md`  
-**Version:** 1.1.0  
+**Version:** 1.4.0  
 **Status:** Partially implemented — automated coverage exists for the authorization
-matrix, tenant isolation, secrets, and the supply chain (see the per-section
-**Implemented** notes). Adversarial sandbox-escape testing against the strong
-backends and the CI scanning pipeline (§8) remain.  
+matrix, tenant isolation, secrets, the supply chain, adversarial sandbox/isolation
+testing including true in-guest escape attempts against the strong backends
+(egress-proxy bypass, filesystem escape, PID/forkbomb containment, plugin
+host-call denial, gVisor mount/`/proc/kcore` escape denial, Firecracker guest-OOM
+containment — §5 fully covered), and the CI scanning pipeline (§8: dependency
+audit, secret scanning, container image scanning — see the per-section
+**Implemented** notes). Remaining: fuzz-target infrastructure (§8's last open row).  
 **Owner:** Quality Engineering Team · Security Team  
 **Last Updated:** 2026-07-03
 
@@ -93,6 +97,42 @@ Adversarial tests attempt to break tool/plugin isolation:
 
 Untrusted-code escape attempts run against the strong backends (gVisor/microVM).
 
+**Implemented:** `apex-tools` `egress_adversarial.rs` drives the `EgressProxy`
+directly (no `docker` needed, runs unconditionally) with adversarial CONNECT
+traffic — an IP-literal dial of an allow-listed *hostname* (denied, since the
+allow-list is a string match, not a resolved-address match), a non-CONNECT method
+used to sidestep host-checking (405), a malformed empty-target CONNECT (denied,
+proxy stays alive for the next client), and an oversized/unterminated header
+flood (rejected promptly, no hang or unbounded buffering). `sandbox_backends.rs`
+(docker-gated) adds two filesystem-escape attempts —
+`container_read_only_rootfs_denies_writes_outside_workspace` (a write outside
+`/workspace` fails on the `--read-only` rootfs) and
+`container_workspace_mount_does_not_expose_host_sibling_directory` (`..`
+traversal from `/workspace` can't reach an unmounted sibling host directory) —
+plus a resource-limit adversarial test,
+`container_pids_limit_contains_a_fork_bomb` (a `--pids-limit` cap survives 40
+attempted forkbomb forks, keeping the live process count far below the attempt
+count). `apex-plugin` `engine.rs`
+`ungranted_capability_is_denied_before_the_runtime_is_ever_invoked` proves the
+plugin host-call denial is enforced *before* the capability runtime is ever
+invoked (a counting spy runtime records zero invocations), not just that its
+result is discarded. Known, explicitly out-of-scope gap: a container on
+`bridge` networking can bypass the egress proxy entirely by ignoring
+`HTTPS_PROXY` and dialing out directly — the documented "L3 egress
+bypass-blocking" item, deferred past v0.3. **True in-guest escape attempts
+against the strong backends have now landed too:**
+`gvisor_denies_privileged_mount_syscall` (a compromised guest attempting to
+`mount` — a classic escape/pivot primitive — is denied by gVisor's sentry
+intercepting the syscall in its own user-space kernel rather than the host) and
+`gvisor_denies_reading_host_physical_memory_via_proc_kcore` (`/proc/kcore`, a
+known container-escape/info-leak vector exposing physical memory, is
+inaccessible under gVisor's synthetic procfs); `firecracker_memory_ceiling_contains_a_guest_oom`
+proves the microVM's `mem_size_mib` is a real hardware-virtualized ceiling — a
+runaway process is OOM-killed by the guest's own kernel well before the
+wall-clock timeout, mirroring the container backend's cgroup memory test but
+for the VM boundary itself. §5 is now fully
+covered.
+
 ---
 
 # 6. Secrets Tests
@@ -141,6 +181,25 @@ Publish-time trust + scan gating is covered in `apex-marketplace` (signature ver
 
 These gate the [CI pipeline](index.md#5-ci-pipeline-overview).
 
+**Implemented:** [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — the
+existing `rust` job's `cargo clippy --workspace --all-targets -- -D warnings` step
+*is* the static-analysis gate (already blocking merge). Two new jobs close the
+remaining rows: **`security`** runs `rustsec/audit-check` (SCA — the RustSec
+advisory DB against `Cargo.lock`, posted as a check run) and a standalone
+`gitleaks detect --no-git` pass over the working tree (secret scanning, run as
+the plain binary rather than the wrapper Action to avoid its
+organizational-use license gate); **`container-scan`** builds
+`deployment/docker/Dockerfile` (the single-binary image's first real CI build —
+previously only built manually) and runs `aquasecurity/trivy-action` against it,
+failing on HIGH/CRITICAL vulnerabilities with a known fix available
+(`ignore-unfixed: true`, since an unfixed CVE isn't actionable). Fuzzing remains
+deferred (no proptest/fuzz-target infrastructure exists yet — see
+[unit-tests.md §7](unit-tests.md#7-property--fuzz-testing)); this is the one row
+still open. Not yet run against a live GitHub Actions environment (developed and
+reasoned about offline) — the first real run should be watched for false
+positives, particularly gitleaks against the crypto test fixtures in
+`apex-plugin`'s `keyless`/`verify` modules and `deployment/rekor/`.
+
 ---
 
 # 9. Penetration Testing & Reviews
@@ -171,5 +230,8 @@ These gate the [CI pipeline](index.md#5-ci-pipeline-overview).
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.0.0 | 2026-06-27 | Initial Security Testing specification |
+| 1.4.0 | 2026-07-03 | True in-guest escape attempts against the strong backends (§5, closing the section): `gvisor_denies_privileged_mount_syscall` and `gvisor_denies_reading_host_physical_memory_via_proc_kcore` (`sandbox_backends.rs`) prove gVisor's sentry denies a compromised guest's `mount` attempt and blocks `/proc/kcore` physical-memory disclosure; `firecracker_memory_ceiling_contains_a_guest_oom` proves the microVM's `mem_size_mib` is a real hardware-virtualized ceiling (guest-kernel OOM, not a hang). §5 is now fully covered; remaining work is entirely in §8 (fuzzing) |
+| 1.3.0 | 2026-07-03 | CI scanning pipeline (§8) landed: `.github/workflows/ci.yml` gained a `security` job (RustSec `cargo-audit` dependency check + a standalone `gitleaks --no-git` secret scan) and a `container-scan` job (builds `deployment/docker/Dockerfile` — its first real CI build — and runs Trivy against the image, failing on HIGH/CRITICAL fixable CVEs). Static analysis was already covered by the existing clippy gate. Not yet run against live GitHub Actions; fuzzing remains the one open row in §8 |
+| 1.2.0 | 2026-07-03 | First slice of adversarial sandbox-escape tests (§5): egress-proxy bypass attempts (`apex-tools` `egress_adversarial.rs` — IP-literal hostname bypass, non-CONNECT method smuggling, malformed CONNECT, oversized header flood), filesystem escape (`sandbox_backends.rs` — read-only rootfs write, workspace sibling-directory traversal), a PID/forkbomb containment test, and a plugin host-call-without-a-grant denial test (`apex-plugin` `engine.rs`, proving zero runtime invocations on denial). Documented the known L3 egress-bypass gap (bridge-networked container ignoring `HTTPS_PROXY`) rather than asserting a protection that doesn't exist. Remaining: true in-guest escape attempts against gVisor/Firecracker themselves |
 | 1.1.0 | 2026-07-03 | Status → partially implemented: per-section notes for the RBAC default-deny matrix (+ malformed-scope hardening), tenant-isolation + spoof-rejection suite, secret masking/by-reference audit, and the supply-chain tamper battery (publisher-key + keyless). Remaining: adversarial sandbox-escape testing on the strong backends and the CI scanning pipeline (§8) |
+| 1.0.0 | 2026-06-27 | Initial Security Testing specification |

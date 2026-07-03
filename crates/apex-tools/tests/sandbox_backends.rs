@@ -117,6 +117,36 @@ async fn container_enforces_memory_limit() {
 }
 
 #[tokio::test]
+async fn container_pids_limit_contains_a_fork_bomb() {
+    if !has(SandboxBackend::Container).await {
+        return;
+    }
+    // A `--pids-limit` cap (cgroup `pids.max`) must survive an adversarial attempt
+    // to grab far more processes than granted: of 40 attempted background jobs,
+    // only a handful may actually hold a live pid inside the container.
+    let mut c = cmd(
+        "sh",
+        &[
+            "-c",
+            "for i in $(seq 1 40); do sleep 10 & done 2>/dev/null; sleep 1; ls /proc | grep -Ec '^[0-9]+$'",
+        ],
+    );
+    c.limits.max_pids = Some(8);
+    c.limits.timeout = Duration::from_secs(15);
+    let sb = ContainerSandbox::docker(IMAGE);
+    let out = run(&sb, &c).await;
+
+    assert_eq!(out.exit_code, Some(0), "stderr: {}", out.stderr);
+    let alive: u32 = out.stdout.trim().parse().unwrap_or(u32::MAX);
+    assert!(
+        alive < 40,
+        "a pids limit of 8 must keep the fork bomb far below the 40 attempted forks, got {alive} alive; stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+}
+
+#[tokio::test]
 async fn gvisor_runs_under_runsc_kernel() {
     if !has(SandboxBackend::Gvisor).await {
         return;
@@ -129,6 +159,58 @@ async fn gvisor_runs_under_runsc_kernel() {
         out.stdout.contains("gVisor"),
         "expected gVisor sentry banner in dmesg, got: {}",
         out.stdout
+    );
+}
+
+#[tokio::test]
+async fn gvisor_denies_privileged_mount_syscall() {
+    if !has(SandboxBackend::Gvisor).await {
+        return;
+    }
+    // A compromised guest process attempting to mount a filesystem is a classic
+    // container-escape primitive (remounting `/` writable, staging a bind-mount
+    // pivot, etc.). gVisor's sentry intercepts `mount` in its own user-space
+    // kernel rather than passing it to the host, and denies it by default.
+    let sb = ContainerSandbox::gvisor(IMAGE);
+    let out = run(
+        &sb,
+        &cmd("sh", &["-c", "mount -t tmpfs tmpfs /mnt; echo RC=$?"]),
+    )
+    .await;
+    assert!(
+        out.stdout.contains("RC=") && !out.stdout.contains("RC=0"),
+        "an in-guest mount attempt must be denied under gVisor, got stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+}
+
+#[tokio::test]
+async fn gvisor_denies_reading_host_physical_memory_via_proc_kcore() {
+    if !has(SandboxBackend::Gvisor).await {
+        return;
+    }
+    // `/proc/kcore` exposes a process's view of physical memory — a known
+    // container-escape / info-leak vector if a strong backend's synthetic procfs
+    // ever forwarded it to the real host. gVisor's own procfs implementation
+    // must not expose it (or must expose empty/inaccessible content).
+    let sb = ContainerSandbox::gvisor(IMAGE);
+    let out = run(
+        &sb,
+        &cmd(
+            "sh",
+            &[
+                "-c",
+                "dd if=/proc/kcore of=/dev/null bs=1 count=64 2>&1; echo RC=$?",
+            ],
+        ),
+    )
+    .await;
+    assert!(
+        !out.stdout.contains("RC=0"),
+        "reading /proc/kcore must not succeed under gVisor, got stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
     );
 }
 
@@ -195,6 +277,53 @@ async fn firecracker_microvm_runs_command_and_returns_output() {
 }
 
 #[tokio::test]
+async fn firecracker_memory_ceiling_contains_a_guest_oom() {
+    // Needs KVM + the firecracker binary (capability) and a guest kernel + rootfs,
+    // supplied via env — see `firecracker_microvm_runs_command_and_returns_output`.
+    if !has(SandboxBackend::Firecracker).await {
+        return;
+    }
+    let (Ok(kernel), Ok(rootfs)) = (
+        std::env::var("APEX_FC_KERNEL"),
+        std::env::var("APEX_FC_ROOTFS"),
+    ) else {
+        eprintln!("skipping: APEX_FC_KERNEL / APEX_FC_ROOTFS not set");
+        return;
+    };
+
+    // A microVM's memory ceiling (`mem_size_mib`, hardware-virtualized — the guest
+    // simply has no more RAM to allocate) must contain a runaway process the same
+    // way the container backend's cgroup does: the guest's own OOM killer should
+    // intervene well before the wall-clock timeout, rather than the VM hanging or
+    // (worse) the host feeling any memory pressure from it.
+    let limits = ResourceLimits {
+        timeout: Duration::from_secs(30),
+        memory_bytes: Some(128 * 1024 * 1024),
+        ..ResourceLimits::default()
+    };
+    let config = FirecrackerConfig::from_limits(&kernel, &rootfs, &limits);
+    let sb = FirecrackerSandbox::with_config(config);
+
+    let mut c = cmd(
+        "sh",
+        &["-c", "a=x; while :; do a=\"$a$a$a$a$a$a$a$a$a\"; done"],
+    );
+    c.limits.timeout = Duration::from_secs(30);
+    let out = sb.execute(&c).await.expect("microVM execution");
+
+    assert!(
+        !out.timed_out,
+        "an unbounded memory grab in a 128 MiB microVM should be OOM-killed well before the wall-clock timeout"
+    );
+    assert_ne!(
+        out.exit_code,
+        Some(0),
+        "the OOM-killed process must not report success, stderr: {}",
+        out.stderr
+    );
+}
+
+#[tokio::test]
 async fn warm_pool_executes_and_reuses_container_sandboxes() {
     if !has(SandboxBackend::Container).await {
         return;
@@ -222,4 +351,103 @@ async fn warm_pool_executes_and_reuses_container_sandboxes() {
     let _sb = pool.acquire().await.expect("reacquire");
     assert_eq!(pool.reused(), 2, "both checkouts reused warm instances");
     assert_eq!(pool.created(), 2, "no extra sandboxes built");
+}
+
+// --- Adversarial filesystem-escape tests -----------------------------------
+//
+// The container backend bind-mounts exactly one host directory (`cmd.workdir`) at
+// `/workspace` and makes the whole rootfs `--read-only` otherwise. These tests
+// attempt the two obvious escapes an untrusted tool might try: writing somewhere
+// outside the mount, and reading a sibling host directory that was never granted.
+
+/// A fresh host scratch directory under the OS temp dir, unique per test run.
+fn scratch_dir(name: &str) -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "apex-fs-escape-{name}-{}-{seq}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    dir
+}
+
+fn cmd_in(workdir: &std::path::Path, program: &str, args: &[&str]) -> SandboxCommand {
+    let mut c = cmd(program, args);
+    c.workdir = workdir.to_string_lossy().into_owned();
+    c
+}
+
+#[tokio::test]
+async fn container_read_only_rootfs_denies_writes_outside_workspace() {
+    if !has(SandboxBackend::Container).await {
+        return;
+    }
+    let base = scratch_dir("readonly");
+    let workdir = base.join("workdir");
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+
+    let sb = ContainerSandbox::docker(IMAGE);
+    // The rootfs outside the bind mount is `--read-only`; only `/workspace` and the
+    // `tmpfs` `/tmp` are writable. A tool trying to tamper with the image itself
+    // (e.g. planting a backdoor in `/etc` or `/bin`) must be denied.
+    let out = run(
+        &sb,
+        &cmd_in(
+            &workdir,
+            "sh",
+            &["-c", "echo pwned > /etc/apex_pwn_test; echo RC=$?"],
+        ),
+    )
+    .await;
+
+    assert!(
+        out.stdout.contains("RC=") && !out.stdout.contains("RC=0"),
+        "write outside /workspace must fail on the read-only rootfs, got stdout: {:?} stderr: {:?}",
+        out.stdout,
+        out.stderr
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn container_workspace_mount_does_not_expose_host_sibling_directory() {
+    if !has(SandboxBackend::Container).await {
+        return;
+    }
+    let base = scratch_dir("sibling");
+    let workdir = base.join("workdir");
+    let secret_dir = base.join("secret");
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+    std::fs::create_dir_all(&secret_dir).expect("create secret dir");
+    let token = "apex_host_secret_2b6f9a";
+    std::fs::write(secret_dir.join("marker.txt"), token).expect("write marker");
+
+    let sb = ContainerSandbox::docker(IMAGE);
+    // Only `workdir` is bind-mounted at `/workspace`; its host sibling `secret/` was
+    // never granted. Traversing `..` from `/workspace` must land inside the
+    // container's own (empty) rootfs, never back out onto the host.
+    let out = run(
+        &sb,
+        &cmd_in(
+            &workdir,
+            "sh",
+            &["-c", "cat ../secret/marker.txt 2>&1; echo RC=$?"],
+        ),
+    )
+    .await;
+
+    assert!(
+        !out.stdout.contains(token),
+        "a sibling host directory outside the bind mount must not be readable via `..`, got: {:?}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("RC=0"),
+        "the traversal read must fail, got: {:?}",
+        out.stdout
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
 }

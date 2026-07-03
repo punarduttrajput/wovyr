@@ -1,6 +1,11 @@
 # CI pipeline for the Apex AI Platform.
 # Mirrors docs/19-implementation-guide/build-system.md §8:
 #   fmt+clippy → build → unit → integration
+# Automated security scanning (docs/15-testing/security-testing.md §8) gates the
+# same pipeline: SAST is the `rust` job's clippy step (`-D warnings`); `security`
+# below adds the rest — dependency CVEs (SCA) and secret scanning — and
+# `container-scan` builds the single-binary Docker image and scans it for
+# vulnerabilities (also the image's first real CI build).
 name: ci
 
 on:
@@ -37,3 +42,60 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  security:
+    name: dependency + secret scanning
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # audit-check posts its findings as a check run, which needs write access
+      # even when the repo's default GITHUB_TOKEN permissions are read-only.
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # SCA: RustSec advisory-DB check against Cargo.lock. Annotates the PR/commit
+      # via the default GITHUB_TOKEN; no extra secrets needed.
+      - name: Dependency audit (cargo-audit / RustSec)
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Secret scanning: the standalone gitleaks binary (not the wrapper Action,
+      # which gates organizational use behind a license) against the checked-out
+      # working tree only — `--no-git` scans files as they are at this commit
+      # rather than replaying the full history on every run.
+      - name: Secret scan (gitleaks)
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks detect --source . --no-git --redact --exit-code 1
+
+  container-scan:
+    name: container image scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the apex image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployment/docker/Dockerfile
+          tags: apex:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Container scanning: fail the build on known HIGH/CRITICAL vulnerabilities
+      # in the OS packages and Rust dependencies baked into the image.
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: apex:ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
