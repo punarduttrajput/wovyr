@@ -963,6 +963,109 @@ artifacts:
         (package, root, policy)
     }
 
+    /// Supply-chain tamper battery for the **keyless** install path
+    /// ([security-testing §7], [ADR-0009]): every corruption of a keyless package is
+    /// rejected fail-closed at `install`, and nothing is registered.
+    #[test]
+    fn keyless_install_rejects_every_tampering() {
+        use crate::keyless::*;
+        const NOW: u64 = 1_700_000_000_000;
+
+        let (ca_pkcs8, _) = generate_keypair().unwrap();
+        let ca = InMemoryCa::from_pkcs8(&ca_pkcs8).unwrap();
+        let (log_pkcs8, _) = generate_keypair().unwrap();
+        let log = InMemoryTransparencyLog::from_pkcs8(&log_pkcs8, NOW + 1000).unwrap();
+        let identity = SignerIdentity {
+            issuer: "https://ci.example.com".into(),
+            subject: "release@acme.dev".into(),
+        };
+        let (eph, _) = generate_keypair().unwrap();
+        let bundle =
+            sign_keyless(MANIFEST.as_bytes(), &identity, &eph, &ca, Some(&log), NOW).unwrap();
+        let root = KeylessRoot {
+            ca_public_keys: vec![ca.public_key_hex()],
+            log_public_keys: vec![log.public_key_hex()],
+        };
+        let policy = IdentityPolicy {
+            allow: vec![IdentityRule {
+                issuer: "https://ci.example.com".into(),
+                subject: "release@acme.dev".into(),
+                publisher: "acme".into(),
+            }],
+            require_transparency: true,
+        };
+        let good = Package::new(MANIFEST, Vec::new())
+            .with_artifact("artifacts/github.wasm", b"hello world".to_vec())
+            .with_keyless(bundle.clone());
+        let engine = || {
+            PluginEngine::new(semver::Version::new(1, 0, 0), TrustStore::new())
+                .with_keyless(root.clone(), policy.clone())
+        };
+
+        // Sanity: the untampered package installs.
+        assert!(engine().install(&good, &grants()).is_ok());
+
+        // 1. Tampered manifest (bundle signs the original bytes).
+        let mutated = MANIFEST.replace("net:egress:api.github.com", "net:egress:*");
+        let pkg = Package::new(mutated, Vec::new())
+            .with_artifact("artifacts/github.wasm", b"hello world".to_vec())
+            .with_keyless(bundle.clone());
+        assert!(engine().install(&pkg, &["net:egress:*".into()]).is_err());
+
+        // 2. Certificate from an unpinned CA (attacker's own CA).
+        let (evil_ca_pkcs8, _) = generate_keypair().unwrap();
+        let evil_ca = InMemoryCa::from_pkcs8(&evil_ca_pkcs8).unwrap();
+        let (eph2, _) = generate_keypair().unwrap();
+        let forged = sign_keyless(
+            MANIFEST.as_bytes(),
+            &identity,
+            &eph2,
+            &evil_ca,
+            Some(&log),
+            NOW,
+        )
+        .unwrap();
+        let pkg = Package::new(MANIFEST, Vec::new())
+            .with_artifact("artifacts/github.wasm", b"hello world".to_vec())
+            .with_keyless(forged);
+        assert!(engine().install(&pkg, &grants()).is_err());
+
+        // 3. Forged transparency-log timestamp (SET no longer verifies).
+        let mut set_forged = bundle.clone();
+        set_forged.log_entry.as_mut().unwrap().integrated_time_ms += 1;
+        let pkg = Package::new(MANIFEST, Vec::new())
+            .with_artifact("artifacts/github.wasm", b"hello world".to_vec())
+            .with_keyless(set_forged);
+        assert!(engine().install(&pkg, &grants()).is_err());
+
+        // 4. Identity not granted the publisher's namespace.
+        let narrow = IdentityPolicy {
+            allow: vec![IdentityRule {
+                issuer: "https://ci.example.com".into(),
+                subject: "release@acme.dev".into(),
+                publisher: "someone-else".into(),
+            }],
+            require_transparency: true,
+        };
+        let mut narrowed = PluginEngine::new(semver::Version::new(1, 0, 0), TrustStore::new())
+            .with_keyless(root.clone(), narrow);
+        assert!(matches!(
+            narrowed.install(&good, &grants()).unwrap_err(),
+            Error::Forbidden(_)
+        ));
+
+        // 5. Bundle stripped: a keyless-only package (no publisher key) against an
+        // empty trust store with keyless disabled → rejected (no downgrade to
+        // unsigned).
+        let stripped = Package::new(MANIFEST, Vec::new())
+            .with_artifact("artifacts/github.wasm", b"hello world".to_vec());
+        let mut plain = PluginEngine::new(semver::Version::new(1, 0, 0), TrustStore::new());
+        assert!(plain.install(&stripped, &grants()).is_err());
+
+        // None of the rejected installs registered anything.
+        assert!(engine().installed().is_empty());
+    }
+
     #[test]
     fn installs_a_keyless_signed_package_when_configured() {
         let (package, root, policy) = keyless_package();

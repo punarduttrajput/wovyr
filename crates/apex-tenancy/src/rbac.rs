@@ -50,14 +50,21 @@ impl Role {
     }
 }
 
-/// Whether `scope` is a read scope (`*:read`).
+/// Whether `scope` names `<domain>:<action>` with a non-empty domain — rejecting
+/// malformed scopes (`":read"`, `"agents:"`, `""`) fail-closed so a suffix match
+/// alone never authorizes.
+fn is_well_formed(scope: &str, action: &str) -> bool {
+    matches!(scope.strip_suffix(action), Some(domain) if domain.ends_with(':') && domain.len() > 1)
+}
+
+/// Whether `scope` is a read scope (`<domain>:read`).
 fn is_read(scope: &str) -> bool {
-    scope.ends_with(":read")
+    is_well_formed(scope, "read")
 }
 
 /// Whether `scope` is a (non-admin) write/action scope.
 fn is_write(scope: &str) -> bool {
-    scope.ends_with(":write")
+    is_well_formed(scope, "write")
         || scope == "workflows:run"
         || scope == "tools:invoke"
         || scope == "agents:run"
@@ -153,5 +160,117 @@ mod tests {
         // No roles ⇒ no access.
         let empty = TenantContext::default();
         assert!(empty.authorize("agents:read").is_err());
+    }
+
+    // ── Security suite: the RBAC default-deny matrix ([security-testing §3]). ──
+    // These guard the whole authorization surface as a table, not per-scope
+    // spot-checks, so a future permission change can't silently widen a role.
+
+    /// Every scope the platform authorizes against, tagged by tier. The matrix
+    /// below asserts each role grants exactly the tiers at or below its rank —
+    /// the privilege ladder Viewer < Editor < ProjectAdmin < OrgAdmin <
+    /// PlatformAdmin — and nothing above it (fail-closed).
+    const READ_SCOPES: &[&str] = &[
+        "agents:read",
+        "workflows:read",
+        "memory:read",
+        "secrets:read",
+        "audit:read",
+        "projects:read",
+    ];
+    const WRITE_SCOPES: &[&str] = &[
+        "agents:write",
+        "agents:run",
+        "workflows:run",
+        "memory:write",
+        "secrets:write",
+        "tools:invoke",
+    ];
+    const PROJECT_ADMIN_SCOPES: &[&str] = &["memory:admin", "projects:admin", "agents:admin"];
+    const ORG_ADMIN_SCOPES: &[&str] = &["org.admin", "users:admin"];
+    const PLATFORM_SCOPES: &[&str] = &["platform.admin"];
+
+    /// The highest tier each role may reach (0=read … 4=platform). A role grants a
+    /// scope iff the scope's tier ≤ the role's rank.
+    fn rank(role: Role) -> usize {
+        match role {
+            Role::Viewer => 0,
+            Role::Editor => 1,
+            Role::ProjectAdmin => 2,
+            Role::OrgAdmin => 3,
+            Role::PlatformAdmin => 4,
+        }
+    }
+
+    #[test]
+    fn rbac_default_deny_matrix_is_a_strict_privilege_ladder() {
+        let tiers: [(usize, &[&str]); 5] = [
+            (0, READ_SCOPES),
+            (1, WRITE_SCOPES),
+            (2, PROJECT_ADMIN_SCOPES),
+            (3, ORG_ADMIN_SCOPES),
+            (4, PLATFORM_SCOPES),
+        ];
+        let roles = [
+            Role::Viewer,
+            Role::Editor,
+            Role::ProjectAdmin,
+            Role::OrgAdmin,
+            Role::PlatformAdmin,
+        ];
+        for role in roles {
+            for (tier, scopes) in tiers {
+                let expected = tier <= rank(role); // grant iff at/below the role's rank
+                for scope in scopes {
+                    assert_eq!(
+                        role.grants(scope),
+                        expected,
+                        "{role:?} vs `{scope}` (tier {tier}): expected grant={expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_and_malformed_scopes_are_denied_for_non_admins() {
+        // A scope no tier recognizes must be refused by every non-superuser role —
+        // fail-closed, so a typo or a newly-added scope never defaults to allowed.
+        for scope in [
+            "",
+            "agents",
+            "agents:",
+            ":read",
+            "agents:frobnicate",
+            "AGENTS:READ",
+        ] {
+            assert!(!Role::Viewer.grants(scope), "viewer granted `{scope}`");
+            assert!(!Role::Editor.grants(scope), "editor granted `{scope}`");
+        }
+        // Org/platform admins are deliberately broad (everything below their bar),
+        // but the platform-admin scope itself stays exclusive to PlatformAdmin.
+        assert!(!Role::OrgAdmin.grants("platform.admin"));
+        assert!(!Role::ProjectAdmin.grants("org.admin"));
+    }
+
+    #[test]
+    fn authorize_never_leaks_across_the_admin_boundary() {
+        // A project admin acting with a full role union still cannot cross into
+        // org/platform administration — the union is a max, not an escalation.
+        let ctx = TenantContext {
+            tenant: "acme".into(),
+            project: Some("prj-x".into()),
+            principal: "eve".into(),
+            roles: vec![Role::Viewer, Role::Editor, Role::ProjectAdmin],
+        };
+        assert!(ctx.authorize("projects:admin").is_ok());
+        assert!(matches!(
+            ctx.authorize("org.admin").unwrap_err(),
+            Error::Forbidden(_)
+        ));
+        assert!(matches!(
+            ctx.authorize("platform.admin").unwrap_err(),
+            Error::Forbidden(_)
+        ));
     }
 }
