@@ -5,7 +5,7 @@
 //! CRUD logic via [`RegistryState`]. Operations are fail-closed: mutating an absent
 //! listing is [`Error::NotFound`](apex_common::Error::NotFound).
 
-use crate::listing::{ListingRecord, PublishedVersion, Review};
+use crate::listing::{ListingRecord, PublishedVersion, Review, ReviewStatus};
 use apex_common::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -45,6 +45,7 @@ impl RegistryState {
                 reviews: Vec::new(),
                 installs: 0,
                 verified: false,
+                review: ReviewStatus::Unreviewed,
             });
         for c in categories {
             if !rec.categories.contains(c) {
@@ -70,9 +71,69 @@ impl RegistryState {
         Ok(())
     }
 
-    /// Set (or clear) a listing's verified badge.
+    /// Set (or clear) a listing's verified badge directly — an operator override
+    /// alongside the [`request_review`](Self::request_review)/
+    /// [`approve_review`](Self::approve_review)/[`reject_review`](Self::reject_review)
+    /// workflow (e.g. an immediate takedown, or back-compat with a pre-workflow
+    /// verified listing). Does not touch [`ReviewStatus`].
     pub fn set_verified(&mut self, listing_id: &str, verified: bool) -> Result<()> {
         self.get_mut(listing_id)?.verified = verified;
+        Ok(())
+    }
+
+    /// A publisher requests human review of their listing's current latest version
+    /// ([Marketplace §6]) — the step gating the **verified** badge (not `publish`
+    /// itself; community listings publish and install without ever entering this
+    /// lifecycle). Fails if there is no published version yet, or if a review is
+    /// already pending.
+    pub fn request_review(&mut self, listing_id: &str) -> Result<()> {
+        let rec = self.get_mut(listing_id)?;
+        if rec.review.is_pending() {
+            return Err(Error::conflict(format!(
+                "listing `{listing_id}` already has a pending review"
+            )));
+        }
+        let version = rec
+            .latest()
+            .map(|v| v.version.clone())
+            .ok_or_else(|| Error::invalid("cannot request review: no published version"))?;
+        rec.review = ReviewStatus::Pending { version };
+        Ok(())
+    }
+
+    /// A reviewer approves the pending review, setting the verified badge. Fails if
+    /// no review is pending.
+    pub fn approve_review(&mut self, listing_id: &str, reviewer: &str) -> Result<()> {
+        let rec = self.get_mut(listing_id)?;
+        let ReviewStatus::Pending { version } = &rec.review else {
+            return Err(Error::invalid(format!(
+                "listing `{listing_id}` has no pending review"
+            )));
+        };
+        rec.review = ReviewStatus::Approved {
+            reviewer: reviewer.to_string(),
+            version: version.clone(),
+        };
+        rec.verified = true;
+        Ok(())
+    }
+
+    /// A reviewer rejects the pending review with actionable `reason`, clearing the
+    /// verified badge; the publisher may address it and request review again. Fails
+    /// if no review is pending.
+    pub fn reject_review(&mut self, listing_id: &str, reviewer: &str, reason: &str) -> Result<()> {
+        let rec = self.get_mut(listing_id)?;
+        let ReviewStatus::Pending { version } = &rec.review else {
+            return Err(Error::invalid(format!(
+                "listing `{listing_id}` has no pending review"
+            )));
+        };
+        rec.review = ReviewStatus::Rejected {
+            reviewer: reviewer.to_string(),
+            version: version.clone(),
+            reason: reason.to_string(),
+        };
+        rec.verified = false;
         Ok(())
     }
 
@@ -108,8 +169,68 @@ pub trait RegistryStore: Send + Sync {
     /// Set a listing's verified badge (fail-closed if absent).
     fn set_verified(&self, listing_id: &str, verified: bool) -> Result<()>;
 
+    /// A publisher requests human review of the listing's current latest version
+    /// (fail-closed if absent, unpublished, or already pending).
+    fn request_review(&self, listing_id: &str) -> Result<()>;
+
+    /// A reviewer approves the pending review (fail-closed if none is pending).
+    fn approve_review(&self, listing_id: &str, reviewer: &str) -> Result<()>;
+
+    /// A reviewer rejects the pending review with feedback (fail-closed if none is
+    /// pending).
+    fn reject_review(&self, listing_id: &str, reviewer: &str, reason: &str) -> Result<()>;
+
     /// Increment a listing's install count (fail-closed if absent).
     fn record_install(&self, listing_id: &str) -> Result<()>;
+}
+
+/// Lets a `Registry` be built over a boxed, runtime-selected backend
+/// (`Registry<Box<dyn RegistryStore>>`) — the seam a binary uses to pick
+/// `FileRegistryStore` vs. a capability-gated `PostgresRegistryStore` at startup
+/// (e.g. from an environment variable) without becoming generic over it.
+impl RegistryStore for Box<dyn RegistryStore> {
+    fn upsert_version(
+        &self,
+        publisher: &str,
+        name: &str,
+        version: PublishedVersion,
+        categories: &[String],
+        channel: &str,
+    ) -> Result<()> {
+        (**self).upsert_version(publisher, name, version, categories, channel)
+    }
+
+    fn get(&self, listing_id: &str) -> Result<Option<ListingRecord>> {
+        (**self).get(listing_id)
+    }
+
+    fn all(&self) -> Result<Vec<ListingRecord>> {
+        (**self).all()
+    }
+
+    fn add_review(&self, listing_id: &str, review: Review) -> Result<()> {
+        (**self).add_review(listing_id, review)
+    }
+
+    fn set_verified(&self, listing_id: &str, verified: bool) -> Result<()> {
+        (**self).set_verified(listing_id, verified)
+    }
+
+    fn request_review(&self, listing_id: &str) -> Result<()> {
+        (**self).request_review(listing_id)
+    }
+
+    fn approve_review(&self, listing_id: &str, reviewer: &str) -> Result<()> {
+        (**self).approve_review(listing_id, reviewer)
+    }
+
+    fn reject_review(&self, listing_id: &str, reviewer: &str, reason: &str) -> Result<()> {
+        (**self).reject_review(listing_id, reviewer, reason)
+    }
+
+    fn record_install(&self, listing_id: &str) -> Result<()> {
+        (**self).record_install(listing_id)
+    }
 }
 
 /// In-memory registry store for tests and single-process use.
@@ -165,6 +286,24 @@ impl RegistryStore for InMemoryRegistryStore {
             .lock()
             .unwrap()
             .set_verified(listing_id, verified)
+    }
+
+    fn request_review(&self, listing_id: &str) -> Result<()> {
+        self.state.lock().unwrap().request_review(listing_id)
+    }
+
+    fn approve_review(&self, listing_id: &str, reviewer: &str) -> Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .approve_review(listing_id, reviewer)
+    }
+
+    fn reject_review(&self, listing_id: &str, reviewer: &str, reason: &str) -> Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .reject_review(listing_id, reviewer, reason)
     }
 
     fn record_install(&self, listing_id: &str) -> Result<()> {
@@ -250,6 +389,18 @@ impl RegistryStore for FileRegistryStore {
         self.mutate(|state| state.set_verified(listing_id, verified))
     }
 
+    fn request_review(&self, listing_id: &str) -> Result<()> {
+        self.mutate(|state| state.request_review(listing_id))
+    }
+
+    fn approve_review(&self, listing_id: &str, reviewer: &str) -> Result<()> {
+        self.mutate(|state| state.approve_review(listing_id, reviewer))
+    }
+
+    fn reject_review(&self, listing_id: &str, reviewer: &str, reason: &str) -> Result<()> {
+        self.mutate(|state| state.reject_review(listing_id, reviewer, reason))
+    }
+
     fn record_install(&self, listing_id: &str) -> Result<()> {
         self.mutate(|state| state.record_install(listing_id))
     }
@@ -330,6 +481,88 @@ mod tests {
                 )
                 .is_err()
         );
+        assert!(store.request_review("nope/x").is_err());
+        assert!(store.approve_review("nope/x", "alice").is_err());
+        assert!(store.reject_review("nope/x", "alice", "no").is_err());
+    }
+
+    #[test]
+    fn human_review_workflow_approves_and_sets_verified() {
+        let store = InMemoryRegistryStore::new();
+        store
+            .upsert_version("acme", "x", version("1.0.0"), &[], "stable")
+            .unwrap();
+
+        // No pending review yet: approve/reject are refused.
+        assert!(store.approve_review("acme/x", "alice").is_err());
+        assert!(store.reject_review("acme/x", "alice", "no").is_err());
+        assert!(!store.get("acme/x").unwrap().unwrap().review.is_pending());
+
+        store.request_review("acme/x").unwrap();
+        assert!(store.get("acme/x").unwrap().unwrap().review.is_pending());
+        // Double-requesting a pending review is refused.
+        assert!(store.request_review("acme/x").is_err());
+
+        store.approve_review("acme/x", "alice").unwrap();
+        let rec = store.get("acme/x").unwrap().unwrap();
+        assert!(rec.verified);
+        assert_eq!(
+            rec.review,
+            ReviewStatus::Approved {
+                reviewer: "alice".into(),
+                version: "1.0.0".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn human_review_workflow_rejects_and_clears_verified() {
+        let store = InMemoryRegistryStore::new();
+        store
+            .upsert_version("acme", "x", version("1.0.0"), &[], "stable")
+            .unwrap();
+        store.request_review("acme/x").unwrap();
+        store
+            .reject_review("acme/x", "alice", "missing SBOM")
+            .unwrap();
+
+        let rec = store.get("acme/x").unwrap().unwrap();
+        assert!(!rec.verified);
+        assert_eq!(
+            rec.review,
+            ReviewStatus::Rejected {
+                reviewer: "alice".into(),
+                version: "1.0.0".into(),
+                reason: "missing SBOM".into(),
+            }
+        );
+        // A rejected listing may request review again.
+        store.request_review("acme/x").unwrap();
+        assert!(store.get("acme/x").unwrap().unwrap().review.is_pending());
+    }
+
+    #[test]
+    fn request_review_requires_a_published_version() {
+        // A listing with no published version (constructed directly against
+        // `RegistryState`, since `upsert_version` always creates one) must refuse a
+        // review request.
+        let mut state = RegistryState::default();
+        state.listings.insert(
+            "acme/empty".into(),
+            ListingRecord {
+                id: "acme/empty".into(),
+                publisher: "acme".into(),
+                name: "empty".into(),
+                categories: vec![],
+                versions: vec![],
+                channels: Default::default(),
+                reviews: vec![],
+                installs: 0,
+                verified: false,
+                review: ReviewStatus::Unreviewed,
+            },
+        );
+        assert!(state.request_review("acme/empty").is_err());
     }
 
     #[test]
@@ -349,5 +582,25 @@ mod tests {
         assert_eq!(rec.installs, 1);
         assert_eq!(rec.latest().unwrap().version, "1.0.0");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn boxed_dyn_store_delegates_to_the_underlying_backend() {
+        // The seam `Registry<Box<dyn RegistryStore>>` relies on: a caller (e.g. a
+        // server/CLI runtime store selector) boxes whichever backend it picked, and
+        // every operation must behave exactly as calling the concrete type directly.
+        let boxed: Box<dyn RegistryStore> = Box::new(InMemoryRegistryStore::new());
+        boxed
+            .upsert_version("acme", "x", version("1.0.0"), &["a".into()], "stable")
+            .unwrap();
+        assert_eq!(boxed.all().unwrap().len(), 1);
+        boxed.record_install("acme/x").unwrap();
+        assert_eq!(boxed.get("acme/x").unwrap().unwrap().installs, 1);
+        assert!(boxed.record_install("nope/x").is_err());
+
+        boxed.request_review("acme/x").unwrap();
+        boxed.approve_review("acme/x", "alice").unwrap();
+        assert!(boxed.get("acme/x").unwrap().unwrap().verified);
+        assert!(boxed.reject_review("nope/x", "alice", "no").is_err());
     }
 }

@@ -258,10 +258,36 @@ impl<S: RegistryStore> Registry<S> {
         self.store.add_review(listing_id, review)
     }
 
-    /// Set a listing's verified badge — the operator/reviewer human-review step
-    /// ([§6](../../docs/08-plugin-sdk/marketplace.md#6-review--quality)).
+    /// Set a listing's verified badge directly — an operator override alongside the
+    /// [`request_review`](Self::request_review)/[`approve_review`](Self::approve_review)/
+    /// [`reject_review`](Self::reject_review) workflow (e.g. an immediate takedown, or
+    /// back-compat with a pre-workflow verified listing). Does not touch
+    /// `ReviewStatus`.
     pub fn set_verified(&self, listing_id: &str, verified: bool) -> Result<()> {
         self.store.set_verified(listing_id, verified)
+    }
+
+    /// A publisher requests human review of their listing's current latest version —
+    /// the step gating the **verified** badge
+    /// ([§6](../../docs/08-plugin-sdk/marketplace.md#6-review--quality)). Does not
+    /// gate `publish` itself: community (unreviewed) listings publish and install
+    /// fine without ever entering this lifecycle. Fails if there's no published
+    /// version, or a review is already pending.
+    pub fn request_review(&self, listing_id: &str) -> Result<()> {
+        self.store.request_review(listing_id)
+    }
+
+    /// A reviewer approves the listing's pending review, setting the verified badge
+    /// ([§6]). Fails if no review is pending.
+    pub fn approve_review(&self, listing_id: &str, reviewer: &str) -> Result<()> {
+        self.store.approve_review(listing_id, reviewer)
+    }
+
+    /// A reviewer rejects the listing's pending review with actionable `reason`
+    /// ([§6]), clearing the verified badge; the publisher may address it and request
+    /// review again. Fails if no review is pending.
+    pub fn reject_review(&self, listing_id: &str, reviewer: &str, reason: &str) -> Result<()> {
+        self.store.reject_review(listing_id, reviewer, reason)
     }
 
     /// Increment a listing's install count (called after a successful install).
@@ -452,6 +478,56 @@ capabilities:
         reg.set_verified("acme/github", true).unwrap();
         assert_eq!(reg.search(&SearchQuery::default()).unwrap().len(), 1);
         assert!(reg.download("acme/github", None).is_ok());
+    }
+
+    #[test]
+    fn human_review_workflow_gates_the_verified_badge() {
+        let (pkg, public) = signed_pkg(GITHUB);
+        let reg = Registry::new(InMemoryRegistryStore::new(), trust_for("acme", public))
+            .with_policy(RegistryPolicy {
+                require_verified: true,
+                ..Default::default()
+            });
+        reg.publish(&pkg, &[], None).unwrap();
+
+        // Publishing never required review — a community listing exists, just hidden
+        // behind `require_verified` until it earns the badge.
+        assert!(reg.get("acme/github").unwrap().is_none());
+        assert!(reg.approve_review("acme/github", "alice").is_err());
+
+        reg.request_review("acme/github").unwrap();
+        assert!(
+            reg.get("acme/github").unwrap().is_none(),
+            "a pending review does not itself confer the verified badge"
+        );
+
+        reg.approve_review("acme/github", "alice").unwrap();
+        let listing = reg.get("acme/github").unwrap().unwrap();
+        assert!(listing.verified);
+        assert_eq!(
+            listing.review,
+            crate::listing::ReviewStatus::Approved {
+                reviewer: "alice".into(),
+                version: "1.4.0".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejected_review_can_be_resubmitted() {
+        let (pkg, public) = signed_pkg(GITHUB);
+        let reg = Registry::new(InMemoryRegistryStore::new(), trust_for("acme", public));
+        reg.publish(&pkg, &[], None).unwrap();
+
+        reg.request_review("acme/github").unwrap();
+        reg.reject_review("acme/github", "alice", "missing SBOM")
+            .unwrap();
+        assert!(!reg.get("acme/github").unwrap().unwrap().verified);
+
+        // The rejection is actionable feedback, not a dead end — request again.
+        reg.request_review("acme/github").unwrap();
+        reg.approve_review("acme/github", "bob").unwrap();
+        assert!(reg.get("acme/github").unwrap().unwrap().verified);
     }
 
     #[test]

@@ -12,6 +12,10 @@ description = "Single-node HTTP server exposing the Apex Platform API (v0.1: age
 # server's run path. Off by default (pulls Wasmtime via apex-plugin/wasi); without it,
 # enabled plugin tools register but error on call (the not-loaded placeholder).
 plugin-wasi = ["apex-plugin/wasi"]
+# Postgres-backed marketplace registry: when `APEX_MARKETPLACE_POSTGRES_URL` is set,
+# the marketplace routes share a durable catalog across server nodes instead of each
+# holding its own `registry.json`. Off by default (pulls the `postgres` crate).
+postgres = ["apex-marketplace/postgres"]
 
 [dependencies]
 apex-common.workspace = true

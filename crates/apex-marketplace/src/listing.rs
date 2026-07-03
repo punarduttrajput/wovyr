@@ -79,6 +79,53 @@ pub struct Review {
     pub body: String,
 }
 
+/// The human-review lifecycle for a listing's request to become **Verified**
+/// ([Marketplace §6](../../docs/08-plugin-sdk/marketplace.md#6-review--quality)):
+/// `Submit → automated checks → security scan → human review (for verified) →
+/// publish`. Automated checks + the security scan already gate every `publish`
+/// (§7's `RegistryPolicy`); this covers the human step, which only applies to the
+/// **verified** track — a community (unreviewed) listing publishes and installs
+/// fine without ever entering this lifecycle.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReviewStatus {
+    /// No verification requested — the default for every listing, and where a
+    /// rejected listing returns to once the publisher acknowledges the feedback by
+    /// [requesting review](../../docs/08-plugin-sdk/marketplace.md#6-review--quality)
+    /// again.
+    #[default]
+    Unreviewed,
+    /// The publisher requested review of `version`; awaiting a reviewer decision.
+    Pending {
+        /// The version under review (the listing's latest at request time).
+        version: String,
+    },
+    /// A reviewer approved `version` — the listing's `verified` badge is set.
+    Approved {
+        /// The identity of the approving reviewer.
+        reviewer: String,
+        /// The approved version.
+        version: String,
+    },
+    /// A reviewer rejected `version` with actionable feedback; the publisher may
+    /// address `reason` and request review again.
+    Rejected {
+        /// The identity of the rejecting reviewer.
+        reviewer: String,
+        /// The rejected version.
+        version: String,
+        /// Actionable feedback explaining the rejection.
+        reason: String,
+    },
+}
+
+impl ReviewStatus {
+    /// Whether a review is currently awaiting a reviewer decision.
+    pub fn is_pending(&self) -> bool {
+        matches!(self, ReviewStatus::Pending { .. })
+    }
+}
+
 /// The stored aggregate for one listing (`publisher/name`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListingRecord {
@@ -102,9 +149,15 @@ pub struct ListingRecord {
     /// Cumulative install count.
     #[serde(default)]
     pub installs: u64,
-    /// Whether the listing passed review (operator-set verified badge).
+    /// Whether the listing passed review (the verified badge). Set directly by
+    /// [`approve_review`](crate::Registry::approve_review)/
+    /// [`reject_review`](crate::Registry::reject_review), or by the operator's
+    /// [`set_verified`](crate::Registry::set_verified) override.
     #[serde(default)]
     pub verified: bool,
+    /// The human-review lifecycle for the verified-badge request ([§6]).
+    #[serde(default)]
+    pub review: ReviewStatus,
 }
 
 impl ListingRecord {
@@ -165,6 +218,7 @@ impl ListingRecord {
             reviews: self.reviews.len() as u64,
             installs: self.installs,
             verified: self.verified,
+            review: self.review.clone(),
         }
     }
 }
@@ -206,6 +260,9 @@ pub struct Listing {
     pub installs: u64,
     /// Verified badge.
     pub verified: bool,
+    /// The human-review lifecycle for the verified-badge request ([§6]).
+    #[serde(default)]
+    pub review: ReviewStatus,
 }
 
 #[cfg(test)]
@@ -239,6 +296,7 @@ mod tests {
             reviews: vec![],
             installs: 0,
             verified: false,
+            review: ReviewStatus::Unreviewed,
         };
         assert_eq!(rec.rating(), None);
         rec.reviews.push(Review {
@@ -252,5 +310,20 @@ mod tests {
             body: String::new(),
         });
         assert_eq!(rec.rating(), Some(4.5));
+    }
+
+    #[test]
+    fn review_status_defaults_unreviewed_and_reports_pending() {
+        assert_eq!(ReviewStatus::default(), ReviewStatus::Unreviewed);
+        assert!(!ReviewStatus::Unreviewed.is_pending());
+        let pending = ReviewStatus::Pending {
+            version: "1.0.0".into(),
+        };
+        assert!(pending.is_pending());
+        let approved = ReviewStatus::Approved {
+            reviewer: "alice".into(),
+            version: "1.0.0".into(),
+        };
+        assert!(!approved.is_pending());
     }
 }

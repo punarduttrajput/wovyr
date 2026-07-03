@@ -16,7 +16,7 @@
 
 use crate::config;
 use apex_common::{Error, Result};
-use apex_marketplace::{FileRegistryStore, Registry, SearchQuery};
+use apex_marketplace::{FileRegistryStore, Registry, RegistryStore, SearchQuery};
 use apex_plugin::{
     CapabilityKind, InstalledPlugin, Package, PluginEngine, PluginManifest, PluginState, TrustStore,
 };
@@ -629,18 +629,33 @@ pub fn uninstall_cmd(id: &str) -> Result<()> {
 // --- Marketplace -----------------------------------------------------------------
 //
 // The local registry mirrors the rest of the `apex plugin` surface: durable state
-// under `~/.apex/marketplace/registry.json`, sharing the plugin trust store so only
-// trusted publishers can list a plugin. (A remote registry server speaks the same
+// under `~/.apex/marketplace/registry.json` by default, sharing the plugin trust store
+// so only trusted publishers can list a plugin. Built with `--features postgres` and
+// `APEX_MARKETPLACE_POSTGRES_URL` set, it shares a `PostgresRegistryStore` catalog with
+// a `postgres`-built `apex-server` instead — so `apex plugin publish/search/get` see the
+// same listings a running server does. (A remote registry server speaks the same
 // `/api/v1/marketplace` routes.)
 
-/// A registry over the durable local store, sharing the plugin trust store (and the
-/// keyless trust config, when present).
-fn marketplace_registry() -> Result<Registry<FileRegistryStore>> {
-    let store = FileRegistryStore::new(
+/// Open the durable registry store: `PostgresRegistryStore` when this binary was built
+/// with the `postgres` feature *and* `APEX_MARKETPLACE_POSTGRES_URL` is set, else the
+/// single-node `FileRegistryStore` at `~/.apex/marketplace/registry.json`.
+fn open_store() -> Result<Box<dyn RegistryStore>> {
+    #[cfg(feature = "postgres")]
+    if let Ok(url) = std::env::var("APEX_MARKETPLACE_POSTGRES_URL") {
+        let store = apex_marketplace::PostgresRegistryStore::connect(&url)?;
+        return Ok(Box::new(store));
+    }
+    Ok(Box::new(FileRegistryStore::new(
         config::config_dir()?
             .join("marketplace")
             .join("registry.json"),
-    );
+    )))
+}
+
+/// A registry over the durable store, sharing the plugin trust store (and the
+/// keyless trust config, when present).
+fn marketplace_registry() -> Result<Registry<Box<dyn RegistryStore>>> {
+    let store = open_store()?;
     let mut reg = Registry::new(store, load_trust()?);
     if let Some(k) = load_keyless()? {
         reg = reg.with_keyless(k.root, k.policy);

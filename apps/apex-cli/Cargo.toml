@@ -24,6 +24,11 @@ plugin-wasi = ["apex-plugin/wasi", "dep:apex-secrets"]
 # Rekor client for `plugin keyless-sign --rekor <url>` (witness signings in a
 # transparency log, ADR-0009). Off by default (pulls reqwest's blocking client).
 keyless-rekor = ["apex-plugin/rekor"]
+# Postgres-backed marketplace registry: when APEX_MARKETPLACE_POSTGRES_URL is set,
+# both `apex plugin publish|search|get` and the embedded `apex dev` server share the
+# same durable catalog instead of each process reading its own `registry.json`. Off by
+# default (pulls the `postgres` crate).
+postgres = ["apex-marketplace/postgres", "apex-server/postgres"]
 
 [dependencies]
 apex-common.workspace = true

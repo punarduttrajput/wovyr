@@ -4,16 +4,20 @@
 //! surfaces a version's supply-chain posture (permission risk, SBOM, build provenance,
 //! content digest, signature verification) so an operator sees it before granting.
 //!
-//! Listings persist to a durable [`FileRegistryStore`] at `~/.apex/marketplace/registry.json`.
-//! Publishing re-verifies the package signature against the **same** trust store the
-//! plugin lifecycle uses (`~/.apex/plugins/trust.json`), so only trusted publishers can
-//! list a plugin. Operator curation ([§7]) is loaded from
-//! `~/.apex/marketplace/policy.json` when present (else the permissive default). The
-//! install bridge downloads a listed package and installs it into the local plugin
-//! catalog via the shared [`plugins::install_package`](crate::plugins) helper.
+//! Listings persist to a durable [`FileRegistryStore`] at `~/.apex/marketplace/registry.json`
+//! by default, or — when built with the `postgres` cargo feature and
+//! `APEX_MARKETPLACE_POSTGRES_URL` is set — a `PostgresRegistryStore` shared across every
+//! node running this server, so a fleet publishes/discovers/downloads against one durable
+//! catalog instead of each node holding its own file. Publishing re-verifies the package
+//! signature against the **same** trust store the plugin lifecycle uses
+//! (`~/.apex/plugins/trust.json`), so only trusted publishers can list a plugin. Operator
+//! curation ([§7]) is loaded from `~/.apex/marketplace/policy.json` when present (else the
+//! permissive default). The install bridge downloads a listed package and installs it into
+//! the local plugin catalog via the shared [`plugins::install_package`](crate::plugins)
+//! helper.
 
 use apex_marketplace::{
-    FileRegistryStore, PermissionRisk, Registry, RegistryPolicy, Review, SearchQuery,
+    FileRegistryStore, PermissionRisk, Registry, RegistryPolicy, RegistryStore, Review, SearchQuery,
 };
 use apex_plugin::{CapabilityKind, Package, TrustStore};
 use axum::{
@@ -63,11 +67,26 @@ fn load_policy() -> Result<RegistryPolicy, ApiError> {
     }
 }
 
+/// Open the durable registry store: `PostgresRegistryStore` when this binary was built
+/// with the `postgres` feature *and* `APEX_MARKETPLACE_POSTGRES_URL` is set (a shared
+/// catalog across every node running this server), else the single-node
+/// `FileRegistryStore` at `~/.apex/marketplace/registry.json`.
+fn open_store() -> Result<Box<dyn RegistryStore>, ApiError> {
+    #[cfg(feature = "postgres")]
+    if let Ok(url) = std::env::var("APEX_MARKETPLACE_POSTGRES_URL") {
+        let store = apex_marketplace::PostgresRegistryStore::connect(&url)?;
+        return Ok(Box::new(store));
+    }
+    Ok(Box::new(FileRegistryStore::new(
+        marketplace_dir()?.join("registry.json"),
+    )))
+}
+
 /// Build a registry over the durable store, sharing the plugin trust store (and the
 /// keyless trust config, when present) and applying the operator policy.
-fn registry() -> Result<Registry<FileRegistryStore>, ApiError> {
+fn registry() -> Result<Registry<Box<dyn RegistryStore>>, ApiError> {
     let trust = plugins::load_trust()?;
-    let store = FileRegistryStore::new(marketplace_dir()?.join("registry.json"));
+    let store = open_store()?;
     let mut reg = Registry::new(store, trust).with_policy(load_policy()?);
     if let Some(keyless) = plugins::load_keyless()? {
         reg = reg.with_keyless(keyless.root, keyless.policy);
@@ -95,6 +114,18 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/marketplace/listings/{id}/verify",
             post(verify_listing),
+        )
+        .route(
+            "/api/v1/marketplace/listings/{id}/request-review",
+            post(request_review),
+        )
+        .route(
+            "/api/v1/marketplace/listings/{id}/approve",
+            post(approve_review),
+        )
+        .route(
+            "/api/v1/marketplace/listings/{id}/reject",
+            post(reject_review),
         )
         .route(
             "/api/v1/marketplace/listings/{id}/install",
@@ -305,13 +336,84 @@ fn default_true() -> bool {
     true
 }
 
-/// `POST /api/v1/marketplace/listings/{id}/verify` — operator sets the verified badge.
+/// `POST /api/v1/marketplace/listings/{id}/verify` — operator sets the verified badge
+/// directly, bypassing the request/approve/reject workflow below (e.g. an immediate
+/// takedown, or back-compat with a pre-workflow verified listing).
 async fn verify_listing(
     Path(id): Path<String>,
     Json(req): Json<VerifyReq>,
 ) -> Result<Json<Value>, ApiError> {
     registry()?.set_verified(&id, req.verified)?;
     Ok(Json(json!({ "id": id, "verified": req.verified })))
+}
+
+/// `POST /api/v1/marketplace/listings/{id}/request-review` — the publisher requests
+/// human review of the listing's current latest version, the step gating the
+/// **verified** badge ([Marketplace §6]). Does not gate `publish` itself.
+async fn request_review(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    registry()?.request_review(&id)?;
+    Ok(Json(json!({ "id": id, "status": "pending" })))
+}
+
+#[derive(Deserialize)]
+struct ReviewDecisionReq {
+    /// The reviewing identity, when the caller didn't send `X-Apex-Principal`.
+    #[serde(default)]
+    reviewer: Option<String>,
+}
+
+/// The reviewer identity for a review decision: `X-Apex-Principal` if present, else
+/// the request body's `reviewer` field, else `"operator"` (anonymous back-compat).
+fn reviewer_identity(headers: &HeaderMap, body_reviewer: Option<&str>) -> String {
+    let principal = crate::tenancy::principal(headers);
+    if !principal.is_empty() {
+        return principal;
+    }
+    body_reviewer
+        .filter(|r| !r.is_empty())
+        .unwrap_or("operator")
+        .to_string()
+}
+
+/// `POST /api/v1/marketplace/listings/{id}/approve` — a reviewer approves the
+/// listing's pending review, setting the verified badge ([Marketplace §6]).
+async fn approve_review(
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<ReviewDecisionReq>,
+) -> Result<Json<Value>, ApiError> {
+    let reviewer = reviewer_identity(&headers, req.reviewer.as_deref());
+    registry()?.approve_review(&id, &reviewer)?;
+    Ok(Json(
+        json!({ "id": id, "verified": true, "reviewer": reviewer }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct RejectReviewReq {
+    /// The reviewing identity, when the caller didn't send `X-Apex-Principal`.
+    #[serde(default)]
+    reviewer: Option<String>,
+    /// Actionable feedback explaining the rejection.
+    reason: String,
+}
+
+/// `POST /api/v1/marketplace/listings/{id}/reject` — a reviewer rejects the listing's
+/// pending review with actionable feedback ([Marketplace §6]), clearing the verified
+/// badge; the publisher may address it and request review again.
+async fn reject_review(
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<RejectReviewReq>,
+) -> Result<Json<Value>, ApiError> {
+    let reviewer = reviewer_identity(&headers, req.reviewer.as_deref());
+    registry()?.reject_review(&id, &reviewer, &req.reason)?;
+    Ok(Json(json!({
+        "id": id,
+        "verified": false,
+        "reviewer": reviewer,
+        "reason": req.reason,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -445,5 +547,18 @@ metadata: { name: bare, version: 1.0.0, publisher: acme }
             .map(|f| f["code"].as_str().unwrap())
             .collect();
         assert_eq!(codes, ["sbom.missing", "provenance.missing"]);
+    }
+
+    #[test]
+    fn reviewer_identity_prefers_the_principal_header_then_body_then_operator() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-apex-principal", "alice".parse().unwrap());
+        assert_eq!(reviewer_identity(&headers, Some("bob")), "alice");
+        assert_eq!(reviewer_identity(&headers, None), "alice");
+
+        let empty = HeaderMap::new();
+        assert_eq!(reviewer_identity(&empty, Some("bob")), "bob");
+        assert_eq!(reviewer_identity(&empty, None), "operator");
+        assert_eq!(reviewer_identity(&empty, Some("")), "operator");
     }
 }
