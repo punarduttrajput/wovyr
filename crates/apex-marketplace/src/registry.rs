@@ -22,6 +22,7 @@ use crate::policy::RegistryPolicy;
 use crate::scan::{self, ScanReport};
 use crate::store::RegistryStore;
 use apex_common::{Error, Result};
+use apex_plugin::keyless::{IdentityPolicy, KeylessRoot};
 use apex_plugin::{CapabilityKind, Package, TrustStore};
 use sha2::{Digest, Sha256};
 
@@ -59,6 +60,7 @@ pub struct SearchQuery {
 pub struct Registry<S: RegistryStore> {
     store: S,
     trust: TrustStore,
+    keyless: Option<(KeylessRoot, IdentityPolicy)>,
     policy: RegistryPolicy,
 }
 
@@ -68,8 +70,19 @@ impl<S: RegistryStore> Registry<S> {
         Self {
             store,
             trust,
+            keyless: None,
             policy: RegistryPolicy::default(),
         }
+    }
+
+    /// Accept **keyless-signed** packages at publish
+    /// ([ADR-0009](../../docs/17-adr/ADR-0009-keyless-signing.md)): a package
+    /// carrying a keyless bundle verifies against this pinned `root` + identity
+    /// `policy` instead of the publisher-key trust store. A bundle that fails to
+    /// verify is rejected outright (no downgrade to the publisher-key path).
+    pub fn with_keyless(mut self, root: KeylessRoot, policy: IdentityPolicy) -> Self {
+        self.keyless = Some((root, policy));
+        self
     }
 
     /// Apply an operator curation `policy`.
@@ -85,9 +98,11 @@ impl<S: RegistryStore> Registry<S> {
 
     /// Publish a `.apexpkg` package to `channel` (default [`DEFAULT_CHANNEL`] if `None`).
     ///
-    /// Verifies the signature against the trust store, enforces the publish policy
-    /// (allow-list, blocklist, permission-risk ceiling), content-addresses the package,
-    /// and indexes it as a new version of its listing. Fail-closed: on any check failure
+    /// Verifies supply-chain trust (the publisher-key signature against the trust
+    /// store, or the keyless bundle when [`with_keyless`](Self::with_keyless) is
+    /// configured), enforces the publish policy (allow-list, blocklist,
+    /// permission-risk ceiling, scan gate), content-addresses the package, and
+    /// indexes it as a new version of its listing. Fail-closed: on any check failure
     /// nothing is indexed. `categories` are publisher/operator-supplied browse tags.
     pub fn publish(
         &self,
@@ -96,8 +111,14 @@ impl<S: RegistryStore> Registry<S> {
         channel: Option<&str>,
     ) -> Result<PublishOutcome> {
         let package = Package::from_apexpkg(apexpkg)?;
-        // 1. Supply-chain trust: signature over the exact manifest bytes.
-        let manifest = package.verify(&self.trust)?;
+        // 1. Supply-chain trust over the exact manifest bytes: the keyless mode
+        // ([ADR-0009]) when the registry accepts it and the package carries a bundle
+        // (rejected outright on failure — no downgrade), else the publisher-key
+        // signature against the trust store.
+        let manifest = match (package.keyless_bundle(), &self.keyless) {
+            (Some(_), Some((root, policy))) => package.verify_keyless(root, policy)?,
+            _ => package.verify(&self.trust)?,
+        };
 
         let listing_id = manifest.qualified_id();
         let risk = PermissionRisk::classify(&manifest.permissions);
@@ -524,6 +545,62 @@ capabilities:
         let l = reg.get("acme/github").unwrap().unwrap();
         assert_eq!(l.scan_severity, Some(Severity::Info));
         assert_eq!(l.scan_findings, 2);
+    }
+
+    #[test]
+    fn keyless_publish_accepted_when_configured_rejected_otherwise() {
+        use apex_plugin::keyless::{
+            InMemoryCa, InMemoryTransparencyLog, SignerIdentity, generate_keypair, sign_keyless,
+        };
+        const NOW: u64 = 1_700_000_000_000;
+
+        // A keyless-only package: empty publisher-key signature, bundle attached.
+        let (ca_pkcs8, _) = generate_keypair().unwrap();
+        let ca = InMemoryCa::from_pkcs8(&ca_pkcs8).unwrap();
+        let (log_pkcs8, _) = generate_keypair().unwrap();
+        let log = InMemoryTransparencyLog::from_pkcs8(&log_pkcs8, NOW + 1000).unwrap();
+        let (eph, _) = generate_keypair().unwrap();
+        let identity = SignerIdentity {
+            issuer: "https://ci.example.com".into(),
+            subject: "release@acme.dev".into(),
+        };
+        let bundle =
+            sign_keyless(GITHUB.as_bytes(), &identity, &eph, &ca, Some(&log), NOW).unwrap();
+        let pkg = Package::new(GITHUB, Vec::new())
+            .with_keyless(bundle)
+            .to_apexpkg()
+            .unwrap();
+        let root = KeylessRoot {
+            ca_public_keys: vec![ca.public_key_hex()],
+            log_public_keys: vec![log.public_key_hex()],
+        };
+        let policy = IdentityPolicy {
+            allow: vec![apex_plugin::keyless::IdentityRule {
+                issuer: "https://ci.example.com".into(),
+                subject: "release@acme.dev".into(),
+                publisher: "acme".into(),
+            }],
+            require_transparency: true,
+        };
+
+        // Without keyless config the registry falls to the (empty) trust store.
+        let plain = Registry::new(InMemoryRegistryStore::new(), TrustStore::new());
+        assert!(plain.publish(&pkg, &[], None).is_err());
+
+        // With the pinned root + policy, the keyless package publishes end to end.
+        let reg = Registry::new(InMemoryRegistryStore::new(), TrustStore::new())
+            .with_keyless(root, policy);
+        let out = reg.publish(&pkg, &[], None).unwrap();
+        assert_eq!(out.reference, "acme/github@1.4.0");
+        assert!(reg.get("acme/github").unwrap().is_some());
+        // The published bytes round-trip with the bundle intact.
+        let downloaded = reg.download("acme/github", None).unwrap();
+        assert!(
+            Package::from_apexpkg(&downloaded)
+                .unwrap()
+                .keyless_bundle()
+                .is_some()
+        );
     }
 
     #[test]

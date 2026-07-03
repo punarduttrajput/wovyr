@@ -63,12 +63,16 @@ fn load_policy() -> Result<RegistryPolicy, ApiError> {
     }
 }
 
-/// Build a registry over the durable store, sharing the plugin trust store and applying
-/// the operator policy.
+/// Build a registry over the durable store, sharing the plugin trust store (and the
+/// keyless trust config, when present) and applying the operator policy.
 fn registry() -> Result<Registry<FileRegistryStore>, ApiError> {
     let trust = plugins::load_trust()?;
     let store = FileRegistryStore::new(marketplace_dir()?.join("registry.json"));
-    Ok(Registry::new(store, trust).with_policy(load_policy()?))
+    let mut reg = Registry::new(store, trust).with_policy(load_policy()?);
+    if let Some(keyless) = plugins::load_keyless()? {
+        reg = reg.with_keyless(keyless.root, keyless.policy);
+    }
+    Ok(reg)
 }
 
 pub(crate) fn routes() -> Router<Arc<AppState>> {

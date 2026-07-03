@@ -335,6 +335,7 @@ impl Tool for PluginTool {
 /// The Plugin Engine: catalog + lifecycle control plane.
 pub struct PluginEngine {
     trust: TrustStore,
+    keyless: Option<(crate::keyless::KeylessRoot, crate::keyless::IdentityPolicy)>,
     platform_api: semver::Version,
     runtime: Arc<dyn CapabilityRuntime>,
     staging_dir: Option<PathBuf>,
@@ -348,6 +349,7 @@ impl PluginEngine {
     pub fn new(platform_api: semver::Version, trust: TrustStore) -> Self {
         Self {
             trust,
+            keyless: None,
             platform_api,
             runtime: Arc::new(NotLoadedRuntime),
             staging_dir: None,
@@ -355,6 +357,20 @@ impl PluginEngine {
             plugins: BTreeMap::new(),
             events: Vec::new(),
         }
+    }
+
+    /// Accept **keyless-signed** packages ([ADR-0009]): a package carrying a
+    /// [`KeylessBundle`](crate::keyless::KeylessBundle) verifies against this pinned
+    /// `root` + identity `policy` instead of the publisher-key trust store. Packages
+    /// without a bundle keep using the trust store; a bundle that fails to verify is
+    /// rejected outright (no downgrade to the publisher-key path).
+    pub fn with_keyless(
+        mut self,
+        root: crate::keyless::KeylessRoot,
+        policy: crate::keyless::IdentityPolicy,
+    ) -> Self {
+        self.keyless = Some((root, policy));
+        self
     }
 
     /// Enforce a supply-chain `policy` (provenance/SBOM) at install time
@@ -680,12 +696,27 @@ impl PluginEngine {
     ) -> Result<Option<PathBuf>> {
         let id = manifest.qualified_id();
 
-        // Verify signature over the raw manifest bytes (untrusted publisher / tamper).
-        self.trust.verify(
-            &manifest.metadata.publisher,
-            package.manifest_yaml.as_bytes(),
-            &package.signature,
-        )?;
+        // Verify supply-chain trust over the raw manifest bytes (untrusted publisher /
+        // tamper). A keyless bundle takes precedence when the engine accepts keyless
+        // ([ADR-0009]) — and is rejected outright on failure, never downgraded to the
+        // publisher-key path; otherwise the detached signature must verify against
+        // the trust store.
+        match (package.keyless_bundle(), &self.keyless) {
+            (Some(bundle), Some((root, policy))) => {
+                crate::keyless::verify_keyless(
+                    package.manifest_yaml.as_bytes(),
+                    bundle,
+                    root,
+                    policy,
+                    &manifest.metadata.publisher,
+                )?;
+            }
+            _ => self.trust.verify(
+                &manifest.metadata.publisher,
+                package.manifest_yaml.as_bytes(),
+                &package.signature,
+            )?,
+        }
 
         // Platform-API compatibility.
         self.check_compatibility(manifest)?;
@@ -892,6 +923,81 @@ artifacts:
 
     fn grants() -> Vec<String> {
         vec!["net:egress:*".to_string()]
+    }
+
+    /// A keyless-signed package (no publisher key at all) + the pinned root/policy
+    /// that verify it ([ADR-0009]).
+    fn keyless_package() -> (
+        Package,
+        crate::keyless::KeylessRoot,
+        crate::keyless::IdentityPolicy,
+    ) {
+        use crate::keyless::*;
+        const NOW: u64 = 1_700_000_000_000;
+        let (ca_pkcs8, _) = crate::keyless::generate_keypair().unwrap();
+        let ca = InMemoryCa::from_pkcs8(&ca_pkcs8).unwrap();
+        let (log_pkcs8, _) = crate::keyless::generate_keypair().unwrap();
+        let log = InMemoryTransparencyLog::from_pkcs8(&log_pkcs8, NOW + 1000).unwrap();
+        let (eph, _) = crate::keyless::generate_keypair().unwrap();
+        let identity = SignerIdentity {
+            issuer: "https://ci.example.com".into(),
+            subject: "release@acme.dev".into(),
+        };
+        let bundle =
+            sign_keyless(MANIFEST.as_bytes(), &identity, &eph, &ca, Some(&log), NOW).unwrap();
+        let package = Package::new(MANIFEST, Vec::new())
+            .with_artifact("artifacts/github.wasm", b"hello world".to_vec())
+            .with_keyless(bundle);
+        let root = KeylessRoot {
+            ca_public_keys: vec![ca.public_key_hex()],
+            log_public_keys: vec![log.public_key_hex()],
+        };
+        let policy = IdentityPolicy {
+            allow: vec![IdentityRule {
+                issuer: "https://ci.example.com".into(),
+                subject: "release@acme.dev".into(),
+                publisher: "acme".into(),
+            }],
+            require_transparency: true,
+        };
+        (package, root, policy)
+    }
+
+    #[test]
+    fn installs_a_keyless_signed_package_when_configured() {
+        let (package, root, policy) = keyless_package();
+
+        // An engine without keyless trust rejects it (empty trust store, no key).
+        let mut plain = PluginEngine::new(semver::Version::new(1, 0, 0), TrustStore::new());
+        assert!(plain.install(&package, &grants()).is_err());
+
+        // With the pinned root + policy, the same package installs.
+        let mut engine = PluginEngine::new(semver::Version::new(1, 0, 0), TrustStore::new())
+            .with_keyless(root.clone(), policy.clone());
+        let installed = engine.install(&package, &grants()).unwrap();
+        assert_eq!(installed.manifest.reference(), "acme/github@1.4.0");
+
+        // No downgrade: a bundle that fails policy is rejected even though the
+        // package could never pass the publisher-key path either way — and even
+        // with a *valid* trust-store signature present, the bundle still rules.
+        let strict = crate::keyless::IdentityPolicy {
+            allow: vec![crate::keyless::IdentityRule {
+                issuer: "https://ci.example.com".into(),
+                subject: "someone-else@*".into(),
+                publisher: "acme".into(),
+            }],
+            require_transparency: true,
+        };
+        let (kp, public) = generate_keypair();
+        let mut trust = TrustStore::new();
+        trust.trust("acme", public);
+        let trad_signed = Package::new(MANIFEST, sign(&kp, MANIFEST.as_bytes()))
+            .with_artifact("artifacts/github.wasm", b"hello world".to_vec())
+            .with_keyless(package.keyless_bundle().unwrap().clone());
+        let mut engine =
+            PluginEngine::new(semver::Version::new(1, 0, 0), trust).with_keyless(root, strict);
+        let err = engine.install(&trad_signed, &grants()).unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "{err}");
     }
 
     #[test]

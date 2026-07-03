@@ -87,10 +87,24 @@ instead of X.509/DER.
   signing environment asserts. Fine for the dev CA; a Fulcio-compatible or
   OIDC-validating CA is additive behind the same trait.
 
+# Consumers (landed after the core)
+
+Keyless is a policy-selectable trust mode at both supply-chain choke points, with
+identical no-downgrade semantics (a present bundle is verified keylessly or
+rejected — never falls back to the publisher-key path):
+
+- **Registry publish** — `Registry::with_keyless(root, policy)`
+  (`apex-marketplace`); a keyless-only package flows publish → discover →
+  download → install → enable with no publisher key anywhere
+  (`tests/keyless_supply_chain.rs`).
+- **Engine install** — `PluginEngine::with_keyless(root, policy)` (`apex-plugin`).
+- **Server** — both are configured from one operator file,
+  `~/.apex/plugins/keyless.json` (`{"root": …, "policy": …}`); absent ⇒ keyless
+  disabled.
+
 # Deferred
 
 - Rekor SET verification (RFC 8785 canonicalization) and inclusion-proof checks.
 - X.509/Fulcio certificate compatibility; OIDC token validation in the CA.
-- Registry/marketplace publish accepting keyless bundles as a policy-selectable
-  trust mode (the `Registry` consumes `Package::verify` today; `verify_keyless`
-  is the drop-in next slice), and audit-log recording of keyless publish events.
+- CLI `plugin sign --keyless` publisher tooling, and audit-log recording of
+  keyless publish events.

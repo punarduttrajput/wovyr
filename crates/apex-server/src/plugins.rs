@@ -59,6 +59,38 @@ fn load_catalog() -> Result<Vec<InstalledPlugin>, ApiError> {
     }
 }
 
+/// Operator keyless-trust configuration ([ADR-0009]) from
+/// `~/.apex/plugins/keyless.json` (`{"root": …, "policy": …}`), shared by the plugin
+/// engine and the marketplace registry. Absent ⇒ keyless disabled (publisher-key
+/// trust only).
+#[derive(serde::Deserialize)]
+pub(crate) struct KeylessConfig {
+    pub root: apex_plugin::KeylessRoot,
+    pub policy: apex_plugin::IdentityPolicy,
+}
+
+pub(crate) fn load_keyless() -> Result<Option<KeylessConfig>, ApiError> {
+    let path = match plugins_dir() {
+        Some(dir) => dir.join("keyless.json"),
+        None => return Ok(None),
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("corrupt keyless trust config: {e}"),
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            e.to_string(),
+        )),
+    }
+}
+
 pub(crate) fn load_trust() -> Result<TrustStore, ApiError> {
     let path = match plugins_dir() {
         Some(dir) => dir.join("trust.json"),
@@ -139,6 +171,9 @@ fn engine() -> Result<PluginEngine, ApiError> {
         .with_catalog(load_catalog()?);
     if let Some(staging) = staging_dir() {
         e = e.with_staging_dir(staging);
+    }
+    if let Some(keyless) = load_keyless()? {
+        e = e.with_keyless(keyless.root, keyless.policy);
     }
     Ok(e)
 }
