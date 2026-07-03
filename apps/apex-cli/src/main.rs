@@ -115,6 +115,40 @@ enum PluginCommand {
         out: Option<String>,
     },
 
+    /// Set up keyless trust on this node: a dev CA + the pinned trust config
+    /// (`~/.apex/plugins/keyless.json`, ADR-0009).
+    KeylessInit {
+        /// Identity grant as `issuer|subject|publisher` (repeatable; `subject` and
+        /// `publisher` accept a trailing `*` wildcard).
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+    },
+
+    /// Keyless-sign a plugin manifest: a short-lived identity certificate over an
+    /// ephemeral key that never touches disk (ADR-0009).
+    KeylessSign {
+        /// Path to the plugin manifest (`plugin.yaml`).
+        #[arg(long)]
+        manifest: String,
+
+        /// Signer identity issuer (e.g. `https://ci.example.com`).
+        #[arg(long)]
+        issuer: String,
+
+        /// Signer identity subject (e.g. `release@acme.dev`).
+        #[arg(long)]
+        subject: String,
+
+        /// Rekor transparency-log URL to witness the signing
+        /// (requires a `--features keyless-rekor` build).
+        #[arg(long)]
+        rekor: Option<String>,
+
+        /// CA key path (defaults to `~/.apex/plugins/keyless-ca.key`).
+        #[arg(long)]
+        ca_key: Option<String>,
+    },
+
     /// Bundle a package directory into a single distributable `.apexpkg` file.
     Pack {
         /// Path to the plugin package directory.
@@ -581,6 +615,14 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
         Command::Plugin { command } => match command {
             PluginCommand::Keygen { publisher, dir } => plugin::keygen_cmd(&publisher, &dir),
             PluginCommand::Sign { key, manifest, out } => plugin::sign_cmd(&key, &manifest, out),
+            PluginCommand::KeylessInit { allow } => plugin::keyless_init_cmd(allow),
+            PluginCommand::KeylessSign {
+                manifest,
+                issuer,
+                subject,
+                rekor,
+                ca_key,
+            } => plugin::keyless_sign_cmd(&manifest, &issuer, &subject, rekor, ca_key),
             PluginCommand::Pack { dir, out } => plugin::pack_cmd(&dir, out),
             PluginCommand::Trust { publisher, key } => plugin::trust_cmd(&publisher, &key),
             PluginCommand::Install { dir, grants } => plugin::install_cmd(&dir, grants),

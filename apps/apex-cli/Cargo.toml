@@ -21,6 +21,9 @@ otlp = ["apex-telemetry/otlp"]
 # `agents run --local`. Off by default (pulls Wasmtime via apex-plugin/wasi). Pulls
 # the secret vault so a tenant-scoped run injects the plugin's secrets into the sandbox.
 plugin-wasi = ["apex-plugin/wasi", "dep:apex-secrets"]
+# Rekor client for `plugin keyless-sign --rekor <url>` (witness signings in a
+# transparency log, ADR-0009). Off by default (pulls reqwest's blocking client).
+keyless-rekor = ["apex-plugin/rekor"]
 
 [dependencies]
 apex-common.workspace = true

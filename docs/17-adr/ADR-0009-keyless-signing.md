@@ -79,10 +79,11 @@ instead of X.509/DER.
 - **(−)** Not wire-compatible with Sigstore tooling (`cosign` cannot verify an
   Apex bundle). Acceptable: the trust root is operator-pinned either way, and the
   architecture leaves room to swap encodings later.
-- **(−)** Rekor's **signed entry timestamp is not yet verified** (it covers
-  Rekor's RFC 8785 canonicalization, which we do not reproduce); bundles from real
-  Rekor verify with no pinned log key — integrated time is trusted as recorded at
-  ingest. The in-memory log's SET *is* verified, so the check itself is exercised.
+- **(+)** Rekor's **signed entry timestamp is verified offline**: the bundle
+  carries Rekor's canonicalized entry `body`, the verifier reproduces the RFC 8785
+  SET payload (`{body, integratedTime, logID, logIndex}`), and pinned log keys are
+  accepted as raw/SPKI ed25519 or ECDSA P-256 (Rekor's memory signer) — proven
+  live against a real Rekor (forged coordinates are rejected).
 - **(−)** No real OIDC yet: the CA attests whatever identity the operator of the
   signing environment asserts. Fine for the dev CA; a Fulcio-compatible or
   OIDC-validating CA is additive behind the same trait.
@@ -102,9 +103,17 @@ rejected — never falls back to the publisher-key path):
   `~/.apex/plugins/keyless.json` (`{"root": …, "policy": …}`); absent ⇒ keyless
   disabled.
 
+- **CLI tooling** — `apex plugin keyless-init` (dev CA + pinned trust config,
+  shared with the server) and `apex plugin keyless-sign` (ephemeral key never
+  touches disk; `--rekor <url>` witnesses the signing, behind the CLI's
+  `keyless-rekor` feature). `plugin.keyless.json` beside a manifest rides into
+  packages via `pack`/`install`/`publish`, and `plugin.sig` becomes optional for
+  keyless-only packages.
+
 # Deferred
 
-- Rekor SET verification (RFC 8785 canonicalization) and inclusion-proof checks.
-- X.509/Fulcio certificate compatibility; OIDC token validation in the CA.
-- CLI `plugin sign --keyless` publisher tooling, and audit-log recording of
-  keyless publish events.
+- Merkle inclusion-proof checks against the log's signed tree head.
+- X.509/Fulcio certificate compatibility; OIDC token validation in the CA
+  (a non-goal while the trust root is operator-pinned — revisit if `cosign`
+  interop is ever required).
+- Audit-log recording of keyless publish events.

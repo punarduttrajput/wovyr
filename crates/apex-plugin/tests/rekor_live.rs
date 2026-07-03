@@ -74,12 +74,15 @@ fn keyless_sign_via_rekor_then_offline_verify() {
         "rekor returns a SET"
     );
 
-    // Verify fully offline: pinned CA, no pinned log key (Rekor's SET
-    // canonicalization is the deferred follow-up — the integrated time still
-    // anchors the certificate window).
+    // Verify fully offline with the log's key **pinned**: the SET must verify
+    // against Rekor's RFC 8785 payload (real ECDSA P-256 signature over the real
+    // canonicalized entry).
+    let log_key = log
+        .server_public_key_hex()
+        .expect("fetch rekor public key for pinning");
     let root = KeylessRoot {
         ca_public_keys: vec![ca.public_key_hex()],
-        log_public_keys: vec![],
+        log_public_keys: vec![log_key],
     };
     let policy = IdentityPolicy {
         allow: vec![IdentityRule {
@@ -94,4 +97,10 @@ fn keyless_sign_via_rekor_then_offline_verify() {
 
     // Tampering still fails against the live-produced bundle.
     assert!(verify_keyless(b"tampered", &bundle, &root, &policy, "acme").is_err());
+
+    // Forging the witnessed time breaks the (now-pinned) SET.
+    let mut forged = bundle.clone();
+    forged.log_entry.as_mut().unwrap().integrated_time_ms += 1000;
+    let err = verify_keyless(manifest.as_bytes(), &forged, &root, &policy, "acme").unwrap_err();
+    assert!(err.to_string().contains("signed entry timestamp"), "{err}");
 }

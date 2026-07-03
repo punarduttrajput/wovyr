@@ -8,12 +8,13 @@
 //! witnessed entry (uuid, index, integration time, log id, SET). Run a local stack
 //! with `deployment/rekor/` and gate live tests on `APEX_REKOR_URL`.
 //!
-//! Note: Rekor's signed entry timestamp covers *Rekor's* RFC 8785 canonicalization
-//! of the entry, which [`verify_keyless`](crate::keyless::verify_keyless) does not
-//! reproduce yet — so verify bundles from this log against a [`KeylessRoot`]
-//! (crate::keyless::KeylessRoot) with **no pinned log keys** (the entry's
-//! `integrated_time_ms` still anchors the certificate window). Rekor-SET
-//! verification is the deferred follow-up in ADR-0009.
+//! Bundles from this log are **fully SET-verifiable offline**: the entry carries
+//! Rekor's canonicalized `body`, and
+//! [`verify_keyless`](crate::keyless::verify_keyless) reproduces the RFC 8785
+//! payload Rekor signs — pin the log's key
+//! ([`RekorLog::server_public_key_hex`]) in
+//! [`KeylessRoot::log_public_keys`](crate::keyless::KeylessRoot). A dev log with
+//! the in-memory signer rotates its key on restart, so re-pin after `compose up`.
 
 use crate::keyless::{LogEntryRef, TransparencyLog};
 use crate::verify::hex;
@@ -167,8 +168,35 @@ impl TransparencyLog for RekorLog {
             // Rekor reports seconds; the bundle carries milliseconds.
             integrated_time_ms: e["integratedTime"].as_u64().unwrap_or(0) * 1000,
             log_id: e["logID"].as_str().unwrap_or_default().to_string(),
+            // Rekor's canonicalized entry — what its SET signs over (with the
+            // coordinates), so offline verifiers can check the SET.
+            body: e["body"].as_str().unwrap_or_default().to_string(),
             signed_entry_timestamp: set_hex,
         })
+    }
+}
+
+impl RekorLog {
+    /// Fetch the log's public key (`GET /api/v1/log/publicKey`, PEM) as SPKI DER
+    /// hex — the encoding [`KeylessRoot::log_public_keys`]
+    /// (crate::keyless::KeylessRoot) pins for SET verification. Note: a dev log
+    /// with the in-memory signer rotates this key on restart.
+    pub fn server_public_key_hex(&self) -> Result<String> {
+        let pem = self
+            .http
+            .get(format!("{}/api/v1/log/publicKey", self.base_url))
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.text())
+            .map_err(|e| Error::Provider(format!("rekor public key fetch failed: {e}")))?;
+        let der_b64: String = pem
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+        let der = base64::decode(&der_b64)
+            .ok_or_else(|| Error::Provider("rekor public key PEM is not valid base64".into()))?;
+        Ok(hex::encode(der))
     }
 }
 

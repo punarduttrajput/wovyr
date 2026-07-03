@@ -47,6 +47,33 @@ fn catalog_path() -> Result<PathBuf> {
     Ok(plugins_dir()?.join("catalog.json"))
 }
 
+fn keyless_path() -> Result<PathBuf> {
+    Ok(plugins_dir()?.join("keyless.json"))
+}
+
+fn ca_key_path() -> Result<PathBuf> {
+    Ok(plugins_dir()?.join("keyless-ca.key"))
+}
+
+/// The operator keyless-trust config ([ADR-0009]) at `~/.apex/plugins/keyless.json`
+/// — the same file the server reads, so CLI and server verify identically.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeylessConfig {
+    root: apex_plugin::KeylessRoot,
+    policy: apex_plugin::IdentityPolicy,
+}
+
+/// Load the keyless trust config (`None` if not configured — keyless disabled).
+fn load_keyless() -> Result<Option<KeylessConfig>> {
+    match std::fs::read(keyless_path()?) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| Error::config(format!("corrupt keyless trust config: {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
 /// Load the persisted trust store (empty if none exists yet).
 fn load_trust() -> Result<TrustStore> {
     match std::fs::read(trust_path()?) {
@@ -85,9 +112,12 @@ fn save_catalog(catalog: &[InstalledPlugin]) -> Result<()> {
 pub fn engine() -> Result<PluginEngine> {
     let trust = load_trust()?;
     let catalog = load_catalog()?;
-    let engine = PluginEngine::new(platform_api(), trust)
+    let mut engine = PluginEngine::new(platform_api(), trust)
         .with_staging_dir(staging_dir()?)
         .with_catalog(catalog);
+    if let Some(k) = load_keyless()? {
+        engine = engine.with_keyless(k.root, k.policy);
+    }
     Ok(with_runtime(engine))
 }
 
@@ -179,6 +209,164 @@ fn default_sig_path(manifest: &str) -> String {
         .into_owned()
 }
 
+/// `apex plugin keyless-init [--allow "issuer|subject|publisher"]…` — set up keyless
+/// trust ([ADR-0009]) on this node: generate the dev CA keypair
+/// (`~/.apex/plugins/keyless-ca.key`) and write the pinned trust config
+/// (`~/.apex/plugins/keyless.json`) with the given identity → publisher grants.
+pub fn keyless_init_cmd(allow: Vec<String>) -> Result<()> {
+    use apex_plugin::keyless as kl;
+
+    let config_path = keyless_path()?;
+    if config_path.exists() {
+        return Err(Error::config(format!(
+            "{} already exists — edit it directly, or delete it to re-init",
+            config_path.display()
+        )));
+    }
+
+    let rules = allow
+        .iter()
+        .map(|spec| {
+            let parts: Vec<&str> = spec.split('|').collect();
+            match parts.as_slice() {
+                [issuer, subject, publisher] => Ok(kl::IdentityRule {
+                    issuer: issuer.trim().to_string(),
+                    subject: subject.trim().to_string(),
+                    publisher: publisher.trim().to_string(),
+                }),
+                _ => Err(Error::config(format!(
+                    "--allow must be `issuer|subject|publisher`, got `{spec}`"
+                ))),
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let (ca_pkcs8, ca_public_hex) = kl::generate_keypair()?;
+    std::fs::create_dir_all(plugins_dir()?)?;
+    let key_path = ca_key_path()?;
+    std::fs::write(&key_path, &ca_pkcs8)?;
+    restrict(&key_path);
+
+    let config = KeylessConfig {
+        root: apex_plugin::KeylessRoot {
+            ca_public_keys: vec![ca_public_hex.clone()],
+            log_public_keys: Vec::new(),
+        },
+        policy: apex_plugin::IdentityPolicy {
+            allow: rules,
+            // Dev-first default: bundles verify without a transparency log. Flip to
+            // true (and pin the log key) once signing goes through `--rekor`.
+            require_transparency: false,
+        },
+    };
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
+
+    println!("Keyless trust initialized:");
+    println!("  CA key:      {}  (keep secret)", key_path.display());
+    println!("  CA public:   {ca_public_hex}");
+    println!("  trust config: {}", config_path.display());
+    if config.policy.allow.is_empty() {
+        println!("No identities allowed yet (fail-closed) — add rules under `policy.allow`.");
+    }
+    println!(
+        "Sign with `apex plugin keyless-sign --manifest <plugin.yaml> --issuer <i> --subject <s>`."
+    );
+    Ok(())
+}
+
+/// `apex plugin keyless-sign --manifest <plugin.yaml> --issuer <i> --subject <s>
+/// [--rekor <url>] [--ca-key <path>]` — keyless-sign a manifest ([ADR-0009]): certify
+/// a fresh ephemeral key with the CA, sign, optionally witness the event in a Rekor
+/// transparency log, and write the bundle to `plugin.keyless.json` beside the
+/// manifest (picked up by `pack`/`install`/`publish`). The ephemeral key never
+/// touches disk.
+pub fn keyless_sign_cmd(
+    manifest: &str,
+    issuer: &str,
+    subject: &str,
+    rekor: Option<String>,
+    ca_key: Option<String>,
+) -> Result<()> {
+    use apex_plugin::keyless as kl;
+
+    let ca_path = match &ca_key {
+        Some(p) => PathBuf::from(p),
+        None => ca_key_path()?,
+    };
+    let ca_pkcs8 = std::fs::read(&ca_path).map_err(|e| {
+        Error::config(format!(
+            "could not read CA key {} (run `apex plugin keyless-init` first): {e}",
+            ca_path.display()
+        ))
+    })?;
+    let manifest_bytes = std::fs::read(manifest)
+        .map_err(|e| Error::config(format!("could not read manifest {manifest}: {e}")))?;
+    let identity = kl::SignerIdentity {
+        issuer: issuer.to_string(),
+        subject: subject.to_string(),
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Error::config("system clock is before the epoch"))?
+        .as_millis() as u64;
+
+    // Run on a plain thread: the Rekor client is blocking HTTP, which must not run
+    // on the async runtime the CLI dispatches from.
+    let bundle = std::thread::spawn(move || -> Result<kl::KeylessBundle> {
+        let ca = kl::InMemoryCa::from_pkcs8(&ca_pkcs8)?;
+        let (ephemeral, _) = kl::generate_keypair()?;
+        match rekor {
+            None => kl::sign_keyless(&manifest_bytes, &identity, &ephemeral, &ca, None, now_ms),
+            Some(url) => {
+                let log = rekor_log(&url)?;
+                kl::sign_keyless(
+                    &manifest_bytes,
+                    &identity,
+                    &ephemeral,
+                    &ca,
+                    Some(log.as_ref()),
+                    now_ms,
+                )
+            }
+        }
+    })
+    .join()
+    .map_err(|_| Error::Runtime("keyless signing thread panicked".into()))??;
+
+    let out = Path::new(manifest)
+        .parent()
+        .map(|p| p.join("plugin.keyless.json"))
+        .unwrap_or_else(|| PathBuf::from("plugin.keyless.json"));
+    std::fs::write(&out, serde_json::to_vec_pretty(&bundle)?)?;
+
+    println!(
+        "Keyless-signed as {} (issuer {}).",
+        bundle.cert.identity.subject, bundle.cert.identity.issuer
+    );
+    match &bundle.log_entry {
+        Some(e) => println!(
+            "Witnessed by transparency log: index {}, uuid {}.",
+            e.log_index, e.uuid
+        ),
+        None => println!("No transparency log (pass --rekor <url> to witness the signing)."),
+    }
+    println!("Wrote bundle to {}", out.display());
+    Ok(())
+}
+
+/// A Rekor-backed transparency log (behind the `keyless-rekor` cargo feature).
+#[cfg(feature = "keyless-rekor")]
+fn rekor_log(url: &str) -> Result<Box<dyn apex_plugin::keyless::TransparencyLog>> {
+    Ok(Box::new(apex_plugin::rekor::RekorLog::new(url)))
+}
+
+#[cfg(not(feature = "keyless-rekor"))]
+fn rekor_log(_url: &str) -> Result<Box<dyn apex_plugin::keyless::TransparencyLog>> {
+    Err(Error::config(
+        "this build has no Rekor client; rebuild with `--features keyless-rekor`",
+    ))
+}
+
 /// `apex plugin trust <publisher> --key <pubkey-file>` — register a publisher's raw
 /// ed25519 public key so its packages verify on install.
 pub fn trust_cmd(publisher: &str, key: &str) -> Result<()> {
@@ -206,18 +394,40 @@ fn load_package(source: &str) -> Result<(Package, PluginManifest)> {
     read_package_dir(path)
 }
 
-/// Read a package directory (`plugin.yaml` + `plugin.sig` + declared artifacts).
+/// Read a package directory (`plugin.yaml` + `plugin.sig` and/or
+/// `plugin.keyless.json` + declared artifacts). At least one signing mode must be
+/// present: the detached publisher-key signature, or a keyless bundle ([ADR-0009]).
 fn read_package_dir(dir: &Path) -> Result<(Package, PluginManifest)> {
     let manifest_yaml = std::fs::read_to_string(dir.join("plugin.yaml"))
         .map_err(|e| Error::config(format!("could not read {}/plugin.yaml: {e}", dir.display())))?;
-    let signature = std::fs::read(dir.join("plugin.sig")).map_err(|e| {
-        Error::config(format!(
-            "could not read {}/plugin.sig (sign the manifest with `apex plugin sign`): {e}",
-            dir.display()
-        ))
-    })?;
+    let keyless: Option<apex_plugin::KeylessBundle> =
+        match std::fs::read(dir.join("plugin.keyless.json")) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
+                Error::config(format!(
+                    "corrupt {}/plugin.keyless.json: {e}",
+                    dir.display()
+                ))
+            })?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(Error::Io(e)),
+        };
+    let signature = match std::fs::read(dir.join("plugin.sig")) {
+        Ok(sig) => sig,
+        // Keyless-only packages carry no publisher-key signature at all.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && keyless.is_some() => Vec::new(),
+        Err(e) => {
+            return Err(Error::config(format!(
+                "could not read {}/plugin.sig (sign with `apex plugin sign` or \
+                 `apex plugin keyless-sign`): {e}",
+                dir.display()
+            )));
+        }
+    };
     let manifest = PluginManifest::from_yaml(&manifest_yaml)?;
     let mut package = Package::new(manifest_yaml, signature);
+    if let Some(bundle) = keyless {
+        package = package.with_keyless(bundle);
+    }
     for artifact in &manifest.artifacts {
         let bytes = std::fs::read(dir.join(&artifact.path)).map_err(|e| {
             Error::config(format!(
@@ -423,14 +633,19 @@ pub fn uninstall_cmd(id: &str) -> Result<()> {
 // trusted publishers can list a plugin. (A remote registry server speaks the same
 // `/api/v1/marketplace` routes.)
 
-/// A registry over the durable local store, sharing the plugin trust store.
+/// A registry over the durable local store, sharing the plugin trust store (and the
+/// keyless trust config, when present).
 fn marketplace_registry() -> Result<Registry<FileRegistryStore>> {
     let store = FileRegistryStore::new(
         config::config_dir()?
             .join("marketplace")
             .join("registry.json"),
     );
-    Ok(Registry::new(store, load_trust()?))
+    let mut reg = Registry::new(store, load_trust()?);
+    if let Some(k) = load_keyless()? {
+        reg = reg.with_keyless(k.root, k.policy);
+    }
+    Ok(reg)
 }
 
 fn parse_capability_kind(s: &str) -> Option<CapabilityKind> {

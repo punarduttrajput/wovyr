@@ -20,9 +20,12 @@
 //! implementations; a Rekor-backed log lives behind the `rekor` cargo feature (see
 //! [`crate::rekor`], live-tested against `deployment/rekor/`).
 //!
-//! Deferred ([ADR-0009]): X.509/Fulcio certificate compatibility and verification of
-//! real Rekor signed-entry timestamps (needs RFC 8785 canonicalization); the SET
-//! check here covers logs using this module's canonical entry form.
+//! SET verification covers **both** log formats: a log that supplies its own
+//! canonical entry `body` (Rekor) is checked against the RFC 8785 payload it signs
+//! ([`rekor_set_payload`], ed25519 or ECDSA P-256 pinned keys — proven live against
+//! a real Rekor); the Apex in-memory log signs this module's canonical entry form
+//! ([`set_canonical_bytes`]). Deferred ([ADR-0009]): X.509/Fulcio certificate
+//! compatibility and Merkle inclusion-proof checks.
 
 use crate::verify::hex;
 use apex_common::{Error, Result};
@@ -86,7 +89,12 @@ pub struct LogEntryRef {
     pub integrated_time_ms: u64,
     /// Identifier of the log that witnessed the entry.
     pub log_id: String,
-    /// The log's signature (hex) over [`set_canonical_bytes`] — the signed entry
+    /// The log's own canonicalized entry (base64), when the log defines one —
+    /// **Rekor** does, and its SET signs over it (see [`rekor_set_payload`]). Empty
+    /// for the Apex in-memory log, whose SET signs [`set_canonical_bytes`] instead.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+    /// The log's signature (hex) over its SET payload — the signed entry
     /// timestamp (SET). Empty when the log does not provide one.
     #[serde(default)]
     pub signed_entry_timestamp: String,
@@ -108,6 +116,74 @@ pub fn body_digest_hex(artifact: &[u8], signature_hex: &str, public_key_hex: &st
     hex::encode(Sha256::digest(
         format!("{artifact_digest}\n{signature_hex}\n{public_key_hex}").as_bytes(),
     ))
+}
+
+/// Escape a string for embedding in canonical JSON (RFC 8785 string rules for the
+/// characters that can actually occur here — quotes, backslashes, controls).
+fn jcs_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The exact bytes **Rekor** signs for its SET: the RFC 8785 (JCS)
+/// canonicalization of `{body, integratedTime, logID, logIndex}` — keys in
+/// lexicographic order, no whitespace, `integratedTime` in **seconds**.
+pub fn rekor_set_payload(entry: &LogEntryRef) -> Vec<u8> {
+    format!(
+        r#"{{"body":"{}","integratedTime":{},"logID":"{}","logIndex":{}}}"#,
+        jcs_escape(&entry.body),
+        entry.integrated_time_ms / 1000,
+        jcs_escape(&entry.log_id),
+        entry.log_index
+    )
+    .into_bytes()
+}
+
+/// Verify `signature_hex` over `message` with a pinned log/CA key in any accepted
+/// encoding: raw ed25519 (32 bytes), SPKI ed25519 (44 bytes), SPKI ECDSA P-256
+/// (91 bytes, e.g. Rekor's `/api/v1/log/publicKey`), or a raw uncompressed P-256
+/// point (65 bytes). ECDSA signatures are ASN.1-encoded (as Rekor emits them).
+fn verify_with_pinned_key(key_hex: &str, message: &[u8], signature_hex: &str) -> Result<()> {
+    let key = hex::decode(key_hex)?;
+    let sig = hex::decode(signature_hex)?;
+    /// DER prefix of a PKIX `SubjectPublicKeyInfo` for ed25519.
+    const ED25519_SPKI_PREFIX: [u8; 12] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    /// DER prefix of a PKIX `SubjectPublicKeyInfo` for ECDSA P-256 (prime256v1).
+    const P256_SPKI_PREFIX: [u8; 26] = [
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    ];
+    let (alg, raw): (&dyn ring::signature::VerificationAlgorithm, &[u8]) = match key.len() {
+        32 => (&ED25519, &key),
+        44 if key.starts_with(&ED25519_SPKI_PREFIX) => (&ED25519, &key[12..]),
+        65 if key[0] == 0x04 => (&ring::signature::ECDSA_P256_SHA256_ASN1, &key),
+        91 if key.starts_with(&P256_SPKI_PREFIX) => {
+            (&ring::signature::ECDSA_P256_SHA256_ASN1, &key[26..])
+        }
+        n => {
+            return Err(Error::invalid(format!(
+                "unsupported pinned key encoding ({n} bytes)"
+            )));
+        }
+    };
+    UnparsedPublicKey::new(alg, raw)
+        .verify(message, &sig)
+        .map_err(|_| Error::invalid("signature verification failed against pinned key"))
 }
 
 /// A self-contained keyless signature over a plugin manifest: certificate +
@@ -315,6 +391,7 @@ impl TransparencyLog for InMemoryTransparencyLog {
             log_index: entries.len() as u64,
             integrated_time_ms: self.now_ms,
             log_id,
+            body: String::new(), // Apex-native SET form (no log-defined body)
             signed_entry_timestamp: String::new(),
         };
         entry.signed_entry_timestamp =
@@ -429,13 +506,19 @@ pub fn verify_keyless(
                 ));
             }
             if !root.log_public_keys.is_empty() {
-                let body =
-                    body_digest_hex(manifest_bytes, &bundle.signature, &bundle.cert.public_key);
-                let set_bytes = set_canonical_bytes(entry, &body);
-                let set_ok = root
-                    .log_public_keys
-                    .iter()
-                    .any(|k| verify_ed25519(k, &set_bytes, &entry.signed_entry_timestamp).is_ok());
+                // Two SET formats: a log that supplies its own canonical `body`
+                // (Rekor) signs the RFC 8785 payload over it; the Apex in-memory
+                // log signs this module's canonical entry form.
+                let set_bytes = if entry.body.is_empty() {
+                    let body =
+                        body_digest_hex(manifest_bytes, &bundle.signature, &bundle.cert.public_key);
+                    set_canonical_bytes(entry, &body)
+                } else {
+                    rekor_set_payload(entry)
+                };
+                let set_ok = root.log_public_keys.iter().any(|k| {
+                    verify_with_pinned_key(k, &set_bytes, &entry.signed_entry_timestamp).is_ok()
+                });
                 if !set_ok {
                     return Err(Error::invalid(
                         "transparency-log signed entry timestamp does not verify against a pinned log key",
@@ -586,6 +669,93 @@ mod tests {
         let mut lax = policy();
         lax.require_transparency = false;
         assert!(verify_keyless(manifest, &bundle, &root, &lax, "acme").is_ok());
+    }
+
+    /// A test log that mimics **Rekor**: the entry carries the log's canonical
+    /// `body` (base64) and the SET signs the RFC 8785 payload over it.
+    struct RekorishLog<F: Fn(&[u8]) -> Vec<u8>> {
+        sign: F,
+        now_ms: u64,
+    }
+
+    impl<F: Fn(&[u8]) -> Vec<u8>> TransparencyLog for RekorishLog<F> {
+        fn append(&self, _a: &[u8], _s: &str, _p: &str) -> Result<LogEntryRef> {
+            let mut entry = LogEntryRef {
+                uuid: "0791c72f88cf47564".into(),
+                log_index: 7,
+                integrated_time_ms: self.now_ms,
+                log_id: "fcdb0cf103bc".into(),
+                body: "eyJhcGlWZXJzaW9uIjoiMC4wLjEifQ==".into(),
+                signed_entry_timestamp: String::new(),
+            };
+            entry.signed_entry_timestamp = hex::encode((self.sign)(&rekor_set_payload(&entry)));
+            Ok(entry)
+        }
+    }
+
+    /// Sign + verify with a Rekor-shaped log across every pinned-key encoding the
+    /// verifier accepts: raw ed25519, and ECDSA P-256 as both SPKI DER and a raw
+    /// uncompressed point (Rekor's memory signer is P-256).
+    #[test]
+    fn rekor_format_set_verifies_with_ed25519_and_p256_pins() {
+        let manifest = b"m";
+        let (ca_pkcs8, _) = generate_keypair().unwrap();
+        let ca = InMemoryCa::from_pkcs8(&ca_pkcs8).unwrap();
+        let (eph, _) = generate_keypair().unwrap();
+
+        // — ed25519 log key, pinned raw —
+        let (log_pkcs8, log_pub_hex) = generate_keypair().unwrap();
+        let log_kp = Ed25519KeyPair::from_pkcs8(&log_pkcs8).unwrap();
+        let log = RekorishLog {
+            sign: move |m: &[u8]| log_kp.sign(m).as_ref().to_vec(),
+            now_ms: NOW + 1000,
+        };
+        let bundle = sign_keyless(manifest, &identity(), &eph, &ca, Some(&log), NOW).unwrap();
+        let root = KeylessRoot {
+            ca_public_keys: vec![ca.public_key_hex()],
+            log_public_keys: vec![log_pub_hex],
+        };
+        assert!(verify_keyless(manifest, &bundle, &root, &policy(), "acme").is_ok());
+
+        // Tampering with any SET-covered coordinate breaks it.
+        let mut forged = bundle.clone();
+        forged.log_entry.as_mut().unwrap().log_index += 1;
+        let err = verify_keyless(manifest, &forged, &root, &policy(), "acme").unwrap_err();
+        assert!(err.to_string().contains("signed entry timestamp"), "{err}");
+
+        // — ECDSA P-256 log key (what Rekor's memory signer uses) —
+        use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
+        let rng = ring::rand::SystemRandom::new();
+        let p256_pkcs8 =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+        let p256 =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, p256_pkcs8.as_ref(), &rng)
+                .unwrap();
+        let point = p256.public_key().as_ref().to_vec(); // 65-byte uncompressed
+        let rng2 = ring::rand::SystemRandom::new();
+        let log = RekorishLog {
+            sign: move |m: &[u8]| p256.sign(&rng2, m).unwrap().as_ref().to_vec(),
+            now_ms: NOW + 1000,
+        };
+        let (eph2, _) = generate_keypair().unwrap();
+        let bundle = sign_keyless(manifest, &identity(), &eph2, &ca, Some(&log), NOW).unwrap();
+
+        // Pin as SPKI DER (PEM-decoded form) and as the raw point — both verify.
+        let mut spki = vec![
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
+            0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+        ];
+        spki.extend_from_slice(&point);
+        for pinned in [hex::encode(&spki), hex::encode(&point)] {
+            let root = KeylessRoot {
+                ca_public_keys: vec![ca.public_key_hex()],
+                log_public_keys: vec![pinned],
+            };
+            assert!(
+                verify_keyless(manifest, &bundle, &root, &policy(), "acme").is_ok(),
+                "p256 pin should verify"
+            );
+        }
     }
 
     #[test]
