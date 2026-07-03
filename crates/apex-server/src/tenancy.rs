@@ -928,4 +928,145 @@ mod tests {
         assert_eq!(s, StatusCode::OK);
         assert_eq!(etag.as_deref(), Some("\"3\""));
     }
+
+    /// The v0.3 exit criterion: **teams operate self-serve via the dashboard with
+    /// enforced quotas.** This drives the exact HTTP routes the dashboard's
+    /// `settings.service.ts` calls — org → project → member → quota → agent run —
+    /// end to end, proving a team bootstraps, self-serves, and is held to the quota
+    /// it sets (the flow verified live against `apex dev`).
+    #[tokio::test]
+    async fn teams_self_serve_the_full_lifecycle_with_enforced_quotas() {
+        // SAFETY: single-threaded test; bootstrap the operator as a platform admin.
+        unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
+        let st = state();
+
+        // A request as `who`, optionally naming a project (for run quota metering).
+        async fn as_user(
+            st: &Arc<AppState>,
+            method: &str,
+            uri: &str,
+            who: &str,
+            project: Option<&str>,
+            body: Value,
+        ) -> (StatusCode, Value) {
+            let mut b = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("x-apex-tenant", "acme")
+                .header("x-apex-principal", who);
+            if let Some(p) = project {
+                b = b.header("x-apex-project", p);
+            }
+            let resp = crate::router(st.clone())
+                .oneshot(b.body(axum::body::Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        // 1. Operator bootstraps the org, then a project under it.
+        let (s, org) = as_user(
+            &st,
+            "POST",
+            "/api/v1/organizations",
+            "root",
+            None,
+            json!({"name":"Acme"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let org_id = org["id"].as_str().unwrap().to_string();
+        let (s, prj) = as_user(
+            &st,
+            "POST",
+            "/api/v1/projects",
+            "root",
+            None,
+            json!({"name":"Prod","organization":org_id}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let prj_id = prj["id"].as_str().unwrap().to_string();
+
+        // 2. Operator grants alice org_admin — she now self-serves the tenant.
+        let (s, _) = as_user(
+            &st,
+            "POST",
+            &format!("/api/v1/projects/{prj_id}/members"),
+            "root",
+            None,
+            json!({"user":"alice","role":"org_admin","scope":{"organization":org_id}}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+
+        // 3. Self-serve is authorized, not open: a non-member cannot set the quota.
+        let quota_uri = format!("/api/v1/projects/{prj_id}/quota");
+        let (s, _) = as_user(
+            &st,
+            "PATCH",
+            &quota_uri,
+            "mallory",
+            None,
+            json!({"concurrent_agent_runs":1}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "non-member must not set quota");
+
+        // 4. Alice self-serves a quota of one concurrent run.
+        let (s, q) = as_user(
+            &st,
+            "PATCH",
+            &quota_uri,
+            "alice",
+            None,
+            json!({"concurrent_agent_runs":1}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(q["limits"]["concurrent_agent_runs"], 1);
+
+        // 5. A metered run under the project is admitted.
+        let run = json!({"manifest":"metadata:\n  name: hello\nspec:\n  instructions: hi\n","input":{"message":"hi"}});
+        let (s, _) = as_user(
+            &st,
+            "POST",
+            "/api/v1/agents:run",
+            "alice",
+            Some(&prj_id),
+            run.clone(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+
+        // 6. Alice tightens the quota to zero, then the next run is refused — the team
+        // is held to the limit it set itself.
+        let (s, _) = as_user(
+            &st,
+            "PATCH",
+            &quota_uri,
+            "alice",
+            None,
+            json!({"concurrent_agent_runs":0}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, err) = as_user(
+            &st,
+            "POST",
+            "/api/v1/agents:run",
+            "alice",
+            Some(&prj_id),
+            run,
+        )
+        .await;
+        assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err["error"]["code"], "quota_exceeded");
+    }
 }
