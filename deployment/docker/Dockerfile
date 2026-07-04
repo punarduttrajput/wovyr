@@ -9,6 +9,11 @@
 # Run the hello agent (offline mock provider, no key needed):
 #   docker run --rm apex:dev agents run --local \
 #     -f examples/agents/hello.yaml --input '{"message":"Hi"}' --stream
+#
+# Pass --build-arg FEATURES="tiered-memory,postgres" to build with the tiered
+# Postgres/Qdrant backends compiled in (see deployment/docker-compose.yml, which
+# does exactly this) — the default empty FEATURES keeps this identical to the
+# plain build above.
 
 # ---- build stage ------------------------------------------------------------
 FROM rust:1.96-slim-bookworm AS build
@@ -17,14 +22,20 @@ WORKDIR /src
 
 # Copy the full workspace and build the CLI in release mode.
 COPY . .
-RUN cargo build --release -p apex-cli
+ARG FEATURES=""
+RUN if [ -n "$FEATURES" ]; then \
+      cargo build --release -p apex-cli --features "$FEATURES"; \
+    else \
+      cargo build --release -p apex-cli; \
+    fi
 
 # ---- runtime stage ----------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
-# CA certificates so the OpenAI-compatible provider and http_get tool can use TLS.
+# CA certificates so the OpenAI-compatible provider and http_get tool can use
+# TLS; curl so compose/orchestrators can healthcheck `/healthz` over real HTTP.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as a non-root user.

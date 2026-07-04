@@ -94,6 +94,36 @@ fn registry() -> Result<Registry<Box<dyn RegistryStore>>, ApiError> {
     Ok(reg)
 }
 
+/// Run a synchronous registry operation on a dedicated blocking-pool thread.
+///
+/// The sync `postgres` crate's `Client` (used by `PostgresRegistryStore` when
+/// `APEX_MARKETPLACE_POSTGRES_URL` is set) drives its own internal Tokio runtime
+/// via `block_on` for *every* call, including `connect` — calling it directly
+/// from an Axum handler panics ("Cannot start a runtime from within a runtime")
+/// because the handler is already running on one of this server's own runtime
+/// worker threads. `spawn_blocking` moves the whole registry construction +
+/// operation onto a plain OS thread outside that runtime, where the nested
+/// `block_on` is fine. (The file-store path doesn't need this, but paying a
+/// thread hop for it too keeps every handler on one code path.)
+async fn with_registry<T, F>(f: F) -> Result<T, ApiError>
+where
+    F: FnOnce(&mut Registry<Box<dyn RegistryStore>>) -> Result<T, ApiError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut reg = registry()?;
+        f(&mut reg)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("registry task panicked: {e}"),
+        ))
+    })
+}
+
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/marketplace/listings", get(search_listings))
@@ -159,7 +189,7 @@ async fn search_listings(Query(params): Query<SearchParams>) -> Result<Json<Valu
         category: params.category,
         capability: params.capability.as_deref().and_then(parse_capability),
     };
-    let listings = registry()?.search(&query)?;
+    let listings = with_registry(move |reg| Ok(reg.search(&query)?)).await?;
     let total = listings.len();
     Ok(Json(json!({ "listings": listings, "total": total })))
 }
@@ -167,14 +197,17 @@ async fn search_listings(Query(params): Query<SearchParams>) -> Result<Json<Valu
 /// `GET /api/v1/marketplace/listings/{id}` — one listing's detail (`id` URL-encoded
 /// `publisher%2Fname`).
 async fn get_listing(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    match registry()?.get(&id)? {
-        Some(listing) => Ok(Json(json!(listing))),
-        None => Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            format!("listing `{id}` not found"),
-        )),
-    }
+    let listing = with_registry(move |reg| {
+        reg.get(&id)?.ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("listing `{id}` not found"),
+            )
+        })
+    })
+    .await?;
+    Ok(Json(json!(listing)))
 }
 
 #[derive(Deserialize)]
@@ -200,7 +233,10 @@ async fn publish_listing(
     Json(req): Json<PublishReq>,
 ) -> Result<Json<Value>, ApiError> {
     let bytes = base64_decode(&req.apexpkg)?;
-    let out = registry()?.publish(&bytes, &req.categories, req.channel.as_deref())?;
+    let categories = req.categories;
+    let channel = req.channel;
+    let out =
+        with_registry(move |reg| Ok(reg.publish(&bytes, &categories, channel.as_deref())?)).await?;
 
     let tenant = headers
         .get("x-apex-tenant")
@@ -233,7 +269,9 @@ async fn download_version(
     Path(id): Path<String>,
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let bytes = registry()?.download(&id, params.version.as_deref())?;
+    let lookup_id = id.clone();
+    let bytes =
+        with_registry(move |reg| Ok(reg.download(&lookup_id, params.version.as_deref())?)).await?;
     Ok(Json(json!({ "id": id, "apexpkg": base64_encode(&bytes) })))
 }
 
@@ -247,23 +285,26 @@ async fn version_attestation(
     Path(id): Path<String>,
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let reg = registry()?;
-    let listing = reg.get(&id)?.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            format!("listing `{id}` not found"),
+    let value = with_registry(move |reg| {
+        let listing = reg.get(&id)?.ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("listing `{id}` not found"),
+            )
+        })?;
+        let bytes = reg.download(&id, params.version.as_deref())?;
+        let trust = plugins::load_trust()?;
+        attestation_json(
+            &id,
+            &bytes,
+            &trust,
+            listing.verified,
+            &reg.policy().deny_components,
         )
-    })?;
-    let bytes = reg.download(&id, params.version.as_deref())?;
-    let trust = plugins::load_trust()?;
-    Ok(Json(attestation_json(
-        &id,
-        &bytes,
-        &trust,
-        listing.verified,
-        &reg.policy().deny_components,
-    )?))
+    })
+    .await?;
+    Ok(Json(value))
 }
 
 /// Build the supply-chain attestation JSON for a package: permission risk, SBOM, build
@@ -315,15 +356,14 @@ async fn review_listing(
     Path(id): Path<String>,
     Json(req): Json<ReviewReq>,
 ) -> Result<Json<Value>, ApiError> {
-    registry()?.review(
-        &id,
-        Review {
-            author: req.author,
-            rating: req.rating,
-            body: req.body,
-        },
-    )?;
-    Ok(Json(json!({ "id": id, "status": "reviewed" })))
+    let id_for_resp = id.clone();
+    let review = Review {
+        author: req.author,
+        rating: req.rating,
+        body: req.body,
+    };
+    with_registry(move |reg| Ok(reg.review(&id, review)?)).await?;
+    Ok(Json(json!({ "id": id_for_resp, "status": "reviewed" })))
 }
 
 #[derive(Deserialize)]
@@ -343,16 +383,19 @@ async fn verify_listing(
     Path(id): Path<String>,
     Json(req): Json<VerifyReq>,
 ) -> Result<Json<Value>, ApiError> {
-    registry()?.set_verified(&id, req.verified)?;
-    Ok(Json(json!({ "id": id, "verified": req.verified })))
+    let id_for_resp = id.clone();
+    let verified = req.verified;
+    with_registry(move |reg| Ok(reg.set_verified(&id, verified)?)).await?;
+    Ok(Json(json!({ "id": id_for_resp, "verified": verified })))
 }
 
 /// `POST /api/v1/marketplace/listings/{id}/request-review` — the publisher requests
 /// human review of the listing's current latest version, the step gating the
 /// **verified** badge ([Marketplace §6]). Does not gate `publish` itself.
 async fn request_review(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    registry()?.request_review(&id)?;
-    Ok(Json(json!({ "id": id, "status": "pending" })))
+    let id_for_resp = id.clone();
+    with_registry(move |reg| Ok(reg.request_review(&id)?)).await?;
+    Ok(Json(json!({ "id": id_for_resp, "status": "pending" })))
 }
 
 #[derive(Deserialize)]
@@ -383,9 +426,11 @@ async fn approve_review(
     Json(req): Json<ReviewDecisionReq>,
 ) -> Result<Json<Value>, ApiError> {
     let reviewer = reviewer_identity(&headers, req.reviewer.as_deref());
-    registry()?.approve_review(&id, &reviewer)?;
+    let id_for_resp = id.clone();
+    let reviewer_for_task = reviewer.clone();
+    with_registry(move |reg| Ok(reg.approve_review(&id, &reviewer_for_task)?)).await?;
     Ok(Json(
-        json!({ "id": id, "verified": true, "reviewer": reviewer }),
+        json!({ "id": id_for_resp, "verified": true, "reviewer": reviewer }),
     ))
 }
 
@@ -407,12 +452,17 @@ async fn reject_review(
     Json(req): Json<RejectReviewReq>,
 ) -> Result<Json<Value>, ApiError> {
     let reviewer = reviewer_identity(&headers, req.reviewer.as_deref());
-    registry()?.reject_review(&id, &reviewer, &req.reason)?;
+    let id_for_resp = id.clone();
+    let reviewer_for_task = reviewer.clone();
+    let reason = req.reason;
+    let reason_for_task = reason.clone();
+    with_registry(move |reg| Ok(reg.reject_review(&id, &reviewer_for_task, &reason_for_task)?))
+        .await?;
     Ok(Json(json!({
-        "id": id,
+        "id": id_for_resp,
         "verified": false,
         "reviewer": reviewer,
-        "reason": req.reason,
+        "reason": reason,
     })))
 }
 
@@ -429,13 +479,17 @@ async fn install_listing(
     Path(id): Path<String>,
     Json(req): Json<InstallReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let reg = registry()?;
-    let bytes = reg.download(&id, req.version.as_deref())?;
-    let package = Package::from_apexpkg(&bytes)?;
-    let installed = plugins::install_package(&package, &req.grants)?;
-    reg.record_install(&id)?;
+    let id_for_resp = id.clone();
+    let installed = with_registry(move |reg| {
+        let bytes = reg.download(&id, req.version.as_deref())?;
+        let package = Package::from_apexpkg(&bytes)?;
+        let installed = plugins::install_package(&package, &req.grants)?;
+        reg.record_install(&id)?;
+        Ok(installed)
+    })
+    .await?;
     Ok(Json(
-        json!({ "id": id, "status": "installed", "plugin": installed }),
+        json!({ "id": id_for_resp, "status": "installed", "plugin": installed }),
     ))
 }
 

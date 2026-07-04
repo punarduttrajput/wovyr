@@ -7,10 +7,13 @@ Document ID: DEP-002
 
 **Document ID:** DEP-002  
 **File Path:** `docs/12-deployment/docker-compose.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — §3's topology is the aspirational C4 multi-service split
+(future milestone); a real, working compose file exists today at
+[`deployment/docker-compose.yml`](../../deployment/docker-compose.yml) for
+what's actually built: the single `apex` binary + Postgres + Qdrant. See §12.  
 **Owner:** Platform Operations Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-05
 
 ---
 
@@ -140,7 +143,51 @@ workers, use [Kubernetes](kubernetes.md).
 
 ---
 
-# 10. Related Documents
+# 10. Implemented Today
+
+§3's topology (separate `api-gateway`/`memory-engine`/… images) is a future
+milestone — the actual v0.1 deployable artifact is one binary (`apex`, via
+[`deployment/docker/Dockerfile`](../../deployment/docker/Dockerfile)), not a
+microservice split. [`deployment/docker-compose.yml`](../../deployment/docker-compose.yml)
+reflects that reality:
+
+```bash
+make compose-up      # or: docker compose -f deployment/docker-compose.yml up -d --build
+curl http://localhost:8080/healthz
+make compose-down
+```
+
+- **`apex`** — the embedded single-node server (`apex dev`), built with the
+  `tiered-memory,postgres` cargo features.
+- **`postgres`** — backs the **marketplace registry** (`PostgresRegistryStore`,
+  selected when `APEX_MARKETPLACE_POSTGRES_URL` is set): this *is* wired into
+  the running server. Verified live, including a chaos check — stopping
+  Postgres mid-flight makes marketplace routes fail closed with a clean `502
+  provider_error` (not a crash; `apex`'s own `/healthz` stays unaffected, since
+  it doesn't depend on Postgres), and restarting Postgres recovers on the very
+  next request with no `apex` restart needed (each call opens a fresh
+  connection rather than holding a pool).
+- **`qdrant`** — backs the **tiered memory** store (Postgres + Qdrant), but
+  that integration is CLI-only today (`apex memory put/query`, built with
+  `tiered-memory`) — `apex dev`'s embedded server does not route memory
+  through it, always using the local file store instead. Exercise it against
+  the same compose network with `docker compose -f
+  deployment/docker-compose.yml run --rm apex memory put --namespace demo
+  --content "hello"`.
+
+This pass also found and fixed a real bug: the sync `postgres` crate's
+`Client` drives its own internal Tokio runtime for every call (including
+`connect`), which panics ("Cannot start a runtime from within a runtime")
+when invoked directly from an Axum handler — a handler already runs on one
+of the server's own runtime threads. Every marketplace route now runs its
+registry operation via `tokio::task::spawn_blocking` (see
+`crates/apex-server/src/marketplace.rs`'s `with_registry` helper), which
+moves the whole synchronous call onto a plain OS thread outside the async
+runtime, where the nested `block_on` is fine.
+
+---
+
+# 11. Related Documents
 
 - [`12-deployment/docker.md`](docker.md)
 - [`12-deployment/kubernetes.md`](kubernetes.md)
@@ -148,8 +195,9 @@ workers, use [Kubernetes](kubernetes.md).
 
 ---
 
-# 11. Revision History
+# 12. Revision History
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-05 | Added a real, working `deployment/docker-compose.yml` (§10): the actual single-binary `apex` + Postgres (marketplace registry, genuinely wired into the server) + Qdrant (tiered memory, CLI-only today). Parameterized `deployment/docker/Dockerfile` with a `FEATURES` build arg and added `curl` for a real `/healthz` healthcheck. Found and fixed a real bug while verifying this live: every marketplace route panicked when Postgres-backed, because the sync `postgres` crate's blocking calls can't run directly on an Axum handler's own async-runtime thread — fixed via `tokio::task::spawn_blocking`. Chaos-checked: a Postgres outage degrades marketplace routes to a clean `502`, recovering automatically once Postgres returns, with `apex`'s own health and every non-marketplace route unaffected throughout |
 | 1.0.0 | 2026-06-27 | Initial Docker Compose deployment guide |
