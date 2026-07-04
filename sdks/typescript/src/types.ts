@@ -8,6 +8,20 @@ export interface ApexClientOptions {
   principal?: string;
   /** `fetch` override, mainly for tests. Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
+  /** Retry policy for transient failures (network errors, `429`, `502`/`503`/
+   * `504`). Defaults to 2 retries with a 250ms base delay, doubling each
+   * attempt. Set `maxRetries: 0` to disable. Only applied to `GET` requests —
+   * mutating requests are never auto-retried, since retrying one without an
+   * `Idempotency-Key` could double-execute it. */
+  retry?: RetryOptions;
+}
+
+export interface RetryOptions {
+  /** Number of retry attempts after the initial try. Default `2`. */
+  maxRetries?: number;
+  /** Base delay in ms before the first retry; doubles each subsequent
+   * attempt (250 → 500 → 1000 …). Default `250`. */
+  baseDelayMs?: number;
 }
 
 /** The cursor-pagination envelope every list endpoint returns. */

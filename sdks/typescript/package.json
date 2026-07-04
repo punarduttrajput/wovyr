@@ -17,9 +17,11 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/test/"
+    "lint:openapi": "redocly lint ../../docs/09-api/openapi.yaml",
+    "test": "npm run lint:openapi && npm run build && node --test dist/test/"
   },
   "devDependencies": {
+    "@redocly/cli": "^2.37.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.5.0"
   },

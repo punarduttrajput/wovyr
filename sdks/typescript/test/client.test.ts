@@ -18,7 +18,7 @@
  */
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
-import { ApexClient, ApexApiError } from "../src/index.js";
+import { ApexClient, ApexApiError, paginateAll } from "../src/index.js";
 
 const baseUrl = process.env.APEX_TEST_BASE_URL ?? "http://127.0.0.1:8080";
 
@@ -227,5 +227,77 @@ describe("ApexClient (integration)", () => {
     const page = await client().agents.list({ limit: 1 });
     assert.ok(page.data.length <= 1);
     assert.equal(typeof page.has_more, "boolean");
+  });
+
+  test("pagination: paginateAll() drains every stored agent across pages", async (t) => {
+    if (!serverAvailable) return t.skip("no server");
+    const c = client();
+    const created: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { id } = await c.agents.create(
+        `apiVersion: agent.apex.io/v1\nkind: Agent\nmetadata:\n  name: paginate-test-${i}-${Date.now()}\nspec:\n  model_selector: { capability: chat, class: fast }\n  instructions: hi\n`,
+      );
+      created.push(id);
+    }
+    try {
+      const seen = new Set<string>();
+      for await (const id of paginateAll((params) => c.agents.list(params), { limit: 1 })) {
+        seen.add(id);
+      }
+      for (const id of created) assert.ok(seen.has(id), `expected paginateAll to surface ${id}`);
+    } finally {
+      await Promise.all(created.map((id) => c.agents.delete(id).catch(() => {})));
+    }
+  });
+});
+
+describe("HttpClient retry (unit, mocked fetch)", () => {
+  function flakyFetch(failCount: number, finalStatus = 200) {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      if (calls <= failCount) {
+        return new Response("service unavailable", { status: 503 });
+      }
+      return new Response(JSON.stringify({ status: "ok", version: "test" }), {
+        status: finalStatus,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, callCount: () => calls };
+  }
+
+  test("GET retries a 503 and eventually succeeds", async () => {
+    const { fetchImpl, callCount } = flakyFetch(2);
+    const c = new ApexClient({
+      baseUrl: "http://unit-test.invalid",
+      fetchImpl,
+      retry: { maxRetries: 2, baseDelayMs: 1 },
+    });
+    const health = await c.health();
+    assert.equal(health.status, "ok");
+    assert.equal(callCount(), 3);
+  });
+
+  test("GET gives up after exhausting retries", async () => {
+    const { fetchImpl, callCount } = flakyFetch(5);
+    const c = new ApexClient({
+      baseUrl: "http://unit-test.invalid",
+      fetchImpl,
+      retry: { maxRetries: 2, baseDelayMs: 1 },
+    });
+    await assert.rejects(() => c.health(), ApexApiError);
+    assert.equal(callCount(), 3); // 1 initial + 2 retries, then surfaces the error
+  });
+
+  test("POST is never auto-retried, even on a 503", async () => {
+    const { fetchImpl, callCount } = flakyFetch(1);
+    const c = new ApexClient({
+      baseUrl: "http://unit-test.invalid",
+      fetchImpl,
+      retry: { maxRetries: 2, baseDelayMs: 1 },
+    });
+    await assert.rejects(() => c.agents.run({ manifest: "x" }), ApexApiError);
+    assert.equal(callCount(), 1);
   });
 });

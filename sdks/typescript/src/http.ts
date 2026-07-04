@@ -1,5 +1,13 @@
 import { ApexApiError, type ApexErrorBody } from "./errors.js";
-import type { ApexClientOptions } from "./types.js";
+import type { ApexClientOptions, RetryOptions } from "./types.js";
+
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_BASE_DELAY_MS = 250;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Extra per-request knobs layered on top of the client's defaults. `query` is
  * typed as a bare `object` (rather than an indexed `Record`) so any of the
@@ -19,12 +27,16 @@ export class HttpClient {
   private readonly tenant: string | undefined;
   private readonly principal: string | undefined;
   private readonly fetchImpl: typeof fetch;
+  private readonly maxRetries: number;
+  private readonly baseDelayMs: number;
 
   constructor(options: ApexClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.tenant = options.tenant;
     this.principal = options.principal;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.maxRetries = options.retry?.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.baseDelayMs = options.retry?.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
   }
 
   private url(path: string, query?: RequestOptions["query"]): string {
@@ -43,7 +55,9 @@ export class HttpClient {
   }
 
   /** Perform a request and return the raw `Response` (used by the SSE helper,
-   * which needs the body stream rather than a parsed value). */
+   * which needs the body stream rather than a parsed value). Retries transient
+   * failures per the client's {@link RetryOptions}, but only for `GET` — see
+   * {@link ApexClientOptions.retry}. */
   async raw(method: string, path: string, body?: unknown, options?: RequestOptions): Promise<Response> {
     const headers = this.defaultHeaders(options?.headers);
     const init: RequestInit = { method, headers };
@@ -51,7 +65,22 @@ export class HttpClient {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    return this.fetchImpl(this.url(path, options?.query), init);
+    const url = this.url(path, options?.query);
+    const retriesAllowed = method === "GET" ? this.maxRetries : 0;
+
+    let attempt = 0;
+    for (;;) {
+      try {
+        const response = await this.fetchImpl(url, init);
+        if (attempt >= retriesAllowed || !RETRYABLE_STATUSES.has(response.status)) {
+          return response;
+        }
+      } catch (err) {
+        if (attempt >= retriesAllowed) throw err;
+      }
+      await sleep(this.baseDelayMs * 2 ** attempt);
+      attempt++;
+    }
   }
 
   /** Perform a request and decode the JSON body, throwing {@link ApexApiError}

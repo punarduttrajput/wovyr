@@ -7,7 +7,7 @@ Document ID: API-001
 
 **Document ID:** API-001  
 **File Path:** `docs/09-api/overview.md`  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Draft — this document describes the **target-state** convention;
 the machine-readable, ground-truth contract for what `apex-server` actually
 implements today is [`openapi.yaml`](openapi.yaml) (hand-authored from the
@@ -17,10 +17,13 @@ key — agent name, workflow `execution_id`, `publisher/name`, …), no OAuth2/
 JWT/mTLS (plain `X-Apex-Tenant`/`X-Apex-Principal` headers), and no generic
 `/operations/{id}` polling resource. Pagination, the `Idempotency-Key` header,
 `If-Match`/`ETag` concurrency, and the error envelope below *are* implemented
-as documented. A first TypeScript client generated against `openapi.yaml` lives
-at [`sdks/typescript`](../../sdks/typescript).  
+as documented. A TypeScript client generated against `openapi.yaml` lives
+at [`sdks/typescript`](../../sdks/typescript), with retry/backoff on `GET`
+requests and a `paginateAll()` auto-iteration helper. The deprecation window
+this section's `/v2` sentence promises is spelled out concretely in
+[deprecation-policy.md](deprecation-policy.md).  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-07-03
+**Last Updated:** 2026-07-04
 
 ---
 
@@ -52,7 +55,8 @@ https://{host}/api/v1/...
 - The API is namespaced `/api/v1`.
 - Additive changes (new fields, new endpoints) are backward compatible.
 - Breaking changes introduce `/api/v2`, run in parallel, and follow a published
-  deprecation window.
+  deprecation window — see [deprecation-policy.md](deprecation-policy.md) for
+  the concrete window (90 days minimum) and required headers.
 - Responses include an `Apex-Api-Version` header.
 
 ---
@@ -251,5 +255,6 @@ signed, retried with backoff, and mirror Event Bus topics.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-04 | Linked the new [deprecation-policy.md](deprecation-policy.md) from §3; noted the TypeScript SDK's new retry/backoff and `paginateAll()` helper |
 | 1.1.0 | 2026-07-03 | Added `openapi.yaml` as the hand-authored, ground-truth machine-readable contract (v1.0 "Stability" workstream), noting where this convention doc describes target-state behavior the real API doesn't implement (opaque ids, OAuth2/JWT, `/operations/{id}`). First TypeScript client (`sdks/typescript`) landed against the spec, integration-tested against a live `apex dev` server |
 | 1.0.0 | 2026-06-27 | Initial Platform API Overview & Conventions |

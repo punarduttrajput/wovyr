@@ -7,10 +7,10 @@ Document ID: API-INDEX-001
 
 **Document ID:** API-INDEX-001  
 **File Path:** `docs/09-api/index.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Active  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-04
 
 ---
 
@@ -68,6 +68,7 @@ contracts are for *running* them at scale.
 | Document | Responsibility |
 |----------|----------------|
 | [overview.md](overview.md) | API conventions: REST/gRPC, versioning, pagination, errors, idempotency |
+| [deprecation-policy.md](deprecation-policy.md) | Breaking-change definition, deprecation window, `/v2` parallel-run rule |
 | [authentication.md](authentication.md) | AuthN/Z: OAuth2, JWT, API keys, RBAC scopes |
 | [agents.md](agents.md) | Agent definitions, runs, sessions |
 | [workflows.md](workflows.md) | Workflow definitions, executions, control |
@@ -111,4 +112,5 @@ contracts are for *running* them at scale.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-04 | Added [deprecation-policy.md](deprecation-policy.md) to the document map |
 | 1.0.0 | 2026-06-27 | Initial Platform API Index |
