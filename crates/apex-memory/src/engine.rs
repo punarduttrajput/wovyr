@@ -60,6 +60,34 @@ impl MemoryEngine {
         tags: Vec<String>,
         required_scopes: Vec<String>,
     ) -> Result<String> {
+        self.remember_full(
+            namespace,
+            content,
+            memory_type,
+            importance,
+            tags,
+            required_scopes,
+            false,
+        )
+        .await
+    }
+
+    /// Like [`Self::remember_scoped`], additionally marking the record
+    /// `sensitive` — [Encryption §4](../../docs/13-security/encryption.md#4-application-layer-encryption):
+    /// a plain store ignores the flag, but an
+    /// [`EncryptingMemoryStore`](crate::EncryptingMemoryStore) seals `content`
+    /// through `apex-kms` before it reaches disk.
+    #[allow(clippy::too_many_arguments)] // mirrors remember_scoped's existing positional-arg style
+    pub async fn remember_full(
+        &self,
+        namespace: impl Into<String>,
+        content: impl Into<String>,
+        memory_type: MemoryType,
+        importance: f32,
+        tags: Vec<String>,
+        required_scopes: Vec<String>,
+        sensitive: bool,
+    ) -> Result<String> {
         let content = content.into();
         let embedding = self.embed(&content).await?;
         let record = MemoryRecord {
@@ -71,6 +99,7 @@ impl MemoryEngine {
             importance: importance.clamp(0.0, 1.0),
             tags,
             required_scopes,
+            sensitive,
             seq: 0,
         };
         self.store.put(record).await
@@ -555,6 +584,7 @@ mod tests {
             importance: 0.0,
             tags: Vec::new(),
             required_scopes: Vec::new(),
+            sensitive: false,
             seq: 0,
         }
     }

@@ -84,11 +84,14 @@ impl PostgresStore {
                      importance      REAL NOT NULL,
                      tags            TEXT[] NOT NULL,
                      required_scopes TEXT[] NOT NULL DEFAULT '{}',
+                     sensitive       BOOLEAN NOT NULL DEFAULT FALSE,
                      seq             BIGINT NOT NULL
                  );
-                 -- Backfill the ABAC column on databases created before it existed.
+                 -- Backfill columns on databases created before they existed.
                  ALTER TABLE memory_records
                      ADD COLUMN IF NOT EXISTS required_scopes TEXT[] NOT NULL DEFAULT '{}';
+                 ALTER TABLE memory_records
+                     ADD COLUMN IF NOT EXISTS sensitive BOOLEAN NOT NULL DEFAULT FALSE;
                  CREATE INDEX IF NOT EXISTS memory_records_ns ON memory_records (namespace);
                  CREATE INDEX IF NOT EXISTS memory_records_fts
                      ON memory_records USING GIN (to_tsvector('english', content));",
@@ -108,6 +111,7 @@ impl PostgresStore {
             importance: row.get("importance"),
             tags: row.get("tags"),
             required_scopes: row.get("required_scopes"),
+            sensitive: row.get("sensitive"),
             seq: row.get::<_, i64>("seq") as u64,
         }
     }
@@ -126,8 +130,8 @@ impl MemoryStore for PostgresStore {
         self.client
             .execute(
                 "INSERT INTO memory_records
-                   (id, namespace, content, embedding, memory_type, importance, tags, required_scopes, seq)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                   (id, namespace, content, embedding, memory_type, importance, tags, required_scopes, sensitive, seq)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 &[
                     &id,
                     &record.namespace,
@@ -137,6 +141,7 @@ impl MemoryStore for PostgresStore {
                     &record.importance,
                     &record.tags,
                     &record.required_scopes,
+                    &record.sensitive,
                     &seq,
                 ],
             )

@@ -86,6 +86,7 @@ fn rec(ns: &str, content: &str, embedding: Vec<f32>) -> MemoryRecord {
         importance: 0.5,
         tags: Vec::new(),
         required_scopes: Vec::new(),
+        sensitive: false,
         seq: 0,
     }
 }

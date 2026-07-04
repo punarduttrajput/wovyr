@@ -15,12 +15,14 @@
 
 #[cfg(feature = "tiered")]
 mod backends;
+mod encrypting_store;
 mod engine;
 mod record;
 mod store;
 
 #[cfg(feature = "tiered")]
 pub use backends::{PostgresStore, QdrantStore, TieredStore};
+pub use encrypting_store::EncryptingMemoryStore;
 pub use engine::MemoryEngine;
 pub use record::{
     AccessContext, CompactionOutcome, CompactionPolicy, MemoryQuery, MemoryRecord, MemoryType,

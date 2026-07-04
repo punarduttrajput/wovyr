@@ -56,6 +56,13 @@ pub struct MemoryRecord {
     /// ([ranking §8](../../docs/06-memory-engine/ranking.md)). Empty = public.
     #[serde(default)]
     pub required_scopes: Vec<String>,
+    /// Whether `content` should be sealed at rest via `apex-kms` (tenant =
+    /// `namespace`) — [Encryption §4](../../docs/13-security/encryption.md#4-application-layer-encryption)'s
+    /// "memory records flagged sensitive". A plain [`MemoryStore`](crate::MemoryStore)
+    /// ignores this flag entirely; only
+    /// [`EncryptingMemoryStore`](crate::EncryptingMemoryStore) acts on it.
+    #[serde(default)]
+    pub sensitive: bool,
     /// Monotonic insertion sequence (assigned by the store; used for recency).
     #[serde(default)]
     pub seq: u64,
