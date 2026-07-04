@@ -111,6 +111,36 @@ impl Secret {
             reference: self.reference().to_string(),
         }
     }
+
+    /// Reconstruct a secret from its raw parts — crate-internal, used by an
+    /// encrypting store rehydrating from sealed storage (it never has a
+    /// `SecretValue` to build from, only recovered plaintext).
+    pub(crate) fn from_parts(
+        namespace: String,
+        name: String,
+        value: String,
+        previous: Option<String>,
+        version: u32,
+    ) -> Self {
+        Self {
+            namespace,
+            name,
+            value,
+            previous,
+            version,
+        }
+    }
+
+    /// The raw current value — crate-internal. Sealing needs the plaintext
+    /// bytes; external consumers use the masked [`value`](Self::value).
+    pub(crate) fn raw_value(&self) -> &str {
+        &self.value
+    }
+
+    /// The raw previous value, if any — crate-internal.
+    pub(crate) fn raw_previous(&self) -> Option<&str> {
+        self.previous.as_deref()
+    }
 }
 
 /// A secret's metadata — everything *except* the value. Safe to list/return.

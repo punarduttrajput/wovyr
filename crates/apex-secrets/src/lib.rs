@@ -11,19 +11,29 @@
 //! - [`Secret`] / [`SecretMetadata`] — the stored record (value + rotation history) and
 //!   its value-free projection.
 //! - [`SecretStore`] — the durable port, with [`InMemorySecretStore`] +
-//!   [`FileSecretStore`] backends.
+//!   [`FileSecretStore`] backends, plus an at-rest-**encrypting**
+//!   [`EncryptedFileSecretStore`]
+//!   ([Encryption §4](../../docs/13-security/encryption.md#4-application-layer-encryption)):
+//!   seals a secret's value (and retained previous value) through
+//!   [`apex_kms`] before it reaches disk, keyed by the secret's own
+//!   `namespace` as the KMS tenant — the plain `FileSecretStore`'s
+//!   `secrets.json` holds plaintext, this one's `secrets.enc.json` never
+//!   does. `list` stays value-free either way, so it never needs to unseal.
 //! - [`Vault`] — the access-controlled front: **tenant isolation** + a
 //!   **`secret:read:<name>` grant** gate the resolution path, fail-closed.
 //!
-//! Depends only on `apex-common`, keeping the workspace dependency spine one-directional.
-//! Sandbox/plugin **injection** of resolved values is a consumer of this crate (the Tool
+//! Depends on `apex-common` and `apex-kms` (itself `apex-common`-only), keeping
+//! the workspace dependency spine one-directional. Sandbox/plugin
+//! **injection** of resolved values is a consumer of this crate (the Tool
 //! Runtime / Plugin host), wired separately.
 
+mod encrypted_store;
 mod reference;
 mod secret;
 mod store;
 mod vault;
 
+pub use encrypted_store::EncryptedFileSecretStore;
 pub use reference::{SCHEME, SecretRef};
 pub use secret::{Secret, SecretMetadata, SecretValue};
 pub use store::{FileSecretStore, InMemorySecretStore, SecretStore};

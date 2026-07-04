@@ -260,6 +260,7 @@ name = "apex-secrets"
 version = "0.1.0"
 dependencies = [
  "apex-common",
+ "apex-kms",
  "serde",
  "serde_json",
 ]

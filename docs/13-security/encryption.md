@@ -7,10 +7,12 @@ Document ID: SEC-004
 
 **Document ID:** SEC-004  
 **File Path:** `docs/13-security/encryption.md`  
-**Version:** 1.1.0  
-**Status:** Draft — §5's key hierarchy now has a code counterpart (`apex-kms`);
-everything else in this document (transit/at-rest encryption, PII handling)
-remains infra-level and undocumented-in-code, as it was  
+**Version:** 1.2.0  
+**Status:** Draft — §5's key hierarchy has a code counterpart (`apex-kms`),
+now with a first real §4 application-layer-encryption consumer
+(`apex-secrets`'s `EncryptedFileSecretStore`); everything else in this
+document (transit/at-rest infra encryption, PII handling) remains
+infra-level and undocumented-in-code, as it was  
 **Owner:** Security Team  
 **Last Updated:** 2026-07-04
 
@@ -56,8 +58,12 @@ encryption (see [Terraform](../12-deployment/terraform.md)).
 Sensitive fields can be encrypted **above** the datastore with per-tenant keys, so
 a compromised database alone does not expose them:
 
-- Memory records flagged sensitive ([Memory security](../06-memory-engine/overview.md#12-security))
-- Selected configuration and PII fields
+- Secret values ([secret-management](secret-management.md)) — **implemented**:
+  `apex-secrets`'s `EncryptedFileSecretStore` seals a secret's current and
+  retained-previous value through `apex-kms` before they reach disk, keyed
+  by the secret's own namespace as the KMS tenant.
+- Memory records flagged sensitive ([Memory security](../06-memory-engine/overview.md#12-security)) — not yet implemented
+- Selected configuration and PII fields — not yet implemented
 
 This is envelope encryption: data keys wrapped by a tenant key in the KMS.
 
@@ -86,11 +92,12 @@ rather than a real KMS/HSM. Rotation is `rotate_tenant_key` (rolls a new
 tenant key version, retaining old ones) plus `rewrap_data_key` (the caller
 moves each DEK it holds onto the new version — the crate has no visibility
 into which DEKs a consumer has stored, so it cannot rewrap them itself).
-Crypto-shredding is `destroy_tenant_key`, fail-closed thereafter. Not yet
-done: a cloud-KMS-/HSM-backed root (the `Kms` trait is the boundary a real
-backend would implement — only tenant-key wrap/unwrap would change), wiring
-into a real consumer (a memory record's "sensitive" flag, config/PII
-fields), server routes/CLI surface, and audit-logging key lifecycle events
+Crypto-shredding is `destroy_tenant_key`, fail-closed thereafter. **Wired
+into a real consumer**: `apex-secrets`'s `EncryptedFileSecretStore` (§4
+above). Not yet done: a cloud-KMS-/HSM-backed root (the `Kms` trait is the
+boundary a real backend would implement — only tenant-key wrap/unwrap would
+change), a memory record's "sensitive" flag, config/PII fields, server
+routes/CLI surface, and audit-logging key lifecycle events
 (§9 below). See `crates/apex-kms/src/lib.rs`.
 
 ---
@@ -148,5 +155,6 @@ compliance frameworks ([index §7](index.md#7-compliance-posture)).
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-04 | §4's first real application-layer-encryption consumer landed: `apex-secrets`'s `EncryptedFileSecretStore` seals secret values through `apex-kms`, keyed by the secret's own namespace as the KMS tenant. `secrets.enc.json` (distinct from the plaintext `FileSecretStore`'s `secrets.json`) never holds a plaintext value; verified by a test reading the raw file bytes |
 | 1.1.0 | 2026-07-04 | §5's key hierarchy landed in code: `apex-kms` (`Kms` trait, `LocalKms`, rotation/rewrap, crypto-shredding). Not yet done: a cloud-KMS/HSM-backed root, wiring into a real consumer, server/CLI surface, audit integration |
 | 1.0.0 | 2026-06-27 | Initial Encryption specification |

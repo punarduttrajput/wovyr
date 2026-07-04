@@ -1,10 +1,15 @@
 //! Durable storage for secrets — the vault's backing catalog.
 //!
 //! [`SecretStore`] is the port; [`InMemorySecretStore`] (tests/single-process) and
-//! [`FileSecretStore`] (one `secrets.json`) are the backends. A production deployment
-//! would back this with a managed vault (cloud secrets manager / HashiCorp Vault)
-//! ([secret-management §3](../../docs/13-security/secret-management.md#3-secret-vault));
-//! at-rest encryption is the store's responsibility and out of scope here.
+//! [`FileSecretStore`] (one plaintext `secrets.json`) are the backends here. A
+//! production deployment would back this with a managed vault (cloud secrets
+//! manager / HashiCorp Vault)
+//! ([secret-management §3](../../docs/13-security/secret-management.md#3-secret-vault))
+//! — or, short of that, swap in
+//! [`EncryptedFileSecretStore`](crate::EncryptedFileSecretStore) (in
+//! `encrypted_store.rs`), which seals values through `apex-kms` before they
+//! reach disk. At-rest encryption remains the *store's* responsibility (this
+//! trait is encryption-agnostic either way).
 
 use crate::secret::{Secret, SecretMetadata};
 use apex_common::{Error, Result};
