@@ -14,6 +14,7 @@ members = [
     "crates/apex-events",
     "crates/apex-secrets",
     "crates/apex-audit",
+    "crates/apex-kms",
     "crates/apex-server",
     "apps/apex-cli",
 ]
@@ -40,6 +41,7 @@ apex-tenancy = { path = "crates/apex-tenancy" }
 apex-events = { path = "crates/apex-events" }
 apex-secrets = { path = "crates/apex-secrets" }
 apex-audit = { path = "crates/apex-audit" }
+apex-kms = { path = "crates/apex-kms" }
 apex-server = { path = "crates/apex-server" }
 
 # External

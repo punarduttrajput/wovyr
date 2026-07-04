@@ -1,0 +1,143 @@
+//! Durable storage for tenant key records — the KMS's backing catalog. Only
+//! ever holds *wrapped* key material (sealed by the root key); an entry here
+//! is inert without the root key that wrapped it, unlike a secret store
+//! (which holds plaintext) — see
+//! [`apex_secrets::FileSecretStore`](../../apex-secrets/src/store.rs) for the
+//! analogous plaintext case.
+
+use crate::model::TenantKeyRecord;
+use apex_common::{Error, Result};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// A durable catalog of tenant key records, keyed by tenant id.
+pub trait KmsStore: Send + Sync {
+    /// Fetch a tenant's key record, if one has ever been provisioned.
+    fn get(&self, tenant: &str) -> Result<Option<TenantKeyRecord>>;
+    /// Create or replace a tenant's key record.
+    fn put(&self, record: TenantKeyRecord) -> Result<()>;
+}
+
+/// In-process store (tests / single process).
+#[derive(Default)]
+pub struct InMemoryKmsStore {
+    inner: Mutex<BTreeMap<String, TenantKeyRecord>>,
+}
+
+impl InMemoryKmsStore {
+    /// An empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, TenantKeyRecord>> {
+        self.inner.lock().expect("kms store mutex poisoned")
+    }
+}
+
+impl KmsStore for InMemoryKmsStore {
+    fn get(&self, tenant: &str) -> Result<Option<TenantKeyRecord>> {
+        Ok(self.lock().get(tenant).cloned())
+    }
+
+    fn put(&self, record: TenantKeyRecord) -> Result<()> {
+        self.lock().insert(record.tenant.clone(), record);
+        Ok(())
+    }
+}
+
+/// Filesystem store: the whole catalog in one `kms.json` under a directory.
+pub struct FileKmsStore {
+    path: PathBuf,
+    inner: Mutex<BTreeMap<String, TenantKeyRecord>>,
+}
+
+impl FileKmsStore {
+    /// Open (or create) the store under `dir` (loads any existing `kms.json`).
+    pub fn new(dir: impl Into<PathBuf>) -> Result<Self> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir).map_err(|e| Error::config(format!("create kms dir: {e}")))?;
+        let path = dir.join("kms.json");
+        let inner = if path.exists() {
+            let bytes =
+                std::fs::read(&path).map_err(|e| Error::config(format!("read kms.json: {e}")))?;
+            let list: Vec<TenantKeyRecord> = serde_json::from_slice(&bytes)
+                .map_err(|e| Error::config(format!("parse kms.json: {e}")))?;
+            list.into_iter().map(|r| (r.tenant.clone(), r)).collect()
+        } else {
+            BTreeMap::new()
+        };
+        Ok(Self {
+            path,
+            inner: Mutex::new(inner),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, TenantKeyRecord>> {
+        self.inner.lock().expect("kms store mutex poisoned")
+    }
+
+    fn persist(&self, map: &BTreeMap<String, TenantKeyRecord>) -> Result<()> {
+        let list: Vec<&TenantKeyRecord> = map.values().collect();
+        let bytes = serde_json::to_vec_pretty(&list)
+            .map_err(|e| Error::config(format!("encode kms.json: {e}")))?;
+        std::fs::write(&self.path, bytes).map_err(|e| Error::config(format!("write kms.json: {e}")))
+    }
+}
+
+impl KmsStore for FileKmsStore {
+    fn get(&self, tenant: &str) -> Result<Option<TenantKeyRecord>> {
+        Ok(self.lock().get(tenant).cloned())
+    }
+
+    fn put(&self, record: TenantKeyRecord) -> Result<()> {
+        let mut map = self.lock();
+        map.insert(record.tenant.clone(), record);
+        self.persist(&map)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto;
+
+    fn sample(tenant: &str) -> TenantKeyRecord {
+        TenantKeyRecord {
+            tenant: tenant.to_string(),
+            versions: vec![crate::model::TenantKeyVersion {
+                version: 1,
+                wrapped: crypto::seal(&crypto::generate_key().unwrap(), b"tenant-key").unwrap(),
+            }],
+            destroyed: false,
+        }
+    }
+
+    fn roundtrip(store: &dyn KmsStore) {
+        store.put(sample("acme")).unwrap();
+        store.put(sample("beta")).unwrap();
+
+        assert_eq!(store.get("acme").unwrap().unwrap().tenant, "acme");
+        assert!(store.get("ghost").unwrap().is_none());
+    }
+
+    #[test]
+    fn in_memory_round_trips() {
+        roundtrip(&InMemoryKmsStore::new());
+    }
+
+    #[test]
+    fn file_store_persists_across_reopen() {
+        let dir = std::env::temp_dir().join(format!("apex_kms_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let store = FileKmsStore::new(&dir).unwrap();
+            roundtrip(&store);
+        }
+        let reopened = FileKmsStore::new(&dir).unwrap();
+        assert_eq!(reopened.get("acme").unwrap().unwrap().tenant, "acme");
+        assert_eq!(reopened.get("beta").unwrap().unwrap().tenant, "beta");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

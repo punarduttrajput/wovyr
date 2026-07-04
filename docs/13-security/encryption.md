@@ -7,10 +7,12 @@ Document ID: SEC-004
 
 **Document ID:** SEC-004  
 **File Path:** `docs/13-security/encryption.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — §5's key hierarchy now has a code counterpart (`apex-kms`);
+everything else in this document (transit/at-rest encryption, PII handling)
+remains infra-level and undocumented-in-code, as it was  
 **Owner:** Security Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-04
 
 ---
 
@@ -77,6 +79,20 @@ Data encryption keys (DEKs)
 - Per-tenant keys support crypto-shredding (delete the key to render data
   unrecoverable) for data-deletion guarantees.
 
+**Implemented (`apex-kms`):** the hierarchy above, the `Kms` trait, and
+`LocalKms` — a single-host implementation (AES-256-GCM via `ring`) where the
+root key is generated/held in-process (`root::from_env` or `root::from_file`)
+rather than a real KMS/HSM. Rotation is `rotate_tenant_key` (rolls a new
+tenant key version, retaining old ones) plus `rewrap_data_key` (the caller
+moves each DEK it holds onto the new version — the crate has no visibility
+into which DEKs a consumer has stored, so it cannot rewrap them itself).
+Crypto-shredding is `destroy_tenant_key`, fail-closed thereafter. Not yet
+done: a cloud-KMS-/HSM-backed root (the `Kms` trait is the boundary a real
+backend would implement — only tenant-key wrap/unwrap would change), wiring
+into a real consumer (a memory record's "sensitive" flag, config/PII
+fields), server routes/CLI surface, and audit-logging key lifecycle events
+(§9 below). See `crates/apex-kms/src/lib.rs`.
+
 ---
 
 # 6. Secrets vs. Data
@@ -132,4 +148,5 @@ compliance frameworks ([index §7](index.md#7-compliance-posture)).
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-04 | §5's key hierarchy landed in code: `apex-kms` (`Kms` trait, `LocalKms`, rotation/rewrap, crypto-shredding). Not yet done: a cloud-KMS/HSM-backed root, wiring into a real consumer, server/CLI surface, audit integration |
 | 1.0.0 | 2026-06-27 | Initial Encryption specification |
