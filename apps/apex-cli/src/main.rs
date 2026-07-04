@@ -15,6 +15,7 @@
 //! and a persistent agent store arrive in a later milestone.
 
 mod config;
+mod kms;
 mod memory;
 mod plugin;
 mod stream;
@@ -85,6 +86,35 @@ enum Command {
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
+    },
+
+    /// Manage the platform KMS's tenant keys (docs/13-security/encryption.md §5).
+    Kms {
+        #[command(subcommand)]
+        command: KmsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum KmsCommand {
+    /// Roll a new tenant-key version. Existing wrapped data keys remain valid under
+    /// their original version — nothing already sealed is re-encrypted.
+    Rotate {
+        /// Tenant to rotate.
+        #[arg(long)]
+        tenant: String,
+    },
+
+    /// Permanently crypto-shred a tenant's key material. IRREVERSIBLE — every
+    /// secret/memory ever sealed under this tenant becomes unrecoverable.
+    Destroy {
+        /// Tenant to destroy.
+        #[arg(long)]
+        tenant: String,
+
+        /// Confirm the irreversible action (required).
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -664,6 +694,10 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 version,
                 grants,
             } => plugin::market_install_cmd(&id, version, grants),
+        },
+        Command::Kms { command } => match command {
+            KmsCommand::Rotate { tenant } => kms::rotate_cmd(&tenant),
+            KmsCommand::Destroy { tenant, yes } => kms::destroy_cmd(&tenant, yes),
         },
     }
 }

@@ -185,8 +185,14 @@ mod tests {
         "memory:write",
         "secrets:write",
         "tools:invoke",
+        "kms:write",
     ];
-    const PROJECT_ADMIN_SCOPES: &[&str] = &["memory:admin", "projects:admin", "agents:admin"];
+    const PROJECT_ADMIN_SCOPES: &[&str] = &[
+        "memory:admin",
+        "projects:admin",
+        "agents:admin",
+        "kms:admin",
+    ];
     const ORG_ADMIN_SCOPES: &[&str] = &["org.admin", "users:admin"];
     const PLATFORM_SCOPES: &[&str] = &["platform.admin"];
 

@@ -7,18 +7,20 @@ Document ID: SEC-004
 
 **Document ID:** SEC-004  
 **File Path:** `docs/13-security/encryption.md`  
-**Version:** 1.4.0  
+**Version:** 1.5.0  
 **Status:** Draft — §5's key hierarchy (`apex-kms`) and its two §4 consumers
 (`apex-secrets`'s `EncryptedFileSecretStore`, `apex-memory`'s
-`EncryptingMemoryStore`) are now **live in `apex-server`/`apex-cli`**, not
-just library capabilities: memory encryption is always wrapped (opt-in per
-record via `sensitive`), secret encryption is opt-in per deployment
-(`APEX_SECRETS_ENCRYPT_AT_REST`) since it swaps the on-disk file rather than
-transparently coexisting with existing plaintext. Verified live, including
-cross-process decryption (a CLI-sealed record read back through a
-separately-running server via the shared `~/.apex/kms` root key). Everything
-else in this document (transit/at-rest infra encryption, PII handling)
-remains infra-level and undocumented-in-code, as it was  
+`EncryptingMemoryStore`) are **live in `apex-server`/`apex-cli`**: memory
+encryption is always wrapped (opt-in per record via `sensitive`), secret
+encryption is opt-in per deployment (`APEX_SECRETS_ENCRYPT_AT_REST`) since it
+swaps the on-disk file rather than transparently coexisting with existing
+plaintext. **A key-management surface now exists too** — tenant-key
+rotate/destroy over `/api/v1/kms/tenant-key/*` and `apex kms rotate|destroy`,
+RBAC-gated (`kms:write`/`kms:admin`) and audited (§9). Verified live,
+including cross-process decryption (a CLI-sealed record read back through a
+separately-running server) and the post-destroy fail-closed behavior.
+Everything else in this document (transit/at-rest infra encryption, PII
+handling) remains infra-level and undocumented-in-code, as it was  
 **Owner:** Security Team  
 **Last Updated:** 2026-07-04
 
@@ -115,12 +117,18 @@ Crypto-shredding is `destroy_tenant_key`, fail-closed thereafter. **Wired
 into two real, live consumers** (§4 above): `apex-secrets`'s `EncryptedFileSecretStore`
 and `apex-memory`'s `EncryptingMemoryStore`, both reachable from `apex-server`
 and `apex-cli` (`default_kms` / `config::kms()` — one root key + tenant-key
-catalog at `~/.apex/kms`, shared by both processes and both consumers). Not
-yet done: a cloud-KMS-/HSM-backed root (the `Kms` trait is the boundary a
-real backend would implement — only tenant-key wrap/unwrap would change),
-config/PII fields, a CLI/API surface for key management itself (rotate/
-destroy a tenant key operator-side), and audit-logging key lifecycle events
-(§9 below). See `crates/apex-kms/src/lib.rs`.
+catalog at `~/.apex/kms`, shared by both processes and both consumers). **A
+CLI/API surface for key management itself now exists too**: `POST
+/api/v1/kms/tenant-key/rotate` (`kms:write`) / `.../destroy` (`kms:admin` —
+a materially higher tier, since it's irreversible) and the matching `apex kms
+rotate|destroy --tenant <t>` CLI commands (`destroy` requires `--yes`), both
+operating on the same shared `Kms` — verified live, including the
+post-destroy fail-closed 403/error on any further operation for that tenant.
+**Key lifecycle events are now audited** (§9 below: `kms.tenant_key.rotate`/
+`.destroy`, by tenant reference). Not yet done: a cloud-KMS-/HSM-backed root
+(the `Kms` trait is the boundary a real backend would implement — only
+tenant-key wrap/unwrap would change) and config/PII fields. See
+`crates/apex-kms/src/lib.rs` and `crates/apex-server/src/kms.rs`.
 
 ---
 
@@ -156,6 +164,15 @@ distinct lifecycles.
 Key creation, rotation, and access are audited. Encryption posture supports
 compliance frameworks ([index §7](index.md#7-compliance-posture)).
 
+**Implemented:** tenant-key rotation and crypto-shredding are audited via
+`apex-audit` (`kms.tenant_key.rotate`/`kms.tenant_key.destroy`, resource
+type `kms_tenant_key`, referenced by tenant — never key material), exactly
+like secret mutations. Key *creation* (first-use auto-provisioning inside
+`generate_data_key`/`rotate_tenant_key`) is not separately audited — only
+the explicit operator actions (rotate/destroy) are, since `apex-kms` itself
+has no `apex-audit` dependency (auditing happens at the `apex-server` route
+boundary, matching how `apex-secrets` isn't audit-aware internally either).
+
 ---
 
 # 10. Dependencies
@@ -177,6 +194,7 @@ compliance frameworks ([index §7](index.md#7-compliance-posture)).
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.5.0 | 2026-07-04 | Added a key-management surface: `POST /api/v1/kms/tenant-key/rotate` (`kms:write`) / `.../destroy` (`kms:admin` — a higher tier than routine writes, since crypto-shredding is irreversible) and matching `apex kms rotate\|destroy --tenant <t>` CLI commands (`destroy` requires `--yes`). Both audited (`kms.tenant_key.rotate`/`.destroy`, referenced by tenant). `AppState` gained a `kms` field (the same shared instance backing the two encrypting stores). New RBAC scopes `kms:write`/`kms:admin` added to `apex-tenancy`'s privilege-ladder test (no logic changes needed — they already fell out of the existing generic `is_write`/`ProjectAdmin`-grants-everything-except-3 patterns). 2 new server tests (RBAC tiering incl. post-destroy fail-closed rotate; audit trail). Verified live: rotate → destroy → subsequent rotate returns 403, all three audited in the tamper-evident log; CLI mirrors the same behavior locally |
 | 1.4.0 | 2026-07-04 | Both §4 consumers made **live** in `apex-server`/`apex-cli`: a shared `default_kms()`/`config::kms()` (root key from `APEX_KMS_ROOT_KEY` or generated at `~/.apex/kms/root.key`, tenant catalog in the same directory) feeds both. Memory: `EncryptingMemoryStore` wraps every store unconditionally (safe no-op unless `sensitive: true`); exposed as `POST /api/v1/memory/records`' `sensitive` field and CLI `memory put --sensitive`. Secrets: `EncryptedFileSecretStore` selected via `APEX_SECRETS_ENCRYPT_AT_REST` (opt-in, since it's a distinct file rather than a transparent migration) — the CLI's plugin-secret-injection path honors the identical env var so the two processes never disagree about which file is live. Verified end-to-end against a running server: sensitive content sealed on disk/plaintext on query, non-sensitive/default-secrets behavior unchanged, and a CLI-sealed memory record successfully decrypted by a separately-running server process |
 | 1.3.0 | 2026-07-04 | §4 gets a second real application-layer-encryption consumer: `apex-memory`'s `MemoryRecord.sensitive` flag + `EncryptingMemoryStore` decorator seals `content` through `apex-kms` when set, wrapping any `MemoryStore` (including the tiered Postgres/Qdrant backend, whose `sensitive` column round-trips the flag — verified against a live Postgres in this pass). Retrieval/ranking still see plaintext (unsealed transparently on read); pushdown is disabled for a wrapped store since a purpose-built index can't score ciphertext, so wrapping falls back to in-process ranking |
 | 1.2.0 | 2026-07-04 | §4's first real application-layer-encryption consumer landed: `apex-secrets`'s `EncryptedFileSecretStore` seals secret values through `apex-kms`, keyed by the secret's own namespace as the KMS tenant. `secrets.enc.json` (distinct from the plaintext `FileSecretStore`'s `secrets.json`) never holds a plaintext value; verified by a test reading the raw file bytes |

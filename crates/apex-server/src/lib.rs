@@ -16,6 +16,7 @@
 
 mod audit;
 mod hardening;
+mod kms;
 mod marketplace;
 mod memory;
 mod plugins;
@@ -151,6 +152,10 @@ pub struct AppState {
     pub(crate) memory_store: Arc<dyn apex_memory::MemoryStore>,
     /// Secret vault backing the `/api/v1/secrets` routes (tenant-scoped).
     pub(crate) secrets: apex_secrets::Vault,
+    /// The platform KMS ([Encryption §5](../../docs/13-security/encryption.md#5-key-management)) —
+    /// the same instance that backs `secrets` and `memory`'s encrypting stores, also
+    /// exposed directly for the `/api/v1/kms/*` tenant-key-management routes.
+    pub(crate) kms: Arc<dyn apex_kms::Kms>,
     /// Tamper-evident audit log; security-sensitive routes append to it.
     pub(crate) audit: apex_audit::AuditLog,
 }
@@ -178,7 +183,7 @@ impl AppState {
         // and workflow runs can invoke them with their tenant-scoped secrets injected.
         // Done before the registry is shared with the workflow engine below.
         plugins::register_enabled_tools(&mut registry, &secrets);
-        let (memory, memory_store) = memory::default_engine(kms);
+        let (memory, memory_store) = memory::default_engine(kms.clone());
         let agents = Arc::new(AgentStore::default());
         // Thread gateway + registry + the agent store into the workflow engine so the
         // ServerExecutor can actually drive function/ai/agent activities when the submit
@@ -202,6 +207,7 @@ impl AppState {
             memory,
             memory_store,
             secrets,
+            kms,
             audit: default_audit_log(),
         }
     }
@@ -263,6 +269,14 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn with_audit(mut self, audit: apex_audit::AuditLog) -> Self {
         self.audit = audit;
+        self
+    }
+
+    /// Override the platform KMS (tests inject a fresh in-memory-backed instance so
+    /// they don't touch the shared `~/.apex/kms`, and so tenant-key state starts clean).
+    #[cfg(test)]
+    pub(crate) fn with_kms(mut self, kms: Arc<dyn apex_kms::Kms>) -> Self {
+        self.kms = kms;
         self
     }
 
@@ -504,6 +518,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(marketplace::routes())
         // Secret vault: create/list/get/rotate/delete (tenant-scoped, RBAC-gated).
         .merge(secrets::routes())
+        // KMS: roll/crypto-shred a tenant's key material (tenant-scoped, RBAC-gated).
+        .merge(kms::routes())
         // Audit trail: read the tenant's tamper-evident security records.
         .merge(audit::routes())
         // Tool discovery: list registered tools (built-ins + enabled plugin tools).
@@ -2158,6 +2174,184 @@ mod tests {
         );
 
         // Tenant-scoped: a beta principal sees none of acme's audit records.
+        let (st, beta) =
+            tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(beta["total"], 0);
+    }
+
+    /// A fresh in-memory-backed KMS for tests, isolated from the shared `~/.apex/kms`.
+    #[cfg(test)]
+    fn test_kms() -> Arc<dyn apex_kms::Kms> {
+        Arc::new(apex_kms::LocalKms::new(
+            apex_kms::generate_key().unwrap(),
+            Arc::new(apex_kms::InMemoryKmsStore::new()),
+        ))
+    }
+
+    #[tokio::test]
+    async fn kms_rotate_is_routine_but_destroy_needs_a_higher_tier() {
+        use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org = tenancy
+            .create_org(Organization::new("acme", "Acme"))
+            .unwrap();
+        let m = |user: &str, role| Membership {
+            user: user.to_string(),
+            role,
+            scope: MemberScope::Organization(org.id.clone()),
+        };
+        tenancy.add_membership(m("vic", Role::Viewer)).unwrap();
+        tenancy.add_membership(m("edna", Role::Editor)).unwrap();
+        tenancy.add_membership(m("alice", Role::OrgAdmin)).unwrap();
+        let state = Arc::new(
+            AppState::from_env()
+                .with_tenancy(tenancy)
+                .with_kms(test_kms()),
+        );
+
+        // A viewer can do neither.
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/rotate",
+            "acme",
+            "vic",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "viewer must not rotate");
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/destroy",
+            "acme",
+            "vic",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "viewer must not destroy");
+
+        // An editor may rotate (routine, `kms:write`) but not destroy (`kms:admin`).
+        let (st, body) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/rotate",
+            "acme",
+            "edna",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["version"], 2); // provisions v1 on first use, then rolls to v2
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/destroy",
+            "acme",
+            "edna",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "editor must not destroy");
+
+        // An org admin may destroy — irreversibly: acme's key is crypto-shredded, so
+        // even the org admin's own (RBAC-permitted) rotate now fails closed.
+        let (st, body) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/destroy",
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "destroyed");
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/rotate",
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "a destroyed tenant key must fail closed even for an org admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn kms_tenant_key_mutations_are_audited() {
+        use apex_audit::AuditLog;
+        use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org_a = tenancy
+            .create_org(Organization::new("acme", "Acme"))
+            .unwrap();
+        let org_b = tenancy
+            .create_org(Organization::new("beta", "Beta"))
+            .unwrap();
+        let m = |u: &str, org: &str| Membership {
+            user: u.to_string(),
+            role: Role::OrgAdmin,
+            scope: MemberScope::Organization(org.to_string()),
+        };
+        tenancy.add_membership(m("alice", &org_a.id)).unwrap();
+        tenancy.add_membership(m("bob", &org_b.id)).unwrap();
+        let state = Arc::new(
+            AppState::from_env()
+                .with_tenancy(tenancy)
+                .with_kms(test_kms())
+                .with_audit(AuditLog::in_memory()),
+        );
+
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/rotate",
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/destroy",
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+
+        let (st, audit) =
+            tenant_req(&state, "GET", "/api/v1/audit", "acme", "alice", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        let entries = audit["entries"].as_array().unwrap();
+        let actions: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e["event"]["action"].as_str())
+            .collect();
+        assert!(
+            actions.contains(&"kms.tenant_key.rotate"),
+            "actions: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"kms.tenant_key.destroy"),
+            "actions: {actions:?}"
+        );
+        assert_eq!(entries[0]["event"]["actor"]["principal"], "alice");
+        assert_eq!(entries[0]["event"]["resource"]["id"], "acme");
+
+        // Tenant-scoped: beta sees none of acme's kms audit records.
         let (st, beta) =
             tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
