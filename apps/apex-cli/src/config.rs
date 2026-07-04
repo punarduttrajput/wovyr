@@ -12,6 +12,7 @@
 use apex_common::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Stored authentication state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -53,6 +54,38 @@ pub fn config_dir() -> Result<PathBuf> {
 /// The path to the credentials file.
 pub fn credentials_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("credentials.json"))
+}
+
+/// The platform KMS ([Encryption §5](../../docs/13-security/encryption.md#5-key-management)),
+/// over the same `~/.apex/kms` directory the server uses (`APEX_KMS_ROOT_KEY`
+/// env var, else generate-and-persist `root.key` there) so either process
+/// can decrypt the other's sealed secrets/memories. Falls back to a fully
+/// ephemeral in-process key if the home directory is unavailable — anything
+/// sealed under it will not survive the process exiting.
+pub fn kms() -> Arc<dyn apex_kms::Kms> {
+    let dir = config_dir().ok().map(|d| d.join("kms"));
+    let root_key = apex_kms::root::from_env("APEX_KMS_ROOT_KEY")
+        .ok()
+        .or_else(|| {
+            dir.as_ref()
+                .and_then(|d| apex_kms::root::from_file(d.join("root.key")).ok())
+        });
+    match (root_key, dir) {
+        (Some(key), Some(dir)) => {
+            let store: Arc<dyn apex_kms::KmsStore> = match apex_kms::FileKmsStore::new(dir) {
+                Ok(s) => Arc::new(s),
+                Err(_) => Arc::new(apex_kms::InMemoryKmsStore::new()),
+            };
+            Arc::new(apex_kms::LocalKms::new(key, store))
+        }
+        _ => {
+            let key = apex_kms::generate_key().expect("secure RNG available");
+            Arc::new(apex_kms::LocalKms::new(
+                key,
+                Arc::new(apex_kms::InMemoryKmsStore::new()),
+            ))
+        }
+    }
 }
 
 /// Persist credentials, creating the config directory if needed.

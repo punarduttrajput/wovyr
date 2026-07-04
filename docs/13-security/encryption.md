@@ -7,13 +7,18 @@ Document ID: SEC-004
 
 **Document ID:** SEC-004  
 **File Path:** `docs/13-security/encryption.md`  
-**Version:** 1.3.0  
-**Status:** Draft — §5's key hierarchy has a code counterpart (`apex-kms`),
-now with two real §4 application-layer-encryption consumers
-(`apex-secrets`'s `EncryptedFileSecretStore` and `apex-memory`'s
-`EncryptingMemoryStore`, both listed in §4's bullets); everything else in
-this document (transit/at-rest infra encryption, PII handling) remains
-infra-level and undocumented-in-code, as it was  
+**Version:** 1.4.0  
+**Status:** Draft — §5's key hierarchy (`apex-kms`) and its two §4 consumers
+(`apex-secrets`'s `EncryptedFileSecretStore`, `apex-memory`'s
+`EncryptingMemoryStore`) are now **live in `apex-server`/`apex-cli`**, not
+just library capabilities: memory encryption is always wrapped (opt-in per
+record via `sensitive`), secret encryption is opt-in per deployment
+(`APEX_SECRETS_ENCRYPT_AT_REST`) since it swaps the on-disk file rather than
+transparently coexisting with existing plaintext. Verified live, including
+cross-process decryption (a CLI-sealed record read back through a
+separately-running server via the shared `~/.apex/kms` root key). Everything
+else in this document (transit/at-rest infra encryption, PII handling)
+remains infra-level and undocumented-in-code, as it was  
 **Owner:** Security Team  
 **Last Updated:** 2026-07-04
 
@@ -59,16 +64,24 @@ encryption (see [Terraform](../12-deployment/terraform.md)).
 Sensitive fields can be encrypted **above** the datastore with per-tenant keys, so
 a compromised database alone does not expose them:
 
-- Secret values ([secret-management](secret-management.md)) — **implemented**:
+- Secret values ([secret-management](secret-management.md)) — **implemented and live**:
   `apex-secrets`'s `EncryptedFileSecretStore` seals a secret's current and
   retained-previous value through `apex-kms` before they reach disk, keyed
-  by the secret's own namespace as the KMS tenant.
+  by the secret's own namespace as the KMS tenant. `apex-server`/`apex-cli`
+  select it over the plaintext `FileSecretStore` when
+  `APEX_SECRETS_ENCRYPT_AT_REST` is set — **opt-in per deployment**, since it
+  reads/writes a distinct file (`secrets.enc.json`) rather than transparently
+  migrating whatever is already in the plaintext `secrets.json`.
 - Memory records flagged sensitive ([Memory security](../06-memory-engine/overview.md#12-security)) —
-  **implemented**: `apex-memory`'s `MemoryRecord.sensitive` flag +
+  **implemented and live**: `apex-memory`'s `MemoryRecord.sensitive` flag +
   `EncryptingMemoryStore` decorator seals `content` through `apex-kms` (tenant
   = the record's namespace) before it reaches the inner store (any
   `MemoryStore`, including the tiered Postgres/Qdrant backend), transparently
-  unsealing on every read so retrieval/ranking still see plaintext
+  unsealing on every read so retrieval/ranking still see plaintext.
+  `apex-server`/`apex-cli` wrap **every** memory store this way unconditionally
+  — safe by construction, since it's a no-op for the default `sensitive: false`.
+  Exposed as `POST /api/v1/memory/records`' `sensitive` body field and `memory
+  put --sensitive`.
 - Selected configuration and PII fields — not yet implemented
 
 This is envelope encryption: data keys wrapped by a tenant key in the KMS.
@@ -99,11 +112,14 @@ tenant key version, retaining old ones) plus `rewrap_data_key` (the caller
 moves each DEK it holds onto the new version — the crate has no visibility
 into which DEKs a consumer has stored, so it cannot rewrap them itself).
 Crypto-shredding is `destroy_tenant_key`, fail-closed thereafter. **Wired
-into two real consumers** (§4 above): `apex-secrets`'s `EncryptedFileSecretStore`
-and `apex-memory`'s `EncryptingMemoryStore`. Not yet done: a cloud-KMS-/HSM-backed
-root (the `Kms` trait is the boundary a real backend would implement — only
-tenant-key wrap/unwrap would change), config/PII fields, server routes/CLI
-surface, and audit-logging key lifecycle events
+into two real, live consumers** (§4 above): `apex-secrets`'s `EncryptedFileSecretStore`
+and `apex-memory`'s `EncryptingMemoryStore`, both reachable from `apex-server`
+and `apex-cli` (`default_kms` / `config::kms()` — one root key + tenant-key
+catalog at `~/.apex/kms`, shared by both processes and both consumers). Not
+yet done: a cloud-KMS-/HSM-backed root (the `Kms` trait is the boundary a
+real backend would implement — only tenant-key wrap/unwrap would change),
+config/PII fields, a CLI/API surface for key management itself (rotate/
+destroy a tenant key operator-side), and audit-logging key lifecycle events
 (§9 below). See `crates/apex-kms/src/lib.rs`.
 
 ---
@@ -161,6 +177,7 @@ compliance frameworks ([index §7](index.md#7-compliance-posture)).
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.4.0 | 2026-07-04 | Both §4 consumers made **live** in `apex-server`/`apex-cli`: a shared `default_kms()`/`config::kms()` (root key from `APEX_KMS_ROOT_KEY` or generated at `~/.apex/kms/root.key`, tenant catalog in the same directory) feeds both. Memory: `EncryptingMemoryStore` wraps every store unconditionally (safe no-op unless `sensitive: true`); exposed as `POST /api/v1/memory/records`' `sensitive` field and CLI `memory put --sensitive`. Secrets: `EncryptedFileSecretStore` selected via `APEX_SECRETS_ENCRYPT_AT_REST` (opt-in, since it's a distinct file rather than a transparent migration) — the CLI's plugin-secret-injection path honors the identical env var so the two processes never disagree about which file is live. Verified end-to-end against a running server: sensitive content sealed on disk/plaintext on query, non-sensitive/default-secrets behavior unchanged, and a CLI-sealed memory record successfully decrypted by a separately-running server process |
 | 1.3.0 | 2026-07-04 | §4 gets a second real application-layer-encryption consumer: `apex-memory`'s `MemoryRecord.sensitive` flag + `EncryptingMemoryStore` decorator seals `content` through `apex-kms` when set, wrapping any `MemoryStore` (including the tiered Postgres/Qdrant backend, whose `sensitive` column round-trips the flag — verified against a live Postgres in this pass). Retrieval/ranking still see plaintext (unsealed transparently on read); pushdown is disabled for a wrapped store since a purpose-built index can't score ciphertext, so wrapping falls back to in-process ranking |
 | 1.2.0 | 2026-07-04 | §4's first real application-layer-encryption consumer landed: `apex-secrets`'s `EncryptedFileSecretStore` seals secret values through `apex-kms`, keyed by the secret's own namespace as the KMS tenant. `secrets.enc.json` (distinct from the plaintext `FileSecretStore`'s `secrets.json`) never holds a plaintext value; verified by a test reading the raw file bytes |
 | 1.1.0 | 2026-07-04 | §5's key hierarchy landed in code: `apex-kms` (`Kms` trait, `LocalKms`, rotation/rewrap, crypto-shredding). Not yet done: a cloud-KMS/HSM-backed root, wiring into a real consumer, server/CLI surface, audit integration |

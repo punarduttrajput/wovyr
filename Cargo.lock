@@ -135,6 +135,7 @@ version = "0.1.0"
 dependencies = [
  "apex-agent",
  "apex-common",
+ "apex-kms",
  "apex-marketplace",
  "apex-memory",
  "apex-plugin",
@@ -274,6 +275,7 @@ dependencies = [
  "apex-audit",
  "apex-common",
  "apex-events",
+ "apex-kms",
  "apex-marketplace",
  "apex-memory",
  "apex-plugin",

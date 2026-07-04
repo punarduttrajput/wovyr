@@ -132,14 +132,26 @@ fn with_runtime(engine: PluginEngine) -> PluginEngine {
 }
 
 /// The local secret vault over `~/.apex/secrets` (falls back to in-memory if the home
-/// directory is unavailable).
+/// directory is unavailable). Honors the same `APEX_SECRETS_ENCRYPT_AT_REST` opt-in as
+/// the server's `default_secrets_vault` — both processes read the same directory, so
+/// they must agree on which file (`secrets.json` vs `secrets.enc.json`) is live, or a
+/// plugin's `secret:read:<name>` grant would silently fail to find a secret the server
+/// API created (or vice versa).
 #[cfg(feature = "plugin-wasi")]
 fn secrets_vault() -> apex_secrets::Vault {
-    let store: std::sync::Arc<dyn apex_secrets::SecretStore> = match config::config_dir()
-        .ok()
-        .and_then(|d| apex_secrets::FileSecretStore::new(d.join("secrets")).ok())
-    {
-        Some(s) => std::sync::Arc::new(s),
+    let dir = config::config_dir().ok().map(|d| d.join("secrets"));
+    let encrypt_at_rest = std::env::var("APEX_SECRETS_ENCRYPT_AT_REST").is_ok();
+    let store: std::sync::Arc<dyn apex_secrets::SecretStore> = match dir {
+        Some(d) if encrypt_at_rest => {
+            match apex_secrets::EncryptedFileSecretStore::new(d, config::kms()) {
+                Ok(s) => std::sync::Arc::new(s),
+                Err(_) => std::sync::Arc::new(apex_secrets::InMemorySecretStore::new()),
+            }
+        }
+        Some(d) => match apex_secrets::FileSecretStore::new(d) {
+            Ok(s) => std::sync::Arc::new(s),
+            Err(_) => std::sync::Arc::new(apex_secrets::InMemorySecretStore::new()),
+        },
         None => std::sync::Arc::new(apex_secrets::InMemorySecretStore::new()),
     };
     apex_secrets::Vault::new(store)

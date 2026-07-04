@@ -28,6 +28,7 @@ apex-tenancy.workspace = true
 apex-events.workspace = true
 apex-secrets.workspace = true
 apex-audit.workspace = true
+apex-kms.workspace = true
 apex-memory.workspace = true
 apex-plugin.workspace = true
 apex-marketplace.workspace = true

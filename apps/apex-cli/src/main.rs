@@ -471,6 +471,11 @@ enum MemoryCommand {
         /// Access scope a reader must be granted to retrieve this memory (repeatable).
         #[arg(long = "require-scope")]
         require_scopes: Vec<String>,
+
+        /// Seal the content at rest through the platform KMS
+        /// (docs/13-security/encryption.md §4).
+        #[arg(long)]
+        sensitive: bool,
     },
 
     /// Query memories by relevance.
@@ -597,7 +602,18 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 importance,
                 tags,
                 require_scopes,
-            } => memory::put_cmd(&namespace, &content, importance, tags, require_scopes).await,
+                sensitive,
+            } => {
+                memory::put_cmd(
+                    &namespace,
+                    &content,
+                    importance,
+                    tags,
+                    require_scopes,
+                    sensitive,
+                )
+                .await
+            }
             MemoryCommand::Query {
                 query,
                 namespace,

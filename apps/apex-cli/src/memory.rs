@@ -8,8 +8,8 @@
 use crate::config;
 use apex_agent::{ContextRetriever, MemorySpec, RetrievedContext};
 use apex_memory::{
-    CompactionPolicy, FileStore, MemoryEngine, MemoryQuery, MemoryStore, MemoryType,
-    RetrievalStrategy,
+    CompactionPolicy, EncryptingMemoryStore, FileStore, MemoryEngine, MemoryQuery, MemoryStore,
+    MemoryType, RetrievalStrategy,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -19,8 +19,14 @@ use apex_provider::Gateway;
 /// Build a memory engine. Uses the durable tiered backend (Postgres + Qdrant) when
 /// the `tiered-memory` feature is built and both `APEX_MEMORY_POSTGRES_URL` and
 /// `APEX_MEMORY_QDRANT_URL` are set; otherwise a local `~/.apex/memory` file store.
+/// Always wrapped in [`EncryptingMemoryStore`] — transparent unless a caller marks a
+/// record `--sensitive`, so existing plaintext memories are unaffected.
 async fn engine() -> apex_common::Result<MemoryEngine> {
-    Ok(MemoryEngine::new(Gateway::from_env(), open_store().await?))
+    let store: Arc<dyn MemoryStore> = Arc::new(EncryptingMemoryStore::new(
+        open_store().await?,
+        config::kms(),
+    ));
+    Ok(MemoryEngine::new(Gateway::from_env(), store))
 }
 
 /// The local JSON-lines file store under `~/.apex/memory`.
@@ -104,22 +110,25 @@ impl ContextRetriever for EngineRetriever {
 }
 
 /// `apex memory put` — store a memory.
+#[allow(clippy::too_many_arguments)] // mirrors MemoryEngine::remember_full's positional-arg style
 pub async fn put_cmd(
     namespace: &str,
     content: &str,
     importance: f32,
     tags: Vec<String>,
     require_scopes: Vec<String>,
+    sensitive: bool,
 ) -> apex_common::Result<()> {
     let id = engine()
         .await?
-        .remember_scoped(
+        .remember_full(
             namespace,
             content,
             MemoryType::Semantic,
             importance,
             tags,
             require_scopes,
+            sensitive,
         )
         .await?;
     println!("stored {id}");

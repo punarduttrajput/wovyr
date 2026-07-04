@@ -36,6 +36,7 @@ apex-provider.workspace = true
 apex-tools.workspace = true
 apex-agent.workspace = true
 apex-workflow.workspace = true
+apex-kms.workspace = true
 apex-memory.workspace = true
 apex-telemetry.workspace = true
 apex-plugin.workspace = true

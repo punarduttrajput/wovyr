@@ -8,8 +8,8 @@
 use crate::AppState;
 use crate::hardening::{PageQuery, paginate};
 use apex_memory::{
-    AccessContext, FileStore, InMemoryStore, MemoryEngine, MemoryQuery, MemoryRecord, MemoryStore,
-    MemoryType, RankingWeights, RetrievalStrategy,
+    AccessContext, EncryptingMemoryStore, FileStore, InMemoryStore, MemoryEngine, MemoryQuery,
+    MemoryRecord, MemoryStore, MemoryType, RankingWeights, RetrievalStrategy,
 };
 use apex_provider::Gateway;
 use axum::{
@@ -47,16 +47,20 @@ fn visible_to(required_scopes: &[String], tenant: &str) -> bool {
 }
 
 /// Build the memory engine over the durable `~/.apex/memory` file store (shared with the
-/// CLI), falling back to in-memory if that directory is unavailable. Returns the engine
-/// plus a clone of the store for namespace/record enumeration.
-pub(crate) fn default_engine() -> (MemoryEngine, Arc<dyn MemoryStore>) {
+/// CLI), falling back to in-memory if that directory is unavailable. Always wrapped in
+/// [`EncryptingMemoryStore`] over `kms` — transparent and backward-compatible, since it
+/// only acts on records with `sensitive: true` (none by default) — so every read path
+/// (this engine, plus namespace/record enumeration below) sees plaintext regardless.
+/// Returns the engine plus a clone of the (wrapped) store for that enumeration.
+pub(crate) fn default_engine(kms: Arc<dyn apex_kms::Kms>) -> (MemoryEngine, Arc<dyn MemoryStore>) {
     let dir = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|home| std::path::PathBuf::from(home).join(".apex").join("memory"));
-    let store: Arc<dyn MemoryStore> = match dir.and_then(|d| FileStore::new(d).ok()) {
+    let inner: Arc<dyn MemoryStore> = match dir.and_then(|d| FileStore::new(d).ok()) {
         Some(s) => Arc::new(s),
         None => Arc::new(InMemoryStore::new()),
     };
+    let store: Arc<dyn MemoryStore> = Arc::new(EncryptingMemoryStore::new(inner, kms));
     let engine = MemoryEngine::new(Gateway::from_env(), store.clone());
     (engine, store)
 }
@@ -245,6 +249,10 @@ struct PutRequest {
     importance: Option<f32>,
     tags: Option<Vec<String>>,
     required_scopes: Option<Vec<String>>,
+    /// Seal `content` at rest through the platform KMS
+    /// ([Encryption §4](../../docs/13-security/encryption.md#4-application-layer-encryption)).
+    /// Defaults to `false`.
+    sensitive: Option<bool>,
 }
 
 /// `POST /api/v1/memory/records` — store a memory (embedded via the gateway).
@@ -265,13 +273,14 @@ async fn put_record(
     required_scopes.push(tenant_scope(&tenant));
     let id = state
         .memory
-        .remember_scoped(
+        .remember_full(
             req.namespace,
             req.content,
             parse_type(req.memory_type.as_deref()),
             req.importance.unwrap_or(0.5).clamp(0.0, 1.0),
             req.tags.unwrap_or_default(),
             required_scopes,
+            req.sensitive.unwrap_or(false),
         )
         .await?;
     Ok(Json(json!({ "id": id, "status": "stored" })))
