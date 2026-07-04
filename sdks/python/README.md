@@ -12,8 +12,11 @@ install to use it.
 
 ## Install
 
-Not yet published; consume from the repo directly (path dependency, or copy
-`apex_sdk/` into your project) until it ships to PyPI.
+Published as [`apex-ai-sdk`](https://pypi.org/project/apex-ai-sdk/) on PyPI:
+
+```bash
+pip install apex-ai-sdk
+```
 
 ## Usage
 
@@ -82,4 +85,3 @@ run instead of skip.
 - No `redocly`-style contract test wired against `openapi.yaml` (the
   TypeScript SDK's `npm test` runs one; this package has no npm-equivalent
   tool available in this environment to wire the same check to).
-- Not published to PyPI yet.
