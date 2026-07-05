@@ -231,6 +231,7 @@ dependencies = [
  "apex-common",
  "apex-provider",
  "apex-tools",
+ "apex-workflow",
  "async-trait",
  "serde",
  "serde_json",

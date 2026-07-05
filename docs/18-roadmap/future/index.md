@@ -7,7 +7,7 @@ Document ID: FUT-INDEX-001
 
 **Document ID:** FUT-INDEX-001
 **File Path:** `docs/18-roadmap/future/index.md`
-**Version:** 1.2.0
+**Version:** 1.4.0
 **Status:** Exploratory
 **Owner:** Product Team
 **Last Updated:** 2026-07-05
@@ -39,7 +39,7 @@ plannable and prunable, not to promise them.
 | [FUT-003](B3-advanced-memory.md) | Advanced Memory | [future §2.3](../future.md#23-advanced-memory) | Exploratory |
 | [FUT-004](B4-execution-frontiers.md) | Execution Frontiers | [future §2.4](../future.md#24-execution-frontiers) | Exploratory |
 | [FUT-005](B5-ecosystem-interop.md) | Ecosystem & Interoperability | [future §2.5](../future.md#25-ecosystem--interop) | Exploratory |
-| [FUT-006](B6-trust-evaluation.md) | Trust & Evaluation | [future §2.6](../future.md#26-trust--evaluation) | Exploratory — prototype spike in `crates/apex-eval`, pre-ADR |
+| [FUT-006](B6-trust-evaluation.md) | Trust & Evaluation | [future §2.6](../future.md#26-trust--evaluation) | Exploratory — prototype spike in `crates/apex-eval`, pointed at FUT-001's workflow via a `compare` module, and at a real `mistralrs` model (one run so far: a tie), pre-ADR |
 
 ---
 
@@ -88,6 +88,8 @@ carried indefinitely.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.4.0 | 2026-07-05 | FUT-006's `apex-eval` gained a real `mistralrs` model run of the comparison harness — one run so far, a tie — updated FUT-006's register row; see [B6-trust-evaluation.md §8.2](B6-trust-evaluation.md#82-a-real-model-run-2026-07-05) |
+| 1.3.0 | 2026-07-05 | FUT-006's `apex-eval` gained a `compare` module pointed at FUT-001's `research-team.yaml` — updated FUT-006's register row; see [B6-trust-evaluation.md §8.1](B6-trust-evaluation.md#81-pointed-at-fut-001-2026-07-05) for what it proves and doesn't |
 | 1.2.0 | 2026-07-05 | FUT-001 gained a code prototype for direction (b) (`examples/workflows/research-team.yaml` + `apex-server`) — updated its register row; see [B1-multi-agent-systems.md §8](B1-multi-agent-systems.md#8-prototype-slice-2026-07-05) for what it proves and doesn't |
 | 1.1.0 | 2026-07-05 | FUT-006 gained a code prototype (`crates/apex-eval`) — updated its register row; see [B6-trust-evaluation.md §8](B6-trust-evaluation.md#8-prototype-spike-2026-07-05) for what it proves and doesn't |
 | 1.0.0 | 2026-07-05 | Initial Tier B research-bet index (FUT-001…FUT-006) with dependency ordering |
