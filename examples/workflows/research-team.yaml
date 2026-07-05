@@ -1,0 +1,44 @@
+apiVersion: workflow.apex.io/v1
+kind: Workflow
+metadata:
+  name: research-team
+  version: 1.0.0
+spec:
+  # FUT-001(b) prototype: a coordinator workflow that fans out to two `agent`
+  # activities researching different angles of the same topic, then joins their
+  # results in a `synthesize` activity — "workflow-orchestrated agents"
+  # (docs/18-roadmap/future/B1-multi-agent-systems.md §4, direction b).
+  #
+  # `agent` activities run *stored* agents; register some first, e.g.:
+  #   POST /api/v1/agents { "manifest": "metadata:\n  name: pro-researcher\n  ...", }
+  #   POST /api/v1/agents { "manifest": "metadata:\n  name: con-researcher\n  ...", }
+  #   POST /api/v1/agents { "manifest": "metadata:\n  name: synthesizer\n  ...", }
+  # This activity type is handled by the apex-server ServerExecutor only — see
+  # examples/workflows/agent-review.yaml for the single-agent case.
+  #
+  # `proResearch` and `conResearch` have no edge between them, so the engine's
+  # existing concurrent-batch execution runs them in parallel (no new engine code
+  # needed — see apex-workflow/tests/engine.rs::parallel_branches_run_concurrently).
+  # Submitting with an `X-Apex-Project` header makes both draw from that project's
+  # quota (concurrent_agent_runs / llm_cost_per_day_usd) as one shared budget,
+  # instead of each activity running unmetered.
+  activities:
+    - id: proResearch
+      type: agent
+      name: pro-researcher
+      inputs: { message: "Research the case FOR: ${input.topic}" }
+
+    - id: conResearch
+      type: agent
+      name: con-researcher
+      inputs: { message: "Research the case AGAINST: ${input.topic}" }
+
+    - id: synthesize
+      type: agent
+      name: synthesizer
+      inputs:
+        message: "Combine these two research findings into a balanced summary.\nFOR: ${proResearch.message}\nAGAINST: ${conResearch.message}"
+
+  transitions:
+    - { from: proResearch, to: synthesize }
+    - { from: conResearch, to: synthesize }

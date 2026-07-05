@@ -15,7 +15,7 @@ use apex_workflow::{
     ActivityContext, ActivityError, ActivityExecutor, ActivityState, CheckpointStore, Clock,
     Definition, DefinitionResolver, Engine, EventLog, ExecutionFilter, FileScheduleStore,
     FileStore, FileTimerStore, RunOutcome, Schedule, ScheduleDispatcher, ScheduleStore,
-    SystemClock, TimerDispatcher, TimerStore, WorkflowState,
+    SystemClock, TimerDispatcher, TimerStore, WorkflowState, resolve_template,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -31,7 +31,7 @@ struct PlatformExecutor {
 impl ActivityExecutor for PlatformExecutor {
     async fn execute(&self, ctx: &ActivityContext) -> Result<Value, ActivityError> {
         // Resolve `${path}` references in the inputs against the live variables.
-        let inputs = resolve_templates(&ctx.inputs, ctx);
+        let inputs = resolve_template(&ctx.inputs, ctx);
 
         match ctx.activity_type.as_str() {
             // `function` activities are pass-throughs: echo their (resolved) inputs.
@@ -111,78 +111,6 @@ impl ActivityExecutor for PlatformExecutor {
                 "unsupported activity type `{other}` in the local runner"
             ))),
         }
-    }
-}
-
-/// Recursively replace `${path}` placeholders in string inputs with the resolved
-/// workflow variable. A string that is exactly `${path}` adopts the value's JSON
-/// type; embedded placeholders are stringified.
-fn resolve_templates(value: &Value, ctx: &ActivityContext) -> Value {
-    match value {
-        Value::String(s) => substitute(s, ctx),
-        Value::Array(items) => {
-            Value::Array(items.iter().map(|v| resolve_templates(v, ctx)).collect())
-        }
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), resolve_templates(v, ctx)))
-                .collect(),
-        ),
-        other => other.clone(),
-    }
-}
-
-fn substitute(s: &str, ctx: &ActivityContext) -> Value {
-    let trimmed = s.trim();
-    if let Some(path) = trimmed
-        .strip_prefix("${")
-        .and_then(|r| r.strip_suffix('}'))
-        .filter(|_| trimmed.starts_with("${") && trimmed.ends_with('}'))
-    {
-        return lookup(path.trim(), ctx);
-    }
-    // Replace any embedded ${...} occurrences with their stringified values.
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        if let Some(end) = after.find('}') {
-            let val = lookup(after[..end].trim(), ctx);
-            out.push_str(&value_to_string(&val));
-            rest = &after[end + 1..];
-        } else {
-            out.push_str(&rest[start..]);
-            rest = "";
-        }
-    }
-    out.push_str(rest);
-    Value::String(out)
-}
-
-/// Resolve a dotted path against the activity's variables.
-fn lookup(path: &str, ctx: &ActivityContext) -> Value {
-    let mut parts = path.split('.');
-    let Some(head) = parts.next() else {
-        return Value::Null;
-    };
-    let Some(mut current) = ctx.variables.get(head).cloned() else {
-        return Value::Null;
-    };
-    for part in parts {
-        match current.get(part) {
-            Some(v) => current = v.clone(),
-            None => return Value::Null,
-        }
-    }
-    current
-}
-
-fn value_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
     }
 }
 

@@ -7,8 +7,12 @@ Document ID: FUT-001
 
 **Document ID:** FUT-001
 **File Path:** `docs/18-roadmap/future/B1-multi-agent-systems.md`
-**Version:** 1.0.0
-**Status:** Exploratory — research bet, not committed
+**Version:** 1.1.0
+**Status:** Exploratory — research bet, not committed. A prototype slice for
+direction (b) now exists in code (`examples/workflows/research-team.yaml` +
+`apex-server`, §8) — it proves the fan-out/join shape and closes the aggregate-
+budget invariant, but does not itself satisfy the graduation gate (no benchmark
+against a single agent). Still pre-ADR.
 **Owner:** Agent Framework Team
 **Last Updated:** 2026-07-05
 
@@ -123,26 +127,95 @@ Absent that evidence, it stays exploratory.
 
 ---
 
-# 8. Dependencies
+# 8. Prototype Slice (2026-07-05)
+
+Direction (b) — workflow-orchestrated agents — was picked over (a)
+coordinator-as-agent because it reuses the durable engine's existing fan-out/join
+instead of a new dynamic delegation mechanism. Investigation found the shape was
+**already mostly buildable**: `apex-server`'s `ServerExecutor` already ran a single
+`agent`-typed workflow activity end to end through the real `run_agent` loop, and
+the engine already runs any batch of simultaneously-ready activities concurrently
+regardless of type ([`apex-workflow/tests/engine.rs::parallel_branches_run_concurrently`](../../../crates/apex-workflow/tests/engine.rs))
+— so a static DAG with N parallel `agent` activities needed no new engine code.
+
+**What this slice built:**
+- [`examples/workflows/research-team.yaml`](../../../examples/workflows/research-team.yaml) —
+  a coordinator pattern: two `agent` activities research opposite angles of
+  `${input.topic}` in parallel (no edge between them), converging into a
+  `synthesize` `agent` activity that combines both via
+  `${proResearch.message}`/`${conResearch.message}`.
+- **A real, previously-undiscovered gap fixed along the way**: `ServerExecutor`
+  had **no `${...}` template resolution at all** — the engine hands executors
+  the raw definition inputs and leaves interpolation to them
+  ([execution model §14](../../03-workflow-engine/execution-model.md)), and only
+  the CLI's `PlatformExecutor` implemented it. This meant the pre-existing
+  `agent-review.yaml` example's `${draft.message}` reference never actually
+  worked when run through the live server — only via `workflows run --local`.
+  Extracted the resolution logic to `apex_workflow::resolve_template` (a shared
+  helper both executors now call) and wired it into `ServerExecutor`, closing the
+  gap for every activity type, not just `agent`.
+- **Closed the "single enforced aggregate budget" invariant**
+  ([§5.2](#52-invariants-to-preserve)): workflow-driven `agent` activities
+  previously bypassed the project quota system entirely (unlike the direct
+  `agents:run` endpoints), so a fan-out to N sub-agents had N independent,
+  unmetered budgets. `ServerExecutor`'s `agent` branch now runs every sub-agent
+  through the same `tenancy::admit_run`/`record_run_cost` gate a direct run uses,
+  keyed by an `__project` marker `submit_handler` stamps from `X-Apex-Project` —
+  so a group's concurrent sub-agents draw from one shared
+  `concurrent_agent_runs`/`llm_cost_per_day_usd` ceiling. A quota rejection is
+  `ActivityError::Retryable` (the slot frees once a sibling's run ends), not a
+  permanent failure.
+
+**What it proves** (`crates/apex-server/src/workflow_runner.rs`'s test module):
+1. `research_team_fans_out_and_joins_two_agents` — both sub-agents produce
+   output and the `synthesize` activity's resolved input contains both (no
+   unresolved `${` placeholder survives) — "collect results from N sub-agents"
+   and the templating fix, in one test.
+2. `agent_activity_respects_project_quota` — with `concurrent_agent_runs: 0` on
+   the submitting project, an `agent` activity fails on quota grounds instead of
+   running unmetered — proving the budget wiring is live, not just plumbed
+   (a deterministic-reject test, mirroring `apex-server/src/tenancy.rs`'s own
+   quota tests, rather than a timing-based concurrency race against near-instant
+   mock LLM calls).
+
+**What it explicitly does not prove** (open problems for the eventual ADR):
+- **No benchmark against a single agent** — [§7](#7-graduation-gate)'s
+  graduation gate needs [FUT-006](B6-trust-evaluation.md)'s eval harness pointed
+  at this workflow shape; that wiring doesn't exist yet.
+- **Direction (a)** (coordinator-as-agent / a dynamic `spawn_agent` tool) is
+  untouched — a materially different, more open-ended mechanism.
+- **No CLI-local support** — `workflows run --local`'s `PlatformExecutor` still
+  has no stored-agent concept to resolve an `agent` activity's `name` against;
+  this bet is provable entirely through the server, which already has the
+  `AgentStore` primitive.
+- **No dynamic fan-out cap** — breadth is bounded by what the workflow author
+  statically declares in the DAG; nothing enforces a depth/breadth ceiling for a
+  hypothetical future where workflows could spawn workflows dynamically.
+
+---
+
+# 9. Dependencies
 
 - [FUT-006 Trust & Evaluation](B6-trust-evaluation.md) — needed to *measure* the
   "outperforms a single agent" claim in the gate.
 - The child-workflow model ([ADR-0008](../../17-adr/ADR-0008-subworkflows.md)) if
-  direction (b) is chosen.
+  direction (b) needs dynamic (not just statically-authored) composition later.
 
 ---
 
-# 9. Related Documents
+# 10. Related Documents
 
 - [`18-roadmap/future.md`](../future.md) §2.1 — origin
 - [`01-product/prd-future.md`](../../01-product/prd-future.md) §6.1 — requirements context
 - [`04-agent-framework/multi-agent-coordination.md`](../../04-agent-framework/multi-agent-coordination.md)
 - [`17-adr/ADR-0008-subworkflows.md`](../../17-adr/ADR-0008-subworkflows.md) — the child-execution precedent
+- `examples/workflows/research-team.yaml` — the prototype slice (§8)
 
 ---
 
-# 10. Revision History
+# 11. Revision History
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-05 | Added §8 Prototype Slice: a coordinator-pattern example workflow (fan-out to two `agent` activities, joined), a fix for `ServerExecutor`'s previously-missing `${...}` template resolution, and aggregate project-quota enforcement across a group's sub-agents. Still pre-ADR — gathers evidence for §7's gate, doesn't satisfy it |
 | 1.0.0 | 2026-07-05 | Initial exploration doc for the multi-agent research bet |

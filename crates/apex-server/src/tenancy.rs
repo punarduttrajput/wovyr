@@ -16,7 +16,8 @@
 
 use crate::{ApiError, AppState};
 use apex_tenancy::{
-    MemberScope, Membership, Organization, Project, ProjectStatus, QuotaLimits, Role, TenantContext,
+    MemberScope, Membership, Organization, Project, ProjectStatus, QuotaLimits, Role, TenancyStore,
+    TenantContext,
 };
 use axum::{
     Json, Router,
@@ -399,9 +400,12 @@ fn current_day() -> u64 {
 }
 
 /// Releases a project's concurrency slot when dropped (after the run completes, succeeds
-/// or fails). A no-op when the run was unmetered (no project / no quota).
+/// or fails). A no-op when the run was unmetered (no project / no quota). Depends only on
+/// the [`QuotaTracker`] itself (not the full [`AppState`]), so it can be shared with
+/// callers — like the workflow engine's [`ServerExecutor`](crate::workflow_runner::ServerExecutor)
+/// — that are constructed before an `AppState` exists.
 pub(crate) struct RunPermit {
-    state: Arc<AppState>,
+    quota: Arc<QuotaTracker>,
     project: String,
     metered: bool,
 }
@@ -411,7 +415,7 @@ impl Drop for RunPermit {
         if !self.metered {
             return;
         }
-        if let Ok(mut u) = self.state.quota.usage.lock()
+        if let Ok(mut u) = self.quota.usage.lock()
             && let Some(c) = u.concurrent.get_mut(&self.project)
         {
             *c = c.saturating_sub(1);
@@ -424,23 +428,24 @@ impl Drop for RunPermit {
 /// concurrency slot until dropped; `Err` ([`Error::QuotaExceeded`] → `429`) if a limit
 /// is hit. Unmetered (returns a no-op permit) when there is no project or no quota.
 pub(crate) fn admit_run(
-    state: &Arc<AppState>,
+    tenancy: &Arc<dyn TenancyStore>,
+    quota: &Arc<QuotaTracker>,
     project: Option<&str>,
 ) -> Result<RunPermit, ApiError> {
     let unmetered = |project: String| RunPermit {
-        state: state.clone(),
+        quota: quota.clone(),
         project,
         metered: false,
     };
     let Some(project) = project else {
         return Ok(unmetered(String::new()));
     };
-    let Some(limits) = state.tenancy.get_quota(project)? else {
+    let Some(limits) = tenancy.get_quota(project)? else {
         return Ok(unmetered(project.to_string()));
     };
 
     let day = current_day();
-    let mut u = state.quota.usage.lock().expect("quota mutex poisoned");
+    let mut u = quota.usage.lock().expect("quota mutex poisoned");
     let current = u.concurrent.get(project).copied().unwrap_or(0);
     limits.check_concurrent_runs(current)?;
     let spent = match u.cost.get(project) {
@@ -452,19 +457,19 @@ pub(crate) fn admit_run(
     limits.check_llm_cost(spent, 0.0)?;
     *u.concurrent.entry(project.to_string()).or_insert(0) += 1;
     Ok(RunPermit {
-        state: state.clone(),
+        quota: quota.clone(),
         project: project.to_string(),
         metered: true,
     })
 }
 
 /// Record `cost` USD of LLM spend against `project`'s current-day budget (after a run).
-pub(crate) fn record_run_cost(state: &Arc<AppState>, project: Option<&str>, cost: f64) {
+pub(crate) fn record_run_cost(quota: &Arc<QuotaTracker>, project: Option<&str>, cost: f64) {
     let Some(project) = project else {
         return;
     };
     let day = current_day();
-    let mut u = state.quota.usage.lock().expect("quota mutex poisoned");
+    let mut u = quota.usage.lock().expect("quota mutex poisoned");
     let entry = u.cost.entry(project.to_string()).or_insert((day, 0.0));
     if entry.0 != day {
         *entry = (day, 0.0);
@@ -728,19 +733,19 @@ mod tests {
             )
             .unwrap();
 
-        let permit = admit_run(&st, Some("prj-x")).expect("first run admitted");
+        let permit = admit_run(&st.tenancy, &st.quota, Some("prj-x")).expect("first run admitted");
         // A second concurrent run is rejected.
         assert!(matches!(
-            admit_run(&st, Some("prj-x")),
+            admit_run(&st.tenancy, &st.quota, Some("prj-x")),
             Err(e) if e.status == StatusCode::TOO_MANY_REQUESTS
         ));
         // Releasing the slot lets the next run in.
         drop(permit);
-        assert!(admit_run(&st, Some("prj-x")).is_ok());
+        assert!(admit_run(&st.tenancy, &st.quota, Some("prj-x")).is_ok());
 
         // A project with no quota, and a run with no project, are unmetered.
-        assert!(admit_run(&st, Some("prj-none")).is_ok());
-        assert!(admit_run(&st, None).is_ok());
+        assert!(admit_run(&st.tenancy, &st.quota, Some("prj-none")).is_ok());
+        assert!(admit_run(&st.tenancy, &st.quota, None).is_ok());
     }
 
     #[tokio::test]

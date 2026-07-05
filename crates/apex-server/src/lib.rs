@@ -135,8 +135,11 @@ pub struct AppState {
     workflow_owners: RwLock<BTreeMap<String, String>>,
     /// Tenancy catalog backing the org/project/membership/quota routes (G: tenancy).
     pub(crate) tenancy: Arc<dyn TenancyStore>,
-    /// Per-project run-path quota usage (concurrent runs + daily LLM spend).
-    pub(crate) quota: tenancy::QuotaTracker,
+    /// Per-project run-path quota usage (concurrent runs + daily LLM spend). An `Arc`
+    /// (not embedded directly) so it can be shared into the workflow engine's
+    /// [`ServerExecutor`](workflow_runner::ServerExecutor), which is constructed before
+    /// this struct exists.
+    pub(crate) quota: Arc<tenancy::QuotaTracker>,
     /// Webhook subscriptions; events emitted on mutations are delivered to matches.
     pub(crate) webhooks: Arc<dyn WebhookStore>,
     /// Sends signed webhook payloads (swappable for tests).
@@ -187,10 +190,19 @@ impl AppState {
         plugins::register_enabled_tools(&mut registry, &secrets);
         let (memory, memory_store) = memory::default_engine(kms.clone());
         let agents = Arc::new(AgentStore::default());
-        // Thread gateway + registry + the agent store into the workflow engine so the
-        // ServerExecutor can actually drive function/ai/agent activities when the submit
-        // route runs a workflow (an `agent` activity looks up a stored agent by id here).
-        let workflows = default_workflows_engine(gateway.clone(), registry.clone(), agents.clone());
+        let tenancy_store = default_tenancy_store();
+        let quota = Arc::new(tenancy::QuotaTracker::new());
+        // Thread gateway + registry + the agent store + tenancy/quota into the workflow
+        // engine so the ServerExecutor can actually drive function/ai/agent activities
+        // when the submit route runs a workflow (an `agent` activity looks up a stored
+        // agent by id here, and enforces the same project quota a direct run would).
+        let workflows = default_workflows_engine(
+            gateway.clone(),
+            registry.clone(),
+            agents.clone(),
+            tenancy_store.clone(),
+            quota.clone(),
+        );
         Self {
             gateway,
             registry,
@@ -199,8 +211,8 @@ impl AppState {
             run_counter: AtomicU64::new(1),
             workflows,
             workflow_owners: RwLock::new(BTreeMap::new()),
-            tenancy: default_tenancy_store(),
-            quota: tenancy::QuotaTracker::new(),
+            tenancy: tenancy_store,
+            quota,
             webhooks: default_webhook_store(kms.clone()),
             webhook_sender: Arc::new(webhooks::ReqwestSender::default()),
             webhook_policy: BackoffPolicy::default(),
@@ -433,15 +445,18 @@ fn default_webhook_store(kms: Arc<dyn apex_kms::Kms>) -> Arc<dyn WebhookStore> {
 /// directory the CLI writes to), falling back to an empty in-memory store if that
 /// directory is unavailable.  The executor is a [`ServerExecutor`] that handles
 /// `function`/`ai`/`agent`/`human` activities so the write-path submit route can
-/// actually drive workflow runs.  The read paths (`list`/`status`/`history`) are
-/// unaffected.
+/// actually drive workflow runs — including enforcing the submitting project's quota
+/// on `agent` activities, the same gate a direct `agents:run` call goes through.  The
+/// read paths (`list`/`status`/`history`) are unaffected.
 fn default_workflows_engine(
     gateway: Arc<Gateway>,
     registry: ToolRegistry,
     agents: Arc<AgentStore>,
+    tenancy: Arc<dyn TenancyStore>,
+    quota: Arc<tenancy::QuotaTracker>,
 ) -> Engine {
     let executor = Arc::new(workflow_runner::ServerExecutor::new(
-        gateway, registry, agents,
+        gateway, registry, agents, tenancy, quota,
     ));
     let dir = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -719,7 +734,7 @@ async fn run_stream_handler(
     // the run task and releases when it ends.
     let project = tenancy::run_project(&headers);
     let tenant = tenancy::run_tenant(&headers);
-    let permit = match tenancy::admit_run(&state, project.as_deref()) {
+    let permit = match tenancy::admit_run(&state.tenancy, &state.quota, project.as_deref()) {
         Ok(p) => p,
         Err(e) => return e.into_response(),
     };
@@ -736,7 +751,7 @@ async fn run_stream_handler(
         let mut sink = ChannelSink { tx: tx.clone() };
         let frame = match run_agent(&def, &state.gateway, &state.registry, opts, &mut sink).await {
             Ok(out) => {
-                tenancy::record_run_cost(&state, project.as_deref(), out.usage.cost_usd);
+                tenancy::record_run_cost(&state.quota, project.as_deref(), out.usage.cost_usd);
                 Event::default().event("result").data(
                     json!({ "status": "succeeded", "output": { "message": out.text }, "steps": out.steps })
                         .to_string(),
@@ -766,7 +781,7 @@ async fn run_definition(
 
     // Quota gate: hold a concurrency slot for the duration of the run (released on
     // drop), then record the run's cost against the project's daily budget.
-    let _permit = tenancy::admit_run(state, project)?;
+    let _permit = tenancy::admit_run(&state.tenancy, &state.quota, project)?;
     let mut opts = RunOptions::new(input).with_tenant(tenant);
     // An explicit per-run override wins; otherwise fall back to the agent's own default.
     if let Some(n) = max_steps.or(def.spec.max_steps) {
@@ -784,7 +799,7 @@ async fn run_definition(
             return Err(ApiError::from(e));
         }
     };
-    tenancy::record_run_cost(state, project, out.usage.cost_usd);
+    tenancy::record_run_cost(&state.quota, project, out.usage.cost_usd);
 
     let run_id = format!("run_{}", state.run_counter.fetch_add(1, Ordering::SeqCst));
     webhooks::emit(

@@ -18,6 +18,7 @@
 
 use apex_agent::{NullSink, RunOptions, run_agent};
 use apex_provider::Gateway;
+use apex_tenancy::TenancyStore;
 use apex_tools::{ToolContext, ToolRegistry, ToolRequest};
 use apex_workflow::{ActivityContext, ActivityError, ActivityExecutor, Definition};
 use async_trait::async_trait;
@@ -31,7 +32,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::{AgentStore, ApiError, AppState};
+use crate::{AgentStore, ApiError, AppState, tenancy};
 
 // ── ServerExecutor ────────────────────────────────────────────────────────────
 
@@ -47,7 +48,14 @@ use crate::{AgentStore, ApiError, AppState};
 ///   `inputs.message` field becomes the user turn, same convention as `ai`). The
 ///   agent is looked up in the *submitting tenant's* store (via the `__tenant`
 ///   marker `submit_handler` stamps into the run input), so a workflow can never
-///   reach another tenant's agent.
+///   reach another tenant's agent. When the submission also carried an in-scope
+///   project (`__project`, from `X-Apex-Project`), the run is admitted through the
+///   same [`tenancy::admit_run`]/[`tenancy::record_run_cost`] gate a direct
+///   `agents:run` call goes through — so a workflow that fans out to N sub-agents
+///   draws from one shared project budget (concurrent runs + daily LLM spend)
+///   instead of N independent, unmetered ones. A quota-exceeded rejection is
+///   [`ActivityError::Retryable`]: the blocking slot is held only for a sibling
+///   activity's duration, so a retry can succeed once it frees.
 /// - `human`             — returns [`ActivityError::Interrupted`] so the engine
 ///   durably suspends; the run is resumed by `POST …/{id}/approve`.
 /// - anything else       — permanent failure (activity type unknown to server).
@@ -55,14 +63,24 @@ pub struct ServerExecutor {
     gateway: Arc<Gateway>,
     registry: ToolRegistry,
     agents: Arc<AgentStore>,
+    tenancy: Arc<dyn TenancyStore>,
+    quota: Arc<tenancy::QuotaTracker>,
 }
 
 impl ServerExecutor {
-    pub fn new(gateway: Arc<Gateway>, registry: ToolRegistry, agents: Arc<AgentStore>) -> Self {
+    pub fn new(
+        gateway: Arc<Gateway>,
+        registry: ToolRegistry,
+        agents: Arc<AgentStore>,
+        tenancy: Arc<dyn TenancyStore>,
+        quota: Arc<tenancy::QuotaTracker>,
+    ) -> Self {
         Self {
             gateway,
             registry,
             agents,
+            tenancy,
+            quota,
         }
     }
 }
@@ -70,6 +88,13 @@ impl ServerExecutor {
 #[async_trait]
 impl ActivityExecutor for ServerExecutor {
     async fn execute(&self, ctx: &ActivityContext) -> Result<Value, ActivityError> {
+        // Resolve `${activity.field}` references against the live variables (e.g. a
+        // `synthesize` activity's `inputs.message: "${proResearch.message}"`) — the
+        // engine hands executors the raw definition inputs and leaves interpolation to
+        // them (apex_workflow::resolve_template), the same helper the CLI's local
+        // runner uses, so both executors interpolate identically.
+        let inputs = apex_workflow::resolve_template(&ctx.inputs, ctx);
+
         match ctx.activity_type.as_str() {
             "function" | "tool" => {
                 let tool_id = ctx.name.as_deref().ok_or_else(|| {
@@ -79,7 +104,7 @@ impl ActivityExecutor for ServerExecutor {
                     ))
                 })?;
                 let tool_ctx = ToolContext::default();
-                let req = ToolRequest::new(ctx.inputs.clone());
+                let req = ToolRequest::new(inputs);
                 self.registry
                     .execute(tool_id, &tool_ctx, req)
                     .await
@@ -91,9 +116,9 @@ impl ActivityExecutor for ServerExecutor {
                     .name
                     .clone()
                     .unwrap_or_else(|| "You are a helpful assistant.".to_string());
-                let user_msg = match ctx.inputs.get("message").and_then(|v| v.as_str()) {
+                let user_msg = match inputs.get("message").and_then(|v| v.as_str()) {
                     Some(m) => m.to_string(),
-                    None => ctx.inputs.to_string(),
+                    None => inputs.to_string(),
                 };
                 use apex_provider::{ChatRequest, Message};
                 let req = ChatRequest::new(
@@ -126,19 +151,23 @@ impl ActivityExecutor for ServerExecutor {
                         ctx.id
                     ))
                 })?;
-                let input = if ctx.inputs.is_null() {
-                    json!({})
-                } else {
-                    ctx.inputs.clone()
-                };
+                let input = if inputs.is_null() { json!({}) } else { inputs };
                 let mut opts = RunOptions::new(input).with_tenant(tenant);
                 if let Some(n) = def.spec.max_steps {
                     opts = opts.with_max_steps(n);
                 }
+                let project = ctx.variables.get("__project").and_then(Value::as_str);
+                // Admit through the same project quota gate a direct `agents:run` call
+                // uses, so a workflow's fan-out to N sub-agents shares one budget rather
+                // than each activity running unmetered. A rejection is retryable: the
+                // slot frees once a sibling activity's run ends.
+                let _permit = tenancy::admit_run(&self.tenancy, &self.quota, project)
+                    .map_err(|e| ActivityError::Retryable(e.message))?;
                 let mut sink = NullSink;
                 let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
                     .await
                     .map_err(|e| ActivityError::Retryable(e.to_string()))?;
+                tenancy::record_run_cost(&self.quota, project, output.usage.cost_usd);
                 Ok(json!({ "message": output.text, "steps": output.steps }))
             }
             "human" => {
@@ -236,8 +265,13 @@ async fn submit_handler(
     // Stamp the submitting tenant into the run input so an `agent` activity resolves
     // stored agents from the *submitter's* agent store, not cross-tenant. Reserved
     // (`__`-prefixed) key: hidden from variable listings same as other internal markers.
+    // The in-scope project (if any) rides along the same way, so `agent` activities
+    // draw from the submitter's project quota instead of running unmetered.
     if let Value::Object(map) = &mut input {
         map.insert("__tenant".to_string(), json!(tenant));
+        if let Some(project) = tenancy::run_project(&headers) {
+            map.insert("__project".to_string(), json!(project));
+        }
     }
 
     // Derive an execution id from the workflow name + a monotonic counter.
@@ -417,12 +451,25 @@ mod tests {
     }
 
     async fn post_json(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
+        post_json_headers(app, uri, &[], body).await
+    }
+
+    async fn post_json_headers(
+        app: axum::Router,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
         let resp = app
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header("content-type", "application/json")
+                builder
                     .body(axum::body::Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -580,6 +627,135 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
         assert_eq!(
             detail["execution"]["status"], "Failed",
             "execution should fail when the referenced agent doesn't exist: {detail}"
+        );
+    }
+
+    /// FUT-001(b) prototype: two `agent` activities with no edge between them fan out
+    /// concurrently (the engine's existing type-agnostic batch execution — no new
+    /// engine code), and a downstream `synthesize` agent activity joins both outputs
+    /// via `${proResearch.message}`/`${conResearch.message}` — proving both "collect
+    /// results from N sub-agents" and that `ServerExecutor` actually interpolates
+    /// `${...}` references (it previously didn't; see `resolve_template`).
+    const RESEARCH_TEAM_YAML: &str = "\
+metadata:\n  name: research-team\nspec:\n  activities:\n    - id: proResearch\n      type: agent\n      name: pro-researcher\n      inputs: { message: \"FOR: ${input.topic}\" }\n    - id: conResearch\n      type: agent\n      name: con-researcher\n      inputs: { message: \"AGAINST: ${input.topic}\" }\n    - id: synthesize\n      type: agent\n      name: synthesizer\n      inputs: { message: \"FOR=${proResearch.message} AGAINST=${conResearch.message}\" }\n  transitions:\n    - { from: proResearch, to: synthesize }\n    - { from: conResearch, to: synthesize }\n";
+
+    #[tokio::test]
+    async fn research_team_fans_out_and_joins_two_agents() {
+        let state = Arc::new(AppState::from_env());
+        let router = crate::router(state.clone());
+
+        for name in ["pro-researcher", "con-researcher", "synthesizer"] {
+            let (st, body) = post_json(
+                router.clone(),
+                "/api/v1/agents",
+                json!({ "manifest": format!("metadata:\n  name: {name}\nspec:\n  instructions: Be terse.\n") }),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "registering `{name}`: {body}");
+        }
+
+        let (st, body) = post_json(
+            router,
+            "/api/v1/workflows",
+            json!({
+                "manifest": RESEARCH_TEAM_YAML,
+                "input": { "topic": "remote work" },
+                "execution_id": "research-team-test",
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        let detail = wait_for_terminal(&state, "research-team-test").await;
+        assert_eq!(
+            detail["execution"]["status"], "Completed",
+            "execution did not complete: {detail}"
+        );
+
+        let events = detail["events"].as_array().unwrap();
+        let output_of = |activity_id: &str| -> String {
+            events
+                .iter()
+                .find(|e| e["type"] == "ActivityCompleted" && e["id"] == activity_id)
+                .unwrap_or_else(|| {
+                    panic!("no ActivityCompleted event for `{activity_id}`: {detail}")
+                })["output"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+
+        let pro = output_of("proResearch");
+        let con = output_of("conResearch");
+        assert!(!pro.is_empty(), "expected non-empty pro-research output");
+        assert!(!con.is_empty(), "expected non-empty con-research output");
+
+        // The synthesize activity's *input* (echoed back via the mock provider's
+        // response, which includes the prompt) must contain both prior activities'
+        // literal outputs, not the unresolved `${proResearch.message}` placeholder —
+        // proving the join actually collected both sub-agents' results.
+        let synthesized = output_of("synthesize");
+        assert!(
+            !synthesized.contains("${"),
+            "synthesize output still contains an unresolved placeholder: {synthesized}"
+        );
+    }
+
+    /// A workflow's fan-out to N `agent` activities shares one project budget instead
+    /// of each activity running unmetered: with `concurrent_agent_runs: 0` (deterministic
+    /// reject, same style as `tenancy.rs`'s own quota tests — avoids a flaky
+    /// timing-based concurrency proof against near-instant mock LLM calls), submitting
+    /// with `X-Apex-Project` fails the activity on quota grounds instead of silently
+    /// running it unmetered.
+    const QUOTA_AGENT_YAML: &str = "\
+metadata:\n  name: agent-wf-quota\nspec:\n  activities:\n    - id: greet\n      type: agent\n      name: greeter\n      retry: { max_attempts: 1 }\n      inputs:\n        message: hi\n";
+
+    #[tokio::test]
+    async fn agent_activity_respects_project_quota() {
+        let state = Arc::new(AppState::from_env());
+        state
+            .tenancy
+            .set_quota(
+                "prj-quota-test",
+                apex_tenancy::QuotaLimits {
+                    concurrent_agent_runs: Some(0),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let (st, body) = post_json(
+            crate::router(state.clone()),
+            "/api/v1/agents",
+            json!({ "manifest": "metadata:\n  name: greeter\nspec:\n  instructions: Be friendly.\n" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        let (st, body) = post_json_headers(
+            crate::router(state.clone()),
+            "/api/v1/workflows",
+            &[("x-apex-project", "prj-quota-test")],
+            json!({ "manifest": QUOTA_AGENT_YAML, "execution_id": "agent-wf-quota-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        let detail = wait_for_terminal(&state, "agent-wf-quota-test").await;
+        assert_eq!(
+            detail["execution"]["status"], "Failed",
+            "execution should fail when the project's agent-run quota is exhausted: {detail}"
+        );
+
+        let events = detail["events"].as_array().unwrap();
+        let failure = events
+            .iter()
+            .find(|e| e["type"] == "ActivityFailed" && e["id"] == "greet")
+            .unwrap_or_else(|| panic!("no ActivityFailed event for `greet`: {detail}"));
+        let error = failure["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("concurrent_agent_runs"),
+            "expected a quota-related failure reason, got: {error}"
         );
     }
 }

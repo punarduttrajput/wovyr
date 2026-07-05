@@ -7,7 +7,7 @@ Document ID: FUT-INDEX-001
 
 **Document ID:** FUT-INDEX-001
 **File Path:** `docs/18-roadmap/future/index.md`
-**Version:** 1.1.0
+**Version:** 1.2.0
 **Status:** Exploratory
 **Owner:** Product Team
 **Last Updated:** 2026-07-05
@@ -34,7 +34,7 @@ plannable and prunable, not to promise them.
 
 | Doc | Direction | Origin | Status |
 |-----|-----------|--------|--------|
-| [FUT-001](B1-multi-agent-systems.md) | Autonomous Multi-Agent Systems | [future §2.1](../future.md#21-autonomous-multi-agent-systems) | Exploratory |
+| [FUT-001](B1-multi-agent-systems.md) | Autonomous Multi-Agent Systems | [future §2.1](../future.md#21-autonomous-multi-agent-systems) | Exploratory — prototype slice for direction (b) in `examples/workflows/research-team.yaml` + `apex-server`, pre-ADR |
 | [FUT-002](B2-self-optimizing-platform.md) | Self-Optimizing Platform | [future §2.2](../future.md#22-self-optimizing-platform) | Exploratory |
 | [FUT-003](B3-advanced-memory.md) | Advanced Memory | [future §2.3](../future.md#23-advanced-memory) | Exploratory |
 | [FUT-004](B4-execution-frontiers.md) | Execution Frontiers | [future §2.4](../future.md#24-execution-frontiers) | Exploratory |
@@ -88,5 +88,6 @@ carried indefinitely.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-05 | FUT-001 gained a code prototype for direction (b) (`examples/workflows/research-team.yaml` + `apex-server`) — updated its register row; see [B1-multi-agent-systems.md §8](B1-multi-agent-systems.md#8-prototype-slice-2026-07-05) for what it proves and doesn't |
 | 1.1.0 | 2026-07-05 | FUT-006 gained a code prototype (`crates/apex-eval`) — updated its register row; see [B6-trust-evaluation.md §8](B6-trust-evaluation.md#8-prototype-spike-2026-07-05) for what it proves and doesn't |
 | 1.0.0 | 2026-07-05 | Initial Tier B research-bet index (FUT-001…FUT-006) with dependency ordering |

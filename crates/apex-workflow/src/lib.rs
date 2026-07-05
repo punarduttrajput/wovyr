@@ -37,6 +37,7 @@ mod retry;
 mod schedule;
 mod state;
 mod store;
+mod template;
 mod timer;
 mod worker;
 
@@ -55,6 +56,7 @@ pub use schedule::{
 };
 pub use state::{ActivityState, WorkflowState};
 pub use store::{CheckpointStore, EventLog, FileStore, InMemoryStore};
+pub use template::resolve as resolve_template;
 pub use timer::{
     Clock, FileTimerStore, InMemoryTimerStore, ManualClock, PendingTimer, SystemClock,
     TimerDispatcher, TimerStore,
