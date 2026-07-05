@@ -7,17 +7,16 @@ Document ID: FUT-006
 
 **Document ID:** FUT-006
 **File Path:** `docs/18-roadmap/future/B6-trust-evaluation.md`
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Status:** Exploratory — research bet, not committed. A prototype spike now
 exists in code (`crates/apex-eval`, §8) — it gathers evidence for the
 graduation gate below, but does not itself satisfy it (no CI gate, no
-real/non-deterministic-provider variance study). A real non-deterministic
-provider now exists to eventually run it against (`apex-provider`'s
-`mistralrs` feature), but the two are not yet wired together. The harness has
-also been pointed at FUT-001's multi-agent workflow (§8.1) via a new
-`compare` module — a reproducible comparison mechanism, still on a scripted
-deterministic provider, not yet the real-model benchmark either bet needs.
-Still pre-ADR.
+quantified real/non-deterministic-provider variance study). The harness has
+been pointed at FUT-001's multi-agent workflow (§8.1) via a new `compare`
+module, and now also at the real `mistralrs` provider (§8.2) — one real run
+produced a tie (both paths failed the fixture, though the workflow's answer
+was qualitatively closer), a single, uncontrolled data point, not the
+"quantified, stable variance" the graduation gate needs. Still pre-ADR.
 **Owner:** Quality / Security Team
 **Last Updated:** 2026-07-05
 
@@ -213,6 +212,46 @@ Also: the workflow side's `EvalReport::usage` is always zero, since a workflow
 activity's output is a bare JSON value, not a `Usage`-carrying struct — per-case
 workflow cost isn't surfaced through `apex_workflow::ExecutionState` today.
 
+## 8.2 A real-model run (2026-07-05)
+
+`crates/apex-eval` gained an optional `mistralrs` feature
+(`mistralrs = ["apex-provider/mistralrs"]`) and
+`tests/real_model_comparison.rs`, which points `run_comparison` at the real
+`MistralRsProvider` (Qwen2.5-0.5B-Instruct via mistral.rs) instead of the
+scripted `BalancedViewProvider`. Since the provider sets no sampling
+parameters — it is genuinely non-deterministic — and the model is tiny, the
+test deliberately does **not** assert `workflow_wins()`; it asserts only
+structural properties (both paths complete, the single-agent side consumes
+real nonzero token usage) and prints the full report so the actual result is
+observable rather than gated on.
+
+**The one real run so far (`--release`, ~5.6 minutes of real CPU inference for
+4 model calls) produced a tie, not a win**, on the same "cover both `support`
+and `risk`" fixture `multi_agent_vs_single_agent.rs` uses:
+- Single agent: **failed** — `"answer is missing [\"support\", \"risk\"]"`
+  (missed both required perspectives).
+- Workflow: **failed too** — but `"answer is missing [\"support\"]"` only
+  (it covered one of the two required perspectives, the single agent covered
+  neither).
+
+So on this one data point, the workflow's answer was qualitatively closer —
+visible in the `detail` string, not the binary `pass_rate` — but not enough to
+flip `contains_all` from fail to pass, so `pass_rate` was `0.0` on both sides
+and `workflow_wins()` returns `false`. This is an honest, expected outcome
+given Qwen2.5-0.5B's already-documented quality ceiling
+(`apex-provider/src/mistralrs_provider.rs`'s own module doc), not a bug in the
+harness — the comparison mechanism worked exactly as designed and surfaced a
+real, nuanced, non-binary result.
+
+**What this does and doesn't establish:** it proves the harness can drive a
+real model end to end (real GGUF download, real inference, real token usage)
+and that the result is genuinely uncontrolled — unlike every other result in
+this crate's history. It is **one run, no seed control, no repetition** — not
+the "quantified, stable variance" [§7](#7-graduation-gate)'s graduation gate
+ultimately needs. That needs multiple runs (ideally with a larger, more capable
+model) to see whether "workflow closer, single agent behind" is a stable
+pattern or noise. Still open.
+
 ---
 
 # 9. Enables
@@ -236,8 +275,9 @@ For that reason it is the natural **first** bet to graduate.
 - [`01-product/prd-future.md`](../../01-product/prd-future.md) §6.6
 - [`04-agent-framework/policy-engine.md`](../../04-agent-framework/policy-engine.md)
 - [`15-testing/index.md`](../../15-testing/index.md)
-- `crates/apex-eval` — the prototype spike (§8), extended with `compare` (§8.1)
-- [B1-multi-agent-systems.md](B1-multi-agent-systems.md) — the consumer of §8.1's comparison harness
+- `crates/apex-eval` — the prototype spike (§8), extended with `compare` (§8.1) and the real `mistralrs` run (§8.2)
+- [B1-multi-agent-systems.md](B1-multi-agent-systems.md) — the consumer of §8.1/§8.2's comparison harness
+- `crates/apex-provider/src/mistralrs_provider.rs` — the real, non-deterministic provider §8.2 points the harness at
 
 ---
 
@@ -245,6 +285,7 @@ For that reason it is the natural **first** bet to graduate.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.4.0 | 2026-07-05 | Added §8.2: pointed the comparison harness at the real `mistralrs` provider (new optional feature on `apex-eval`). One real run produced a tie — both paths failed the fixture, though the workflow's answer covered one of two required perspectives vs. the single agent's zero. One uncontrolled data point, not the quantified variance study the gate needs |
 | 1.3.0 | 2026-07-05 | Added §8.1: `apex-eval` gained a `compare` module pointed at FUT-001's `research-team.yaml` — proves the single-agent-vs-workflow comparison mechanism works and is reproducible on an illustrative fixture; explicitly not the real-model benchmark either bet's graduation gate needs |
 | 1.2.0 | 2026-07-05 | Noted a real, local, non-deterministic provider now exists (`apex-provider`'s `mistralrs` feature, verified end to end against a real HTTP fetch) — a real target `apex-eval` could eventually run against, closing part of §8's "not proven" gap without wiring the two together yet |
 | 1.1.0 | 2026-07-05 | Added §8 Prototype Spike: `crates/apex-eval` built and tested, proving reproducible fixture-based scoring and deterministic regression detection against the real `run_agent` loop. Corrected §3's claim about `MockProvider` (it cannot drive per-fixture scoring). Still pre-ADR — the spike gathers evidence for §7's graduation gate, it doesn't satisfy it |

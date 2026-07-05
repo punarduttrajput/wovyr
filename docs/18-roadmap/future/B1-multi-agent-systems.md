@@ -7,14 +7,15 @@ Document ID: FUT-001
 
 **Document ID:** FUT-001
 **File Path:** `docs/18-roadmap/future/B1-multi-agent-systems.md`
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Status:** Exploratory — research bet, not committed. A prototype slice for
 direction (b) now exists in code (`examples/workflows/research-team.yaml`,
 runnable via either `apex-server` or the CLI's local runner, §8) — it proves the
-fan-out/join shape and closes the aggregate-budget invariant. A first,
-scripted-provider comparison against a single agent also now exists
-(`apex-eval`'s `compare` module, §8) — reproducible, but not yet the
-real-model benchmark the graduation gate needs. Still pre-ADR.
+fan-out/join shape and closes the aggregate-budget invariant. Both a scripted-
+provider and a first real-model (`mistralrs`) comparison against a single
+agent now exist (`apex-eval`'s `compare` module, §8) — the real run was a tie
+on n=1, not the quantified "measurably outperforms" evidence the graduation
+gate needs. Still pre-ADR.
 **Owner:** Agent Framework Team
 **Last Updated:** 2026-07-05
 
@@ -210,11 +211,20 @@ the *comparison mechanism* works and gives a directionally plausible result, not
 that a real model's workflow output measurably beats its single-agent output on
 real tasks.
 
+**A real-model run now exists too (2026-07-05, same day).**
+[B6-trust-evaluation.md §8.2](B6-trust-evaluation.md#82-a-real-model-run-2026-07-05)
+points the same comparison at the real `mistralrs` provider
+(Qwen2.5-0.5B-Instruct). The one run so far (real ~5.6-minute CPU inference,
+no sampling control) was a **tie, not a win**: both the single agent and the
+workflow failed the "cover both perspectives" fixture, but the workflow's
+answer covered one of the two required perspectives where the single agent
+covered neither — a real, honest, and not-yet-decisive result, not a bug.
+
 **What it explicitly does not prove** (open problems for the eventual ADR):
-- **No real-model benchmark** — the comparison harness above exists, but still
-  needs a real, non-deterministic provider in the loop (`mistralrs` exists but
-  isn't wired into `apex-eval`) before it satisfies [§7](#7-graduation-gate)'s
-  "real benchmark" bar.
+- **No quantified real-model benchmark yet** — one uncontrolled real run is not
+  [§7](#7-graduation-gate)'s "measurably outperforms... real benchmark" bar;
+  that needs repeated runs (ideally with a more capable model) to see whether
+  the workflow's edge is a stable pattern or noise.
 - **Direction (a)** (coordinator-as-agent / a dynamic `spawn_agent` tool) is
   untouched — a materially different, more open-ended mechanism.
 - **No aggregate quota on the CLI side** — the project-budget enforcement above
@@ -230,8 +240,9 @@ real tasks.
 # 9. Dependencies
 
 - [FUT-006 Trust & Evaluation](B6-trust-evaluation.md) — needed to *measure* the
-  "outperforms a single agent" claim in the gate; a first, scripted-provider
-  version of that measurement now exists (§8), pending a real-model run.
+  "outperforms a single agent" claim in the gate; both a scripted-provider and
+  a first real-model version of that measurement now exist (§8), the latter
+  showing a tie on n=1 — repeated real runs are the open next step.
 - The child-workflow model ([ADR-0008](../../17-adr/ADR-0008-subworkflows.md)) if
   direction (b) needs dynamic (not just statically-authored) composition later.
 
@@ -245,6 +256,7 @@ real tasks.
 - [`17-adr/ADR-0008-subworkflows.md`](../../17-adr/ADR-0008-subworkflows.md) — the child-execution precedent
 - `examples/workflows/research-team.yaml` — the prototype slice (§8)
 - [B6-trust-evaluation.md §8.1](B6-trust-evaluation.md#81-pointed-at-fut-001-2026-07-05) — the comparison harness pointed at this workflow
+- [B6-trust-evaluation.md §8.2](B6-trust-evaluation.md#82-a-real-model-run-2026-07-05) — the real-model run's result
 
 ---
 
@@ -252,6 +264,7 @@ real tasks.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.4.0 | 2026-07-05 | §8: recorded the real-model (`mistralrs`) comparison run — a tie on n=1, workflow covered one of two required perspectives vs. the single agent's zero. Updated the "not proven" list: no longer "no real-model benchmark," now "no quantified benchmark yet" |
 | 1.3.0 | 2026-07-05 | §8: FUT-006's `apex-eval` gained a `compare` module pointed at `research-team.yaml` — a reproducible single-agent-vs-workflow comparison on a scripted-provider fixture. Explicitly not yet the real-model benchmark §7's gate needs |
 | 1.2.0 | 2026-07-05 | §8: added CLI-local support for `agent` activities (`--agents-dir` on `workflows run --local`), so `research-team.yaml` runs identically without a server. Three new `apps/apex-cli` tests. Updated the "not proven" list accordingly |
 | 1.1.0 | 2026-07-05 | Added §8 Prototype Slice: a coordinator-pattern example workflow (fan-out to two `agent` activities, joined), a fix for `ServerExecutor`'s previously-missing `${...}` template resolution, and aggregate project-quota enforcement across a group's sub-agents. Still pre-ADR — gathers evidence for §7's gate, doesn't satisfy it |
