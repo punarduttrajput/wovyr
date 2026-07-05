@@ -7,10 +7,17 @@ Document ID: DEP-004
 
 **Document ID:** DEP-004  
 **File Path:** `docs/12-deployment/helm.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — describes the **long-term, aspirational** multi-chart/
+multi-service packaging. **Not built.** A real, working chart exists today at
+[`deployment/helm/apex/`](../../deployment/helm/apex/README.md) — one chart
+for the actual single-binary + Postgres + Qdrant topology (mirrors
+`deployment/docker-compose.yml`), not the per-service chart split this doc
+describes. See that chart's `README.md` for what it does and doesn't prove
+(validated offline with `helm lint`/`helm template`/`kubeconform`; never
+applied to a live cluster).
 **Owner:** Platform Operations Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-05
 
 ---
 
@@ -149,4 +156,5 @@ explicitly removed.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-05 | Added a status note pointing to `deployment/helm/apex/` — a real, single-chart Helm chart for the actual single-binary topology, distinct from this doc's aspirational multi-chart split |
 | 1.0.0 | 2026-06-27 | Initial Helm deployment guide |

@@ -1,0 +1,87 @@
+# Default values for the apex chart. See README.md for the full mapping back
+# to deployment/docker-compose.yml and the gaps this chart doesn't close.
+
+apex:
+  image:
+    # No registry to push to from this dev environment — point this at
+    # wherever you push deployment/docker/Dockerfile's image (built with
+    # --build-arg FEATURES=tiered-memory,postgres to match the values below).
+    repository: apex
+    tag: dev
+    pullPolicy: IfNotPresent
+  # Fixed at 1: apex's durable state (~/.apex/{tenancy,kms,secrets,webhooks,
+  # workflows,memory,audit}) is local files on a PVC, not shared/replicated —
+  # horizontal scaling isn't supported yet (matches the project's own
+  # documented state: no sharding/multi-region support today).
+  replicaCount: 1
+  port: 8080
+  env:
+    # APEX_PLATFORM_ADMINS — comma-separated principal ids with platform-admin
+    # scope. Optional; empty means no platform admins (fail-closed default).
+    platformAdmins: ""
+  secrets:
+    # APEX_KMS_ROOT_KEY (hex). Empty -> apex-server falls back to a fully
+    # ephemeral in-process root key (logged loudly) — fine for a smoke test,
+    # NOT for production (every secret/memory record sealed under it becomes
+    # unrecoverable on pod restart). Generate one with:
+    #   openssl rand -hex 32
+    kmsRootKey: ""
+    # OPENAI_API_KEY. Empty -> the deterministic offline mock provider (no
+    # real model calls). Set this for a real LLM backend.
+    openaiApiKey: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  persistence:
+    size: 1Gi
+    storageClassName: ""
+  service:
+    type: ClusterIP
+
+postgres:
+  image: postgres:16
+  # Matches docker-compose.yml's defaults exactly. Override all three in
+  # production — these are committed-to-git placeholders, not secrets.
+  user: apex
+  password: apex
+  database: apex
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    size: 5Gi
+    storageClassName: ""
+
+qdrant:
+  # Wired for the CLI's `apex memory put/query` tiered-memory backend only —
+  # the embedded apex-server ignores it and always uses its local file store
+  # (see this chart's README.md and deployment/docker-compose.yml's own
+  # comment for the same gap). Set false if you never run tiered-memory CLI
+  # commands against this cluster.
+  enabled: true
+  image: qdrant/qdrant:latest
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  persistence:
+    size: 5Gi
+    storageClassName: ""
+
+ingress:
+  enabled: false
+  className: ""
+  host: apex.example.com
+  annotations: {}
+  tls: []
