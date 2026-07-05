@@ -5,24 +5,35 @@
 //! Platform mutations emit past-tense [`Event`]s; clients register
 //! [`WebhookSubscription`]s to receive the ones they care about, delivered as
 //! **signed**, **retried** HTTP callbacks. This crate is the transport-agnostic
-//! foundation (it depends only on `apex-common`):
+//! foundation:
 //!
 //! - [`event`] — the [`Event`] record.
 //! - [`subscription`] — [`WebhookSubscription`] + wildcard topic matching.
 //! - [`sign`] — HMAC-SHA256 payload signing/verification (`X-Apex-Signature`).
 //! - [`retry`] — the [`BackoffPolicy`] (pure delay computation).
 //! - [`store`] — the durable [`WebhookStore`] catalog ([`InMemoryWebhookStore`] /
-//!   [`FileWebhookStore`]).
+//!   [`FileWebhookStore`]), plus an at-rest-**encrypting**
+//!   [`EncryptedFileWebhookStore`]
+//!   ([Encryption §4](../../docs/13-security/encryption.md#4-application-layer-encryption)):
+//!   seals a subscription's `secret` (the HMAC signing key) through
+//!   [`apex_kms`] before it reaches disk, keyed by the subscription's own
+//!   `tenant` as the KMS tenant — `url`/`events`/`active` stay plaintext, no
+//!   confidentiality need there. `webhooks.enc.json` never holds a plaintext
+//!   secret; the plain `FileWebhookStore`'s `webhooks.json` does.
 //!
-//! The HTTP delivery worker (sign → POST → backoff retry → dead-letter) and the server
-//! routes + event emission on mutations build on this in a later slice.
+//! Depends on `apex-common` and `apex-kms` (itself `apex-common`-only), keeping
+//! the workspace dependency spine one-directional. The HTTP delivery worker
+//! (sign → POST → backoff retry → dead-letter) and the server routes + event
+//! emission on mutations build on this in a later slice.
 
+mod encrypted_store;
 pub mod event;
 pub mod retry;
 pub mod sign;
 pub mod store;
 pub mod subscription;
 
+pub use encrypted_store::EncryptedFileWebhookStore;
 pub use event::{EVENT_SCHEMA_VERSION, Event};
 pub use retry::BackoffPolicy;
 pub use store::{FileWebhookStore, InMemoryWebhookStore, WebhookState, WebhookStore};

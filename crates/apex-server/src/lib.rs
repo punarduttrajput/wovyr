@@ -28,7 +28,9 @@ mod workflow_runner;
 
 use apex_agent::{AgentDefinition, NullSink, RunEvent, RunEventSink, RunOptions, run_agent};
 use apex_common::Error;
-use apex_events::{BackoffPolicy, FileWebhookStore, InMemoryWebhookStore, WebhookStore};
+use apex_events::{
+    BackoffPolicy, EncryptedFileWebhookStore, FileWebhookStore, InMemoryWebhookStore, WebhookStore,
+};
 use apex_provider::{CostEvent, CostObserver, Gateway};
 use apex_telemetry::Metrics;
 use apex_tenancy::{FileTenancyStore, InMemoryTenancyStore, TenancyStore};
@@ -199,7 +201,7 @@ impl AppState {
             workflow_owners: RwLock::new(BTreeMap::new()),
             tenancy: default_tenancy_store(),
             quota: tenancy::QuotaTracker::new(),
-            webhooks: default_webhook_store(),
+            webhooks: default_webhook_store(kms.clone()),
             webhook_sender: Arc::new(webhooks::ReqwestSender::default()),
             webhook_policy: BackoffPolicy::default(),
             event_counter: AtomicU64::new(1),
@@ -399,8 +401,14 @@ fn default_audit_log() -> apex_audit::AuditLog {
     }
 }
 
-/// A durable [`FileWebhookStore`] at `~/.apex/webhooks`, falling back to in-memory.
-fn default_webhook_store() -> Arc<dyn WebhookStore> {
+/// A durable webhook store at `~/.apex/webhooks`, falling back to in-memory.
+/// Seals a subscription's signing `secret` through `kms` before it reaches
+/// disk (a distinct `webhooks.enc.json`, never mixed with the plaintext
+/// `webhooks.json`) when `APEX_WEBHOOKS_ENCRYPT_AT_REST` is set — **opt-in**,
+/// like the secret vault's equivalent switch: flipping it makes any
+/// already-plaintext subscriptions invisible via this store rather than
+/// transparently migrating them.
+fn default_webhook_store(kms: Arc<dyn apex_kms::Kms>) -> Arc<dyn WebhookStore> {
     let dir = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|home| {
@@ -408,10 +416,15 @@ fn default_webhook_store() -> Arc<dyn WebhookStore> {
                 .join(".apex")
                 .join("webhooks")
         });
-    if let Some(dir) = dir
-        && let Ok(store) = FileWebhookStore::new(dir)
-    {
-        return Arc::new(store);
+    let encrypt_at_rest = std::env::var("APEX_WEBHOOKS_ENCRYPT_AT_REST").is_ok();
+    if let Some(dir) = dir {
+        if encrypt_at_rest {
+            if let Ok(store) = EncryptedFileWebhookStore::new(&dir, kms) {
+                return Arc::new(store);
+            }
+        } else if let Ok(store) = FileWebhookStore::new(&dir) {
+            return Arc::new(store);
+        }
     }
     Arc::new(InMemoryWebhookStore::new())
 }
@@ -2356,6 +2369,72 @@ mod tests {
             tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(beta["total"], 0);
+    }
+
+    /// **Documented, known gap** (see
+    /// [compliance-mapping.md §7](../../docs/13-security/compliance-mapping.md#7-residual-risk-and-gaps)),
+    /// not a regression to fix here: `tenant_authorize` skips its RBAC check
+    /// entirely for a request with no `X-Apex-Principal` against the default
+    /// tenant ([tenancy.rs](tenancy.rs) — "anonymous default tenant retained
+    /// for back-compat"), and that bypass is shared by every tenant-scoped
+    /// route, `kms:admin` included. This test proves — rather than assumes —
+    /// that an *unauthenticated* caller (no principal header at all) can
+    /// currently crypto-shred the default tenant's key material through the
+    /// public KMS route, with zero grant. A production deployment handling
+    /// real tenant data must configure `X-Apex-Principal`/memberships (or
+    /// reject anonymous default-tenant traffic upstream) rather than rely on
+    /// this back-compat mode.
+    #[tokio::test]
+    async fn known_gap_anonymous_default_tenant_caller_reaches_kms_admin_with_no_grant() {
+        let state = Arc::new(AppState::from_env().with_kms(test_kms()));
+
+        // No `X-Apex-Principal` header, default tenant — the anonymous
+        // back-compat path, not a configured role. Rotate first so the
+        // default tenant has key material to destroy (a never-provisioned
+        // tenant would 404, which would be testing the wrong thing).
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/rotate",
+            "default",
+            "",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+
+        let (st, body) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/destroy",
+            "default",
+            "",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "documents the current (accepted, flagged) behavior — if this ever \
+             starts failing, the anonymous back-compat bypass has been narrowed \
+             and this test (and the compliance doc's residual-risk entry) should \
+             be updated, not just re-asserted"
+        );
+        assert_eq!(body["status"], "destroyed");
+
+        // Once shredded, even the *same* anonymous caller is fail-closed again —
+        // the bypass grants the action once, it doesn't disable fail-closed
+        // behavior afterward.
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/rotate",
+            "default",
+            "",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

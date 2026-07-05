@@ -7,10 +7,10 @@ Document ID: SEC-INDEX-001
 
 **Document ID:** SEC-INDEX-001  
 **File Path:** `docs/13-security/index.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Active  
 **Owner:** Security Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-05
 
 ---
 
@@ -81,6 +81,7 @@ Security is implemented across the platform; this section ties it together:
 | [encryption.md](encryption.md) | Data protection in transit and at rest |
 | [secret-management.md](secret-management.md) | Secret storage, injection, rotation |
 | [audit.md](audit.md) | Audit logging and compliance |
+| [compliance-mapping.md](compliance-mapping.md) | Control-by-control framework mapping (currently encryption/key management) |
 
 ---
 
@@ -104,6 +105,11 @@ The platform is designed to support common frameworks (SOC 2, ISO 27001, GDPR):
 data isolation, encryption, auditability, access control, and retention controls
 are first-class. Specific certifications are deployment-dependent.
 
+[`compliance-mapping.md`](compliance-mapping.md) is the first concrete,
+control-by-control slice of evidence behind that statement — currently scoped
+to the encryption/key-management control family, with file/line citations and
+adversarial tests, not yet a full-platform mapping or a third-party attestation.
+
 ---
 
 # 8. Dependencies
@@ -118,4 +124,5 @@ are first-class. Specific certifications are deployment-dependent.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-05 | Added [`compliance-mapping.md`](compliance-mapping.md) to the Document Map (§5) and linked it from §7's Compliance Posture paragraph — the first control-by-control evidence slice (encryption/key management) behind that paragraph's claim |
 | 1.0.0 | 2026-06-27 | Initial Security Index |

@@ -9,6 +9,10 @@ description = "Domain events and outbound webhooks: event model, subscriptions, 
 
 [dependencies]
 apex-common.workspace = true
+# At-rest encryption of a subscription's signing secret (EncryptedFileWebhookStore).
+# apex-kms itself depends only on apex-common, so the workspace spine stays
+# one-directional (the same shape as apex-secrets' dependency on apex-kms).
+apex-kms.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Webhook payload signing (HMAC-SHA256). Both cached and already in the dep graph.

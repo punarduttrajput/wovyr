@@ -7,17 +7,18 @@ Document ID: TEST-006
 
 **Document ID:** TEST-006  
 **File Path:** `docs/15-testing/security-testing.md`  
-**Version:** 1.5.0  
+**Version:** 1.6.0  
 **Status:** Substantially implemented — automated coverage exists for the
 authorization matrix, tenant isolation, secrets, the supply chain, adversarial
 sandbox/isolation testing including true in-guest escape attempts against the
-strong backends (§5 fully covered), and the CI scanning pipeline including
-fuzz-target infrastructure (§8 fully covered — see the per-section
-**Implemented** notes). Remaining: none blocking; §5/§8 are complete, and the
-document's own exit bar (RBAC, isolation, secrets, supply chain, sandbox escape,
-CI scanning) is met in full.  
+strong backends (§5 fully covered), the CI scanning pipeline including
+fuzz-target infrastructure (§8 fully covered), and adversarial testing of the
+encryption/key-management boundary (§9's internal, code-level slice — see
+[compliance-mapping.md](../13-security/compliance-mapping.md)). Remaining:
+§9's periodic third-party pen test and formal compliance audit are still
+unstarted (external/process work, not something this repo alone can close).  
 **Owner:** Quality Engineering Team · Security Team  
-**Last Updated:** 2026-07-03
+**Last Updated:** 2026-07-05
 
 ---
 
@@ -213,6 +214,22 @@ a heavier follow-on; §8 is otherwise fully covered.
   (ties to the project's security-review practice).
 - A responsible-disclosure process for external reports.
 
+**Implemented (internal, code-level):** `apex-kms` `adversarial.rs` attacks the
+envelope-encryption/key-management boundary
+([Encryption §5](../13-security/encryption.md#5-key-management)) directly —
+cross-tenant DEK laundering via `rewrap_data_key`, tenant-key-layer (not just
+DEK-layer) tampering via direct store access, AES-GCM nonce-reuse at volume
+(256 seals), version-number forgery on a captured ciphertext, blind forgery
+with no legitimate ciphertext, and post-crypto-shred replay through the
+higher-level `envelope` API. `apex-server`'s
+`known_gap_anonymous_default_tenant_caller_reaches_kms_admin_with_no_grant`
+proves (rather than assumes) a related, pre-existing finding: the anonymous
+default-tenant back-compat bypass reaches `kms:admin`. Full findings, the
+control mapping this exercise informed, and residual-risk detail are in the
+new [`compliance-mapping.md`](../13-security/compliance-mapping.md). No
+third-party penetration test or formal compliance audit has been performed —
+that item remains open.
+
 ---
 
 # 10. Dependencies
@@ -234,6 +251,7 @@ a heavier follow-on; §8 is otherwise fully covered.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.6.0 | 2026-07-05 | §9 gained its first "Implemented" note: `apex-kms`'s new `adversarial.rs` suite (cross-tenant DEK laundering via `rewrap`, tenant-key-layer tampering, nonce-reuse-at-volume, version-number/blind forgery, post-crypto-shred replay through `envelope`) plus `apex-server`'s proof of a pre-existing finding (the anonymous default-tenant bypass reaching `kms:admin`). Full detail in the new [`compliance-mapping.md`](../13-security/compliance-mapping.md). External pen test / formal audit remain the only open items in §9 |
 | 1.5.0 | 2026-07-03 | Fuzz-target infrastructure landed (§8's last open row, see [unit-tests.md §7](unit-tests.md#7-property--fuzz-testing) for detail): `proptest`-based fuzz tests for `apex-plugin` (`PluginManifest::from_yaml`, `Package::from_apexpkg`) and `apex-workflow` (`Definition::from_yaml`, `Cron::parse`/`next_after`) prove arbitrary input never panics on the parsers an untrusted plugin download or workflow definition hits first. §8 is now fully covered; true coverage-guided fuzzing (`cargo-fuzz`) remains a heavier, separate follow-on |
 | 1.4.0 | 2026-07-03 | True in-guest escape attempts against the strong backends (§5, closing the section): `gvisor_denies_privileged_mount_syscall` and `gvisor_denies_reading_host_physical_memory_via_proc_kcore` (`sandbox_backends.rs`) prove gVisor's sentry denies a compromised guest's `mount` attempt and blocks `/proc/kcore` physical-memory disclosure; `firecracker_memory_ceiling_contains_a_guest_oom` proves the microVM's `mem_size_mib` is a real hardware-virtualized ceiling (guest-kernel OOM, not a hang). §5 is now fully covered; remaining work is entirely in §8 (fuzzing) |
 | 1.3.0 | 2026-07-03 | CI scanning pipeline (§8) landed: `.github/workflows/ci.yml` gained a `security` job (RustSec `cargo-audit` dependency check + a standalone `gitleaks --no-git` secret scan) and a `container-scan` job (builds `deployment/docker/Dockerfile` — its first real CI build — and runs Trivy against the image, failing on HIGH/CRITICAL fixable CVEs). Static analysis was already covered by the existing clippy gate. Not yet run against live GitHub Actions; fuzzing remains the one open row in §8 |
