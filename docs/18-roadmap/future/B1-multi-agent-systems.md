@@ -7,15 +7,16 @@ Document ID: FUT-001
 
 **Document ID:** FUT-001
 **File Path:** `docs/18-roadmap/future/B1-multi-agent-systems.md`
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Status:** Exploratory — research bet, not committed. A prototype slice for
 direction (b) now exists in code (`examples/workflows/research-team.yaml`,
 runnable via either `apex-server` or the CLI's local runner, §8) — it proves the
 fan-out/join shape and closes the aggregate-budget invariant. Both a scripted-
-provider and a first real-model (`mistralrs`) comparison against a single
-agent now exist (`apex-eval`'s `compare` module, §8) — the real run was a tie
-on n=1, not the quantified "measurably outperforms" evidence the graduation
-gate needs. Still pre-ADR.
+provider and a real-model (`mistralrs`) comparison against a single agent now
+exist (`apex-eval`'s `compare` module, §8) — 4 out of 4 real runs tied
+identically (the workflow closer but not ahead), correcting an assumption
+that the provider was non-deterministic. Not yet the quantified "measurably
+outperforms" evidence the graduation gate needs. Still pre-ADR.
 **Owner:** Agent Framework Team
 **Last Updated:** 2026-07-05
 
@@ -214,17 +215,29 @@ real tasks.
 **A real-model run now exists too (2026-07-05, same day).**
 [B6-trust-evaluation.md §8.2](B6-trust-evaluation.md#82-a-real-model-run-2026-07-05)
 points the same comparison at the real `mistralrs` provider
-(Qwen2.5-0.5B-Instruct). The one run so far (real ~5.6-minute CPU inference,
-no sampling control) was a **tie, not a win**: both the single agent and the
-workflow failed the "cover both perspectives" fixture, but the workflow's
-answer covered one of the two required perspectives where the single agent
-covered neither — a real, honest, and not-yet-decisive result, not a bug.
+(Qwen2.5-0.5B-Instruct). The first run (real ~5.6-minute CPU inference) was a
+**tie, not a win**: both the single agent and the workflow failed the "cover
+both perspectives" fixture, but the workflow's answer covered one of the two
+required perspectives where the single agent covered neither.
+
+**Repeated 3 more times, same day, to check whether that tie was
+representative**: all 3 repeats tied **identically** — same token counts,
+same exact failure detail, every time. So **4 out of 4 independent real-model
+runs produced the same tie.** This also corrects an assumption carried over
+from `mistralrs_provider.rs`'s own doc comment ("the first genuinely
+non-deterministic provider..."): empirically, this provider/model combination
+behaves deterministically (likely greedy decoding by default, since no
+sampler is configured), not non-deterministically as assumed. Zero observed
+variance is a stronger result than expected for §7's "stable variance" bar,
+but it's still 4 repeats of one prompt on one tiny model — not a variance
+study across different inputs or a more capable model.
 
 **What it explicitly does not prove** (open problems for the eventual ADR):
-- **No quantified real-model benchmark yet** — one uncontrolled real run is not
-  [§7](#7-graduation-gate)'s "measurably outperforms... real benchmark" bar;
-  that needs repeated runs (ideally with a more capable model) to see whether
-  the workflow's edge is a stable pattern or noise.
+- **No quantified real-model benchmark yet** — 4 identical repeats of one
+  prompt is not [§7](#7-graduation-gate)'s "measurably outperforms... real
+  benchmark" bar; that needs a broader set of fixtures (and ideally a more
+  capable model) to see whether "workflow ties/beats single-agent" generalizes
+  beyond this one task.
 - **Direction (a)** (coordinator-as-agent / a dynamic `spawn_agent` tool) is
   untouched — a materially different, more open-ended mechanism.
 - **No aggregate quota on the CLI side** — the project-budget enforcement above
@@ -264,6 +277,7 @@ covered neither — a real, honest, and not-yet-decisive result, not a bug.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.5.0 | 2026-07-05 | §8: repeated the real-model run 3 more times — all 4 tied identically, correcting the assumption the provider is non-deterministic. Updated the "not proven" list to reflect this is still one prompt/one model, not a broader benchmark |
 | 1.4.0 | 2026-07-05 | §8: recorded the real-model (`mistralrs`) comparison run — a tie on n=1, workflow covered one of two required perspectives vs. the single agent's zero. Updated the "not proven" list: no longer "no real-model benchmark," now "no quantified benchmark yet" |
 | 1.3.0 | 2026-07-05 | §8: FUT-006's `apex-eval` gained a `compare` module pointed at `research-team.yaml` — a reproducible single-agent-vs-workflow comparison on a scripted-provider fixture. Explicitly not yet the real-model benchmark §7's gate needs |
 | 1.2.0 | 2026-07-05 | §8: added CLI-local support for `agent` activities (`--agents-dir` on `workflows run --local`), so `research-team.yaml` runs identically without a server. Three new `apps/apex-cli` tests. Updated the "not proven" list accordingly |

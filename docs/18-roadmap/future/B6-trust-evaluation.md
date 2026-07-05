@@ -7,16 +7,18 @@ Document ID: FUT-006
 
 **Document ID:** FUT-006
 **File Path:** `docs/18-roadmap/future/B6-trust-evaluation.md`
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Status:** Exploratory — research bet, not committed. A prototype spike now
 exists in code (`crates/apex-eval`, §8) — it gathers evidence for the
-graduation gate below, but does not itself satisfy it (no CI gate, no
-quantified real/non-deterministic-provider variance study). The harness has
-been pointed at FUT-001's multi-agent workflow (§8.1) via a new `compare`
-module, and now also at the real `mistralrs` provider (§8.2) — one real run
-produced a tie (both paths failed the fixture, though the workflow's answer
-was qualitatively closer), a single, uncontrolled data point, not the
-"quantified, stable variance" the graduation gate needs. Still pre-ADR.
+graduation gate below, but does not itself satisfy it (no CI gate). The
+harness has been pointed at FUT-001's multi-agent workflow (§8.1) via a new
+`compare` module, and at the real `mistralrs` provider (§8.2) — 4 out of 4
+real runs (1 original + 3 repeats) tied identically, correcting the earlier
+assumption that this provider is "genuinely non-deterministic" (it appears
+deterministic in practice, likely greedy decoding by default). Zero observed
+variance is closer to §7's bar than expected, but 4 repeats of one prompt on
+one tiny model isn't the broader variance study the gate still needs. Still
+pre-ADR.
 **Owner:** Quality / Security Team
 **Last Updated:** 2026-07-05
 
@@ -219,14 +221,14 @@ workflow cost isn't surfaced through `apex_workflow::ExecutionState` today.
 `tests/real_model_comparison.rs`, which points `run_comparison` at the real
 `MistralRsProvider` (Qwen2.5-0.5B-Instruct via mistral.rs) instead of the
 scripted `BalancedViewProvider`. Since the provider sets no sampling
-parameters — it is genuinely non-deterministic — and the model is tiny, the
-test deliberately does **not** assert `workflow_wins()`; it asserts only
-structural properties (both paths complete, the single-agent side consumes
-real nonzero token usage) and prints the full report so the actual result is
-observable rather than gated on.
+parameters — assumed non-deterministic going in (see the correction below) —
+and the model is tiny, the test deliberately does **not** assert
+`workflow_wins()`; it asserts only structural properties (both paths complete,
+the single-agent side consumes real nonzero token usage) and prints the full
+report so the actual result is observable rather than gated on.
 
-**The one real run so far (`--release`, ~5.6 minutes of real CPU inference for
-4 model calls) produced a tie, not a win**, on the same "cover both `support`
+**The first real run (`--release`, ~5.6 minutes of real CPU inference for 4
+model calls) produced a tie, not a win**, on the same "cover both `support`
 and `risk`" fixture `multi_agent_vs_single_agent.rs` uses:
 - Single agent: **failed** — `"answer is missing [\"support\", \"risk\"]"`
   (missed both required perspectives).
@@ -234,7 +236,7 @@ and `risk`" fixture `multi_agent_vs_single_agent.rs` uses:
   (it covered one of the two required perspectives, the single agent covered
   neither).
 
-So on this one data point, the workflow's answer was qualitatively closer —
+So on this data point, the workflow's answer was qualitatively closer —
 visible in the `detail` string, not the binary `pass_rate` — but not enough to
 flip `contains_all` from fail to pass, so `pass_rate` was `0.0` on both sides
 and `workflow_wins()` returns `false`. This is an honest, expected outcome
@@ -243,14 +245,34 @@ given Qwen2.5-0.5B's already-documented quality ceiling
 harness — the comparison mechanism worked exactly as designed and surfaced a
 real, nuanced, non-binary result.
 
+**Correction, from repeating the run (2026-07-05, same day): this setup is not
+observably non-deterministic.** A new `real_model_comparison_variance_over_n_runs`
+test repeated the identical comparison 3 more times (loading the model once,
+reusing it across iterations) specifically to check whether the tie above was
+representative or noise. **All 3 repeats produced byte-for-byte identical
+results** — the same token counts (202 total on the single-agent side) and the
+same exact `detail` strings as the original run, i.e. **4 out of 4 independent
+runs (1 original process + 3 repeats) tied identically**. `MistralRsProvider`'s
+own module doc calls it "the first genuinely non-deterministic provider in
+this workspace's own tests" on the grounds that it sets no sampling
+parameters — that claim was an assumption, not something previously tested
+end to end; the empirical behavior observed here (at least for this
+model/config, likely mistral.rs defaulting to greedy/deterministic decoding
+when no sampler is set) doesn't bear it out. The doc comments in
+`mistralrs_provider.rs` and `real_model_comparison.rs` have been updated to
+state this as an open, now-tested question rather than an assumed fact.
+
 **What this does and doesn't establish:** it proves the harness can drive a
-real model end to end (real GGUF download, real inference, real token usage)
-and that the result is genuinely uncontrolled — unlike every other result in
-this crate's history. It is **one run, no seed control, no repetition** — not
-the "quantified, stable variance" [§7](#7-graduation-gate)'s graduation gate
-ultimately needs. That needs multiple runs (ideally with a larger, more capable
-model) to see whether "workflow closer, single agent behind" is a stable
-pattern or noise. Still open.
+real model end to end (real GGUF download, real inference, real token usage),
+and — a stronger result than originally expected — that **the observed
+variance across 4 runs is zero**: the workflow tied the single agent (closer,
+not ahead) every time. That is meaningfully closer to
+[§7](#7-graduation-gate)'s "quantified, stable variance" bar than a single
+uncontrolled run would be, but it's still not that bar: 4 repeats of the exact
+same prompt on the exact same tiny model isn't a variance study across
+*inputs*, model sizes, or genuine sampling — it mainly shows this particular
+setup is repeatable, not that "workflow ties/beats single-agent" generalizes.
+Broader fixtures and a larger/more capable model remain the honest next step.
 
 ---
 
@@ -285,6 +307,7 @@ For that reason it is the natural **first** bet to graduate.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.5.0 | 2026-07-05 | §8.2: repeated the real-model run 3 more times (`real_model_comparison_variance_over_n_runs`) — all 4 runs tied identically, correcting the assumption (stated in `mistralrs_provider.rs`'s own doc and carried into this doc at 1.2.0) that this provider is "genuinely non-deterministic." Zero observed variance so far, though only across one repeated prompt on one tiny model |
 | 1.4.0 | 2026-07-05 | Added §8.2: pointed the comparison harness at the real `mistralrs` provider (new optional feature on `apex-eval`). One real run produced a tie — both paths failed the fixture, though the workflow's answer covered one of two required perspectives vs. the single agent's zero. One uncontrolled data point, not the quantified variance study the gate needs |
 | 1.3.0 | 2026-07-05 | Added §8.1: `apex-eval` gained a `compare` module pointed at FUT-001's `research-team.yaml` — proves the single-agent-vs-workflow comparison mechanism works and is reproducible on an illustrative fixture; explicitly not the real-model benchmark either bet's graduation gate needs |
 | 1.2.0 | 2026-07-05 | Noted a real, local, non-deterministic provider now exists (`apex-provider`'s `mistralrs` feature, verified end to end against a real HTTP fetch) — a real target `apex-eval` could eventually run against, closing part of §8's "not proven" gap without wiring the two together yet |
