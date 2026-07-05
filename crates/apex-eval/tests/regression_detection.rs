@@ -118,6 +118,7 @@ async fn a_correct_provider_passes_every_case() {
     let report = run_suite(&suite(), &def, &gateway, &registry)
         .await
         .unwrap();
+    println!("{report:#?}");
 
     assert_eq!(
         report.pass_rate, 1.0,
@@ -135,6 +136,7 @@ async fn a_regressed_provider_fails_exactly_the_regressed_case() {
     let report = run_suite(&suite(), &def, &gateway, &registry)
         .await
         .unwrap();
+    println!("{report:#?}");
 
     assert!(
         report.pass_rate < 1.0,
@@ -168,6 +170,7 @@ async fn the_same_suite_against_the_same_provider_is_byte_for_byte_reproducible(
     let report_b = run_suite(&suite, &def, &gateway_b, &registry)
         .await
         .unwrap();
+    println!("{report_a:#?}");
 
     assert_eq!(
         report_a, report_b,

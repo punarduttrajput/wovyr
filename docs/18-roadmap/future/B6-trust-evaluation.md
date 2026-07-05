@@ -7,18 +7,18 @@ Document ID: FUT-006
 
 **Document ID:** FUT-006
 **File Path:** `docs/18-roadmap/future/B6-trust-evaluation.md`
-**Version:** 1.5.0
+**Version:** 1.6.0
 **Status:** Exploratory — research bet, not committed. A prototype spike now
 exists in code (`crates/apex-eval`, §8) — it gathers evidence for the
-graduation gate below, but does not itself satisfy it (no CI gate). The
-harness has been pointed at FUT-001's multi-agent workflow (§8.1) via a new
-`compare` module, and at the real `mistralrs` provider (§8.2) — 4 out of 4
-real runs (1 original + 3 repeats) tied identically, correcting the earlier
-assumption that this provider is "genuinely non-deterministic" (it appears
-deterministic in practice, likely greedy decoding by default). Zero observed
-variance is closer to §7's bar than expected, but 4 repeats of one prompt on
-one tiny model isn't the broader variance study the gate still needs. Still
-pre-ADR.
+graduation gate below, but does not itself fully satisfy it. The harness has
+been pointed at FUT-001's multi-agent workflow (§8.1) via a new `compare`
+module, and at the real `mistralrs` provider (§8.2) — 4 out of 4 real runs (1
+original + 3 repeats) tied identically, correcting the earlier assumption
+that this provider is "genuinely non-deterministic" (it appears deterministic
+in practice, likely greedy decoding by default). A first named CI regression
+gate now exists too (§8.3), closing the "no CI gate at all" part of the
+graduation-gate work, though not yet the quantified-threshold version §4
+describes. Still pre-ADR.
 **Owner:** Quality / Security Team
 **Last Updated:** 2026-07-05
 
@@ -174,9 +174,10 @@ against the real `run_agent` loop, not mocked):
   verified end to end running the real `run_agent` tool-calling loop against a
   real HTTP fetch), but `apex-eval` has not been pointed at it — this narrows
   the gap (a real target now exists to run against) without closing it.
-- No LLM-as-judge, no CI wiring, no telemetry (`apex-eval` emits no metrics
-  yet), and no CLI surface. `MockProvider` cannot drive this harness at all
-  (§3, corrected).
+- No LLM-as-judge, no telemetry (`apex-eval` emits no metrics yet), and no CLI
+  surface. `MockProvider` cannot drive this harness at all (§3, corrected). A
+  first named CI step now exists (§8.3) but it's hard-coded assertions, not a
+  quantified threshold/baseline system.
 - The one-of-struct `Expectation` design is a direct, load-bearing consequence
   of `serde_yaml`'s limitation — a real (non-deprecated) YAML library might
   remove that constraint; the ADR should decide whether to keep the struct
@@ -274,6 +275,33 @@ same prompt on the exact same tiny model isn't a variance study across
 setup is repeatable, not that "workflow ties/beats single-agent" generalizes.
 Broader fixtures and a larger/more capable model remain the honest next step.
 
+## 8.3 A first CI regression gate (2026-07-05)
+
+`.github/workflows/ci.yml`'s `rust` job gained a named **"Eval regression
+gate (FUT-006)"** step, running `apex-eval`'s two deterministic suites
+(`regression_detection.rs`, `multi_agent_vs_single_agent.rs`) explicitly with
+`--nocapture`. Both suites already ran as part of the preceding `cargo test
+--workspace` step — the point of the new step isn't new coverage, it's
+**visibility and legibility**: a failure here now reads as "quality
+regression detected" in the PR check list, distinct from a generic test
+failure, and each run's `EvalReport`/`ComparisonReport` (pass rate, per-case
+detail) prints to the CI log even on success (the three
+`regression_detection.rs` tests and both `multi_agent_vs_single_agent.rs`
+tests gained a `println!("{report:#?}")` for exactly this).
+
+**What this closes**: FUT-006's own "not yet: ... no CI gate" line is no
+longer accurate — there is now a real, named CI check for the deterministic
+regression suite. **What this does not close**: this is still hard-coded
+`assert_eq!`/`assert!` expectations per test, not a quantified
+threshold/baseline-comparison system (e.g. "fail if pass_rate drops below
+0.95" against a moving or checked-in baseline) — [§4](#4-direction-design-sketch-non-committal)'s
+"regression gate: wire eval into CI as a quantified, stable-variance check"
+is still open at that level. The real `mistralrs` path
+(`real_model_comparison.rs`) deliberately stays off in CI — same rationale as
+every other optional/expensive feature-gated test in this workspace (Redis,
+Qdrant, Postgres): it needs real network access and real CPU inference time
+neither is guaranteed in a CI runner.
+
 ---
 
 # 9. Enables
@@ -299,7 +327,8 @@ For that reason it is the natural **first** bet to graduate.
 - [`15-testing/index.md`](../../15-testing/index.md)
 - `crates/apex-eval` — the prototype spike (§8), extended with `compare` (§8.1) and the real `mistralrs` run (§8.2)
 - [B1-multi-agent-systems.md](B1-multi-agent-systems.md) — the consumer of §8.1/§8.2's comparison harness
-- `crates/apex-provider/src/mistralrs_provider.rs` — the real, non-deterministic provider §8.2 points the harness at
+- `crates/apex-provider/src/mistralrs_provider.rs` — the real provider §8.2 points the harness at (see its doc comment for the determinism correction)
+- `.github/workflows/ci.yml` — the "Eval regression gate (FUT-006)" step (§8.3)
 
 ---
 
@@ -307,6 +336,7 @@ For that reason it is the natural **first** bet to graduate.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.6.0 | 2026-07-05 | Added §8.3: a named "Eval regression gate (FUT-006)" CI step running the deterministic suites with `--nocapture`, plus `println!`s so each report is visible on success. Closes "no CI gate at all"; the quantified-threshold version §4 describes is still open |
 | 1.5.0 | 2026-07-05 | §8.2: repeated the real-model run 3 more times (`real_model_comparison_variance_over_n_runs`) — all 4 runs tied identically, correcting the assumption (stated in `mistralrs_provider.rs`'s own doc and carried into this doc at 1.2.0) that this provider is "genuinely non-deterministic." Zero observed variance so far, though only across one repeated prompt on one tiny model |
 | 1.4.0 | 2026-07-05 | Added §8.2: pointed the comparison harness at the real `mistralrs` provider (new optional feature on `apex-eval`). One real run produced a tie — both paths failed the fixture, though the workflow's answer covered one of two required perspectives vs. the single agent's zero. One uncontrolled data point, not the quantified variance study the gate needs |
 | 1.3.0 | 2026-07-05 | Added §8.1: `apex-eval` gained a `compare` module pointed at FUT-001's `research-team.yaml` — proves the single-agent-vs-workflow comparison mechanism works and is reproducible on an illustrative fixture; explicitly not the real-model benchmark either bet's graduation gate needs |

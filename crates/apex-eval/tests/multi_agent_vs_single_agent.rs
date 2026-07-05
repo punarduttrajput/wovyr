@@ -138,6 +138,7 @@ async fn workflow_covers_both_perspectives_the_single_agent_misses() {
     )
     .await
     .unwrap();
+    println!("{report:#?}");
 
     assert_eq!(
         report.single_agent.pass_rate, 0.0,
@@ -185,6 +186,7 @@ async fn comparison_is_reproducible() {
     )
     .await
     .unwrap();
+    println!("{report_a:#?}");
 
     assert_eq!(
         report_a, report_b,
