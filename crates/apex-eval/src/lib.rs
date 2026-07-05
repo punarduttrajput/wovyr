@@ -30,12 +30,23 @@
 //! [`runner::run_suite`] drives the real [`apex_agent::run_agent`] loop — this
 //! crate adds no new agent-execution path, only a scoring layer on top of the
 //! one that already exists.
+//!
+//! [`compare::run_comparison`] extends the harness to
+//! [FUT-001](../../docs/18-roadmap/future/B1-multi-agent-systems.md)'s
+//! evidence need: run the same fixtures as a single agent and as a workflow
+//! (e.g. `examples/workflows/research-team.yaml`), score both the same way,
+//! and compare. See `compare`'s own doc comment for the honesty caveat: this
+//! runs against a scripted deterministic provider, so it proves the
+//! *comparison mechanism* works, not yet the "real benchmark" FUT-001's
+//! graduation gate needs.
 
+mod compare;
 mod fixture;
 mod report;
 mod runner;
 mod score;
 
+pub use compare::{ComparisonCase, ComparisonReport, ComparisonSuite, run_comparison};
 pub use fixture::{EvalSuite, Expectation, Fixture};
 pub use report::{CaseResult, EvalReport};
 pub use runner::run_suite;

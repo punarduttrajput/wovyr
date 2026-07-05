@@ -7,13 +7,14 @@ Document ID: FUT-001
 
 **Document ID:** FUT-001
 **File Path:** `docs/18-roadmap/future/B1-multi-agent-systems.md`
-**Version:** 1.2.0
+**Version:** 1.3.0
 **Status:** Exploratory — research bet, not committed. A prototype slice for
 direction (b) now exists in code (`examples/workflows/research-team.yaml`,
 runnable via either `apex-server` or the CLI's local runner, §8) — it proves the
-fan-out/join shape and closes the aggregate-budget invariant, but does not
-itself satisfy the graduation gate (no benchmark against a single agent). Still
-pre-ADR.
+fan-out/join shape and closes the aggregate-budget invariant. A first,
+scripted-provider comparison against a single agent also now exists
+(`apex-eval`'s `compare` module, §8) — reproducible, but not yet the
+real-model benchmark the graduation gate needs. Still pre-ADR.
 **Owner:** Agent Framework Team
 **Last Updated:** 2026-07-05
 
@@ -194,10 +195,26 @@ Three new `apps/apex-cli` tests
 templating story holds through the local executor, driving the real `Engine`
 (not just calling `PlatformExecutor::execute` in isolation).
 
+**Eval harness pointed at this workflow (2026-07-05, same day, follow-up).**
+[FUT-006](B6-trust-evaluation.md)'s `apex-eval` gained a `compare` module
+(`run_comparison`, [B6-trust-evaluation.md §8.1](B6-trust-evaluation.md#81-pointed-at-fut-001-2026-07-05))
+that runs the same task both as a single agent and as this real
+`research-team.yaml` workflow, scoring both the same way. Two new
+`crates/apex-eval` tests
+(`workflow_covers_both_perspectives_the_single_agent_misses`/
+`comparison_is_reproducible`) show the workflow path passing a task requiring
+two opposing perspectives that the single-agent path misses, reproducibly. **This
+is not yet §7's "real benchmark" evidence**: both paths run against a scripted
+deterministic provider (`BalancedViewProvider`), not a real model — it proves
+the *comparison mechanism* works and gives a directionally plausible result, not
+that a real model's workflow output measurably beats its single-agent output on
+real tasks.
+
 **What it explicitly does not prove** (open problems for the eventual ADR):
-- **No benchmark against a single agent** — [§7](#7-graduation-gate)'s
-  graduation gate needs [FUT-006](B6-trust-evaluation.md)'s eval harness pointed
-  at this workflow shape; that wiring doesn't exist yet.
+- **No real-model benchmark** — the comparison harness above exists, but still
+  needs a real, non-deterministic provider in the loop (`mistralrs` exists but
+  isn't wired into `apex-eval`) before it satisfies [§7](#7-graduation-gate)'s
+  "real benchmark" bar.
 - **Direction (a)** (coordinator-as-agent / a dynamic `spawn_agent` tool) is
   untouched — a materially different, more open-ended mechanism.
 - **No aggregate quota on the CLI side** — the project-budget enforcement above
@@ -213,7 +230,8 @@ templating story holds through the local executor, driving the real `Engine`
 # 9. Dependencies
 
 - [FUT-006 Trust & Evaluation](B6-trust-evaluation.md) — needed to *measure* the
-  "outperforms a single agent" claim in the gate.
+  "outperforms a single agent" claim in the gate; a first, scripted-provider
+  version of that measurement now exists (§8), pending a real-model run.
 - The child-workflow model ([ADR-0008](../../17-adr/ADR-0008-subworkflows.md)) if
   direction (b) needs dynamic (not just statically-authored) composition later.
 
@@ -226,6 +244,7 @@ templating story holds through the local executor, driving the real `Engine`
 - [`04-agent-framework/multi-agent-coordination.md`](../../04-agent-framework/multi-agent-coordination.md)
 - [`17-adr/ADR-0008-subworkflows.md`](../../17-adr/ADR-0008-subworkflows.md) — the child-execution precedent
 - `examples/workflows/research-team.yaml` — the prototype slice (§8)
+- [B6-trust-evaluation.md §8.1](B6-trust-evaluation.md#81-pointed-at-fut-001-2026-07-05) — the comparison harness pointed at this workflow
 
 ---
 
@@ -233,6 +252,7 @@ templating story holds through the local executor, driving the real `Engine`
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.3.0 | 2026-07-05 | §8: FUT-006's `apex-eval` gained a `compare` module pointed at `research-team.yaml` — a reproducible single-agent-vs-workflow comparison on a scripted-provider fixture. Explicitly not yet the real-model benchmark §7's gate needs |
 | 1.2.0 | 2026-07-05 | §8: added CLI-local support for `agent` activities (`--agents-dir` on `workflows run --local`), so `research-team.yaml` runs identically without a server. Three new `apps/apex-cli` tests. Updated the "not proven" list accordingly |
 | 1.1.0 | 2026-07-05 | Added §8 Prototype Slice: a coordinator-pattern example workflow (fan-out to two `agent` activities, joined), a fix for `ServerExecutor`'s previously-missing `${...}` template resolution, and aggregate project-quota enforcement across a group's sub-agents. Still pre-ADR — gathers evidence for §7's gate, doesn't satisfy it |
 | 1.0.0 | 2026-07-05 | Initial exploration doc for the multi-agent research bet |
