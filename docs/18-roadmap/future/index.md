@@ -7,7 +7,7 @@ Document ID: FUT-INDEX-001
 
 **Document ID:** FUT-INDEX-001
 **File Path:** `docs/18-roadmap/future/index.md`
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Status:** Exploratory
 **Owner:** Product Team
 **Last Updated:** 2026-07-05
@@ -39,7 +39,7 @@ plannable and prunable, not to promise them.
 | [FUT-003](B3-advanced-memory.md) | Advanced Memory | [future §2.3](../future.md#23-advanced-memory) | Exploratory |
 | [FUT-004](B4-execution-frontiers.md) | Execution Frontiers | [future §2.4](../future.md#24-execution-frontiers) | Exploratory |
 | [FUT-005](B5-ecosystem-interop.md) | Ecosystem & Interoperability | [future §2.5](../future.md#25-ecosystem--interop) | Exploratory |
-| [FUT-006](B6-trust-evaluation.md) | Trust & Evaluation | [future §2.6](../future.md#26-trust--evaluation) | Exploratory |
+| [FUT-006](B6-trust-evaluation.md) | Trust & Evaluation | [future §2.6](../future.md#26-trust--evaluation) | Exploratory — prototype spike in `crates/apex-eval`, pre-ADR |
 
 ---
 
@@ -88,4 +88,5 @@ carried indefinitely.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-05 | FUT-006 gained a code prototype (`crates/apex-eval`) — updated its register row; see [B6-trust-evaluation.md §8](B6-trust-evaluation.md#8-prototype-spike-2026-07-05) for what it proves and doesn't |
 | 1.0.0 | 2026-07-05 | Initial Tier B research-bet index (FUT-001…FUT-006) with dependency ordering |

@@ -11,6 +11,8 @@
 
 mod embeddings;
 mod gateway;
+#[cfg(feature = "mistralrs")]
+mod mistralrs_provider;
 mod mock;
 mod openai;
 mod provider;
@@ -23,6 +25,8 @@ mod types;
 
 pub use embeddings::{EmbeddingRequest, EmbeddingResponse, cosine_similarity};
 pub use gateway::{Gateway, ModelSelector};
+#[cfg(feature = "mistralrs")]
+pub use mistralrs_provider::MistralRsProvider;
 pub use mock::MockProvider;
 pub use openai::OpenAiProvider;
 pub use provider::{AIProvider, ChatStream, ChatStreamEvent};

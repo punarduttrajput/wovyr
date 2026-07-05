@@ -14,6 +14,11 @@ redis = ["dep:redis"]
 # Qdrant-backed distributed semantic cache (shared across a gateway fleet). Uses the
 # reqwest client already in deps; off by default to keep the surface opt-in.
 qdrant = []
+# A real, local, offline LLM (mistral.rs) as an AIProvider backend. Off by default —
+# pulls a large inference-engine dependency and, at runtime, downloads model weights.
+# Deliberately not chained into Gateway::from_env()'s default resolution; a caller
+# opts in explicitly via MistralRsProvider::from_env().
+mistralrs = ["dep:mistralrs"]
 
 [dependencies]
 apex-common.workspace = true
@@ -27,6 +32,18 @@ reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 redis = { version = "0.24", default-features = false, features = ["tokio-comp"], optional = true }
+# Pure-Rust default features (no CUDA/Metal/MKL, no C compiler needed) — chosen
+# deliberately for portability over this backend's max performance.
+mistralrs = { version = "0.8", optional = true }
+
+[[example]]
+name = "mistralrs_research"
+required-features = ["mistralrs"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# For the mistralrs_research example only (a dev-dependency cycle back to
+# apex-provider is fine — Cargo excludes dev-deps from the graph it resolves
+# for downstream consumers).
+apex-agent.workspace = true
+apex-tools.workspace = true

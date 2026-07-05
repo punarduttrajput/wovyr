@@ -15,6 +15,7 @@ members = [
     "crates/apex-secrets",
     "crates/apex-audit",
     "crates/apex-kms",
+    "crates/apex-eval",
     "crates/apex-server",
     "apps/apex-cli",
 ]
