@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "apex.fullname" . }}-postgres
+  labels:
+    {{- include "apex.labels" . | nindent 4 }}
+    {{- include "apex.postgres.selectorLabels" . | nindent 4 }}
+spec:
+  # Headless: apex's DSN and the wait-for-postgres init container address
+  # this StatefulSet's single pod by its stable per-pod DNS name, not a
+  # load-balanced VIP.
+  clusterIP: None
+  ports:
+    - name: postgres
+      port: 5432
+  selector:
+    {{- include "apex.postgres.selectorLabels" . | nindent 4 }}

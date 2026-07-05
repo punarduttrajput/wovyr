@@ -7,10 +7,19 @@ Document ID: DEP-003
 
 **Document ID:** DEP-003  
 **File Path:** `docs/12-deployment/kubernetes.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — describes the **long-term, aspirational** multi-service
+topology (independent api-gateway/agent-runtime/workflow-engine/… services,
+each with its own HPA, plus a tool-worker DaemonSet with gVisor/Kata sandbox
+pools). **Not built.** The platform today is one binary (`apex-cli`). For
+what actually deploys, see
+[`deployment/helm/apex/README.md`](../../deployment/helm/apex/README.md) — a
+real Helm chart for the single-binary + Postgres + Qdrant topology (the same
+shape as `deployment/docker-compose.yml`), authored 2026-07-05, validated
+offline (`helm lint`/`helm template`/`kubeconform`) but never applied to a
+live cluster.
 **Owner:** Platform Operations Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-05
 
 ---
 
@@ -161,4 +170,5 @@ spec:
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-05 | Added a status note pointing to `deployment/helm/apex/` — a real chart for the actual single-binary topology, distinct from this doc's aspirational multi-service split |
 | 1.0.0 | 2026-06-27 | Initial Kubernetes deployment guide |

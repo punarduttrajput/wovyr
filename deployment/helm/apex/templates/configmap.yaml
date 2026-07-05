@@ -1,0 +1,22 @@
+# Non-sensitive apex-server configuration. Connection strings with embedded
+# credentials (APEX_MARKETPLACE_POSTGRES_URL, APEX_MEMORY_POSTGRES_URL) live
+# in secret.yaml instead, even though the qdrant URL and platform-admins list
+# here are no more sensitive than any other config value.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "apex.fullname" . }}-config
+  labels:
+    {{- include "apex.labels" . | nindent 4 }}
+data:
+  # Explicit rather than relying on the container's /etc/passwd entry for the
+  # non-root `apex` user (uid 10001, home /home/apex per
+  # deployment/docker/Dockerfile) — some container runtimes don't populate
+  # $HOME from NSS for a non-login process exec.
+  HOME: /home/apex
+  {{- if .Values.qdrant.enabled }}
+  APEX_MEMORY_QDRANT_URL: {{ include "apex.qdrantUrl" . | quote }}
+  {{- end }}
+  {{- if .Values.apex.env.platformAdmins }}
+  APEX_PLATFORM_ADMINS: {{ .Values.apex.env.platformAdmins | quote }}
+  {{- end }}

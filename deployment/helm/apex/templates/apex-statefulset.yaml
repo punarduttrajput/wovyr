@@ -1,0 +1,96 @@
+# The `apex` server (`apex dev --addr 0.0.0.0:8080`) — mirrors
+# deployment/docker-compose.yml's `apex` service exactly. A StatefulSet, not
+# a Deployment: apex's durable state is local files on a PVC
+# (/home/apex/.apex/{tenancy,kms,secrets,webhooks,workflows,memory,audit}),
+# not shared across replicas — replicaCount is fixed at 1 in values.yaml
+# until the platform supports sharding/multi-region (not yet built).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "apex.fullname" . }}
+  labels:
+    {{- include "apex.labels" . | nindent 4 }}
+    {{- include "apex.server.selectorLabels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "apex.fullname" . }}
+  replicas: {{ .Values.apex.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "apex.server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "apex.labels" . | nindent 8 }}
+        {{- include "apex.server.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "apex.fullname" . }}
+      # Postgres must be reachable before apex starts — docker-compose.yml
+      # expresses this via `depends_on: condition: service_healthy`; K8s has
+      # no equivalent for StatefulSets, so an init container polls instead.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h {{ include "apex.fullname" . }}-postgres -U "$POSTGRES_USER"; do
+                echo "waiting for postgres..."
+                sleep 2
+              done
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "apex.fullname" . }}-secrets
+                  key: POSTGRES_USER
+      containers:
+        - name: apex
+          image: "{{ .Values.apex.image.repository }}:{{ .Values.apex.image.tag }}"
+          imagePullPolicy: {{ .Values.apex.image.pullPolicy }}
+          command: ["apex"]
+          args: ["dev", "--addr", "0.0.0.0:{{ .Values.apex.port }}"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.apex.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "apex.fullname" . }}-config
+            - secretRef:
+                name: {{ include "apex.fullname" . }}-secrets
+          # `/healthz` is a pure liveness check (no dependency probing —
+          # crates/apex-server/src/lib.rs's handler just returns
+          # {"status":"ok"}), so readinessProbe here only proves the process
+          # is up, not that Postgres/Qdrant are reachable. There is no
+          # `/readyz` in apex-server today; the initContainer above is what
+          # actually gates the pod on Postgres being ready before apex ever
+          # starts. Documented explicitly in this chart's README.md rather
+          # than implying readinessProbe means more than it does.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.apex.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /home/apex/.apex
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.apex.persistence.storageClassName }}
+        storageClassName: {{ .Values.apex.persistence.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.apex.persistence.size }}

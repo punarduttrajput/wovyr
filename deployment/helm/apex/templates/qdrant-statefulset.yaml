@@ -1,0 +1,49 @@
+{{- if .Values.qdrant.enabled }}
+# Backs APEX_MEMORY_QDRANT_URL — wired for the CLI's tiered-memory backend
+# (`apex memory put/query --features tiered-memory`) only. The embedded
+# apex-server (this chart's apex-statefulset.yaml) does NOT route memory
+# through Qdrant/Postgres; it always uses its local file store at
+# /home/apex/.apex/memory. Set qdrant.enabled: false if nothing in your
+# cluster runs those CLI commands — see this chart's README.md.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "apex.fullname" . }}-qdrant
+  labels:
+    {{- include "apex.labels" . | nindent 4 }}
+    {{- include "apex.qdrant.selectorLabels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "apex.fullname" . }}-qdrant
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "apex.qdrant.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "apex.labels" . | nindent 8 }}
+        {{- include "apex.qdrant.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: qdrant
+          image: {{ .Values.qdrant.image }}
+          ports:
+            - name: http
+              containerPort: 6333
+          resources:
+            {{- toYaml .Values.qdrant.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /qdrant/storage
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.qdrant.persistence.storageClassName }}
+        storageClassName: {{ .Values.qdrant.persistence.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.qdrant.persistence.size }}
+{{- end }}

@@ -7,8 +7,11 @@ Document ID: GA-002
 
 **Document ID:** GA-002
 **File Path:** `docs/18-roadmap/v1.0/A2-reliability-ha-dr.md`
-**Version:** 1.0.0
-**Status:** In progress — a first slice (single-node compose) has landed
+**Version:** 1.1.0
+**Status:** In progress — a first slice (single-node compose) has landed, plus
+a first Kubernetes artifact (a Helm chart for that same single-node topology,
+§2). Neither is HA, and the chart has not been validated against a real
+cluster — still gated per §7's own risk note.
 **Owner:** Reliability / Deployment Team
 **Last Updated:** 2026-07-05
 
@@ -39,11 +42,26 @@ remainder is scoped here.
   latent crash bug (marketplace routes panicking on a Postgres-backed runtime).
 - **CI builds the image** (`container-scan` job) and Trivy-scans it; the
   `Dockerfile` takes a `FEATURES` build arg and has a real `/healthz` healthcheck.
-- **K8s / Helm / Terraform are spec-only.**
-  [kubernetes.md](../../12-deployment/kubernetes.md),
-  [helm.md](../../12-deployment/helm.md), and
-  [terraform.md](../../12-deployment/terraform.md) describe the intent; **no
-  artifacts exist in the repo.**
+- **A real Helm chart now exists**: [`deployment/helm/apex/`](../../../deployment/helm/apex/README.md)
+  deploys the *same* single-node topology as compose (one `apex`
+  `StatefulSet` fixed at 1 replica + Postgres + Qdrant `StatefulSet`s) —
+  **not** multi-replica/HA, and **not validated against a real cluster**
+  (none exists in this dev environment). What it *is* validated against:
+  portable `kubectl`/`helm`/`kubeconform` binaries downloaded specifically
+  for this, running fully offline (`helm lint`, `helm template`, and
+  `kubeconform` schema-checking all 9 rendered resources against the real
+  Kubernetes OpenAPI definitions — no apiserver needed for any of these).
+  This caught and fixed a real bug (duplicate `app.kubernetes.io/name`/
+  `instance` label keys) before it could reach a real manifest — genuine
+  value, but explicitly *not* the real-cluster validation §7's risk table
+  calls for.
+- **Helm/Terraform for a multi-service, multi-replica HA topology remain
+  spec-only.** [kubernetes.md](../../12-deployment/kubernetes.md) and
+  [helm.md](../../12-deployment/helm.md) describe a materially bigger
+  aspirational architecture (independent api-gateway/agent-runtime/
+  workflow-engine/… services, each with an HPA); the platform is still one
+  binary. [terraform.md](../../12-deployment/terraform.md) has no artifacts
+  at all yet.
 
 ---
 
@@ -58,7 +76,10 @@ backup/restore, and no DR runbook.
 
 ## 4.1 Functional / deliverables
 - **Kubernetes manifests + Helm chart + Terraform modules** for a multi-replica,
-  HA deployment (validated against a real cluster).
+  HA deployment (validated against a real cluster). A **single-replica Helm
+  chart for the current single-binary topology** now exists (§2) as a first
+  step, offline-validated only — the multi-replica/HA version and the
+  real-cluster validation are both still open.
 - **Backup/restore procedures for every durable store**: the workflow store
   (`~/.apex/workflows`), memory, tenancy, secrets, the KMS tenant-key catalog
   (`~/.apex/kms`), and the marketplace registry (file or `PostgresRegistryStore`).
@@ -84,11 +105,15 @@ Feeds the v1.0 exit criterion of meeting published SLOs in production
 
 # 6. Dependencies & Environment Caveats
 
-- **Requires a real orchestrator** and `kubectl` / `helm` / `terraform` —
-  **none present in the current dev environment**, so the K8s/Helm/Terraform
-  artifacts cannot be authored *and validated* here (authoring blind, without a
-  cluster to test against, would repeat the "spec-only" problem this work exists
-  to fix).
+- **Still requires a real orchestrator to fully validate.** `kubectl`/`helm`
+  are no longer unavailable here — portable binaries were downloaded
+  specifically to author §2's chart, plus `kubeconform` for full OpenAPI
+  schema validation — so manifests are no longer authored *completely* blind.
+  But none of that substitutes for a **live cluster**: no apiserver exists in
+  this environment, so scheduling behavior, PVC provisioning, actual pod
+  startup ordering, and the HA/multi-replica remainder of this deliverable
+  still cannot be validated here. `terraform` itself remains undownloaded/
+  untried.
 - KMS backup interacts with GA-003's cloud-KMS/HSM root
   ([A3](A3-security-completion.md)): a managed root changes what must be backed up.
 
@@ -98,7 +123,7 @@ Feeds the v1.0 exit criterion of meeting published SLOs in production
 
 | Risk | Mitigation |
 |------|-----------|
-| Authoring K8s/Helm/TF blind (no cluster) | Gate on real-cluster validation; don't ship unvalidated manifests as "done" |
+| Authoring K8s/Helm/TF blind (no cluster) | Partially mitigated for Helm: `helm lint`/`helm template`/`kubeconform` (downloaded binaries) catch structural and schema errors offline — already caught one real bug. Still gate on real-cluster validation before calling this deliverable done; don't let offline validation be mistaken for it |
 | KMS-catalog loss = silent data loss | Treat the KMS catalog as a first-class backup target with a restore drill |
 | Compose topology mistaken for HA | Doc clearly separates the shipped single-node slice from the HA remainder |
 
@@ -112,6 +137,7 @@ Feeds the v1.0 exit criterion of meeting published SLOs in production
   [kubernetes.md](../../12-deployment/kubernetes.md) ·
   [helm.md](../../12-deployment/helm.md) ·
   [terraform.md](../../12-deployment/terraform.md)
+- [`deployment/helm/apex/README.md`](../../../deployment/helm/apex/README.md) — the chart itself
 
 ---
 
@@ -119,4 +145,5 @@ Feeds the v1.0 exit criterion of meeting published SLOs in production
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-05 | Recorded the first real Kubernetes artifact: `deployment/helm/apex/` (single-replica Helm chart for the existing single-binary topology), offline-validated with downloaded `helm`/`kubectl`/`kubeconform` (caught a real duplicate-label bug). Updated §2/§4.1/§6/§7 to state plainly this is not HA and not validated against a real cluster — the exit criterion in §5 is unchanged and unmet |
 | 1.0.0 | 2026-07-05 | Initial GA-completion delivery doc for reliability (HA/DR/deployment artifacts); records the shipped single-node compose slice and scopes the HA remainder |
