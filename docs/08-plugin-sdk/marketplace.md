@@ -7,7 +7,7 @@ Document ID: PLG-007
 
 **Document ID:** PLG-007  
 **File Path:** `docs/08-plugin-sdk/marketplace.md`  
-**Version:** 1.6.0  
+**Version:** 1.6.1  
 **Status:** Core implemented — the `apex-marketplace` registry crate provides the listing
 model, governance policy, ratings, and the publish → discover → download → install flow
 (durable `File`/`InMemory` stores, plus a capability-gated `PostgresRegistryStore` behind
@@ -30,7 +30,8 @@ too**: `report_abuse` files an `AbuseReport` against a listing; a moderator's
 `resolve_abuse_report` (optionally delisting — hidden from search/get, download
 refused, exactly like a policy blocklist entry, but a dynamic moderation decision
 rather than static operator config) or `dismiss_abuse_report` closes it, over new
-server routes (`.../report`, `.../reports`, `.../reports/{report_id}/resolve|dismiss`).
+server routes (`.../report`, `.../reports`, `.../reports/{report_id}/resolve|dismiss`)
+**and matching CLI commands** (`plugin report|reports|resolve-abuse|dismiss-abuse`).
 Deferred: undeclared-usage detection / CVE feeds for the scanner, recommendations, and
 monetization (§9).  
 **Owner:** AI Platform Team  
@@ -204,7 +205,10 @@ Server routes: `POST .../listings/{id}/reports/{report_id}/resolve` (body:
 `{moderator?, delist}`) and `.../dismiss` (body: `{moderator?, reason}`); the
 resolving/dismissing/reporting identity is `X-Apex-Principal` if present, else a
 body field, else an anonymous default. Resolving with `delist: true` emits
-`plugin.delisted`; filing a report emits `plugin.abuse_reported`.
+`plugin.delisted`; filing a report emits `plugin.abuse_reported`. The CLI mirrors
+this over the local registry: `apex plugin report <id> <reason> [--reporter]`,
+`plugin reports <id>`, `plugin resolve-abuse <id> <report-id> [--delist]
+[--moderator]`, and `plugin dismiss-abuse <id> <report-id> <reason> [--moderator]`.
 
 Not yet built: re-review triggering (an operator today files a fresh
 `request_review` manually after acting on a report) and using report volume as a
@@ -270,6 +274,7 @@ This is roadmap, not v1.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.6.1 | 2026-07-05 | Abuse-report workflow gains a CLI surface: `apex plugin report <id> <reason> [--reporter]`, `plugin reports <id>`, `plugin resolve-abuse <id> <report-id> [--delist] [--moderator]`, `plugin dismiss-abuse <id> <report-id> <reason> [--moderator]` — over the same local registry `plugin publish/search/get` already use, verified live end to end (file → report → resolve with delisting → confirmed hidden from `search` → fail-closed re-resolve) |
 | 1.6.0 | 2026-07-05 | Abuse-report workflow landed (§8.1): `AbuseReport`/`AbuseReportStatus` (`Open`/`Resolved { moderator, delisted }`/`Dismissed { moderator, reason }`) on `ListingRecord`, plus a `delisted` flag. `Registry::report_abuse` files a report (sequential per-listing id); `resolve_abuse_report`/`dismiss_abuse_report` close it, with `resolve` optionally delisting — `search`/`get`/`download` now exclude delisted listings exactly like a policy blocklist entry. Implemented across all three `RegistryStore` backends plus the `Box<dyn RegistryStore>` blanket impl. New server routes `.../report`, `.../reports`, `.../reports/{report_id}/resolve\|dismiss`, emitting `plugin.abuse_reported`/`plugin.delisted`. Not yet built: using report volume as a ranking signal, or auto-triggering re-review |
 | 1.5.0 | 2026-07-03 | Full human-review workflow landed (§6): `ReviewStatus` (`Unreviewed`/`Pending`/`Approved`/`Rejected { reason }`) on `ListingRecord`, with `Registry::request_review`/`approve_review`/`reject_review` (a publisher requests review of the current latest version; a reviewer approves — setting the verified badge — or rejects with actionable feedback, clearing it; a rejected listing may request review again). Implemented across all three `RegistryStore` backends (in-memory/file/Postgres) plus the `Box<dyn RegistryStore>` blanket impl. New server routes `.../request-review`, `.../approve`, `.../reject` alongside the pre-existing `.../verify` operator override; reviewer identity from `X-Apex-Principal`, else the request body, else `"operator"`. This was the last item deferred from v0.3 |
 | 1.4.0 | 2026-07-03 | Postgres backend wired into runtime store selection (§3): a `RegistryStore for Box<dyn RegistryStore>` blanket impl in `apex-marketplace` lets a binary pick its backend without becoming generic over it; `apex-server`'s `registry()` and the CLI's `marketplace_registry()` both select `PostgresRegistryStore` when built with `--features postgres` and `APEX_MARKETPLACE_POSTGRES_URL` is set (else the file store); the CLI's `postgres` feature also forwards to `apex-server/postgres` so `apex dev` picks it up |

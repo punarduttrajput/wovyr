@@ -760,6 +760,67 @@ pub fn market_install_cmd(id: &str, version: Option<String>, grants: Vec<String>
     Ok(())
 }
 
+/// `apex plugin report <id> <reason> [--reporter <name>]` — file an abuse report
+/// against a marketplace listing (malware, IP infringement, deceptive metadata,
+/// etc.). Feeds moderation and can trigger delisting via `resolve-abuse`.
+pub fn report_abuse_cmd(id: &str, reason: &str, reporter: Option<String>) -> Result<()> {
+    let reporter = reporter.unwrap_or_else(|| "anonymous".to_string());
+    let report_id = marketplace_registry()?.report_abuse(id, &reporter, reason)?;
+    println!("Filed report #{report_id} against {id}.");
+    println!("List open reports with `apex plugin reports {id}`.");
+    Ok(())
+}
+
+/// `apex plugin reports <id>` — list the abuse reports filed against a marketplace
+/// listing, for moderator review.
+pub fn list_abuse_reports_cmd(id: &str) -> Result<()> {
+    let reports = marketplace_registry()?.abuse_reports(id)?;
+    if reports.is_empty() {
+        println!("No abuse reports against {id}.");
+        return Ok(());
+    }
+    for r in &reports {
+        println!(
+            "#{}  reporter: {}  reason: {}  status: {:?}",
+            r.id, r.reporter, r.reason, r.status
+        );
+    }
+    Ok(())
+}
+
+/// `apex plugin resolve-abuse <id> <report-id> [--delist] [--moderator <name>]` — a
+/// moderator resolves an open abuse report as valid, optionally delisting the
+/// listing (removing it from discovery/download).
+pub fn resolve_abuse_cmd(
+    id: &str,
+    report_id: u64,
+    delist: bool,
+    moderator: Option<String>,
+) -> Result<()> {
+    let moderator = moderator.unwrap_or_else(|| "operator".to_string());
+    marketplace_registry()?.resolve_abuse_report(id, report_id, &moderator, delist)?;
+    if delist {
+        println!("Resolved report #{report_id} against {id}: listing delisted.");
+    } else {
+        println!("Resolved report #{report_id} against {id} (not delisted).");
+    }
+    Ok(())
+}
+
+/// `apex plugin dismiss-abuse <id> <report-id> <reason> [--moderator <name>]` — a
+/// moderator dismisses an open abuse report as not actionable.
+pub fn dismiss_abuse_cmd(
+    id: &str,
+    report_id: u64,
+    reason: &str,
+    moderator: Option<String>,
+) -> Result<()> {
+    let moderator = moderator.unwrap_or_else(|| "operator".to_string());
+    marketplace_registry()?.dismiss_abuse_report(id, report_id, &moderator, reason)?;
+    println!("Dismissed report #{report_id} against {id}.");
+    Ok(())
+}
+
 /// Restrict a private-key file to owner-only access where supported.
 #[cfg(unix)]
 fn restrict(path: &Path) {

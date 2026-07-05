@@ -297,6 +297,59 @@ enum PluginCommand {
         #[arg(long = "grant")]
         grants: Vec<String>,
     },
+
+    /// File an abuse report against a marketplace listing (malware, IP infringement,
+    /// deceptive metadata, etc.).
+    Report {
+        /// Listing id (`publisher/name`).
+        id: String,
+
+        /// Why the listing is being reported.
+        reason: String,
+
+        /// Reporting identity (default `anonymous`).
+        #[arg(long)]
+        reporter: Option<String>,
+    },
+
+    /// List the abuse reports filed against a marketplace listing.
+    Reports {
+        /// Listing id (`publisher/name`).
+        id: String,
+    },
+
+    /// Resolve an open abuse report as valid, optionally delisting the listing.
+    ResolveAbuse {
+        /// Listing id (`publisher/name`).
+        id: String,
+
+        /// Report id (0-based, from `plugin reports`).
+        report_id: u64,
+
+        /// Remove the listing from discovery/download.
+        #[arg(long)]
+        delist: bool,
+
+        /// Moderating identity (default `operator`).
+        #[arg(long)]
+        moderator: Option<String>,
+    },
+
+    /// Dismiss an open abuse report as not actionable.
+    DismissAbuse {
+        /// Listing id (`publisher/name`).
+        id: String,
+
+        /// Report id (0-based, from `plugin reports`).
+        report_id: u64,
+
+        /// Why the report was found not actionable.
+        reason: String,
+
+        /// Moderating identity (default `operator`).
+        #[arg(long)]
+        moderator: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -702,6 +755,24 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 version,
                 grants,
             } => plugin::market_install_cmd(&id, version, grants),
+            PluginCommand::Report {
+                id,
+                reason,
+                reporter,
+            } => plugin::report_abuse_cmd(&id, &reason, reporter),
+            PluginCommand::Reports { id } => plugin::list_abuse_reports_cmd(&id),
+            PluginCommand::ResolveAbuse {
+                id,
+                report_id,
+                delist,
+                moderator,
+            } => plugin::resolve_abuse_cmd(&id, report_id, delist, moderator),
+            PluginCommand::DismissAbuse {
+                id,
+                report_id,
+                reason,
+                moderator,
+            } => plugin::dismiss_abuse_cmd(&id, report_id, &reason, moderator),
         },
         Command::Kms { command } => match command {
             KmsCommand::Rotate { tenant } => kms::rotate_cmd(&tenant),
