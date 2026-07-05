@@ -96,6 +96,13 @@ impl Tool for FsReadTool {
 /// model context with large pages.
 const MAX_BODY_BYTES: usize = 16 * 1024;
 
+/// Default `User-Agent` sent with every outbound request. Many real-world sites
+/// (e.g. Wikipedia's robots policy, https://w.wiki/4wJS) reject unidentified
+/// clients with a 403 when no `User-Agent` is set — `reqwest::Client::new()`
+/// sends none by default. Not yet configurable per-request/tenant; a fixed
+/// default is enough until there's a concrete need to override it.
+const DEFAULT_USER_AGENT: &str = "Apex-AI-Platform/0.1 (+https://github.com/apex-ai/apex)";
+
 /// Perform an HTTP GET request and return status, headers count, and a truncated body.
 pub struct HttpGetTool {
     client: reqwest::Client,
@@ -105,7 +112,10 @@ impl HttpGetTool {
     /// Construct with a default HTTP client.
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(DEFAULT_USER_AGENT)
+                .build()
+                .unwrap_or_default(),
         }
     }
 }
@@ -425,6 +435,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn http_get_sends_default_user_agent() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+            socket.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+
+        let t = HttpGetTool::new();
+        let ctx = ToolContext::default();
+        let resp = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"url": format!("http://{addr}/")})),
+            )
+            .await
+            .unwrap();
+        assert!(resp.success);
+
+        let request = server.await.unwrap();
+        let user_agent_line = request
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("user-agent:"))
+            .expect("request must include a User-Agent header");
+        assert!(user_agent_line.contains(DEFAULT_USER_AGENT));
     }
 
     #[tokio::test]
