@@ -6,6 +6,12 @@
 # below adds the rest — dependency CVEs (SCA) and secret scanning — and
 # `container-scan` builds the single-binary Docker image and scans it for
 # vulnerabilities (also the image's first real CI build).
+# The `rust` job's final step is FUT-006's eval regression gate
+# (docs/18-roadmap/future/B6-trust-evaluation.md §8.3): apex-eval's
+# deterministic fixture-based regression suites, run and named explicitly
+# (they already run as part of `cargo test --workspace` above; this step's
+# value is a distinct, legible CI check plus --nocapture so pass rates are
+# visible in the log, not just a pass/fail buried in the full test count).
 name: ci
 
 on:
@@ -42,6 +48,21 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # FUT-006 eval regression gate: apex-eval's deterministic fixture-based
+      # suites, named explicitly (not folded silently into the step above) so
+      # a failure here reads as "quality regression detected," and run with
+      # --nocapture so each suite's EvalReport/ComparisonReport (pass rates,
+      # per-case detail) is visible in the log. Scripted deterministic
+      # providers only — the real `mistralrs` path (crates/apex-eval/tests/
+      # real_model_comparison.rs) stays off in CI, same as every other
+      # optional/expensive feature-gated test in this workspace (Redis,
+      # Qdrant, Postgres): it needs network access to download model weights
+      # and real CPU inference time neither is guaranteed here.
+      - name: Eval regression gate (FUT-006)
+        run: |
+          cargo test -p apex-eval --test regression_detection -- --nocapture
+          cargo test -p apex-eval --test multi_agent_vs_single_agent -- --nocapture
 
   security:
     name: dependency + secret scanning
