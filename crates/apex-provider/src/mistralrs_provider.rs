@@ -3,8 +3,17 @@
 //! Unlike [`crate::mock::MockProvider`] (a canned template) and
 //! [`crate::openai::OpenAiProvider`] (a real model, but over the network via a
 //! vendor API), this backend loads actual model weights in-process and runs
-//! real inference — the first genuinely non-deterministic provider in this
-//! workspace's own tests. Loads a GGUF-quantized model straight from a
+//! real inference. `chat` sets no sampling parameters, so this was assumed to
+//! be the first genuinely non-deterministic provider in this workspace's own
+//! tests — **empirically corrected**: `apex-eval`'s
+//! `real_model_comparison_variance_over_n_runs`
+//! (`crates/apex-eval/tests/real_model_comparison.rs`) ran the identical
+//! prompt against the default `Qwen/Qwen2.5-0.5B-Instruct-GGUF` config 4 times
+//! and got byte-identical output every time (same token counts, same text) —
+//! this configuration behaves deterministically in practice, most likely
+//! because mistral.rs defaults to greedy decoding when no sampler is set.
+//! Whether that holds for other models/prompts, or would change if a sampler
+//! were configured, is untested. Loads a GGUF-quantized model straight from a
 //! HuggingFace repo (mistral.rs handles the download via `hf-hub`); default
 //! configuration points at `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, a small,
 //! ungated, Apache-2.0 model — enough to prove the integration end to end
