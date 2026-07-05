@@ -126,6 +126,60 @@ impl ReviewStatus {
     }
 }
 
+/// A user-submitted report that a listing violates marketplace policy — malware,
+/// IP infringement, deceptive metadata, etc.
+/// ([Marketplace §8](../../docs/08-plugin-sdk/marketplace.md#8-ratings--feedback)).
+/// Feeds moderation and, through [`resolve_abuse_report`](crate::Registry::resolve_abuse_report),
+/// can trigger delisting.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AbuseReport {
+    /// Sequential id, unique within the listing (0-based, assigned at submission) —
+    /// addresses this report for a later resolve/dismiss decision.
+    pub id: u64,
+    /// The reporting principal.
+    pub reporter: String,
+    /// Free-text reason for the report.
+    pub reason: String,
+    /// The report's moderation lifecycle.
+    #[serde(default)]
+    pub status: AbuseReportStatus,
+}
+
+/// The moderation lifecycle for one [`AbuseReport`]:
+/// `Open → Resolved` (the report was valid; `delisted` records whether the listing
+/// was taken down) or `Open → Dismissed` (the report was not actionable).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AbuseReportStatus {
+    /// Awaiting a moderator decision — the default for every submitted report.
+    #[default]
+    Open,
+    /// A moderator found the report valid. `delisted` is `true` when that decision
+    /// removed the listing from discovery/download (the "delisting" outcome from
+    /// [§8]); `false` records the finding without delisting (e.g. the moderator
+    /// instead follows up with the publisher out of band).
+    Resolved {
+        /// The identity of the resolving moderator.
+        moderator: String,
+        /// Whether resolution delisted the listing.
+        delisted: bool,
+    },
+    /// A moderator found the report not actionable.
+    Dismissed {
+        /// The identity of the dismissing moderator.
+        moderator: String,
+        /// Why the report was dismissed.
+        reason: String,
+    },
+}
+
+impl AbuseReportStatus {
+    /// Whether the report is still awaiting a moderator decision.
+    pub fn is_open(&self) -> bool {
+        matches!(self, AbuseReportStatus::Open)
+    }
+}
+
 /// The stored aggregate for one listing (`publisher/name`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListingRecord {
@@ -158,6 +212,14 @@ pub struct ListingRecord {
     /// The human-review lifecycle for the verified-badge request ([§6]).
     #[serde(default)]
     pub review: ReviewStatus,
+    /// User-submitted abuse reports against this listing ([§8]).
+    #[serde(default)]
+    pub abuse_reports: Vec<AbuseReport>,
+    /// Whether a resolved abuse report has delisted this listing ([§8]) — excluded
+    /// from discovery/download exactly like a policy blocklist entry, but a dynamic
+    /// moderation decision rather than static operator config.
+    #[serde(default)]
+    pub delisted: bool,
 }
 
 impl ListingRecord {
@@ -297,6 +359,8 @@ mod tests {
             installs: 0,
             verified: false,
             review: ReviewStatus::Unreviewed,
+            abuse_reports: vec![],
+            delisted: false,
         };
         assert_eq!(rec.rating(), None);
         rec.reviews.push(Review {
@@ -325,5 +389,21 @@ mod tests {
             version: "1.0.0".into(),
         };
         assert!(!approved.is_pending());
+    }
+
+    #[test]
+    fn abuse_report_status_defaults_open() {
+        assert_eq!(AbuseReportStatus::default(), AbuseReportStatus::Open);
+        assert!(AbuseReportStatus::Open.is_open());
+        let resolved = AbuseReportStatus::Resolved {
+            moderator: "alice".into(),
+            delisted: true,
+        };
+        assert!(!resolved.is_open());
+        let dismissed = AbuseReportStatus::Dismissed {
+            moderator: "alice".into(),
+            reason: "not a violation".into(),
+        };
+        assert!(!dismissed.is_open());
     }
 }

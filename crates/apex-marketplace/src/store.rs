@@ -5,7 +5,9 @@
 //! CRUD logic via [`RegistryState`]. Operations are fail-closed: mutating an absent
 //! listing is [`Error::NotFound`](apex_common::Error::NotFound).
 
-use crate::listing::{ListingRecord, PublishedVersion, Review, ReviewStatus};
+use crate::listing::{
+    AbuseReport, AbuseReportStatus, ListingRecord, PublishedVersion, Review, ReviewStatus,
+};
 use apex_common::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -46,6 +48,8 @@ impl RegistryState {
                 installs: 0,
                 verified: false,
                 review: ReviewStatus::Unreviewed,
+                abuse_reports: Vec::new(),
+                delisted: false,
             });
         for c in categories {
             if !rec.categories.contains(c) {
@@ -143,6 +147,81 @@ impl RegistryState {
         rec.installs = rec.installs.saturating_add(1);
         Ok(())
     }
+
+    /// Submit an abuse report against a listing ([Marketplace §8]), returning its
+    /// sequential id (0-based, per listing) for a later resolve/dismiss decision.
+    pub fn report_abuse(&mut self, listing_id: &str, reporter: &str, reason: &str) -> Result<u64> {
+        let rec = self.get_mut(listing_id)?;
+        let id = rec.abuse_reports.len() as u64;
+        rec.abuse_reports.push(AbuseReport {
+            id,
+            reporter: reporter.to_string(),
+            reason: reason.to_string(),
+            status: AbuseReportStatus::Open,
+        });
+        Ok(id)
+    }
+
+    /// The index of `report_id` within `rec.abuse_reports`, if it is still open.
+    fn open_report_index(rec: &ListingRecord, listing_id: &str, report_id: u64) -> Result<usize> {
+        let idx = rec
+            .abuse_reports
+            .iter()
+            .position(|r| r.id == report_id)
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "abuse report `{report_id}` not found on listing `{listing_id}`"
+                ))
+            })?;
+        if !rec.abuse_reports[idx].status.is_open() {
+            return Err(Error::conflict(format!(
+                "abuse report `{report_id}` on listing `{listing_id}` is already resolved"
+            )));
+        }
+        Ok(idx)
+    }
+
+    /// A moderator resolves an open abuse report as valid. `delist` set to `true`
+    /// removes the listing from discovery/download; `false` records the finding
+    /// without delisting. Fails if the listing or report is absent, or the report is
+    /// already resolved/dismissed.
+    pub fn resolve_abuse_report(
+        &mut self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        delist: bool,
+    ) -> Result<()> {
+        let rec = self.get_mut(listing_id)?;
+        let idx = Self::open_report_index(rec, listing_id, report_id)?;
+        rec.abuse_reports[idx].status = AbuseReportStatus::Resolved {
+            moderator: moderator.to_string(),
+            delisted: delist,
+        };
+        if delist {
+            rec.delisted = true;
+        }
+        Ok(())
+    }
+
+    /// A moderator dismisses an open abuse report as not actionable, with `reason`.
+    /// Fails if the listing or report is absent, or the report is already
+    /// resolved/dismissed.
+    pub fn dismiss_abuse_report(
+        &mut self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let rec = self.get_mut(listing_id)?;
+        let idx = Self::open_report_index(rec, listing_id, report_id)?;
+        rec.abuse_reports[idx].status = AbuseReportStatus::Dismissed {
+            moderator: moderator.to_string(),
+            reason: reason.to_string(),
+        };
+        Ok(())
+    }
 }
 
 /// Durable storage for marketplace listings.
@@ -182,6 +261,30 @@ pub trait RegistryStore: Send + Sync {
 
     /// Increment a listing's install count (fail-closed if absent).
     fn record_install(&self, listing_id: &str) -> Result<()>;
+
+    /// Submit an abuse report against a listing (fail-closed if absent). Returns
+    /// the report's sequential id (0-based, per listing).
+    fn report_abuse(&self, listing_id: &str, reporter: &str, reason: &str) -> Result<u64>;
+
+    /// A moderator resolves an open abuse report (fail-closed if the listing/report
+    /// is absent or the report is already resolved/dismissed).
+    fn resolve_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        delist: bool,
+    ) -> Result<()>;
+
+    /// A moderator dismisses an open abuse report (fail-closed if the listing/report
+    /// is absent or the report is already resolved/dismissed).
+    fn dismiss_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        reason: &str,
+    ) -> Result<()>;
 }
 
 /// Lets a `Registry` be built over a boxed, runtime-selected backend
@@ -230,6 +333,30 @@ impl RegistryStore for Box<dyn RegistryStore> {
 
     fn record_install(&self, listing_id: &str) -> Result<()> {
         (**self).record_install(listing_id)
+    }
+
+    fn report_abuse(&self, listing_id: &str, reporter: &str, reason: &str) -> Result<u64> {
+        (**self).report_abuse(listing_id, reporter, reason)
+    }
+
+    fn resolve_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        delist: bool,
+    ) -> Result<()> {
+        (**self).resolve_abuse_report(listing_id, report_id, moderator, delist)
+    }
+
+    fn dismiss_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        reason: &str,
+    ) -> Result<()> {
+        (**self).dismiss_abuse_report(listing_id, report_id, moderator, reason)
     }
 }
 
@@ -308,6 +435,39 @@ impl RegistryStore for InMemoryRegistryStore {
 
     fn record_install(&self, listing_id: &str) -> Result<()> {
         self.state.lock().unwrap().record_install(listing_id)
+    }
+
+    fn report_abuse(&self, listing_id: &str, reporter: &str, reason: &str) -> Result<u64> {
+        self.state
+            .lock()
+            .unwrap()
+            .report_abuse(listing_id, reporter, reason)
+    }
+
+    fn resolve_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        delist: bool,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .resolve_abuse_report(listing_id, report_id, moderator, delist)
+    }
+
+    fn dismiss_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .dismiss_abuse_report(listing_id, report_id, moderator, reason)
     }
 }
 
@@ -403,6 +563,30 @@ impl RegistryStore for FileRegistryStore {
 
     fn record_install(&self, listing_id: &str) -> Result<()> {
         self.mutate(|state| state.record_install(listing_id))
+    }
+
+    fn report_abuse(&self, listing_id: &str, reporter: &str, reason: &str) -> Result<u64> {
+        self.mutate(|state| state.report_abuse(listing_id, reporter, reason))
+    }
+
+    fn resolve_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        delist: bool,
+    ) -> Result<()> {
+        self.mutate(|state| state.resolve_abuse_report(listing_id, report_id, moderator, delist))
+    }
+
+    fn dismiss_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.mutate(|state| state.dismiss_abuse_report(listing_id, report_id, moderator, reason))
     }
 }
 
@@ -560,6 +744,8 @@ mod tests {
                 installs: 0,
                 verified: false,
                 review: ReviewStatus::Unreviewed,
+                abuse_reports: vec![],
+                delisted: false,
             },
         );
         assert!(state.request_review("acme/empty").is_err());
@@ -585,6 +771,132 @@ mod tests {
     }
 
     #[test]
+    fn file_store_round_trips_abuse_reports() {
+        let dir = std::env::temp_dir().join(format!("apex-mkt-abuse-test-{}", std::process::id()));
+        let path = dir.join("registry.json");
+        let _ = std::fs::remove_file(&path);
+        let store = FileRegistryStore::new(&path);
+        store
+            .upsert_version("acme", "x", version("1.0.0"), &[], "stable")
+            .unwrap();
+        let id = store.report_abuse("acme/x", "alice", "malware").unwrap();
+        store
+            .resolve_abuse_report("acme/x", id, "mod1", true)
+            .unwrap();
+
+        let reopened = FileRegistryStore::new(&path);
+        let rec = reopened.get("acme/x").unwrap().unwrap();
+        assert!(rec.delisted);
+        assert_eq!(rec.abuse_reports.len(), 1);
+        assert_eq!(
+            rec.abuse_reports[0].status,
+            AbuseReportStatus::Resolved {
+                moderator: "mod1".into(),
+                delisted: true,
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn abuse_report_workflow_resolves_with_delisting() {
+        let store = InMemoryRegistryStore::new();
+        store
+            .upsert_version("acme", "x", version("1.0.0"), &[], "stable")
+            .unwrap();
+
+        let id = store
+            .report_abuse("acme/x", "alice", "bundles malware")
+            .unwrap();
+        assert_eq!(id, 0);
+        let rec = store.get("acme/x").unwrap().unwrap();
+        assert_eq!(rec.abuse_reports.len(), 1);
+        assert!(rec.abuse_reports[0].status.is_open());
+        assert!(!rec.delisted);
+
+        // A second report gets the next sequential id.
+        let id2 = store.report_abuse("acme/x", "bob", "spam").unwrap();
+        assert_eq!(id2, 1);
+
+        store
+            .resolve_abuse_report("acme/x", id, "mod1", true)
+            .unwrap();
+        let rec = store.get("acme/x").unwrap().unwrap();
+        assert!(
+            rec.delisted,
+            "resolving with delist=true delists the listing"
+        );
+        assert_eq!(
+            rec.abuse_reports[0].status,
+            AbuseReportStatus::Resolved {
+                moderator: "mod1".into(),
+                delisted: true,
+            }
+        );
+        // The second, unrelated report is untouched.
+        assert!(rec.abuse_reports[1].status.is_open());
+
+        // Re-resolving an already-resolved report is refused.
+        assert!(
+            store
+                .resolve_abuse_report("acme/x", id, "mod1", false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn abuse_report_dismissed_does_not_delist() {
+        let store = InMemoryRegistryStore::new();
+        store
+            .upsert_version("acme", "x", version("1.0.0"), &[], "stable")
+            .unwrap();
+        let id = store
+            .report_abuse("acme/x", "alice", "false alarm")
+            .unwrap();
+
+        store
+            .dismiss_abuse_report("acme/x", id, "mod1", "not a violation")
+            .unwrap();
+        let rec = store.get("acme/x").unwrap().unwrap();
+        assert!(!rec.delisted);
+        assert_eq!(
+            rec.abuse_reports[0].status,
+            AbuseReportStatus::Dismissed {
+                moderator: "mod1".into(),
+                reason: "not a violation".into(),
+            }
+        );
+
+        // Re-dismissing an already-dismissed report is refused.
+        assert!(
+            store
+                .dismiss_abuse_report("acme/x", id, "mod1", "again")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn abuse_reports_are_fail_closed_on_absent_listing_or_report() {
+        let store = InMemoryRegistryStore::new();
+        assert!(store.report_abuse("nope/x", "alice", "reason").is_err());
+
+        store
+            .upsert_version("acme", "x", version("1.0.0"), &[], "stable")
+            .unwrap();
+        assert!(
+            store
+                .resolve_abuse_report("acme/x", 0, "mod1", true)
+                .is_err(),
+            "no report with id 0 exists yet"
+        );
+        assert!(
+            store
+                .dismiss_abuse_report("acme/x", 0, "mod1", "no")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn boxed_dyn_store_delegates_to_the_underlying_backend() {
         // The seam `Registry<Box<dyn RegistryStore>>` relies on: a caller (e.g. a
         // server/CLI runtime store selector) boxes whichever backend it picked, and
@@ -602,5 +914,16 @@ mod tests {
         boxed.approve_review("acme/x", "alice").unwrap();
         assert!(boxed.get("acme/x").unwrap().unwrap().verified);
         assert!(boxed.reject_review("nope/x", "alice", "no").is_err());
+
+        let report_id = boxed.report_abuse("acme/x", "carol", "spam").unwrap();
+        boxed
+            .resolve_abuse_report("acme/x", report_id, "mod1", true)
+            .unwrap();
+        assert!(boxed.get("acme/x").unwrap().unwrap().delisted);
+        assert!(
+            boxed
+                .dismiss_abuse_report("nope/x", 0, "mod1", "no")
+                .is_err()
+        );
     }
 }

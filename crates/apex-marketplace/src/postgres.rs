@@ -153,4 +153,34 @@ impl RegistryStore for PostgresRegistryStore {
     fn record_install(&self, listing_id: &str) -> Result<()> {
         self.mutate(listing_id, |state| state.record_install(listing_id))
     }
+
+    fn report_abuse(&self, listing_id: &str, reporter: &str, reason: &str) -> Result<u64> {
+        self.mutate(listing_id, |state| {
+            state.report_abuse(listing_id, reporter, reason)
+        })
+    }
+
+    fn resolve_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        delist: bool,
+    ) -> Result<()> {
+        self.mutate(listing_id, |state| {
+            state.resolve_abuse_report(listing_id, report_id, moderator, delist)
+        })
+    }
+
+    fn dismiss_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.mutate(listing_id, |state| {
+            state.dismiss_abuse_report(listing_id, report_id, moderator, reason)
+        })
+    }
 }

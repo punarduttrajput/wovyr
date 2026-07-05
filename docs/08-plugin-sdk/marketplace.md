@@ -7,7 +7,7 @@ Document ID: PLG-007
 
 **Document ID:** PLG-007  
 **File Path:** `docs/08-plugin-sdk/marketplace.md`  
-**Version:** 1.5.0  
+**Version:** 1.6.0  
 **Status:** Core implemented — the `apex-marketplace` registry crate provides the listing
 model, governance policy, ratings, and the publish → discover → download → install flow
 (durable `File`/`InMemory` stores, plus a capability-gated `PostgresRegistryStore` behind
@@ -25,10 +25,16 @@ attestation route, and optionally gating publish fail-closed via
 workflow (§6) is now implemented**: `request_review`/`approve_review`/`reject_review`
 drive a `ReviewStatus` lifecycle gating the verified badge, over new server routes
 (`.../request-review`, `.../approve`, `.../reject`), alongside the pre-existing
-`set_verified` operator override. Deferred: undeclared-usage detection / CVE feeds for
-the scanner, recommendations, abuse-report workflow, and monetization (§9).  
+`set_verified` operator override. **The abuse-report workflow (§8) is now implemented
+too**: `report_abuse` files an `AbuseReport` against a listing; a moderator's
+`resolve_abuse_report` (optionally delisting — hidden from search/get, download
+refused, exactly like a policy blocklist entry, but a dynamic moderation decision
+rather than static operator config) or `dismiss_abuse_report` closes it, over new
+server routes (`.../report`, `.../reports`, `.../reports/{report_id}/resolve|dismiss`).
+Deferred: undeclared-usage detection / CVE feeds for the scanner, recommendations, and
+monetization (§9).  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-07-03
+**Last Updated:** 2026-07-05
 
 ---
 
@@ -174,6 +180,36 @@ marketplace plus private plugins, enforcing their own risk bar.
 - Aggregate quality + abuse-report signals feed listing ranking and can trigger
   re-review or delisting.
 
+## 8.1 Abuse-Report Workflow (Implemented)
+
+Any principal may file an `AbuseReport` against a listing (malware, IP
+infringement, deceptive metadata, etc.) via `Registry::report_abuse` /
+`POST .../listings/{id}/report`. Each report gets a sequential id (0-based, per
+listing) and starts `Open`.
+
+A moderator reviews open reports (`Registry::abuse_reports` /
+`GET .../listings/{id}/reports`) and resolves each one:
+
+- `resolve_abuse_report(listing_id, report_id, moderator, delist)` — the report was
+  valid. `delist: true` sets the listing's `delisted` flag, which hides it from
+  `search`/`get` and refuses `download` exactly like a policy blocklist entry — the
+  "delisting" outcome above — but as a per-listing moderation decision rather than
+  static operator config. `delist: false` records the finding without delisting
+  (e.g. the moderator follows up with the publisher out of band instead).
+- `dismiss_abuse_report(listing_id, report_id, moderator, reason)` — the report was
+  not actionable.
+
+Both fail closed on an absent listing/report or a report that was already decided.
+Server routes: `POST .../listings/{id}/reports/{report_id}/resolve` (body:
+`{moderator?, delist}`) and `.../dismiss` (body: `{moderator?, reason}`); the
+resolving/dismissing/reporting identity is `X-Apex-Principal` if present, else a
+body field, else an anonymous default. Resolving with `delist: true` emits
+`plugin.delisted`; filing a report emits `plugin.abuse_reported`.
+
+Not yet built: re-review triggering (an operator today files a fresh
+`request_review` manually after acting on a report) and using report volume as a
+ranking signal.
+
 ---
 
 # 9. Monetization (Planned)
@@ -209,7 +245,7 @@ This is roadmap, not v1.
 | Search latency | < 200 ms p95 |
 | Listing freshness after publish | < 60 s |
 | Verified-review SLA | publisher-facing target |
-| Abuse-report handling | tracked workflow |
+| Abuse-report handling | tracked workflow (implemented — [§8.1](#81-abuse-report-workflow-implemented)) |
 
 ---
 
@@ -234,6 +270,7 @@ This is roadmap, not v1.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.6.0 | 2026-07-05 | Abuse-report workflow landed (§8.1): `AbuseReport`/`AbuseReportStatus` (`Open`/`Resolved { moderator, delisted }`/`Dismissed { moderator, reason }`) on `ListingRecord`, plus a `delisted` flag. `Registry::report_abuse` files a report (sequential per-listing id); `resolve_abuse_report`/`dismiss_abuse_report` close it, with `resolve` optionally delisting — `search`/`get`/`download` now exclude delisted listings exactly like a policy blocklist entry. Implemented across all three `RegistryStore` backends plus the `Box<dyn RegistryStore>` blanket impl. New server routes `.../report`, `.../reports`, `.../reports/{report_id}/resolve\|dismiss`, emitting `plugin.abuse_reported`/`plugin.delisted`. Not yet built: using report volume as a ranking signal, or auto-triggering re-review |
 | 1.5.0 | 2026-07-03 | Full human-review workflow landed (§6): `ReviewStatus` (`Unreviewed`/`Pending`/`Approved`/`Rejected { reason }`) on `ListingRecord`, with `Registry::request_review`/`approve_review`/`reject_review` (a publisher requests review of the current latest version; a reviewer approves — setting the verified badge — or rejects with actionable feedback, clearing it; a rejected listing may request review again). Implemented across all three `RegistryStore` backends (in-memory/file/Postgres) plus the `Box<dyn RegistryStore>` blanket impl. New server routes `.../request-review`, `.../approve`, `.../reject` alongside the pre-existing `.../verify` operator override; reviewer identity from `X-Apex-Principal`, else the request body, else `"operator"`. This was the last item deferred from v0.3 |
 | 1.4.0 | 2026-07-03 | Postgres backend wired into runtime store selection (§3): a `RegistryStore for Box<dyn RegistryStore>` blanket impl in `apex-marketplace` lets a binary pick its backend without becoming generic over it; `apex-server`'s `registry()` and the CLI's `marketplace_registry()` both select `PostgresRegistryStore` when built with `--features postgres` and `APEX_MARKETPLACE_POSTGRES_URL` is set (else the file store); the CLI's `postgres` feature also forwards to `apex-server/postgres` so `apex dev` picks it up |
 | 1.3.0 | 2026-07-03 | Postgres-backed `RegistryStore` landed (§3): `PostgresRegistryStore` (`postgres` cargo feature) stores one JSON-document row per listing, reusing `RegistryState`'s pure mutation logic — a fleet of nodes can share a durable catalog instead of each holding its own `registry.json`. Capability-gated live tests prove independent connections see each other's writes. Not yet wired into server/CLI runtime store selection |

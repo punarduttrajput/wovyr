@@ -17,7 +17,9 @@
 //! capability-kind filters. Determinism: the registry holds no clock or randomness;
 //! ordering is by relevance then id, and install/review counts are explicit.
 
-use crate::listing::{Listing, ListingRecord, PermissionRisk, PublishedVersion, Review};
+use crate::listing::{
+    AbuseReport, Listing, ListingRecord, PermissionRisk, PublishedVersion, Review,
+};
 use crate::policy::RegistryPolicy;
 use crate::scan::{self, ScanReport};
 use crate::store::RegistryStore;
@@ -173,7 +175,7 @@ impl<S: RegistryStore> Registry<S> {
         let needle = query.text.to_lowercase();
         let mut scored: Vec<(i32, Listing)> = Vec::new();
         for rec in self.store.all()? {
-            if self.policy.is_blocked(&rec.id) {
+            if self.policy.is_blocked(&rec.id) || rec.delisted {
                 continue;
             }
             if self.policy.require_verified && !rec.verified {
@@ -202,12 +204,14 @@ impl<S: RegistryStore> Registry<S> {
         Ok(scored.into_iter().map(|(_, l)| l).collect())
     }
 
-    /// Fetch a listing's projection by id (respecting blocklist / verified policy).
+    /// Fetch a listing's projection by id (respecting blocklist / delisting / verified
+    /// policy).
     pub fn get(&self, listing_id: &str) -> Result<Option<Listing>> {
         if self.policy.is_blocked(listing_id) {
             return Ok(None);
         }
         match self.store.get(listing_id)? {
+            Some(rec) if rec.delisted => Ok(None),
             Some(rec) if self.policy.require_verified && !rec.verified => Ok(None),
             Some(rec) => Ok(Some(rec.to_listing())),
             None => Ok(None),
@@ -215,8 +219,9 @@ impl<S: RegistryStore> Registry<S> {
     }
 
     /// Download the `.apexpkg` bytes for a version (the latest stable if `version` is
-    /// `None`). Honors blocklist + verified policy fail-closed. The returned bytes are
-    /// the exact published package — the caller installs them through the Plugin Engine.
+    /// `None`). Honors blocklist + delisting + verified policy fail-closed. The
+    /// returned bytes are the exact published package — the caller installs them
+    /// through the Plugin Engine.
     pub fn download(&self, listing_id: &str, version: Option<&str>) -> Result<Vec<u8>> {
         if self.policy.is_blocked(listing_id) {
             return Err(Error::Forbidden(format!(
@@ -227,6 +232,11 @@ impl<S: RegistryStore> Registry<S> {
             .store
             .get(listing_id)?
             .ok_or_else(|| Error::NotFound(format!("listing `{listing_id}` not found")))?;
+        if rec.delisted {
+            return Err(Error::Forbidden(format!(
+                "listing `{listing_id}` has been delisted"
+            )));
+        }
         if self.policy.require_verified && !rec.verified {
             return Err(Error::Forbidden(format!(
                 "listing `{listing_id}` is not verified"
@@ -293,6 +303,56 @@ impl<S: RegistryStore> Registry<S> {
     /// Increment a listing's install count (called after a successful install).
     pub fn record_install(&self, listing_id: &str) -> Result<()> {
         self.store.record_install(listing_id)
+    }
+
+    /// Submit an abuse report against a listing
+    /// ([§8](../../docs/08-plugin-sdk/marketplace.md#8-ratings--feedback)) — user-flagged
+    /// malware, IP infringement, deceptive metadata, etc. Feeds moderation and can
+    /// trigger delisting via [`resolve_abuse_report`](Self::resolve_abuse_report).
+    /// Returns the report's sequential id (0-based, per listing).
+    pub fn report_abuse(&self, listing_id: &str, reporter: &str, reason: &str) -> Result<u64> {
+        if reason.trim().is_empty() {
+            return Err(Error::invalid("abuse report reason must not be empty"));
+        }
+        self.store.report_abuse(listing_id, reporter, reason)
+    }
+
+    /// The abuse reports filed against a listing, for moderator review.
+    pub fn abuse_reports(&self, listing_id: &str) -> Result<Vec<AbuseReport>> {
+        Ok(self
+            .store
+            .get(listing_id)?
+            .ok_or_else(|| Error::NotFound(format!("listing `{listing_id}` not found")))?
+            .abuse_reports)
+    }
+
+    /// A moderator resolves an open abuse report as valid ([§8]). `delist` set to
+    /// `true` removes the listing from discovery/download (mirroring a policy
+    /// blocklist entry, but as a dynamic moderation decision); `false` records the
+    /// finding without delisting. Fails if no report matches or it was already
+    /// decided.
+    pub fn resolve_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        delist: bool,
+    ) -> Result<()> {
+        self.store
+            .resolve_abuse_report(listing_id, report_id, moderator, delist)
+    }
+
+    /// A moderator dismisses an open abuse report as not actionable, with `reason`
+    /// ([§8]). Fails if no report matches or it was already decided.
+    pub fn dismiss_abuse_report(
+        &self,
+        listing_id: &str,
+        report_id: u64,
+        moderator: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.store
+            .dismiss_abuse_report(listing_id, report_id, moderator, reason)
     }
 }
 
@@ -677,6 +737,55 @@ capabilities:
                 .keyless_bundle()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn abuse_report_resolved_with_delisting_hides_the_listing() {
+        let (pkg, public) = signed_pkg(GITHUB);
+        let reg = Registry::new(InMemoryRegistryStore::new(), trust_for("acme", public));
+        reg.publish(&pkg, &[], None).unwrap();
+
+        let id = reg
+            .report_abuse("acme/github", "alice", "bundles malware")
+            .unwrap();
+        assert_eq!(reg.abuse_reports("acme/github").unwrap().len(), 1);
+        assert!(
+            reg.get("acme/github").unwrap().is_some(),
+            "not delisted yet"
+        );
+
+        reg.resolve_abuse_report("acme/github", id, "mod1", true)
+            .unwrap();
+
+        // Delisting behaves like a blocklist entry: hidden from search/get, download
+        // refused.
+        assert!(reg.get("acme/github").unwrap().is_none());
+        assert!(reg.search(&SearchQuery::default()).unwrap().is_empty());
+        assert!(reg.download("acme/github", None).is_err());
+    }
+
+    #[test]
+    fn abuse_report_dismissed_does_not_hide_the_listing() {
+        let (pkg, public) = signed_pkg(GITHUB);
+        let reg = Registry::new(InMemoryRegistryStore::new(), trust_for("acme", public));
+        reg.publish(&pkg, &[], None).unwrap();
+
+        let id = reg.report_abuse("acme/github", "alice", "spam").unwrap();
+        reg.dismiss_abuse_report("acme/github", id, "mod1", "not a violation")
+            .unwrap();
+
+        assert!(reg.get("acme/github").unwrap().is_some());
+        assert!(reg.download("acme/github", None).is_ok());
+    }
+
+    #[test]
+    fn abuse_report_requires_a_non_empty_reason() {
+        let (pkg, public) = signed_pkg(GITHUB);
+        let reg = Registry::new(InMemoryRegistryStore::new(), trust_for("acme", public));
+        reg.publish(&pkg, &[], None).unwrap();
+
+        assert!(reg.report_abuse("acme/github", "alice", "  ").is_err());
+        assert!(reg.abuse_reports("acme/github").unwrap().is_empty());
     }
 
     #[test]

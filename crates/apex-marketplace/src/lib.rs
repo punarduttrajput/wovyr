@@ -8,8 +8,9 @@
 //! [`apex_common`].
 //!
 //! - [`listing`] — the [`Listing`]/[`PublishedVersion`]/[`Review`] model,
-//!   [`PermissionRisk`] classification, and [`ReviewStatus`] (the human-review
-//!   lifecycle for the verified badge)
+//!   [`PermissionRisk`] classification, [`ReviewStatus`] (the human-review lifecycle
+//!   for the verified badge), and [`AbuseReport`]/[`AbuseReportStatus`] (the
+//!   moderation lifecycle for a user-flagged listing)
 //!   ([§3](../../docs/08-plugin-sdk/marketplace.md#3-listing-model)).
 //! - [`policy`] — [`RegistryPolicy`], operator curation: publisher allow-list,
 //!   permission-risk ceiling, blocklist, verified-only gating
@@ -20,12 +21,17 @@
 //!   feature) for a shared, multi-node catalog.
 //! - [`registry`] — the [`Registry`] control plane: publish (signature-verified +
 //!   policy-gated + security-scanned), search/discover, download, rate,
-//!   install-count, and the human-review workflow
+//!   install-count, the human-review workflow
 //!   ([§6](../../docs/08-plugin-sdk/marketplace.md#6-review--quality)):
 //!   `request_review` → `approve_review`/`reject_review` gates the **verified**
 //!   badge (not `publish` itself — community/unreviewed listings publish and
 //!   install fine without it), alongside the pre-existing `set_verified` operator
-//!   override.
+//!   override — and the **abuse-report workflow**
+//!   ([§8](../../docs/08-plugin-sdk/marketplace.md#8-ratings--feedback)):
+//!   `report_abuse` files a report against a listing; a moderator
+//!   `resolve_abuse_report` (optionally delisting — excluded from discovery/
+//!   download exactly like a policy blocklist entry, but a dynamic moderation
+//!   decision) or `dismiss_abuse_report`s it.
 //! - [`scan`] — automated static security scanning at publish
 //!   ([§6]): artifact integrity, permission sanity, sandbox posture, SBOM
 //!   deny-list/licensing, and provenance presence, reported as coded [`Finding`]s
@@ -44,7 +50,10 @@ pub mod registry;
 pub mod scan;
 pub mod store;
 
-pub use listing::{Listing, ListingRecord, PermissionRisk, PublishedVersion, Review, ReviewStatus};
+pub use listing::{
+    AbuseReport, AbuseReportStatus, Listing, ListingRecord, PermissionRisk, PublishedVersion,
+    Review, ReviewStatus,
+};
 pub use policy::RegistryPolicy;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresRegistryStore;

@@ -161,6 +161,22 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
             "/api/v1/marketplace/listings/{id}/install",
             post(install_listing),
         )
+        .route(
+            "/api/v1/marketplace/listings/{id}/report",
+            post(report_abuse),
+        )
+        .route(
+            "/api/v1/marketplace/listings/{id}/reports",
+            get(list_abuse_reports),
+        )
+        .route(
+            "/api/v1/marketplace/listings/{id}/reports/{report_id}/resolve",
+            post(resolve_abuse_report),
+        )
+        .route(
+            "/api/v1/marketplace/listings/{id}/reports/{report_id}/dismiss",
+            post(dismiss_abuse_report),
+        )
 }
 
 fn parse_capability(s: &str) -> Option<CapabilityKind> {
@@ -405,16 +421,17 @@ struct ReviewDecisionReq {
     reviewer: Option<String>,
 }
 
-/// The reviewer identity for a review decision: `X-Apex-Principal` if present, else
-/// the request body's `reviewer` field, else `"operator"` (anonymous back-compat).
-fn reviewer_identity(headers: &HeaderMap, body_reviewer: Option<&str>) -> String {
+/// The acting identity for a reviewer/moderator decision, or a report submission:
+/// `X-Apex-Principal` if present, else the request body's own identity field, else
+/// `default` (anonymous back-compat).
+fn actor_identity(headers: &HeaderMap, body_value: Option<&str>, default: &str) -> String {
     let principal = crate::tenancy::principal(headers);
     if !principal.is_empty() {
         return principal;
     }
-    body_reviewer
+    body_value
         .filter(|r| !r.is_empty())
-        .unwrap_or("operator")
+        .unwrap_or(default)
         .to_string()
 }
 
@@ -425,7 +442,7 @@ async fn approve_review(
     headers: HeaderMap,
     Json(req): Json<ReviewDecisionReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let reviewer = reviewer_identity(&headers, req.reviewer.as_deref());
+    let reviewer = actor_identity(&headers, req.reviewer.as_deref(), "operator");
     let id_for_resp = id.clone();
     let reviewer_for_task = reviewer.clone();
     with_registry(move |reg| Ok(reg.approve_review(&id, &reviewer_for_task)?)).await?;
@@ -451,7 +468,7 @@ async fn reject_review(
     headers: HeaderMap,
     Json(req): Json<RejectReviewReq>,
 ) -> Result<Json<Value>, ApiError> {
-    let reviewer = reviewer_identity(&headers, req.reviewer.as_deref());
+    let reviewer = actor_identity(&headers, req.reviewer.as_deref(), "operator");
     let id_for_resp = id.clone();
     let reviewer_for_task = reviewer.clone();
     let reason = req.reason;
@@ -491,6 +508,145 @@ async fn install_listing(
     Ok(Json(
         json!({ "id": id_for_resp, "status": "installed", "plugin": installed }),
     ))
+}
+
+#[derive(Deserialize)]
+struct AbuseReportReq {
+    /// The reporting principal, when the caller didn't send `X-Apex-Principal`.
+    #[serde(default)]
+    reporter: Option<String>,
+    /// Why the listing is being reported (malware, IP infringement, deceptive
+    /// metadata, etc.).
+    reason: String,
+}
+
+/// `POST /api/v1/marketplace/listings/{id}/report` — file an abuse report against a
+/// listing ([Marketplace §8]). Feeds moderation and can trigger delisting via the
+/// `resolve` route below. Emits `plugin.abuse_reported`.
+async fn report_abuse(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<AbuseReportReq>,
+) -> Result<Json<Value>, ApiError> {
+    let reporter = actor_identity(&headers, req.reporter.as_deref(), "anonymous");
+    let id_for_resp = id.clone();
+    let reporter_for_task = reporter.clone();
+    let reason = req.reason;
+    let reason_for_task = reason.clone();
+    let report_id = with_registry(move |reg| {
+        Ok(reg.report_abuse(&id, &reporter_for_task, &reason_for_task)?)
+    })
+    .await?;
+
+    let tenant = headers
+        .get("x-apex-tenant")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("public");
+    crate::webhooks::emit(
+        &state,
+        "plugin.abuse_reported",
+        tenant,
+        json!({ "listing": id_for_resp, "report_id": report_id, "reporter": reporter, "reason": reason }),
+    );
+
+    Ok(Json(json!({
+        "id": id_for_resp,
+        "report_id": report_id,
+        "reporter": reporter,
+        "status": "open",
+    })))
+}
+
+/// `GET /api/v1/marketplace/listings/{id}/reports` — the abuse reports filed against
+/// a listing, for moderator review.
+async fn list_abuse_reports(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    let reports = with_registry(move |reg| Ok(reg.abuse_reports(&id)?)).await?;
+    Ok(Json(json!({ "reports": reports })))
+}
+
+#[derive(Deserialize)]
+struct ResolveAbuseReportReq {
+    /// The moderating identity, when the caller didn't send `X-Apex-Principal`.
+    #[serde(default)]
+    moderator: Option<String>,
+    /// Whether resolving the report also delists the listing (removes it from
+    /// discovery/download).
+    #[serde(default)]
+    delist: bool,
+}
+
+/// `POST /api/v1/marketplace/listings/{id}/reports/{report_id}/resolve` — a
+/// moderator resolves an open abuse report as valid ([Marketplace §8]), optionally
+/// delisting the listing. Emits `plugin.delisted` when `delist` is `true`.
+async fn resolve_abuse_report(
+    State(state): State<Arc<AppState>>,
+    Path((id, report_id)): Path<(String, u64)>,
+    headers: HeaderMap,
+    Json(req): Json<ResolveAbuseReportReq>,
+) -> Result<Json<Value>, ApiError> {
+    let moderator = actor_identity(&headers, req.moderator.as_deref(), "operator");
+    let id_for_resp = id.clone();
+    let moderator_for_task = moderator.clone();
+    let delist = req.delist;
+    with_registry(move |reg| {
+        Ok(reg.resolve_abuse_report(&id, report_id, &moderator_for_task, delist)?)
+    })
+    .await?;
+
+    if delist {
+        let tenant = headers
+            .get("x-apex-tenant")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("public");
+        crate::webhooks::emit(
+            &state,
+            "plugin.delisted",
+            tenant,
+            json!({ "listing": id_for_resp, "report_id": report_id, "moderator": moderator }),
+        );
+    }
+
+    Ok(Json(json!({
+        "id": id_for_resp,
+        "report_id": report_id,
+        "moderator": moderator,
+        "delisted": delist,
+    })))
+}
+
+#[derive(Deserialize)]
+struct DismissAbuseReportReq {
+    /// The moderating identity, when the caller didn't send `X-Apex-Principal`.
+    #[serde(default)]
+    moderator: Option<String>,
+    /// Why the report was found not actionable.
+    reason: String,
+}
+
+/// `POST /api/v1/marketplace/listings/{id}/reports/{report_id}/dismiss` — a
+/// moderator dismisses an open abuse report as not actionable ([Marketplace §8]).
+async fn dismiss_abuse_report(
+    Path((id, report_id)): Path<(String, u64)>,
+    headers: HeaderMap,
+    Json(req): Json<DismissAbuseReportReq>,
+) -> Result<Json<Value>, ApiError> {
+    let moderator = actor_identity(&headers, req.moderator.as_deref(), "operator");
+    let id_for_resp = id.clone();
+    let moderator_for_task = moderator.clone();
+    let reason = req.reason;
+    let reason_for_task = reason.clone();
+    with_registry(move |reg| {
+        Ok(reg.dismiss_abuse_report(&id, report_id, &moderator_for_task, &reason_for_task)?)
+    })
+    .await?;
+
+    Ok(Json(json!({
+        "id": id_for_resp,
+        "report_id": report_id,
+        "moderator": moderator,
+        "reason": reason,
+    })))
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, ApiError> {
@@ -604,15 +760,16 @@ metadata: { name: bare, version: 1.0.0, publisher: acme }
     }
 
     #[test]
-    fn reviewer_identity_prefers_the_principal_header_then_body_then_operator() {
+    fn actor_identity_prefers_the_principal_header_then_body_then_default() {
         let mut headers = HeaderMap::new();
         headers.insert("x-apex-principal", "alice".parse().unwrap());
-        assert_eq!(reviewer_identity(&headers, Some("bob")), "alice");
-        assert_eq!(reviewer_identity(&headers, None), "alice");
+        assert_eq!(actor_identity(&headers, Some("bob"), "operator"), "alice");
+        assert_eq!(actor_identity(&headers, None, "operator"), "alice");
 
         let empty = HeaderMap::new();
-        assert_eq!(reviewer_identity(&empty, Some("bob")), "bob");
-        assert_eq!(reviewer_identity(&empty, None), "operator");
-        assert_eq!(reviewer_identity(&empty, Some("")), "operator");
+        assert_eq!(actor_identity(&empty, Some("bob"), "operator"), "bob");
+        assert_eq!(actor_identity(&empty, None, "operator"), "operator");
+        assert_eq!(actor_identity(&empty, Some(""), "operator"), "operator");
+        assert_eq!(actor_identity(&empty, None, "anonymous"), "anonymous");
     }
 }
