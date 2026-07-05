@@ -3,12 +3,14 @@
 //! Bridges the [workflow engine](apex_workflow) to the platform via a
 //! [`PlatformExecutor`] that maps activities onto the [tool runtime](apex_tools)
 //! (`tool`), the [LLM gateway](apex_provider) (`ai`), pass-throughs (`function`),
-//! and a human-in-the-loop suspend (`human`). Executions persist to a
-//! [`FileStore`](apex_workflow::FileStore) under `~/.apex/workflows`, so a `human`
-//! task can suspend durably and be resumed by `approve` — the customer-support
-//! example ([docs](../../docs/16-examples/customer-support.md)).
+//! a full agent run ([`apex_agent::run_agent`], `agent`), and a human-in-the-loop
+//! suspend (`human`). Executions persist to a [`FileStore`](apex_workflow::FileStore)
+//! under `~/.apex/workflows`, so a `human` task can suspend durably and be resumed
+//! by `approve` — the customer-support example
+//! ([docs](../../docs/16-examples/customer-support.md)).
 
 use crate::config;
+use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent};
 use apex_provider::{ChatRequest, Gateway, Message, ModelSelector};
 use apex_tools::{ToolContext, ToolError, ToolRegistry, ToolRequest};
 use apex_workflow::{
@@ -25,6 +27,10 @@ use std::sync::Arc;
 struct PlatformExecutor {
     registry: ToolRegistry,
     gateway: Gateway,
+    /// Directory `agent`-typed activities resolve `name` against, as
+    /// `<agents_dir>/<name>.yaml` — the CLI's file-based stand-in for the server's
+    /// stored-agent-by-id lookup (there's no local agent store to look up).
+    agents_dir: String,
 }
 
 #[async_trait]
@@ -93,6 +99,38 @@ impl ActivityExecutor for PlatformExecutor {
                 }
             }
 
+            // `agent` activities run a full agent (model + tool loop) via
+            // `run_agent`, mirroring the server's `ServerExecutor` — but resolved
+            // from `<agents_dir>/<name>.yaml` on disk instead of a stored agent id,
+            // since the CLI has no server-side agent store to look up.
+            "agent" => {
+                let agent_id = ctx.name.as_deref().ok_or_else(|| {
+                    ActivityError::Permanent(format!(
+                        "activity `{}`: `name` required for agent type (the agent's file stem \
+                         under --agents-dir)",
+                        ctx.id
+                    ))
+                })?;
+                let path = std::path::Path::new(&self.agents_dir).join(format!("{agent_id}.yaml"));
+                let def = AgentDefinition::from_file(&path.to_string_lossy()).map_err(|e| {
+                    ActivityError::Permanent(format!(
+                        "activity `{}`: could not load agent `{agent_id}` from `{}`: {e}",
+                        ctx.id,
+                        path.display()
+                    ))
+                })?;
+                let input = if inputs.is_null() { json!({}) } else { inputs };
+                let mut opts = RunOptions::new(input);
+                if let Some(n) = def.spec.max_steps {
+                    opts = opts.with_max_steps(n);
+                }
+                let mut sink = NullSink;
+                let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
+                    .await
+                    .map_err(|e| ActivityError::Retryable(e.to_string()))?;
+                Ok(json!({ "message": output.text, "steps": output.steps }))
+            }
+
             // `human` activities suspend until a decision is injected (see `approve`).
             "human" => match ctx.variables.get(&ctx.id) {
                 Some(decision) => Ok(decision.clone()),
@@ -121,7 +159,9 @@ fn workflows_dir() -> apex_common::Result<std::path::PathBuf> {
 
 /// A durable engine over `~/.apex/workflows`, plus the platform executor. A durable
 /// [`FileTimerStore`] is attached so wall-clock `wait` timers fire across `tick`s.
-fn engine() -> apex_common::Result<Engine> {
+/// `agents_dir` is where `agent`-typed activities resolve `name` against; commands
+/// without an `--agents-dir` flag of their own pass `"."`.
+fn engine(agents_dir: &str) -> apex_common::Result<Engine> {
     let dir = workflows_dir()?;
     let store = FileStore::new(dir.clone())?;
     let events: Arc<dyn EventLog> = Arc::new(store.clone());
@@ -130,6 +170,7 @@ fn engine() -> apex_common::Result<Engine> {
     let executor = Arc::new(PlatformExecutor {
         registry: ToolRegistry::with_builtins(),
         gateway: Gateway::from_env(),
+        agents_dir: agents_dir.to_string(),
     });
     Ok(Engine::new(events, checkpoints, executor).with_timer_store(timers))
 }
@@ -169,12 +210,13 @@ pub fn validate_cmd(file: &str) -> apex_common::Result<()> {
     Ok(())
 }
 
-/// `apex workflows run --local -f <file> --input <json> [--id <id>]`.
+/// `apex workflows run --local -f <file> --input <json> [--id <id>] [--agents-dir <dir>]`.
 pub async fn run_cmd(
     file: &str,
     input: &str,
     local: bool,
     id: Option<String>,
+    agents_dir: &str,
 ) -> apex_common::Result<()> {
     if !local {
         return Err(apex_common::Error::config(
@@ -187,7 +229,7 @@ pub async fn run_cmd(
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
     let exec_id = id.unwrap_or_else(|| format!("wf-{}", def.metadata.name));
 
-    let (outcome, state) = engine()?.run(&def, &exec_id, input_value).await?;
+    let (outcome, state) = engine(agents_dir)?.run(&def, &exec_id, input_value).await?;
     report(&def, &exec_id, &outcome, &state);
 
     if let RunOutcome::Failed(_) = outcome {
@@ -220,7 +262,7 @@ pub async fn approve_cmd(
     store.save(&snapshot).await?;
     println!("recorded decision '{decision}' for task '{task}' on execution '{id}'");
 
-    let (outcome, state) = engine()?.resume(&def, id).await?;
+    let (outcome, state) = engine(".")?.resume(&def, id).await?;
     report(&def, id, &outcome, &state);
 
     if let RunOutcome::Failed(_) = outcome {
@@ -239,7 +281,7 @@ pub async fn signal_cmd(
     payload: &str,
 ) -> apex_common::Result<()> {
     let def = Definition::from_file(file)?;
-    let engine = engine()?;
+    let engine = engine(".")?;
 
     let (outcome, state) = match (event, timer) {
         (Some(name), None) => {
@@ -265,7 +307,7 @@ pub async fn signal_cmd(
 /// `apex workflows status --id <id>` — read an execution's live state without
 /// resuming it (a side-effect-free query, G3).
 pub async fn status_cmd(id: &str) -> apex_common::Result<()> {
-    let summary = engine()?.status(id).await?.ok_or_else(|| {
+    let summary = engine(".")?.status(id).await?.ok_or_else(|| {
         apex_common::Error::NotFound(format!("no execution `{id}`; run the workflow first"))
     })?;
     println!(
@@ -315,7 +357,7 @@ pub async fn list_cmd(
         status: status.as_deref().map(parse_status).transpose()?,
         limit,
     };
-    let executions = engine()?.list(&filter).await?;
+    let executions = engine(".")?.list(&filter).await?;
     if executions.is_empty() {
         println!("no executions found");
         return Ok(());
@@ -337,7 +379,7 @@ pub async fn list_cmd(
 /// `apex workflows show --id <id>` — show an execution's status plus its full event
 /// timeline (G4 visibility).
 pub async fn show_cmd(id: &str) -> apex_common::Result<()> {
-    let engine = engine()?;
+    let engine = engine(".")?;
     let summary = engine.status(id).await?.ok_or_else(|| {
         apex_common::Error::NotFound(format!("no execution `{id}`; run the workflow first"))
     })?;
@@ -361,7 +403,7 @@ pub async fn show_cmd(id: &str) -> apex_common::Result<()> {
 /// Caller-driven: run it on a cron/interval to advance time-based work.
 pub async fn tick_cmd(file: &str) -> apex_common::Result<()> {
     let def = Definition::from_file(file)?;
-    let engine = engine()?;
+    let engine = engine(".")?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let resolver = resolver_for(&def);
 
@@ -506,5 +548,108 @@ fn report(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apex_workflow::InMemoryStore;
+
+    /// `examples/agents/` relative to the workspace root (this crate's manifest dir
+    /// is `apps/apex-cli`, two levels down from the workspace root).
+    fn examples_agents_dir() -> String {
+        format!("{}/../../examples/agents", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn ctx(activity_type: &str, name: Option<&str>, inputs: Value) -> ActivityContext {
+        ActivityContext {
+            id: "test-activity".to_string(),
+            activity_type: activity_type.to_string(),
+            name: name.map(str::to_string),
+            inputs,
+            variables: Default::default(),
+            attempt: 1,
+        }
+    }
+
+    fn executor(agents_dir: &str) -> PlatformExecutor {
+        PlatformExecutor {
+            registry: ToolRegistry::with_builtins(),
+            gateway: Gateway::from_env(),
+            agents_dir: agents_dir.to_string(),
+        }
+    }
+
+    /// A local `agent` activity resolves `<agents_dir>/<name>.yaml` and runs it
+    /// through the real `run_agent` loop, mirroring the server's `ServerExecutor`.
+    #[tokio::test]
+    async fn agent_activity_runs_from_agents_dir() {
+        let exec = executor(&examples_agents_dir());
+        let out = exec
+            .execute(&ctx("agent", Some("hello"), json!({"message": "hi"})))
+            .await
+            .expect("agent activity should succeed");
+        let message = out["message"].as_str().unwrap_or_default();
+        assert!(!message.is_empty(), "expected non-empty agent output");
+    }
+
+    /// An `agent` activity referencing a name with no matching file under
+    /// `agents_dir` fails permanently (no such file to retry into existence),
+    /// instead of panicking.
+    #[tokio::test]
+    async fn agent_activity_fails_for_missing_file() {
+        let exec = executor(&examples_agents_dir());
+        let err = exec
+            .execute(&ctx("agent", Some("does-not-exist"), Value::Null))
+            .await
+            .expect_err("missing agent file should fail");
+        assert!(matches!(err, ActivityError::Permanent(_)));
+    }
+
+    /// The full `research-team.yaml` fan-out/join pattern (FUT-001(b)) works through
+    /// the local runner too, not just the server: two `agent` activities with no
+    /// edge between them run (the engine's existing type-agnostic concurrent-batch
+    /// execution), and `synthesize` joins both via `${proResearch.message}`/
+    /// `${conResearch.message}` — proving `PlatformExecutor` resolves `${...}`
+    /// templates for `agent` activities exactly like `ServerExecutor` does.
+    #[tokio::test]
+    async fn research_team_runs_locally_and_joins_two_agents() {
+        let def = Definition::from_file(&format!(
+            "{}/../../examples/workflows/research-team.yaml",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("research-team.yaml should parse");
+
+        let executor = Arc::new(executor(&examples_agents_dir()));
+        let engine = Engine::new(
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryStore::new()),
+            executor,
+        );
+
+        let (outcome, state) = engine
+            .run(
+                &def,
+                "research-team-local-test",
+                json!({"topic": "remote work"}),
+            )
+            .await
+            .expect("workflow should run");
+        assert_eq!(outcome, RunOutcome::Completed, "state: {state:?}");
+
+        // Placeholder-free synthesis output (see the crate-level doc comment on
+        // `PlatformExecutor::execute`'s `${...}` resolution) is the discriminator: an
+        // unresolved reference would still contain the literal `${proResearch.message}`.
+        let synth = &state.activities["synthesize"];
+        let output = synth
+            .output
+            .as_ref()
+            .expect("synthesize should have output");
+        let message = output["message"].as_str().unwrap_or_default();
+        assert!(
+            !message.contains("${"),
+            "synthesize output still contains an unresolved placeholder: {message}"
+        );
     }
 }

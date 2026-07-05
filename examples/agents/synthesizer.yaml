@@ -1,0 +1,8 @@
+apiVersion: agent.apex.io/v1
+kind: Agent
+metadata:
+  name: synthesizer
+spec:
+  model_selector: { capability: chat, class: fast }
+  instructions: |
+    You combine two opposing research findings into one balanced summary.

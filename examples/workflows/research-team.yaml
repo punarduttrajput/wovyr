@@ -9,19 +9,23 @@ spec:
   # results in a `synthesize` activity — "workflow-orchestrated agents"
   # (docs/18-roadmap/future/B1-multi-agent-systems.md §4, direction b).
   #
-  # `agent` activities run *stored* agents; register some first, e.g.:
-  #   POST /api/v1/agents { "manifest": "metadata:\n  name: pro-researcher\n  ...", }
-  #   POST /api/v1/agents { "manifest": "metadata:\n  name: con-researcher\n  ...", }
-  #   POST /api/v1/agents { "manifest": "metadata:\n  name: synthesizer\n  ...", }
-  # This activity type is handled by the apex-server ServerExecutor only — see
-  # examples/workflows/agent-review.yaml for the single-agent case.
+  # Run it two ways:
+  #   - Server: register the three agents first, e.g.
+  #     POST /api/v1/agents { "manifest": "metadata:\n  name: pro-researcher\n  ...", }
+  #     (ditto `con-researcher`, `synthesizer`), then POST /api/v1/workflows.
+  #     Submitting with an `X-Apex-Project` header makes all three draw from that
+  #     project's quota (concurrent_agent_runs / llm_cost_per_day_usd) as one shared
+  #     budget instead of each running unmetered.
+  #   - CLI: `apex workflows run --local -f examples/workflows/research-team.yaml \
+  #       --agents-dir examples/agents --input '{"topic": "remote work"}'`
+  #     resolves each `name` as `examples/agents/<name>.yaml` — see
+  #     `examples/agents/pro-researcher.yaml`/`con-researcher.yaml`/`synthesizer.yaml`.
   #
   # `proResearch` and `conResearch` have no edge between them, so the engine's
   # existing concurrent-batch execution runs them in parallel (no new engine code
   # needed — see apex-workflow/tests/engine.rs::parallel_branches_run_concurrently).
-  # Submitting with an `X-Apex-Project` header makes both draw from that project's
-  # quota (concurrent_agent_runs / llm_cost_per_day_usd) as one shared budget,
-  # instead of each activity running unmetered.
+  # This holds for both executors: see examples/workflows/agent-review.yaml for the
+  # single-agent case.
   activities:
     - id: proResearch
       type: agent

@@ -362,6 +362,13 @@ enum WorkflowsCommand {
         /// Execution id (defaults to `wf-<workflow-name>`). Use to resume/approve.
         #[arg(long)]
         id: Option<String>,
+
+        /// Directory to resolve `agent`-typed activities' `name` against as
+        /// `<agents-dir>/<name>.yaml` (defaults to the current directory). The
+        /// server instead resolves `name` against a *stored* agent id — this is
+        /// the CLI's file-based equivalent for local dev.
+        #[arg(long, default_value = ".")]
+        agents_dir: String,
     },
 
     /// Approve a suspended human task and resume the execution.
@@ -592,7 +599,8 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 input,
                 local,
                 id,
-            } => workflow::run_cmd(&file, &input, local, id).await,
+                agents_dir,
+            } => workflow::run_cmd(&file, &input, local, id, &agents_dir).await,
             WorkflowsCommand::Approve {
                 file,
                 id,

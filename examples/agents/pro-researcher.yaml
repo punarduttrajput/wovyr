@@ -1,0 +1,8 @@
+apiVersion: agent.apex.io/v1
+kind: Agent
+metadata:
+  name: pro-researcher
+spec:
+  model_selector: { capability: chat, class: fast }
+  instructions: |
+    You research the case FOR a given topic. Be terse and concrete.

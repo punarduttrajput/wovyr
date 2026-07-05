@@ -7,12 +7,13 @@ Document ID: FUT-001
 
 **Document ID:** FUT-001
 **File Path:** `docs/18-roadmap/future/B1-multi-agent-systems.md`
-**Version:** 1.1.0
+**Version:** 1.2.0
 **Status:** Exploratory — research bet, not committed. A prototype slice for
-direction (b) now exists in code (`examples/workflows/research-team.yaml` +
-`apex-server`, §8) — it proves the fan-out/join shape and closes the aggregate-
-budget invariant, but does not itself satisfy the graduation gate (no benchmark
-against a single agent). Still pre-ADR.
+direction (b) now exists in code (`examples/workflows/research-team.yaml`,
+runnable via either `apex-server` or the CLI's local runner, §8) — it proves the
+fan-out/join shape and closes the aggregate-budget invariant, but does not
+itself satisfy the graduation gate (no benchmark against a single agent). Still
+pre-ADR.
 **Owner:** Agent Framework Team
 **Last Updated:** 2026-07-05
 
@@ -178,16 +179,31 @@ regardless of type ([`apex-workflow/tests/engine.rs::parallel_branches_run_concu
    quota tests, rather than a timing-based concurrency race against near-instant
    mock LLM calls).
 
+**CLI-local support added (2026-07-05, same day, follow-up).** The CLI's
+`PlatformExecutor` (`apps/apex-cli/src/workflow.rs`) now also handles `agent`
+activities — `workflows run --local` gained an `--agents-dir` flag (default
+`.`); an `agent` activity's `name` resolves to `<agents-dir>/<name>.yaml` on
+disk instead of a stored-agent id (the CLI has no server-side agent store to
+look up). `examples/agents/pro-researcher.yaml`/`con-researcher.yaml`/
+`synthesizer.yaml` were added so `research-team.yaml` runs identically via
+`apex workflows run --local -f examples/workflows/research-team.yaml
+--agents-dir examples/agents --input '{"topic": "..."}'` with no server needed.
+Three new `apps/apex-cli` tests
+(`agent_activity_runs_from_agents_dir`/`agent_activity_fails_for_missing_file`/
+`research_team_runs_locally_and_joins_two_agents`) prove the same fan-out/join/
+templating story holds through the local executor, driving the real `Engine`
+(not just calling `PlatformExecutor::execute` in isolation).
+
 **What it explicitly does not prove** (open problems for the eventual ADR):
 - **No benchmark against a single agent** — [§7](#7-graduation-gate)'s
   graduation gate needs [FUT-006](B6-trust-evaluation.md)'s eval harness pointed
   at this workflow shape; that wiring doesn't exist yet.
 - **Direction (a)** (coordinator-as-agent / a dynamic `spawn_agent` tool) is
   untouched — a materially different, more open-ended mechanism.
-- **No CLI-local support** — `workflows run --local`'s `PlatformExecutor` still
-  has no stored-agent concept to resolve an `agent` activity's `name` against;
-  this bet is provable entirely through the server, which already has the
-  `AgentStore` primitive.
+- **No aggregate quota on the CLI side** — the project-budget enforcement above
+  is server-only; the CLI's local runner has no tenancy/quota concept at all, so
+  a locally-run fan-out has no shared budget (acceptable for single-user local
+  dev, where the primitives it would gate don't exist either).
 - **No dynamic fan-out cap** — breadth is bounded by what the workflow author
   statically declares in the DAG; nothing enforces a depth/breadth ceiling for a
   hypothetical future where workflows could spawn workflows dynamically.
@@ -217,5 +233,6 @@ regardless of type ([`apex-workflow/tests/engine.rs::parallel_branches_run_concu
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-05 | §8: added CLI-local support for `agent` activities (`--agents-dir` on `workflows run --local`), so `research-team.yaml` runs identically without a server. Three new `apps/apex-cli` tests. Updated the "not proven" list accordingly |
 | 1.1.0 | 2026-07-05 | Added §8 Prototype Slice: a coordinator-pattern example workflow (fan-out to two `agent` activities, joined), a fix for `ServerExecutor`'s previously-missing `${...}` template resolution, and aggregate project-quota enforcement across a group's sub-agents. Still pre-ADR — gathers evidence for §7's gate, doesn't satisfy it |
 | 1.0.0 | 2026-07-05 | Initial exploration doc for the multi-agent research bet |
