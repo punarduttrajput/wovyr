@@ -33,6 +33,7 @@ New contributors should follow the [Reading Order](#reading-order) at the bottom
 | Document | Status |
 |----------|--------|
 | [Product Requirements Document](01-product/prd.md) | Available |
+| [Future Directions PRD (Beyond & Completing 1.0)](01-product/prd-future.md) | Available |
 | [System Overview](01-product/system-overview.md) | Available |
 | [Personas](01-product/personas.md) | Available |
 | [User Stories](01-product/user-stories.md) | Available |
@@ -353,7 +354,20 @@ Directional, per-release evolution of the platform.
 | [v0.2 — Memory, Tools & Gateway](18-roadmap/v0.2.md) | Available |
 | [v0.3 — Plugins, Dashboard & Multi-Tenancy](18-roadmap/v0.3.md) | Available |
 | [v1.0 — General Availability](18-roadmap/v1.0.md) | Available |
+| [GA-Completion Work (Tier A) — Index](18-roadmap/v1.0/index.md) | Available |
+| [GA-001 — Scale & Performance Validation](18-roadmap/v1.0/A1-scale-performance.md) | Planned |
+| [GA-002 — Reliability: HA, DR & Deployment](18-roadmap/v1.0/A2-reliability-ha-dr.md) | In progress |
+| [GA-003 — Security: Root-of-Trust, PII & External Validation](18-roadmap/v1.0/A3-security-completion.md) | In progress |
+| [GA-004 — Marketplace Economics & Safety](18-roadmap/v1.0/A4-marketplace-economics.md) | Planned |
+| [GA-005 — SDK Distribution & Migration Guides](18-roadmap/v1.0/A5-sdk-distribution.md) | In progress |
 | [Future — Beyond 1.0](18-roadmap/future.md) | Available |
+| [Future Research Bets (Tier B) — Index](18-roadmap/future/index.md) | Available |
+| [FUT-001 — Autonomous Multi-Agent Systems](18-roadmap/future/B1-multi-agent-systems.md) | Exploratory |
+| [FUT-002 — Self-Optimizing Platform](18-roadmap/future/B2-self-optimizing-platform.md) | Exploratory |
+| [FUT-003 — Advanced Memory](18-roadmap/future/B3-advanced-memory.md) | Exploratory |
+| [FUT-004 — Execution Frontiers](18-roadmap/future/B4-execution-frontiers.md) | Exploratory |
+| [FUT-005 — Ecosystem & Interoperability](18-roadmap/future/B5-ecosystem-interop.md) | Exploratory |
+| [FUT-006 — Trust & Evaluation](18-roadmap/future/B6-trust-evaluation.md) | Exploratory |
 
 ---
 
