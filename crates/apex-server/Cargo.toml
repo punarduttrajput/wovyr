@@ -16,6 +16,13 @@ plugin-wasi = ["apex-plugin/wasi"]
 # the marketplace routes share a durable catalog across server nodes instead of each
 # holding its own `registry.json`. Off by default (pulls the `postgres` crate).
 postgres = ["apex-marketplace/postgres"]
+# Real local-model inference via mistral.rs as the server's gateway backend, selected
+# with `APEX_PROVIDER=mistralrs` (see apex-provider's mistralrs_provider module for the
+# model/env-var configuration this forwards to). Off by default (pulls the heavy
+# mistral.rs inference engine and downloads real GGUF weights on first use); without
+# this feature, `APEX_PROVIDER=mistralrs` logs a warning and falls back to
+# `Gateway::from_env()`.
+mistralrs = ["apex-provider/mistralrs"]
 
 [dependencies]
 apex-common.workspace = true

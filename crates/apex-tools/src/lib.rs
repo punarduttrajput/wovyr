@@ -26,7 +26,7 @@ mod sandbox;
 mod scheduler;
 mod tool;
 
-pub use builtin::{EchoTool, FsReadTool, HttpGetTool, ShellTool};
+pub use builtin::{EchoTool, FsReadTool, HttpGetTool, ImageGenTool, ShellTool};
 pub use egress::EgressProxy;
 pub use pool::{AutoscalePolicy, PooledSandbox, SandboxFactory, SandboxPool};
 pub use registry::ToolRegistry;

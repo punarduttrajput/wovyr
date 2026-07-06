@@ -333,6 +333,14 @@ enum AgentsCommand {
         /// final answer errors with "did not finish within N steps".
         #[arg(long = "max-steps")]
         max_steps: Option<usize>,
+
+        /// Provider backend for a local run (local mode only). `auto` (default)
+        /// mirrors `Gateway::from_env()` — OpenAI if `OPENAI_API_KEY` is set, else the
+        /// deterministic mock. `mistralrs` runs a real local model in-process via
+        /// mistral.rs (needs a `--features mistralrs` build; first use downloads GGUF
+        /// weights — see APEX_MISTRALRS_GGUF_REPO/_GGUF_FILE/_TOK_MODEL_ID).
+        #[arg(long, default_value = "auto")]
+        provider: String,
     },
 }
 
@@ -590,7 +598,13 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 stream,
                 tenant,
                 max_steps,
-            } => run_agent_cmd(&file, &input, local, server, stream, tenant, max_steps).await,
+                provider,
+            } => {
+                run_agent_cmd(
+                    &file, &input, local, server, stream, tenant, max_steps, &provider,
+                )
+                .await
+            }
         },
         Command::Workflows { command } => match command {
             WorkflowsCommand::Validate { file } => workflow::validate_cmd(&file),
@@ -762,15 +776,45 @@ async fn run_agent_cmd(
     stream: bool,
     tenant: Option<String>,
     max_steps: Option<usize>,
+    provider: &str,
 ) -> apex_common::Result<()> {
     // Accept JSON input, or fall back to treating the argument as plain text.
     let input_value: Value =
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
 
     if local {
-        return run_local(file, input_value, stream, tenant, max_steps).await;
+        return run_local(file, input_value, stream, tenant, max_steps, provider).await;
+    }
+    if provider != "auto" {
+        eprintln!("note: --provider is local-only; ignoring for a remote run");
     }
     run_remote(file, input_value, server, stream, max_steps).await
+}
+
+/// Build the gateway a local run uses. `auto` mirrors `Gateway::from_env()`; other
+/// names select an explicit backend (currently only `mistralrs`, gated behind the
+/// `mistralrs` cargo feature since it pulls a heavy inference engine).
+async fn build_local_gateway(provider: &str) -> apex_common::Result<Gateway> {
+    match provider {
+        "auto" => Ok(Gateway::from_env()),
+        "mistralrs" => {
+            #[cfg(feature = "mistralrs")]
+            {
+                let backend = apex_provider::MistralRsProvider::from_env().await?;
+                Ok(Gateway::new(Box::new(backend)))
+            }
+            #[cfg(not(feature = "mistralrs"))]
+            {
+                Err(apex_common::Error::config(
+                    "provider \"mistralrs\" needs a build with --features mistralrs (this \
+                     binary was built without it)",
+                ))
+            }
+        }
+        other => Err(apex_common::Error::config(format!(
+            "unknown provider \"{other}\" (expected \"auto\" or \"mistralrs\")"
+        ))),
+    }
 }
 
 /// Run the agent in-process with the embedded runtime.
@@ -780,10 +824,17 @@ async fn run_local(
     stream: bool,
     tenant: Option<String>,
     max_steps: Option<usize>,
+    provider: &str,
 ) -> apex_common::Result<()> {
     let def = AgentDefinition::from_file(file)?;
-    let gateway = Gateway::from_env();
+    let gateway = build_local_gateway(provider).await?;
     let mut registry = ToolRegistry::with_builtins();
+    // image_generate needs a real, billed API key, so it's only registered when one is
+    // configured — same signal build_local_gateway/Gateway::from_env use to pick a real
+    // vs. mock provider.
+    if std::env::var_os("OPENAI_API_KEY").is_some() {
+        registry.register(std::sync::Arc::new(apex_tools::ImageGenTool::new()));
+    }
     // Make enabled plugins' tool capabilities callable by the agent.
     plugin::engine()?.register_enabled(&mut registry);
     let mut opts = RunOptions::new(input);

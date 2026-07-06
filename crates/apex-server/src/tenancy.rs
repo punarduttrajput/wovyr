@@ -609,9 +609,11 @@ mod tests {
         )
     }
 
-    fn state() -> Arc<AppState> {
+    async fn state() -> Arc<AppState> {
         Arc::new(
-            AppState::from_env().with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new())),
+            AppState::from_env()
+                .await
+                .with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new())),
         )
     }
 
@@ -619,7 +621,7 @@ mod tests {
     async fn rbac_gates_the_tenancy_lifecycle() {
         // SAFETY: single-threaded test; bootstrap a platform admin via env.
         unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
-        let st = state();
+        let st = state().await;
 
         // A non-admin principal cannot create an org (default-deny → 403).
         let (s, _) = req(
@@ -720,9 +722,9 @@ mod tests {
         assert_eq!(q["limits"]["concurrent_agent_runs"], 5);
     }
 
-    #[test]
-    fn quota_tracker_enforces_concurrency() {
-        let st = state();
+    #[tokio::test]
+    async fn quota_tracker_enforces_concurrency() {
+        let st = state().await;
         st.tenancy
             .set_quota(
                 "prj-x",
@@ -750,7 +752,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_endpoint_returns_429_when_quota_exceeded() {
-        let st = state();
+        let st = state().await;
         // A restrictive quota (no concurrent runs allowed) blocks every metered run.
         st.tenancy
             .set_quota(
@@ -798,7 +800,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_org_is_conflict() {
         unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
-        let st = state();
+        let st = state().await;
         let (s, _) = req(
             &st,
             "POST",
@@ -822,7 +824,7 @@ mod tests {
     #[tokio::test]
     async fn project_updates_use_etag_optimistic_concurrency() {
         unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
-        let st = state();
+        let st = state().await;
 
         // Issue a request with optional extra headers, returning (status, ETag, body).
         async fn send(
@@ -943,7 +945,7 @@ mod tests {
     async fn teams_self_serve_the_full_lifecycle_with_enforced_quotas() {
         // SAFETY: single-threaded test; bootstrap the operator as a platform admin.
         unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
-        let st = state();
+        let st = state().await;
 
         // A request as `who`, optionally naming a project (for run quota metering).
         async fn as_user(

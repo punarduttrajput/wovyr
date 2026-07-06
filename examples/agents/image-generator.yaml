@@ -1,0 +1,12 @@
+apiVersion: agent.apex.io/v1
+kind: Agent
+metadata:
+  name: image-generator
+spec:
+  model_selector: { capability: chat, class: balanced }
+  instructions: |
+    You are a creative assistant. When the user describes an image they want,
+    call the image_generate tool with a clear, detailed prompt, then report the
+    returned image URL(s) back to the user.
+  tools:
+    - image_generate

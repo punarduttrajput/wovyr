@@ -446,8 +446,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_app() -> axum::Router {
-        crate::router(Arc::new(AppState::from_env()))
+    async fn test_app() -> axum::Router {
+        crate::router(Arc::new(AppState::from_env().await))
     }
 
     async fn post_json(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
@@ -487,7 +487,7 @@ metadata:\n  name: test-wf\nspec:\n  activities:\n    - id: echo-step\n      typ
     #[tokio::test]
     async fn validate_accepts_valid_yaml() {
         let (st, body) = post_json(
-            test_app(),
+            test_app().await,
             "/api/v1/workflows/validate",
             json!({ "manifest": SIMPLE_YAML }),
         )
@@ -502,7 +502,7 @@ metadata:\n  name: test-wf\nspec:\n  activities:\n    - id: echo-step\n      typ
     #[tokio::test]
     async fn validate_rejects_bad_yaml() {
         let (st, body) = post_json(
-            test_app(),
+            test_app().await,
             "/api/v1/workflows/validate",
             json!({ "manifest": "not: valid: workflow: yaml" }),
         )
@@ -514,7 +514,7 @@ metadata:\n  name: test-wf\nspec:\n  activities:\n    - id: echo-step\n      typ
     #[tokio::test]
     async fn submit_returns_execution_id() {
         let (st, body) = post_json(
-            test_app(),
+            test_app().await,
             "/api/v1/workflows",
             json!({
                 "manifest": SIMPLE_YAML,
@@ -571,7 +571,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
     /// lands in the activity's `ActivityCompleted` event.
     #[tokio::test]
     async fn agent_activity_runs_a_stored_agent() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
 
         let (st, body) = post_json(
             crate::router(state.clone()),
@@ -614,7 +614,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
     /// panicking or hanging.
     #[tokio::test]
     async fn agent_activity_fails_for_unknown_agent() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let (st, body) = post_json(
             crate::router(state.clone()),
             "/api/v1/workflows",
@@ -641,7 +641,7 @@ metadata:\n  name: research-team\nspec:\n  activities:\n    - id: proResearch\n 
 
     #[tokio::test]
     async fn research_team_fans_out_and_joins_two_agents() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let router = crate::router(state.clone());
 
         for name in ["pro-researcher", "con-researcher", "synthesizer"] {
@@ -712,7 +712,7 @@ metadata:\n  name: agent-wf-quota\nspec:\n  activities:\n    - id: greet\n      
 
     #[tokio::test]
     async fn agent_activity_respects_project_quota() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         state
             .tenancy
             .set_quota(

@@ -6,6 +6,11 @@
 //! until the sandbox/permission enforcement lands, since running them unsandboxed
 //! would violate the security model
 //! ([tool framework §31](../../docs/04-agent-framework/tool-framework.md)).
+//!
+//! [`ImageGenTool`] (`image_generate`) is a later addition, deliberately kept out
+//! of [`crate::ToolRegistry::with_builtins`] — it calls a real, billed external API,
+//! unlike the always-free tools above — so a caller registers it explicitly (see its
+//! doc comment) rather than getting it for free in every agent.
 
 use crate::sandbox::{NativeSandbox, ResourceLimits, SandboxBackend, SandboxManager, TrustClass};
 use crate::tool::{Tool, ToolContext, ToolError, ToolMetadata, ToolRequest, ToolResponse};
@@ -190,6 +195,131 @@ impl Tool for HttpGetTool {
             "status": status,
             "truncated": truncated,
             "body": body,
+        })))
+    }
+}
+
+/// Default OpenAI-compatible base URL for image generation. Mirrors
+/// `apex-provider`'s `OpenAiProvider` env-var contract (`OPENAI_API_KEY` +
+/// `APEX_OPENAI_BASE_URL`) without apex-tools taking a dependency on
+/// apex-provider — apex-tools sits below apex-provider in the dependency
+/// spine, so this reads the same two env vars independently.
+const DEFAULT_IMAGE_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// Generate an image from a text prompt via an OpenAI-compatible
+/// `/images/generations` endpoint. Not registered by [`crate::ToolRegistry::with_builtins`]
+/// by default — an agent opts in by listing `image_generate` in its manifest
+/// `tools:` and the registry that constructs it, since (unlike `http_get`) it
+/// needs a real API key and incurs real cost per call.
+pub struct ImageGenTool {
+    client: reqwest::Client,
+}
+
+impl ImageGenTool {
+    /// Construct with a default HTTP client. Reads `OPENAI_API_KEY`/
+    /// `APEX_OPENAI_BASE_URL` per call (in [`Tool::execute`]), not at
+    /// construction, so a missing key fails a single tool call rather than
+    /// registry setup.
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+impl Default for ImageGenTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for ImageGenTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new(
+            "image_generate",
+            "1.0.0",
+            "media",
+            "Generate an image from a text prompt, returning image URLs or base64 data.",
+        )
+        .with_permissions(["net.egress"])
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["prompt"],
+            "properties": {
+                "prompt": { "type": "string", "description": "Text description of the desired image." },
+                "size": { "type": "string", "description": "Image dimensions, e.g. `1024x1024` (default `1024x1024`)." },
+                "n": { "type": "integer", "description": "Number of images to generate (default 1)." }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &ToolContext,
+        request: ToolRequest,
+    ) -> Result<ToolResponse, ToolError> {
+        let prompt = request
+            .parameters
+            .get("prompt")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ToolError::Validation("missing required string field `prompt`".into())
+            })?;
+        let size = request
+            .parameters
+            .get("size")
+            .and_then(Value::as_str)
+            .unwrap_or("1024x1024");
+        let n = request
+            .parameters
+            .get("n")
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
+
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+            ToolError::Validation(
+                "OPENAI_API_KEY is not set; image_generate needs an OpenAI-compatible API key"
+                    .into(),
+            )
+        })?;
+        let base_url = std::env::var("APEX_OPENAI_BASE_URL")
+            .unwrap_or_else(|_| DEFAULT_IMAGE_BASE_URL.to_string());
+        let base_url = base_url.trim_end_matches('/');
+
+        let resp = self
+            .client
+            .post(format!("{base_url}/images/generations"))
+            .bearer_auth(&api_key)
+            .json(&json!({ "prompt": prompt, "size": size, "n": n }))
+            .send()
+            .await
+            .map_err(|e| ToolError::Network(format!("image generation request failed: {e}")))?;
+
+        let status = resp.status();
+        let body: Value = resp.json().await.map_err(|e| {
+            ToolError::Network(format!("reading image generation response failed: {e}"))
+        })?;
+
+        if !status.is_success() {
+            let message = body
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(ToolError::Network(format!(
+                "image generation failed ({status}): {message}"
+            )));
+        }
+
+        let images = body.get("data").cloned().unwrap_or(Value::Array(vec![]));
+
+        Ok(ToolResponse::success(json!({
+            "prompt": prompt,
+            "images": images,
         })))
     }
 }
@@ -432,6 +562,17 @@ mod tests {
         let ctx = ToolContext::default();
         let err = t
             .execute(&ctx, ToolRequest::new(json!({"url": "ftp://example.com"})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn image_generate_missing_prompt_is_validation_error() {
+        let t = ImageGenTool::new();
+        let ctx = ToolContext::default();
+        let err = t
+            .execute(&ctx, ToolRequest::new(json!({})))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Validation(_)));

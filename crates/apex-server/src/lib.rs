@@ -166,13 +166,15 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build state from the environment (provider chosen by `OPENAI_API_KEY`).
-    pub fn from_env() -> Self {
+    /// Build state from the environment (provider chosen by `OPENAI_API_KEY`, or
+    /// `APEX_PROVIDER=mistralrs` to run every agent/workflow on this node against a
+    /// real local model — see [`default_gateway`]).
+    pub async fn from_env() -> Self {
         // Export metrics to OTLP when built with `--features otlp` and the endpoint is
         // set; otherwise an in-process-only registry (see `Metrics::with_otlp_export`).
         let metrics = Metrics::with_otlp_export("apex");
         // Cost events from the gateway become LLM token/cost/savings metrics.
-        let gateway = Arc::new(Gateway::from_env().with_cost_observer(Arc::new(
+        let gateway = Arc::new(default_gateway().await.with_cost_observer(Arc::new(
             MetricsCostObserver {
                 metrics: metrics.clone(),
             },
@@ -183,6 +185,12 @@ impl AppState {
         let kms = default_kms();
         let secrets = default_secrets_vault(kms.clone());
         let mut registry = ToolRegistry::with_builtins();
+        // image_generate needs a real, billed API key, so it's only registered when one
+        // is configured — same signal default_gateway() uses to pick a real vs. mock
+        // provider.
+        if std::env::var_os("OPENAI_API_KEY").is_some() {
+            registry.register(std::sync::Arc::new(apex_tools::ImageGenTool::new()));
+        }
         // Register enabled plugin tools from the durable catalog into the run registry,
         // routed through a secret-aware runtime (when built with `plugin-wasi`), so agent
         // and workflow runs can invoke them with their tenant-scoped secrets injected.
@@ -317,6 +325,43 @@ impl AppState {
             None => tenant == tenancy::DEFAULT_TENANT,
         }
     }
+}
+
+/// The server's chat/embeddings backend. `Gateway::from_env()` (OpenAI if
+/// `OPENAI_API_KEY` is set, else the deterministic mock) unless the operator opts into
+/// a real local model with `APEX_PROVIDER=mistralrs` — in which case every agent and
+/// workflow run on this node goes through it, no per-run choice. Requires this crate's
+/// `mistralrs` cargo feature; without it (or if the model fails to load — e.g. no
+/// network for the first-run GGUF download), falls back to `Gateway::from_env()` with a
+/// loud warning rather than failing server startup outright.
+async fn default_gateway() -> Gateway {
+    let wants_mistralrs = std::env::var("APEX_PROVIDER")
+        .map(|v| v.eq_ignore_ascii_case("mistralrs"))
+        .unwrap_or(false);
+    if !wants_mistralrs {
+        return Gateway::from_env();
+    }
+    #[cfg(feature = "mistralrs")]
+    {
+        match apex_provider::MistralRsProvider::from_env().await {
+            Ok(provider) => return Gateway::new(Box::new(provider)),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "APEX_PROVIDER=mistralrs requested but the model failed to load; \
+                     falling back to Gateway::from_env()"
+                );
+            }
+        }
+    }
+    #[cfg(not(feature = "mistralrs"))]
+    {
+        tracing::warn!(
+            "APEX_PROVIDER=mistralrs requested but this apex-server build lacks the \
+             mistralrs feature; falling back to Gateway::from_env()"
+        );
+    }
+    Gateway::from_env()
 }
 
 /// A durable [`FileTenancyStore`] at `~/.apex/tenancy` (shared with the CLI), falling
@@ -588,7 +633,7 @@ async fn metrics_handler(headers: HeaderMap, State(state): State<Arc<AppState>>)
 
 /// Bind to `addr` and serve until the process is stopped.
 pub async fn serve(addr: SocketAddr) -> apex_common::Result<()> {
-    let state = Arc::new(AppState::from_env());
+    let state = Arc::new(AppState::from_env().await);
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "apex server listening");
@@ -1206,13 +1251,13 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt; // for `oneshot`
 
-    fn test_app() -> Router {
-        router(Arc::new(AppState::from_env()))
+    async fn test_app() -> Router {
+        router(Arc::new(AppState::from_env().await))
     }
 
     #[tokio::test]
     async fn healthz_ok() {
-        let app = test_app();
+        let app = test_app().await;
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1238,7 +1283,7 @@ mod tests {
         )
         .unwrap();
         engine.run(&def, "demo-1", json!({})).await.unwrap();
-        router(Arc::new(AppState::from_env().with_workflows(engine)))
+        router(Arc::new(AppState::from_env().await.with_workflows(engine)))
     }
 
     #[tokio::test]
@@ -1310,7 +1355,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_returns_agent_output() {
-        let app = test_app();
+        let app = test_app().await;
         let body = json!({
             "manifest": "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
             "input": { "message": "ping" }
@@ -1342,7 +1387,7 @@ mod tests {
     /// model turn, so it must fail instead of silently running with the default budget.
     #[tokio::test]
     async fn max_steps_override_is_honored() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let manifest = "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n";
 
         let (st, body) = req(
@@ -1378,7 +1423,7 @@ mod tests {
     /// resolves the definition server-side rather than trusting a request field.
     #[tokio::test]
     async fn agent_level_max_steps_is_a_default_not_a_floor() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let manifest =
             "metadata:\n  name: zero-budget\nspec:\n  instructions: Be friendly.\n  max_steps: 0\n";
 
@@ -1432,7 +1477,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_endpoint_reflects_a_run() {
         // Share one state across two routers so the run's metrics are visible.
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let body = json!({
             "manifest": "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
             "input": { "message": "ping" }
@@ -1474,7 +1519,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_endpoint_serves_openmetrics_when_accepted() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let resp = router(state)
             .oneshot(
                 Request::builder()
@@ -1506,7 +1551,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_manifest_is_400() {
-        let app = test_app();
+        let app = test_app().await;
         let body = json!({ "manifest": "kind: Workflow\nmetadata:\n  name: x\nspec:\n  instructions: hi\n" }).to_string();
         let resp = app
             .oneshot(
@@ -1605,7 +1650,7 @@ mod tests {
         tenancy
             .add_membership(member("bob", Role::OrgAdmin, &org_b.id))
             .unwrap();
-        let state = Arc::new(AppState::from_env().with_tenancy(tenancy));
+        let state = Arc::new(AppState::from_env().await.with_tenancy(tenancy));
 
         let manifest = "metadata:\n  name: secret-agent\nspec:\n  instructions: Be terse.\n";
 
@@ -1740,7 +1785,7 @@ mod tests {
         };
         tenancy.add_membership(member("alice", &org_a.id)).unwrap();
         tenancy.add_membership(member("bob", &org_b.id)).unwrap();
-        let state = Arc::new(AppState::from_env().with_tenancy(tenancy));
+        let state = Arc::new(AppState::from_env().await.with_tenancy(tenancy));
 
         let manifest = "metadata:\n  name: iso-wf\nspec:\n  activities:\n    - id: echo-step\n      type: function\n      name: echo\n      inputs:\n        message: hi\n";
         let exec_id = "wf-iso-acme-1";
@@ -1883,7 +1928,7 @@ mod tests {
         let store: Arc<dyn apex_memory::MemoryStore> = Arc::new(InMemoryStore::new());
         let engine = MemoryEngine::new(Gateway::from_env(), store.clone());
         let state = Arc::new(
-            AppState::from_env()
+            AppState::from_env().await
                 .with_tenancy(tenancy)
                 .with_memory(engine, store),
         );
@@ -2030,7 +2075,7 @@ mod tests {
             .add_membership(m("bob", Role::OrgAdmin, &org_b.id))
             .unwrap();
         let state = Arc::new(
-            AppState::from_env()
+            AppState::from_env().await
                 .with_tenancy(tenancy)
                 .with_secrets(Vault::new(Arc::new(InMemorySecretStore::new()))),
         );
@@ -2151,7 +2196,7 @@ mod tests {
         tenancy.add_membership(m("alice", &org_a.id)).unwrap();
         tenancy.add_membership(m("bob", &org_b.id)).unwrap();
         let state = Arc::new(
-            AppState::from_env()
+            AppState::from_env().await
                 .with_tenancy(tenancy)
                 .with_secrets(Vault::new(Arc::new(InMemorySecretStore::new())))
                 .with_audit(AuditLog::in_memory()),
@@ -2234,7 +2279,7 @@ mod tests {
         tenancy.add_membership(m("edna", Role::Editor)).unwrap();
         tenancy.add_membership(m("alice", Role::OrgAdmin)).unwrap();
         let state = Arc::new(
-            AppState::from_env()
+            AppState::from_env().await
                 .with_tenancy(tenancy)
                 .with_kms(test_kms()),
         );
@@ -2333,7 +2378,7 @@ mod tests {
         tenancy.add_membership(m("alice", &org_a.id)).unwrap();
         tenancy.add_membership(m("bob", &org_b.id)).unwrap();
         let state = Arc::new(
-            AppState::from_env()
+            AppState::from_env().await
                 .with_tenancy(tenancy)
                 .with_kms(test_kms())
                 .with_audit(AuditLog::in_memory()),
@@ -2401,7 +2446,7 @@ mod tests {
     /// this back-compat mode.
     #[tokio::test]
     async fn known_gap_anonymous_default_tenant_caller_reaches_kms_admin_with_no_grant() {
-        let state = Arc::new(AppState::from_env().with_kms(test_kms()));
+        let state = Arc::new(AppState::from_env().await.with_kms(test_kms()));
 
         // No `X-Apex-Principal` header, default tenant — the anonymous
         // back-compat path, not a configured role. Rotate first so the
@@ -2454,7 +2499,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_endpoint_lists_builtins_with_descriptions() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
         let tools = body["tools"].as_array().unwrap();
@@ -2470,7 +2515,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_persistence_lifecycle() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let manifest = "metadata:\n  name: persisted\nspec:\n  instructions: Be friendly.\n";
 
         // Create → returns the agent id.
@@ -2526,7 +2571,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_endpoint_emits_sse_event_frames() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let resp = router(state)
             .oneshot(
                 Request::builder()
@@ -2572,7 +2617,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_agent_rejects_invalid_manifest() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let (st, body) = req(
             &state,
             "POST",
@@ -2611,7 +2656,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_id_is_generated_and_honored() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         // Generated when absent.
         let resp = raw(&state, "GET", "/healthz", &[], Value::Null).await;
         assert!(resp.headers().get("x-request-id").is_some());
@@ -2629,7 +2674,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_envelope_carries_request_id() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let resp = raw(&state, "GET", "/api/v1/agents/missing", &[], Value::Null).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
@@ -2644,7 +2689,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_is_idempotent_per_key() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         let body = json!({
             "manifest": "metadata:\n  name: idem\nspec:\n  instructions: Hi.\n",
             "input": { "message": "hi" }
@@ -2674,7 +2719,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_list_is_cursor_paginated() {
-        let state = Arc::new(AppState::from_env());
+        let state = Arc::new(AppState::from_env().await);
         for name in ["alpha", "bravo", "charlie"] {
             let m = format!("metadata:\n  name: {name}\nspec:\n  instructions: hi\n");
             req(&state, "POST", "/api/v1/agents", json!({ "manifest": m })).await;

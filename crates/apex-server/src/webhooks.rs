@@ -345,6 +345,7 @@ mod tests {
         });
         let state = Arc::new(
             AppState::from_env()
+                .await
                 .with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new()))
                 .with_webhooks(store)
                 .with_webhook_sender(sender.clone())
@@ -408,6 +409,7 @@ mod tests {
         });
         let state = Arc::new(
             AppState::from_env()
+                .await
                 .with_webhooks(Arc::new(store))
                 .with_webhook_sender(sender.clone())
                 .with_webhook_policy(fast_policy()),
