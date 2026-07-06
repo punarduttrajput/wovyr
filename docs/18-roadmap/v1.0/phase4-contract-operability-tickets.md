@@ -1,0 +1,471 @@
+<!--
+File: docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md
+Document ID: RM-GA-P4
+-->
+
+# Phase 4 — Contract & Operability: Implementation Tickets
+
+**Document ID:** RM-GA-P4
+**File Path:** `docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md`
+**Version:** 1.0.0
+**Status:** Ready for grooming
+**Owner:** Engineering (API / Platform)
+**Last Updated:** 2026-07-06
+
+---
+
+# Purpose
+
+Phase 4 of [PRD-003 §10](../../01-product/prd-ga-hardening.md) — **contract &
+operability**. Freezes a consistent, contract-tested API *before* the published SDKs
+acquire users, gives an on-call operator a real observability story, and clears the
+remaining codebase-health debt that makes the platform expensive to change.
+
+Covers **WS-7** (API contract stabilization), **WS-8** (observability & operability),
+and the **WS-9 remainder** (executor unification, the latent CLI panic, config
+consolidation, and cleanup — the CI-matrix piece of WS-9 shipped as Phase-2 CI-901).
+
+**The trap this phase exists to avoid** (PRD-003 §10): contract debt becomes
+*permanent breaking-change* debt the day the first external consumer depends on the
+current shapes. The Python SDK is already on PyPI, so WS-7 is time-sensitive even
+though its tickets are P1, not P0.
+
+Ticket format matches [RM-GA-P1](phase1-security-floor-tickets.md) through
+[RM-GA-P3](phase3-scale-distribution-tickets.md).
+
+---
+
+# Sequencing at a glance
+
+```
+WS-7 (freeze first — every day of delay hardens SDK debt)
+  API-701 (list envelopes) ─┐
+  API-702 (casing policy)   ├─> API-704 (CI contract gate — locks the frozen shape)
+  API-703 (idempotency all) ─┘
+  API-705 (deprecation headers) ─ independent
+
+WS-8
+  OBS-801 (metrics middleware)  ─ independent
+  OBS-802 (request-id correlation) ─ independent
+  OBS-803 (alert rules + dashboards) ─ independent
+  OBS-804 (audit coverage)      ─ independent
+  OBS-805 (dashboard login/CORS/build) ── depends on SEC-101, SEC-204 (Phase 1)
+
+WS-9 remainder
+  HLTH-901 (unify executors) ─ independent (high value: silent behavioral divergence)
+  HLTH-902 (fix CLI panic)   ─ independent (benefits from CI-901 to detect)
+  HLTH-903 (apex-config crate) ─ independent
+  HLTH-904 (cleanup: gateway leak, deps, module splits) ─ independent
+```
+
+**Order WS-7 first.** API-701/702/703 are the breaking pass; API-704 then locks it in
+CI so it can't silently re-diverge. WS-8 and WS-9 parallelize freely.
+
+---
+
+# WS-7 — API Contract Stabilization
+
+## API-701 `[P1]` — Standardize all list endpoints on the cursor-pagination envelope
+
+**Problem.** Six route groups use the standard `{data, has_more, next_cursor,
+total_estimate}` envelope (agents, workflows, orgs, projects, webhooks, memory-records),
+but six use ad-hoc shapes: audit `{entries, total}` (`crates/apex-server/src/audit.rs`),
+plugins `{plugins, total}` (`plugins.rs`), marketplace `{listings, total}`
+(`marketplace.rs`), secrets `{secrets, total}` (`secrets.rs`), tools `{tools, total}`
+(`tools.rs`), and memory query `{results, count}` (`memory.rs:240`). Every inconsistency
+already shipped in the PyPI SDK becomes a breaking change to fix later. (PRD-003 R-7.1;
+closes PP-16 contract portion.)
+
+**Change.**
+- Migrate the six ad-hoc endpoints to the shared `hardening::paginate()` envelope
+  (`{data, has_more, next_cursor, total_estimate}`), adding real cursor pagination
+  where they currently return an unbounded list.
+- Memory `:query` returns ranked results, not a page — keep a `{data, ...}` shape but
+  document it as a non-paginated result set explicitly, so it's consistent in field
+  naming even if not cursor-paged.
+- Update `openapi.yaml` and both SDKs in lockstep.
+
+**Acceptance criteria.**
+- All list endpoints return `data`/`has_more`/`next_cursor`; a schema check confirms no
+  endpoint uses `entries`/`plugins`/`secrets`/`results`/`count` as the top-level array
+  key.
+- The TS + Python SDK integration suites pass against the new shapes.
+
+**Files.** `crates/apex-server/src/{audit,plugins,marketplace,secrets,tools,memory}.rs`;
+`docs/09-api/openapi.yaml`; `sdks/typescript`, `sdks/python`. **Size.** M. **Depends
+on:** none. **Blocks:** API-704.
+
+---
+
+## API-702 `[P1]` — One serde casing policy across all wire enums
+
+**Problem.** Three serialization idioms coexist. Workflow execution `status` serializes
+PascalCase (`"Completed"`) while the `?status=` filter takes lowercase (the known wart,
+`crates/apex-server/src/lib.rs:1101-1115`); workflow event `type`s are PascalCase
+(`"ActivityCompleted"`, relied on in tests at `workflow_runner.rs:603`); memory `type`
+is a lowercased `Debug`; plugin state is a hand-written lowercase string
+(`plugins.rs:272`). A client can't predict the casing of any given enum. (PRD-003 R-7.2;
+closes PP-16 casing portion.)
+
+**Change.**
+- Apply `#[serde(rename_all = "snake_case")]` (chosen policy) to every wire-serialized
+  enum, and delete hand-written string conversions. Reconcile the workflow status
+  filter and body to one casing.
+- This is a **breaking** change to the workflow status/event and plugin-state fields —
+  do it now, in the same pre-GA pass as API-701, and bump the SDK versions together.
+
+**Acceptance criteria.**
+- Every enum on the wire is `snake_case`; the status filter and status field match.
+- A test asserts round-trip stability for each wire enum; SDK suites pass.
+
+**Files.** `crates/apex-workflow/src/` (status/event enums), `crates/apex-server/src/`
+(memory/plugin serialization), `openapi.yaml`, both SDKs. **Size.** M. **Depends on:**
+none. **Blocks:** API-704.
+
+---
+
+## API-703 `[P1]` — Extend `Idempotency-Key` to all mutating routes
+
+**Problem.** `Idempotency-Key` is honored on `agents:run` only, not on
+`agents/{id}/run`, workflow submit, or any other mutation
+(`docs/09-api/openapi.yaml:31-35`). A client retry of an unacknowledged POST can
+double-execute. (PRD-003 R-7.3; closes PP-16 idempotency portion.)
+
+**Change.**
+- Route every mutating handler through the idempotency middleware/helper
+  (`crates/apex-server/src/hardening.rs`), keyed by `(tenant, method, path,
+  Idempotency-Key)`. Reuse the Phase-2 bounded/persistent store (SEC-205 + DUR-404).
+- Document which routes are idempotent-by-key in `openapi.yaml`.
+
+**Acceptance criteria.**
+- A replayed mutation with the same key returns the cached response and does not
+  re-execute; a soak test confirms no double-execution across all mutating routes.
+
+**Files.** `crates/apex-server/src/hardening.rs` (apply broadly), each mutating
+route module; `openapi.yaml`. **Size.** M. **Depends on:** Phase-2 SEC-205, DUR-404
+(bounded/persistent store). 
+
+---
+
+## API-704 `[P1]` — CI contract gate: SDK integration suites + `redocly lint`
+
+**Problem.** `openapi.yaml` is hand-synced ("kept in sync manually until a codegen
+pipeline exists", `openapi.yaml:8-10`); `.github/workflows/ci.yml` has no `redocly`/
+`npm`/`sdk`/`openapi` step. The redocly lint and the TS/Python SDK integration suites
+run only manually against a live `apex dev`. Nothing prevents a handler change from
+silently diverging from the spec the PyPI SDK was written against. (PRD-003 R-7.4;
+closes PP-18.)
+
+**Change.**
+- Add a CI job that boots `apex dev`, runs `redocly lint openapi.yaml`, then runs the
+  TypeScript and Python SDK integration suites against it, as a required gate on every
+  PR.
+- Fold this into the Phase-2 CI-901 service-container job or add a sibling job.
+
+**Acceptance criteria.**
+- A PR that changes a handler's response shape without updating `openapi.yaml`/the SDKs
+  fails CI.
+- The contract gate is green on `main` after API-701/702/703 land.
+
+**Files.** `.github/workflows/ci.yml`; `sdks/typescript`, `sdks/python` (test entry
+points). **Size.** M. **Depends on:** API-701, API-702, API-703 (freeze before
+locking).
+
+---
+
+## API-705 `[P2]` — Emit `Deprecation`/`Sunset` headers from a route-metadata table
+
+**Problem.** `docs/09-api/deprecation-policy.md` (90-day window, `Deprecation`/`Sunset`
+headers) is prose with nothing enforcing it; `hardening.rs` emits no such headers.
+(PRD-003 R-7.5; closes PP-18 deprecation portion.)
+
+**Change.**
+- Add a route-metadata table marking deprecated routes with a sunset date; a middleware
+  emits `Deprecation: true` and `Sunset: <http-date>` for those routes, making the
+  policy mechanically enforceable.
+
+**Acceptance criteria.**
+- A route flagged deprecated returns the headers; a test asserts the window is ≥90 days
+  from the deprecation date.
+
+**Files.** `crates/apex-server/src/hardening.rs`; a route-metadata module. **Size.** S.
+**Depends on:** none.
+
+---
+
+# WS-8 — Observability & Operability
+
+## OBS-801 `[P1]` — RED metrics for all routes via one middleware layer
+
+**Problem.** `apex_api_requests_total`/`apex_api_request_duration_seconds` are recorded
+in exactly two handlers — `run_handler` (`crates/apex-server/src/lib.rs:694-702`) and
+`run_stored_handler` (`lib.rs:987-998`) — despite CLAUDE.md claiming "per route".
+Workflows, memory, marketplace, tenancy, secrets, plugins, webhooks emit **no** request
+metrics, so an on-call operator is blind to a marketplace 502 storm or a memory-query
+latency regression. (PRD-003 R-8.1; closes PP-19 metrics portion.)
+
+**Change.**
+- Replace the two per-handler metric calls with one metrics middleware layer (beside
+  `hardening::request_id`) labeling by route template + status, covering every route.
+
+**Acceptance criteria.**
+- `/metrics` shows request count/latency/error series for every route group; a test
+  hits several routes and asserts the series appear with correct labels.
+
+**Files.** `crates/apex-server/src/lib.rs` (layer + remove per-handler calls),
+`crates/apex-telemetry` (if a helper is needed). **Size.** M. **Depends on:** none.
+
+---
+
+## OBS-802 `[P2]` — Correlate the request id into logs, traces, and audit
+
+**Problem.** The request id (`crates/apex-server/src/hardening.rs:152-197`) is stamped on
+the response header and error body only — never onto a `tracing` span or log line, so
+server logs/OTLP traces can't be joined to a client-reported `X-Request-Id`.
+`AuditEvent` has a `request_id` field (`crates/apex-audit/src/event.rs:78`) but no call
+site ever sets it (`with_request_id`: zero references). (PRD-003 R-8.2; closes PP-19
+correlation portion.)
+
+**Change.**
+- Record the request id onto the handler's `tracing` span
+  (`tracing::Span::current().record(...)`) so it appears in logs and OTLP traces.
+- Set `AuditEvent.request_id` via `with_request_id` in the audit call sites.
+
+**Acceptance criteria.**
+- A request with a given `X-Request-Id` produces log lines / trace spans carrying it,
+  and (for audited actions) an audit entry with that id.
+
+**Files.** `crates/apex-server/src/hardening.rs`, audit call sites (`kms.rs`,
+`secrets.rs`, + OBS-804's new ones). **Size.** S. **Depends on:** none (pairs with
+OBS-804).
+
+---
+
+## OBS-803 `[P2]` — Ship starter Prometheus alert rules and a Grafana dashboard
+
+**Problem.** `docs/14-observability/alerting.md` and `dashboards.md` are Draft specs
+(SLOs, burn-rate alerts, a dashboard catalog); `deployment/` contains zero Prometheus
+rules or Grafana JSON. The on-call story (page on what? visualize how?) is unbuilt.
+(PRD-003 R-8.3; closes PP-19 alerting portion.)
+
+**Change.**
+- Add a starter `deployment/observability/` with a Prometheus alert-rule file (error
+  rate, latency SLO burn, health) built on the OBS-801 metrics, and a Grafana dashboard
+  JSON (RED per route, LLM cost/tokens from the existing `apex_llm_*` series).
+
+**Acceptance criteria.**
+- The alert rules validate (`promtool check rules`); the dashboard imports cleanly and
+  references series that actually exist post-OBS-801.
+
+**Files.** `deployment/observability/` (new). **Size.** S. **Depends on:** OBS-801
+(series must exist).
+
+---
+
+## OBS-804 `[P2]` — Audit coverage for every state-changing handler
+
+**Problem.** `audit::record` is invoked only from `kms.rs` and `secrets.rs`. **Not
+audited:** agent runs, plugin install/enable/disable/uninstall, all tenancy mutations
+(org/project/member/quota), marketplace publish/download/abuse-resolution, and webhook
+subscription changes. The tamper-evident log can't answer "who ran what / who changed
+permissions / who installed which plugin" — insufficient for GA forensics/compliance.
+(PRD-003 R-8.4; closes PP-audit.)
+
+**Change.**
+- Add `audit::record` (referencing resources by id, actor = the verified principal from
+  Phase-1 SEC-101) to every state-changing handler: agent run, plugin lifecycle,
+  tenancy mutations, marketplace publish/moderation, webhook create/delete.
+
+**Acceptance criteria.**
+- Each privileged mutation appears in `GET /api/v1/audit` with actor, action, resource
+  id, and outcome; a test walks a representative mutation per module and asserts the
+  entry.
+
+**Files.** `crates/apex-server/src/{lib,plugins,tenancy,marketplace,webhooks}.rs`.
+**Size.** M. **Depends on:** Phase-1 SEC-101 (verified actor). *(Pairs with OBS-802.)*
+
+---
+
+## OBS-805 `[P2]` — Dashboard: real login/session, CORS, and a build artifact
+
+**Problem.** `dashboard/src/app/core/tenant.config.ts:12-13` hardcodes
+`TENANT = 'acme'` / `PRINCIPAL = 'admin@apex.local'` as compile-time constants sent as
+headers; there is no login flow (BFF deferred). No CORS layer exists in `apex-server`,
+so the SPA only works behind Angular's dev proxy or same-origin. No deployment artifact
+includes the dashboard (Docker/compose/Helm reference only the `apex` binary). Bonus
+staleness: `dashboard/README.md` claims "the server exposes no workflow-authoring routes
+yet" — false since `workflow_runner.rs` shipped. (PRD-003 R-8.5; closes PP-11-dashboard.)
+
+**Change.**
+- Replace the hardcoded constants with a login/session flow that obtains a real
+  credential from the Phase-1 SEC-101 auth layer and sends it (not a spoofable header).
+- Rely on the Phase-1 SEC-204 CORS layer for cross-origin operation; add a dashboard
+  build stage to the Docker image (or serve the built SPA from `apex-server`).
+- Fix the stale `dashboard/README.md`.
+
+**Acceptance criteria.**
+- The dashboard logs in with a real credential and works cross-origin against a
+  CORS-configured server; a built image serves it; the README is accurate.
+
+**Files.** `dashboard/src/app/core/`, `dashboard/` build config, `deployment/docker/`,
+`dashboard/README.md`. **Size.** L. **Depends on:** Phase-1 SEC-101, SEC-204.
+
+---
+
+# WS-9 remainder — Codebase Health
+
+## HLTH-901 `[P1]` — Unify the three `ActivityExecutor` implementations
+
+**Problem.** Three impls with **real semantic drift** make identical workflow YAML
+behave differently locally vs. on the server: CLI `PlatformExecutor`
+(`apps/apex-cli/src/workflow.rs:27-153`), server `ServerExecutor`
+(`crates/apex-server/src/workflow_runner.rs:62-185`), and `EvalWorkflowExecutor`
+(`crates/apex-eval/src/compare.rs:128-165`). CLI maps Network/Internal tool errors →
+`Retryable` while the server maps **all** tool errors → `Permanent` (so a transient
+HTTP failure retries locally but permanently fails the same workflow on the server);
+`ai` activities resolve the model differently; `function`/`human` dispatch differs.
+Template resolution was already unified (`resolve_template`); dispatch was not. (PRD-003
+R-9.2; closes PP-16 executor portion.)
+
+**Change.**
+- Extract one `PlatformActivityExecutor` parameterized over an `AgentResolver` trait
+  (agents-dir file lookup for the CLI, stored-agent-by-id for the server, in-memory map
+  for eval). Delete the three divergent dispatch bodies.
+- Reconcile the retry classification and model resolution to one behavior.
+
+**Acceptance criteria.**
+- A shared test asserts the same workflow + activity errors produce identical retry/
+  terminal behavior across CLI and server executors.
+- All three call sites use the unified executor; the eval comparison still runs.
+
+**Files.** a new shared module (likely in `apex-workflow` or a small `apex-runtime`
+crate), `apps/apex-cli/src/workflow.rs`, `crates/apex-server/src/workflow_runner.rs`,
+`crates/apex-eval/src/compare.rs`. **Size.** L. **Depends on:** none.
+
+---
+
+## HLTH-902 `[P1]` — Fix the latent CLI marketplace `spawn_blocking` panic
+
+**Problem.** `apps/apex-cli/src/main.rs` is `#[tokio::main]`; its async `run()` calls
+`plugin::publish_cmd`/`search_cmd`/`report_abuse_cmd` directly, which reach
+`open_store()`/`marketplace_registry()` (`apps/apex-cli/src/plugin.rs:654-676`) and call
+the **sync** `PostgresRegistryStore::connect` with no `spawn_blocking`. This is the
+identical "Cannot start a runtime from within a runtime" panic the server already found
+and fixed with `with_registry` (`crates/apex-server/src/marketplace.rs:99-125`); the CLI
+path never got the fix, and CLAUDE.md advertises this exact config. Undetectable until
+Phase-2 CI-901 exercises the `postgres` feature. (PRD-003 R-9.3; closes PP-17 panic
+portion.)
+
+**Change.**
+- Wrap the CLI's registry operations in `spawn_blocking` (or run those subcommands
+  before entering the Tokio runtime, since they're synchronous by nature).
+
+**Acceptance criteria.**
+- `apex plugin publish|search|get|report` against a Postgres-backed registry
+  (`--features postgres`, `APEX_MARKETPLACE_POSTGRES_URL` set) succeeds — no panic. A
+  test in the CI-901 postgres job covers it.
+
+**Files.** `apps/apex-cli/src/plugin.rs`, `main.rs`. **Size.** S. **Depends on:**
+Phase-2 CI-901 (to detect/guard).
+
+---
+
+## HLTH-903 `[P2]` — Extract an `apex-config` crate for `~/.apex` layout and env selection
+
+**Problem.** The `~/.apex` bootstrap layer is duplicated wholesale between CLI and
+server — `load_trust`/`load_keyless`/`load_catalog`/`save_catalog`/`open_store`/registry
+construction all exist twice with near-identical bodies (`crates/apex-server/src/plugins.rs`
++ `marketplace.rs` vs. `apps/apex-cli/src/plugin.rs`). Cross-process agreement on which
+secrets file / registry backend / KMS root is live is maintained **by prose**, not
+shared code; one drifted edit silently forks the shared state. ~28 scattered `env::var`
+sites, no central config module. (PRD-003 R-9.4; closes PP-20 config portion.)
+
+**Change.**
+- Create an `apex-config` (or `apex-host`) crate owning the `~/.apex` directory layout,
+  all `APEX_*` env-var reading, and backend selection (which store, which file,
+  encrypted-or-not). Both binaries consume it, so agreement is enforced by code.
+
+**Acceptance criteria.**
+- CLI and server resolve every shared path/backend through the one crate; a test asserts
+  they agree on the live secrets file and registry backend under the same env.
+
+**Files.** new `crates/apex-config/`; `crates/apex-server/src/`, `apps/apex-cli/src/`
+(consume it). **Size.** M. **Depends on:** none. *(Reduces risk for Phase-2 DUR-403's
+shared-state work — ideally sequenced before or with it.)*
+
+---
+
+## HLTH-904 `[P2]` — Cleanup: gateway boundary leak, workspace deps, module splits
+
+**Problem.** Grab-bag of hygiene debt: the `image_generate` builtin
+(`crates/apex-tools/src/builtin.rs:283-300`) calls OpenAI directly, bypassing the
+gateway (no cost metering/retry/failover/cache) and the secrets vault; shared externals
+(`sha2`×5, `semver`×4, `ring`×3) aren't in `[workspace.dependencies]`, so versions can
+drift; `tokio = "full"` everywhere inflates compile time; `Cargo.lock` carries multiple
+versions of several crates; and god modules (`crates/apex-server/src/lib.rs` 2,745 LOC,
+`crates/apex-tools/src/sandbox.rs` 1,890 LOC) never got the module split the other route
+groups/backends have. (PRD-003 R-9.5; closes PP-20/PP-21.)
+
+**Change.**
+- Route `image_generate` through the `Gateway` + secrets vault (inject them, as
+  apex-memory does for embeddings).
+- Move shared external deps into `[workspace.dependencies]`; trim `tokio` features per
+  crate; add `cargo-deny` (bans/duplicates/licenses) to the security CI job.
+- Split `lib.rs` (agents routes → `agents.rs`, state/config factories → `state.rs`/
+  `config.rs`) and `sandbox.rs` (one file per backend under a `sandbox/` module).
+
+**Acceptance criteria.**
+- `image_generate` invocations show up in gateway cost metrics; `cargo-deny` passes in
+  CI; no source file over ~1,000 LOC in the two named crates; build unaffected.
+
+**Files.** `crates/apex-tools/src/builtin.rs`, workspace `Cargo.toml`, per-crate
+`Cargo.toml`, `.github/workflows/ci.yml`, `crates/apex-server/src/lib.rs`,
+`crates/apex-tools/src/sandbox.rs`. **Size.** M–L (splits are mechanical but broad).
+**Depends on:** none.
+
+---
+
+# Rollup
+
+| Ticket | WS | Title | Size | Priority | Depends on |
+|--------|----|-------|------|----------|------------|
+| API-701 | 7 | Standardize list envelopes | M | P1 | — |
+| API-702 | 7 | One serde casing policy | M | P1 | — |
+| API-703 | 7 | Idempotency on all mutations | M | P1 | SEC-205, DUR-404 |
+| API-704 | 7 | CI contract gate (SDK + redocly) | M | P1 | 701,702,703 |
+| API-705 | 7 | Deprecation/Sunset headers | S | P2 | — |
+| OBS-801 | 8 | RED metrics middleware (all routes) | M | P1 | — |
+| OBS-802 | 8 | Request-id correlation | S | P2 | — |
+| OBS-803 | 8 | Alert rules + Grafana dashboard | S | P2 | OBS-801 |
+| OBS-804 | 8 | Audit coverage (all mutations) | M | P2 | SEC-101 |
+| OBS-805 | 8 | Dashboard login/CORS/build | L | P2 | SEC-101, SEC-204 |
+| HLTH-901 | 9 | Unify ActivityExecutors | L | P1 | — |
+| HLTH-902 | 9 | Fix CLI spawn_blocking panic | S | P1 | CI-901 |
+| HLTH-903 | 9 | `apex-config` crate | M | P2 | — |
+| HLTH-904 | 9 | Cleanup: gateway leak, deps, splits | M–L | P2 | — |
+
+**Rough total:** 3 L + 7 M + 4 S ≈ 9–12 engineer-weeks, parallelizable to ~4–5 calendar
+weeks across 2–3 engineers. **Phase-4 exit** = PRD-003 §11 items 5 (API consistent +
+contract-tested; privileged mutations audited and observable) and 6 (executor unified;
+no known latent panic ships — the CI matrix piece landed in Phase 2).
+
+**Cross-phase note:** WS-7 should start as early as the team can spare it (even
+overlapping Phase 2/3), because the SDK-debt clock is already running. WS-8/WS-9 are
+genuinely last — they harden and clean up, but nothing depends on them.
+
+---
+
+# Related
+
+- [PRD-003](../../01-product/prd-ga-hardening.md) — parent PRD (WS-7/8/9, §10 phasing)
+- [RM-GA-P1](phase1-security-floor-tickets.md) · [RM-GA-P2](phase2-durability-execution-tickets.md) · [RM-GA-P3](phase3-scale-distribution-tickets.md)
+- [`09-api/openapi.yaml`](../../09-api/openapi.yaml) · [`09-api/deprecation-policy.md`](../../09-api/deprecation-policy.md)
+- [`14-observability/alerting.md`](../../14-observability/alerting.md) · [`14-observability/dashboards.md`](../../14-observability/dashboards.md)
+
+---
+
+# Revision History
+
+| Version | Date | Description |
+|---------|------|-------------|
+| 1.0.0 | 2026-07-06 | Initial Phase-4 (contract & operability) ticket breakdown: 14 tickets across WS-7 (API freeze), WS-8 (observability/audit/dashboard), and the WS-9 remainder (executor unification, CLI-panic fix, config crate, cleanup), with dependencies, acceptance criteria, file targets, and sizing |

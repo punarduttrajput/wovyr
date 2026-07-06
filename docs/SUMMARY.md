@@ -34,6 +34,7 @@ New contributors should follow the [Reading Order](#reading-order) at the bottom
 |----------|--------|
 | [Product Requirements Document](01-product/prd.md) | Available |
 | [Future Directions PRD (Beyond & Completing 1.0)](01-product/prd-future.md) | Available |
+| [GA Hardening PRD (Closing the Deployed-vs-Designed Gap)](01-product/prd-ga-hardening.md) | Available |
 | [System Overview](01-product/system-overview.md) | Available |
 | [Personas](01-product/personas.md) | Available |
 | [User Stories](01-product/user-stories.md) | Available |

@@ -51,6 +51,7 @@ Status is one of: `Proposed`, `Accepted`, `Superseded by ADR-XXXX`, `Deprecated`
 | [ADR-0007](ADR-0007-plugin-system.md) | Plugin-first extensibility | Accepted |
 | [ADR-0008](ADR-0008-subworkflows.md) | Child workflows as activities (not inline expansion) | Accepted |
 | [ADR-0009](ADR-0009-keyless-signing.md) | Apex-native keyless signing (Sigstore-shaped, offline-verifiable) | Accepted |
+| [ADR-0010](ADR-0010-ga-deployment-topology.md) | GA as single-node appliance (Path A); distributed platform (Path B) as v1.1 follow-on | Accepted |
 
 ---
 
