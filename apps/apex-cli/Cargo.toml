@@ -63,3 +63,7 @@ async-trait.workspace = true
 ring = "0.17"
 # The running platform-API version the engine checks plugin compatibility against.
 semver = "1"
+# Backup-manifest content digests for `apex admin backup|restore` (RM-GA-P2 DR-1001) —
+# same versions already used by apex-plugin/apex-kms elsewhere in the workspace.
+sha2 = "0.10"
+hex = "0.4"

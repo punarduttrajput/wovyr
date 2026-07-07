@@ -206,11 +206,13 @@ dependencies = [
  "apex-workflow",
  "async-trait",
  "clap",
+ "hex",
  "reqwest 0.12.28",
  "ring",
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
 ]
 
