@@ -11,6 +11,7 @@ description = "Envelope-encryption key management: a root key wraps versioned te
 apex-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 # AEAD (AES-256-GCM) + secure randomness — already in the dep graph via apex-plugin's
 # ed25519 signing, so this adds no new supply-chain surface.
 ring = "0.17"

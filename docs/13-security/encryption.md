@@ -159,6 +159,35 @@ field coverage beyond the three §4 consumers, and an actual *external* pen
 test / formal audit. See `crates/apex-kms/src/lib.rs` and
 `crates/apex-server/src/kms.rs`.
 
+**Root-key escrow is a mandatory production install step (RM-GA-P2 DR-1002).**
+Every secret and every sensitive memory record the platform ever seals is
+protected, directly or transitively, by this one root key. If the host that
+generated it is lost with no escrowed copy, that data is **permanently and
+unrecoverably gone** — the same irreversibility `destroy_tenant_key`'s
+crypto-shredding has, but by accident instead of by design. Production
+deployments **must** set `APEX_KMS_ROOT_KEY` (a 32-byte key, hex-encoded)
+from a key sourced and stored durably outside the appliance host itself — a
+secrets manager, an HSM export, a sealed escrow document held by operations —
+*before* the platform is ever started against real data. `root::from_file`'s
+generate-on-first-use `~/.apex/kms/root.key` is a **dev/local convenience
+only**: it now logs a loud warning the moment it generates a fresh key,
+telling the operator to escrow the file it just wrote, because nothing else
+ever will. The escrow story is proven end to end, not just documented:
+`crates/apex-kms/tests/root_key_escrow_restore.rs` seals a record under one
+`LocalKms` instance, exports its root key as the same hex string an operator
+would escrow, copies the tenant-key catalog directory the same way `apex
+admin backup`/`restore` ([DR-1001](../18-roadmap/v1.0/phase2-durability-execution-tickets.md))
+copies `~/.apex/kms`, discards the original instance entirely, then shows a
+completely fresh instance — built only from the escrowed key (round-tripped
+through `root::from_env`, the exact function a restored deployment calls) and
+the restored catalog — decrypts the sealed data; a companion test confirms
+restoring with any other root key fails closed instead of silently
+"working." DR-1001's `apex admin backup` already covers escrowing the
+tenant-key *catalog* (`~/.apex/kms`) as part of a full `~/.apex` snapshot —
+the root key itself is the one piece of state that must be escrowed
+*separately*, since it is never written to a file at all in the recommended
+`APEX_KMS_ROOT_KEY` production mode.
+
 ---
 
 # 6. Secrets vs. Data

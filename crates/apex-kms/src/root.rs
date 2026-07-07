@@ -5,6 +5,20 @@
 //! stand-in, so this module's job is just to get 32 bytes from somewhere
 //! reasonable for that stand-in — an env var, or a generate-once file —
 //! never to *be* the KMS itself.
+//!
+//! **Root-key escrow is a mandatory production install step (RM-GA-P2 DR-1002).**
+//! Every secret and every sensitive memory record in the platform is sealed,
+//! directly or transitively, under this one key; if the host that generated it
+//! is lost with no escrowed copy, that data is permanently and
+//! unrecoverably gone — there is no recovery path, by design (this is the same
+//! property that makes `LocalKms::destroy_tenant_key` an irreversible
+//! crypto-shred). [`from_env`] (`APEX_KMS_ROOT_KEY`, hex-encoded) is the
+//! supported production mode precisely because it forces the operator to have
+//! sourced the key from somewhere durable (a secrets manager, an HSM export, a
+//! sealed escrow document) *before* the platform ever starts. [`from_file`]'s
+//! generate-on-first-use behavior is a dev/local convenience only — it logs a
+//! loud warning the moment it generates a fresh key, telling the operator to
+//! escrow the file it just wrote, because nothing else ever will.
 
 use crate::crypto::{KeyBytes, generate_key};
 use apex_common::{Error, Result};
@@ -18,7 +32,10 @@ pub fn from_env(var: &str) -> Result<KeyBytes> {
 
 /// Load the root key from `path`, generating and persisting a fresh one on
 /// first use (mode `0600` on Unix). Convenient for local/dev; a production
-/// deployment should prefer [`from_env`] (or, later, a real KMS-backed root).
+/// deployment should prefer [`from_env`] (or, later, a real KMS-backed root) —
+/// generating a fresh key here logs a loud warning, since this file is now the
+/// *only* copy of the key that protects every secret/memory this process ever
+/// seals, and nothing escrows it automatically.
 pub fn from_file(path: impl AsRef<Path>) -> Result<KeyBytes> {
     let path = path.as_ref();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -42,6 +59,15 @@ pub fn from_file(path: impl AsRef<Path>) -> Result<KeyBytes> {
     apex_common::fs::atomic_write(path, hex::encode(key))
         .map_err(|e| Error::config(format!("write root key file: {e}")))?;
     restrict_permissions(path)?;
+    tracing::warn!(
+        path = %path.display(),
+        "generated a new KMS root key — this is the ONLY copy of the key that protects \
+         every secret and sensitive memory record this process will ever seal; if this \
+         host is lost without an escrowed copy of this file, that data is PERMANENTLY \
+         UNRECOVERABLE. Escrow it now (a secrets manager, an HSM, a sealed document) and \
+         set APEX_KMS_ROOT_KEY from the escrowed copy for production use instead of \
+         relying on this generate-on-first-use file (RM-GA-P2 DR-1002)."
+    );
     Ok(key)
 }
 
