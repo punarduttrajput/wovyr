@@ -7,10 +7,12 @@ Document ID: RM-GA-P2
 
 **Document ID:** RM-GA-P2
 **File Path:** `docs/18-roadmap/v1.0/phase2-durability-execution-tickets.md`
-**Version:** 1.0.0
-**Status:** Ready for grooming
+**Version:** 1.1.0
+**Status:** Done — all 12 tickets shipped (CI-901, DUR-401/402/403/404/405,
+EXE-601/602/603/604, DR-1001/1002/1003). See `CLAUDE.md` for the implemented
+behavior each ticket produced and the tests proving it.
 **Owner:** Engineering (Platform / Workflow)
-**Last Updated:** 2026-07-06
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -456,4 +458,5 @@ Postgres/Redis and lease-based reclaim respectively — additive, not throwaway.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-07 | All tickets shipped. Marked Done in the header; see `CLAUDE.md`'s per-crate bullets (apex-common, apex-workflow, apex-kms, apex-audit, apex-server, apps/apex-cli) and [backup-and-restore.md](../../12-deployment/backup-and-restore.md) for what each ticket actually produced |
 | 1.0.0 | 2026-07-06 | Initial Phase-2 (durability & execution) ticket breakdown: 13 tickets across WS-4/6/9/10 with dependencies, acceptance criteria, file targets, and sizing |

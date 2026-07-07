@@ -214,7 +214,9 @@ it cannot be recovered from an `~/.apex` backup alone. Escrow the exact value
 set in `APEX_KMS_ROOT_KEY` (a secrets manager, an HSM export, a sealed
 document) before this stack ever touches real data — see
 [encryption.md §5](../13-security/encryption.md#5-key-management) for the
-full escrow rationale and a proven restore test.
+full escrow rationale and a proven restore test. See
+[backup-and-restore.md](backup-and-restore.md) for the recommended backup
+cadence and the RPO/RTO targets a real timed drill validated (DR-1003).
 
 ---
 
@@ -223,6 +225,7 @@ full escrow rationale and a proven restore test.
 - [`12-deployment/docker.md`](docker.md)
 - [`12-deployment/kubernetes.md`](kubernetes.md)
 - [`12-deployment/index.md`](index.md)
+- [`12-deployment/backup-and-restore.md`](backup-and-restore.md)
 
 ---
 
