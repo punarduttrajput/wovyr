@@ -649,7 +649,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
         for _ in 0..100 {
             let (st, body) =
                 post_json_state_get(state, &format!("/api/v1/workflows/{execution_id}")).await;
-            if st == StatusCode::OK && body["execution"]["activities"][activity_id] == "Waiting" {
+            if st == StatusCode::OK && body["execution"]["activities"][activity_id] == "waiting" {
                 return body;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -662,9 +662,19 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
     /// change. Success reports `Cancelled` with a trailing `WorkflowCancelled`
     /// event and the pending activity `Skipped`; a second cancel is `409`, and an
     /// unknown execution is `404`.
+    ///
+    /// Uses `isolated_state()` rather than the shared `~/.apex/workflows`
+    /// `AppState::from_env()`: this fixed execution id has been reused by this
+    /// test across many sessions, and its real on-disk event log now mixes
+    /// pre-API-702 (PascalCase) and post-API-702 (snake_case) `WorkflowEvent`
+    /// JSON — the event log is append-only and is never rewritten by `start()`,
+    /// only the checkpoint is. A real deployment upgrading past this change hits
+    /// the identical incompatibility; there is no migration for it (see the
+    /// `WorkflowEvent` doc comment) — but a test has no excuse to depend on
+    /// pre-existing disk state at all.
     #[tokio::test]
     async fn cancel_route_really_cancels_a_suspended_execution() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         let router = crate::router(state.clone());
 
         let (st, body) = post_json(
@@ -676,7 +686,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
         assert_eq!(st, StatusCode::OK, "{body}");
 
         let detail = wait_for_activity_waiting(&state, "cancel-route-test", "hold").await;
-        assert_eq!(detail["execution"]["status"], "Running");
+        assert_eq!(detail["execution"]["status"], "running");
         assert_eq!(detail["execution"]["waiting_on"], json!(["hold"]));
 
         let resp = router
@@ -697,14 +707,14 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
 
         let (st, detail) = post_json_state_get(&state, "/api/v1/workflows/cancel-route-test").await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(detail["execution"]["status"], "Cancelled");
-        assert_eq!(detail["execution"]["activities"]["hold"], "Skipped");
+        assert_eq!(detail["execution"]["status"], "cancelled");
+        assert_eq!(detail["execution"]["activities"]["hold"], "skipped");
         assert!(
             detail["events"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|e| e["type"] == "WorkflowCancelled"),
+                .any(|e| e["type"] == "workflow_cancelled"),
             "expected a WorkflowCancelled event: {detail}"
         );
 
@@ -766,7 +776,7 @@ metadata:\n  name: exe601-timer\nspec:\n  activities:\n    - {id: wait_a, type: 
         // must land comfortably within the retry budget below (10s).
         let detail = wait_for_terminal(&state, "exe601-timer-test").await;
         assert_eq!(
-            detail["execution"]["status"], "Completed",
+            detail["execution"]["status"], "completed",
             "the durable timer must fire and let the workflow complete on its own: {detail}"
         );
 
@@ -875,9 +885,17 @@ metadata:\n  name: dur405-signal-wait\nspec:\n  activities:\n    - {id: hold, ty
     /// pinned definition (persisted by `submit_handler`, EXE-601) instead of
     /// requiring the client to re-upload the workflow YAML on every call — the
     /// request body carries only the event name.
+    ///
+    /// Uses `isolated_state()` for the same reason
+    /// `cancel_route_really_cancels_a_suspended_execution` does — a fixed
+    /// execution id's real on-disk event log can predate API-702's `snake_case`
+    /// `WorkflowEvent` change. `save_definition`/`definition_resolver` (what this
+    /// test actually exercises) read/write the real `~/.apex/workflows/
+    /// definitions` directory regardless of which checkpoint/event store the
+    /// engine uses, so `isolated_state()` doesn't weaken this test's coverage.
     #[tokio::test]
     async fn signal_succeeds_with_only_execution_id_and_event_when_manifest_is_omitted() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         let router = crate::router(state.clone());
 
         let (st, body) = post_json(
@@ -899,17 +917,18 @@ metadata:\n  name: dur405-signal-wait\nspec:\n  activities:\n    - {id: hold, ty
         assert_eq!(body["status"], "signalled");
 
         let detail = wait_for_terminal(&state, "dur405-signal-test").await;
-        assert_eq!(detail["execution"]["status"], "Completed", "{detail}");
+        assert_eq!(detail["execution"]["status"], "completed", "{detail}");
     }
 
     const DUR405_APPROVE_YAML: &str = "\
 metadata:\n  name: dur405-approve-wait\nspec:\n  activities:\n    - {id: review, type: wait, inputs: {event: review}}\n";
 
     /// Same acceptance for `/approve`: internally a signal keyed by activity id
-    /// ([`approve_handler`]), so it resolves the definition the same way.
+    /// ([`approve_handler`]), so it resolves the definition the same way. Uses
+    /// `isolated_state()` — see the comment on the `signal` version above.
     #[tokio::test]
     async fn approve_succeeds_with_only_execution_id_when_manifest_is_omitted() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         let router = crate::router(state.clone());
 
         let (st, body) = post_json(
@@ -931,15 +950,16 @@ metadata:\n  name: dur405-approve-wait\nspec:\n  activities:\n    - {id: review,
         assert_eq!(body["status"], "approved");
 
         let detail = wait_for_terminal(&state, "dur405-approve-test").await;
-        assert_eq!(detail["execution"]["status"], "Completed", "{detail}");
+        assert_eq!(detail["execution"]["status"], "completed", "{detail}");
     }
 
     /// A re-uploaded manifest that has drifted from the pinned definition is still
     /// rejected fail-closed (G7). DUR-405 makes `manifest` optional; it doesn't
-    /// weaken the drift guard for a caller that still supplies one.
+    /// weaken the drift guard for a caller that still supplies one. Uses
+    /// `isolated_state()` — see the comment on the `signal` success test above.
     #[tokio::test]
     async fn signal_rejects_a_drifted_re_uploaded_manifest() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         let router = crate::router(state.clone());
 
         let (st, body) = post_json(
@@ -1010,9 +1030,9 @@ metadata:\n  name: human-approval-wf\nspec:\n  activities:\n    - {id: review, t
                 post_json_state_get(state, &format!("/api/v1/workflows/{execution_id}")).await;
             if st == StatusCode::OK
                 && body["events"].as_array().is_some_and(|events| {
-                    events
-                        .iter()
-                        .any(|e| e["type"] == "WorkflowInterrupted" && e["activity"] == activity_id)
+                    events.iter().any(|e| {
+                        e["type"] == "workflow_interrupted" && e["activity"] == activity_id
+                    })
                 })
             {
                 return body;
@@ -1062,7 +1082,7 @@ metadata:\n  name: human-approval-wf\nspec:\n  activities:\n    - {id: review, t
 
         let detail = wait_for_terminal(&state, "human-approve-test").await;
         assert_eq!(
-            detail["execution"]["status"], "Completed",
+            detail["execution"]["status"], "completed",
             "the approval decision must be consumed, not discarded: {detail}"
         );
     }
@@ -1080,7 +1100,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
                 post_json_state_get(state, &format!("/api/v1/workflows/{execution_id}")).await;
             if st == StatusCode::OK {
                 let status = body["execution"]["status"].as_str().unwrap_or("");
-                if !matches!(status, "Created" | "Scheduled" | "Running" | "Resumed") {
+                if !matches!(status, "created" | "scheduled" | "running" | "resumed") {
                     return body;
                 }
             }
@@ -1131,7 +1151,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
 
         let detail = wait_for_terminal(&state, "agent-wf-test").await;
         assert_eq!(
-            detail["execution"]["status"], "Completed",
+            detail["execution"]["status"], "completed",
             "execution did not complete: {detail}"
         );
 
@@ -1139,7 +1159,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
             .as_array()
             .unwrap()
             .iter()
-            .find(|e| e["type"] == "ActivityCompleted" && e["id"] == "greet")
+            .find(|e| e["type"] == "activity_completed" && e["id"] == "greet")
             .unwrap_or_else(|| panic!("no ActivityCompleted event for `greet`: {detail}"));
         let message = completed["output"]["message"].as_str().unwrap_or("");
         assert!(
@@ -1164,7 +1184,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
 
         let detail = wait_for_terminal(&state, "agent-wf-missing").await;
         assert_eq!(
-            detail["execution"]["status"], "Failed",
+            detail["execution"]["status"], "failed",
             "execution should fail when the referenced agent doesn't exist: {detail}"
         );
     }
@@ -1207,7 +1227,7 @@ metadata:\n  name: research-team\nspec:\n  activities:\n    - id: proResearch\n 
 
         let detail = wait_for_terminal(&state, "research-team-test").await;
         assert_eq!(
-            detail["execution"]["status"], "Completed",
+            detail["execution"]["status"], "completed",
             "execution did not complete: {detail}"
         );
 
@@ -1215,7 +1235,7 @@ metadata:\n  name: research-team\nspec:\n  activities:\n    - id: proResearch\n 
         let output_of = |activity_id: &str| -> String {
             events
                 .iter()
-                .find(|e| e["type"] == "ActivityCompleted" && e["id"] == activity_id)
+                .find(|e| e["type"] == "activity_completed" && e["id"] == activity_id)
                 .unwrap_or_else(|| {
                     panic!("no ActivityCompleted event for `{activity_id}`: {detail}")
                 })["output"]["message"]
@@ -1282,14 +1302,14 @@ metadata:\n  name: agent-wf-quota\nspec:\n  activities:\n    - id: greet\n      
 
         let detail = wait_for_terminal(&state, "agent-wf-quota-test").await;
         assert_eq!(
-            detail["execution"]["status"], "Failed",
+            detail["execution"]["status"], "failed",
             "execution should fail when the project's agent-run quota is exhausted: {detail}"
         );
 
         let events = detail["events"].as_array().unwrap();
         let failure = events
             .iter()
-            .find(|e| e["type"] == "ActivityFailed" && e["id"] == "greet")
+            .find(|e| e["type"] == "activity_failed" && e["id"] == "greet")
             .unwrap_or_else(|| panic!("no ActivityFailed event for `greet`: {detail}"));
         let error = failure["error"].as_str().unwrap_or_default();
         assert!(

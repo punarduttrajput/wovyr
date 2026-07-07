@@ -886,6 +886,23 @@ mod tests {
     use super::*;
     use crate::verify::testing::{generate_keypair, sign};
 
+    /// RM-GA-P4 API-702: `PluginState` round-trips through JSON as
+    /// `snake_case` — `apex-server`'s `GET /api/v1/plugins` response used to
+    /// re-derive this same string by hand via a match arm instead of relying
+    /// on this derive at all.
+    #[test]
+    fn plugin_state_round_trips_as_snake_case_json() {
+        for (state, wire) in [
+            (PluginState::Enabled, "\"enabled\""),
+            (PluginState::Disabled, "\"disabled\""),
+        ] {
+            let json = serde_json::to_string(&state).unwrap();
+            assert_eq!(json, wire, "{state:?} must serialize to {wire}");
+            let back: PluginState = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, state, "{wire} must deserialize back to {state:?}");
+        }
+    }
+
     const MANIFEST: &str = r#"
 apiVersion: plugin.apex.io/v1
 kind: Plugin

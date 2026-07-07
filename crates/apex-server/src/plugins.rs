@@ -7,7 +7,7 @@
 
 use apex_plugin::{
     CapabilityKind, CapabilityRuntime, InstalledPlugin, NotLoadedRuntime, Package, PluginEngine,
-    PluginState, TrustStore,
+    TrustStore,
 };
 use apex_tools::ToolRegistry;
 use axum::{
@@ -295,7 +295,9 @@ fn plugin_json(p: &InstalledPlugin) -> Value {
         "version": p.manifest.metadata.version,
         "publisher": p.manifest.metadata.publisher,
         "description": p.manifest.metadata.description,
-        "state": match p.state { PluginState::Enabled => "enabled", PluginState::Disabled => "disabled" },
+        // `PluginState` already derives a `snake_case` Serialize — this used to
+        // re-derive the same two strings by hand (RM-GA-P4 API-702).
+        "state": p.state,
         "permissions": p.manifest.permissions,
         "granted": p.granted_permissions,
         "capabilities": caps,
@@ -496,7 +498,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_plugin::PluginManifest;
+    use apex_plugin::{PluginManifest, PluginState};
     use apex_secrets::{InMemorySecretStore, Vault};
 
     fn vault() -> Vault {

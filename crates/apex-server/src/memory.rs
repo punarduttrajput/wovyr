@@ -78,7 +78,11 @@ fn record_json(r: &MemoryRecord) -> Value {
         "id": r.id,
         "namespace": r.namespace,
         "content": r.content,
-        "type": format!("{:?}", r.memory_type).to_lowercase(),
+        // `MemoryType` derives its own `snake_case` Serialize (RM-GA-P4 API-702) —
+        // this used to re-derive the same string by hand via `{:?}` (Debug) +
+        // `to_lowercase()`, which only coincidentally matched serde's output and
+        // would have silently diverged for any future multi-word variant.
+        "type": r.memory_type,
         "importance": r.importance,
         "tags": r.tags,
         "required_scopes": r.required_scopes,
@@ -228,7 +232,9 @@ async fn query(
                 "id": s.record.id,
                 "namespace": s.record.namespace,
                 "content": s.record.content,
-                "type": format!("{:?}", s.record.memory_type).to_lowercase(),
+                // See `record_json`'s comment — `snake_case` via serde, not a
+                // hand-rolled Debug/lowercase hack (RM-GA-P4 API-702).
+                "type": s.record.memory_type,
                 "importance": s.record.importance,
                 "tags": s.record.tags,
                 "score": s.score,
