@@ -17,6 +17,12 @@
 #   - FUT-006's eval regression gate (docs/18-roadmap/future/B6-trust-evaluation.md
 #     §8.3): apex-eval's deterministic fixture-based suites, run with --nocapture so
 #     pass rates are visible in the log.
+# RM-GA-P2 CI-901 adds the feature matrix (`feature-matrix` below): the `rust` job
+# only ever compiles default features, so feature-gated code was never linted and
+# every capability-gated integration test skipped silently forever. `feature-matrix`
+# clippy-checks each feature in isolation via cargo-hack, and
+# `services-integration` runs the Postgres/Qdrant/Redis-gated tests against real
+# service containers — failing if any of them *skips* instead of running.
 name: ci
 
 on:
@@ -75,6 +81,119 @@ jobs:
         run: |
           cargo test -p apex-eval --test regression_detection -- --nocapture
           cargo test -p apex-eval --test multi_agent_vs_single_agent -- --nocapture
+
+  # RM-GA-P2 CI-901 (first half): compile + lint every feature-gated code path.
+  # `cargo hack clippy --each-feature` runs clippy once per crate per feature (plus
+  # the no-feature baseline), so a warning inside a `#[cfg(feature = ...)]` module
+  # breaks CI exactly like one in default-feature code — closing the gap where ~20
+  # feature flags across 11 crates were never linted despite the -D warnings policy.
+  # `mistralrs` is the one exclusion: it pulls the full mistral.rs inference engine,
+  # a multi-tens-of-minutes compile that would dominate the whole pipeline — the
+  # same cost/benefit call that keeps its runtime tests out of CI (see the eval-gate
+  # comment above). It remains compilable locally via
+  #   cargo clippy -p apex-provider --features mistralrs
+  feature-matrix:
+    name: feature matrix (clippy each feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy each feature (deny warnings)
+        run: >
+          cargo hack clippy --workspace --each-feature
+          --exclude-features mistralrs --all-targets -- -D warnings
+
+  # RM-GA-P2 CI-901 (second half): actually run the capability-gated integration
+  # tests that skip silently when their backend is absent. Postgres, Qdrant, and
+  # Redis run as service containers; the env vars below are exactly what each test
+  # gates on. Every test file logs `skipping: ...` when it can't reach its backend,
+  # so the wrapper greps the output and fails on a skip — a test that silently
+  # skipped would otherwise read as green coverage.
+  services-integration:
+    name: service-container integration (Postgres/Qdrant/Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: apex
+          POSTGRES_PASSWORD: apex
+          POSTGRES_DB: apex
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U apex"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      qdrant:
+        # No --health-cmd: the qdrant image ships no curl/wget/nc to probe itself
+        # with; readiness is checked from the runner in the wait step below.
+        image: qdrant/qdrant:latest
+        ports: ["6333:6333"]
+    env:
+      APEX_WORKFLOW_POSTGRES_URL: postgres://apex:apex@localhost:5432/apex
+      APEX_MARKETPLACE_POSTGRES_URL: postgres://apex:apex@localhost:5432/apex
+      APEX_MEMORY_POSTGRES_URL: postgres://apex:apex@localhost:5432/apex
+      APEX_MEMORY_QDRANT_URL: http://localhost:6333
+      APEX_QDRANT_URL: http://localhost:6333
+      APEX_REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Wait for Qdrant
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:6333/readyz && exit 0
+            sleep 2
+          done
+          echo "qdrant never became ready" >&2
+          exit 1
+
+      # Each invocation is wrapped so a `skipping:` line (the tests' capability-gate
+      # convention) fails the job: in this job the backends are guaranteed present,
+      # so a skip means the wiring regressed, not that the environment is offline.
+      - name: Run capability-gated integration tests
+        run: |
+          set -euo pipefail
+          run_gated() {
+            local out
+            out=$(mktemp)
+            "$@" -- --nocapture 2>&1 | tee "$out"
+            if grep -q "skipping:" "$out"; then
+              echo "::error::a capability-gated test skipped despite services being up" >&2
+              exit 1
+            fi
+          }
+          run_gated cargo test -p apex-workflow --features postgres --test postgres_store
+          run_gated cargo test -p apex-marketplace --features postgres --test postgres_store
+          run_gated cargo test -p apex-memory --features tiered --test tiered_backend
+          run_gated cargo test -p apex-provider --features qdrant --test semantic_cache_qdrant
+          run_gated cargo test -p apex-provider --features redis --test redis_breaker
 
   security:
     name: dependency + secret scanning
