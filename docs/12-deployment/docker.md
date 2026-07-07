@@ -7,10 +7,18 @@ Document ID: DEP-001
 
 **Document ID:** DEP-001  
 **File Path:** `docs/12-deployment/docker.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — describes the **long-term, aspirational** per-service
+image split (`apex/api-gateway`, `apex/agent-runtime`, …), a gRPC port, and
+NATS/object-storage config. **Not built** — the platform today is one binary
+(`apex`) built from one Dockerfile
+([`deployment/docker/Dockerfile`](../../deployment/docker/Dockerfile), which
+does build in CI and takes an optional `FEATURES` build arg), with no gRPC
+surface and no NATS dependency anywhere in this workspace. For what actually
+builds and runs, see [`docker-compose.md`](docker-compose.md) §10 and
+[`deployment/docker-compose.yml`](../../deployment/docker-compose.yml).
 **Owner:** Platform Operations Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -147,4 +155,5 @@ Tune from observed [metrics](../14-observability/index.md) (planned).
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-07 | RM-GA-P3 DOC-A2: marked the per-service image split, gRPC port, and NATS/object-storage config as long-term aspirational and not built — the platform is one binary with no gRPC surface and no NATS dependency; pointed to `docker-compose.md`/`deployment/docker/Dockerfile` for what actually ships |
 | 1.0.0 | 2026-06-27 | Initial Docker deployment guide |

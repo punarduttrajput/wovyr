@@ -15,8 +15,7 @@ Apex is a next-generation AI Agent Operating System designed for building, deplo
 Unlike traditional AI frameworks that focus only on LLM orchestration, Apex provides a complete runtime platform featuring:
 
 - AI Agent Runtime
-- Workflow Engine
-- Distributed Scheduler
+- Durable Workflow Engine
 - Tool Execution Engine
 - Memory Engine
 - Plugin Framework
@@ -24,6 +23,16 @@ Unlike traditional AI frameworks that focus only on LLM orchestration, Apex prov
 - Visual Workflow Studio
 - Enterprise Security
 - Cloud Native Deployment
+
+> **GA ships as a single-node appliance** ([ADR-0010](docs/17-adr/ADR-0010-ga-deployment-topology.md),
+> ratified Path A): one `apex` binary, file-backed durable state by default,
+> with Postgres/Qdrant as optional backends for specific subsystems (below).
+> A distributed, multi-replica scheduler (shared queue/leases across
+> instances) exists as tested library code but is **not wired into the
+> shipping binary** — it's a v1.1 "Scale-Out" milestone, not a current
+> capability. See
+> [docs/18-roadmap/v1.0.md](docs/18-roadmap/v1.0.md) for what's shipped vs.
+> deferred, workstream by workstream.
 
 Apex is designed from the ground up using Rust to provide high performance, memory safety, and scalability.
 
@@ -83,77 +92,62 @@ The project aims to provide:
                       │
                Angular Dashboard
                       │
-                REST / gRPC API
+                   REST API
                       │
       ┌─────────────────────────────────┐
-      │         Agent Runtime           │
+      │   apex-server (one binary)      │
       ├─────────────────────────────────┤
-      │ Planner                         │
-      │ Executor                        │
-      │ Reasoner                        │
-      │ Reflection                      │
-      │ Tool Calling                    │
-      │ Memory                          │
-      └─────────────────────────────────┘
-                      │
-      ┌─────────────────────────────────┐
-      │      Workflow Engine            │
-      ├─────────────────────────────────┤
-      │ Scheduler                       │
-      │ Runtime                         │
-      │ DAG                             │
-      │ Checkpoint                      │
-      │ Retry                           │
+      │ Agent Runtime (planner/executor/│
+      │   tool-calling/memory loop)     │
+      │ Workflow Engine (DAG, state     │
+      │   machine, checkpoint, retry)   │
       └─────────────────────────────────┘
                       │
 ─────────────────────────────────────────────
- PostgreSQL
- Redis
- Qdrant
- Object Storage
- NATS
+ ~/.apex (local files) — the default, always-available durable store
+ PostgreSQL — optional: marketplace registry (shipped); memory (CLI-only);
+              workflow store exists as library code, not wired into the server
+ Qdrant     — optional: memory vector index (CLI-only)
 
 ---
 
 # Repository Structure
 
+The actual Cargo workspace layout ([ADR-0001](docs/17-adr/ADR-0001-project-structure.md)):
+shared logic lives in `crates/`, thin binaries in `apps/`.
+
+```
 apex/
+  apps/
+    apex-cli/            # the `apex` binary: login, dev server, agents/workflows/
+                          # memory/kms/plugin/admin commands
+  crates/
+    apex-common/         # Error/Result, Usage, atomic_write/FileLock
+    apex-provider/       # LLM gateway: chat/streaming/embeddings, resilience
+    apex-agent/          # agent manifest + the model/tool run loop
+    apex-tools/          # Tool trait, ToolRegistry, sandbox backends
+    apex-workflow/       # durable, event-sourced workflow engine
+    apex-memory/         # hybrid vector+keyword memory engine
+    apex-telemetry/      # metrics + tracing/logging
+    apex-tenancy/        # organizations/projects/RBAC/quota
+    apex-events/         # domain events + outbound webhooks
+    apex-secrets/        # the secret vault
+    apex-audit/          # tamper-evident, hash-chained audit log
+    apex-kms/            # envelope-encryption key management
+    apex-plugin/         # plugin lifecycle (install/enable/upgrade/rollback)
+    apex-marketplace/    # plugin marketplace registry
+    apex-server/         # the Axum single-node server
+    apex-eval/           # a deterministic AI-eval harness (prototype spike)
+  dashboard/              # Angular SPA (direct to apex-server)
+  deployment/             # Docker/Compose/Helm artifacts for what's actually built
+  docs/                   # spec-driven documentation (source of truth)
+  examples/               # runnable agent/workflow YAML manifests
+  sdks/                   # TypeScript + Python API clients
+```
 
-apps/
-gateway/
-dashboard/
-worker/
-scheduler/
-cli/
-
-crates/
-agent-runtime/
-workflow-engine/
-planner/
-executor/
-memory/
-plugin-sdk/
-tool-runtime/
-llm-gateway/
-telemetry/
-security/
-storage/
-eventbus/
-scheduler/
-config/
-common/
-
-docs/
-
-examples/
-
-plugins/
-
-sdk/
-
-deployment/
-
-scripts/
+See [`CLAUDE.md`](CLAUDE.md) for what each crate actually implements today —
+`docs/` still describes future milestones not yet built, and `CLAUDE.md` is
+kept in sync with the shipping code, not the aspiration.
 
 ---
 
@@ -165,39 +159,46 @@ Backend
 
 API
 
-- Axum
-- tonic (gRPC)
+- Axum (REST — this is what's actually shipped; there is no gRPC surface today)
 
 Frontend
 
 - Angular
 
-Database
+Durable state (default)
 
-- PostgreSQL
+- Local files under `~/.apex`, crash-safe via atomic writes + fsync'd
+  append-only logs — no database required to run `apex dev`
 
-Cache
+Optional backends (env-var-selected; the default file-backed stores work
+without any of these)
 
-- Redis
+- **PostgreSQL** — marketplace registry (shipped, wired into both server and
+  CLI); a `TieredStore` for the memory engine (CLI-only today, `apex memory`
+  commands); a workflow-engine `PostgresStore` exists as tested library code
+  but is **not wired into the server** (v1.1 "Scale-Out" milestone)
+- **Qdrant** — vector ANN backend for the memory engine's `TieredStore`
+  (same CLI-only scope as above), and a `Gateway::with_qdrant_semantic_cache`
+  option that exists as library code but **isn't attached by any shipping
+  binary**
+- **Redis** — a `Gateway::with_redis_breakers` option for fleet-shared
+  circuit-breaker state; exists as library code, **not attached by any
+  shipping binary**
 
-Vector Database
-
-- Qdrant
-
-Messaging
-
-- NATS
+There is no NATS/message-broker dependency anywhere in this workspace.
 
 Observability
 
-- OpenTelemetry
-- Prometheus
-- Grafana
+- OpenTelemetry (opt-in, `otlp` cargo feature)
+- Prometheus (`/metrics`, always on)
+- Grafana (bring-your-own, scrapes the above)
 
 Deployment
 
-- Docker
-- Kubernetes
+- Docker, Docker Compose (real, working — [`deployment/docker-compose.yml`](deployment/docker-compose.yml))
+- Kubernetes/Helm (a real single-replica chart exists at
+  [`deployment/helm/apex/`](deployment/helm/apex/README.md); a multi-service,
+  multi-replica topology is documented as aspirational, v1.1+)
 
 ---
 
@@ -235,11 +236,9 @@ Supports
 
 Supports
 
-- Short-Term Memory
-- Long-Term Memory
-- Semantic Memory
-- Episodic Memory
-- Knowledge Graph
+- Long-Term Memory (hybrid vector + keyword retrieval, recency/importance
+  ranking, MMR diversification, ABAC filtering, compression)
+- Knowledge Graph — **deferred**, not yet implemented (tagged for v1)
 
 ---
 
@@ -258,12 +257,13 @@ Supports
 
 Supports
 
-- OAuth2
-- JWT
-- RBAC
-- Secrets Management
-- Encryption
-- Audit Logs
+- JWT (HS256/RS256) and API-key auth (`APEX_AUTH_MODE=jwt|apikey`) — no
+  OAuth2 authorization flow is implemented
+- RBAC (organization/project roles, default-deny)
+- Secrets Management (a reference-addressed vault, tenant-scoped)
+- Encryption (envelope encryption via a KMS; opt-in at-rest encryption for
+  secrets/memory/webhooks)
+- Audit Logs (tamper-evident, hash-chained)
 
 ---
 
@@ -319,17 +319,40 @@ The documentation is organized into the following sections:
 
 Current Phase
 
-v0.1 Foundations complete; **v0.2 (durability) in progress**. A Cargo workspace
-implements: an agent runtime, an LLM gateway (chat + embeddings, mock +
-OpenAI-compatible), a tool runtime (`echo`/`fs_read`/`http_get`/`shell` over a
-native-process sandbox), a **durable workflow engine** (event-sourced DAG with
-checkpointing, retry, resume, and saga **compensation**), a **memory engine**
-(hybrid vector + keyword retrieval with ranking), a single-node HTTP server, and the
-`apex` CLI (`login`/`dev`/`agents run`/`workflows run`/`memory`).
+**v0.1–v0.3 shipped and tagged.** The v1.0 "GA hardening" effort
+([PRD-003](docs/01-product/prd-ga-hardening.md)) is now in progress, phased:
+[Phase 1](docs/18-roadmap/v1.0/phase1-security-floor-tickets.md) (security
+floor) and [Phase 2](docs/18-roadmap/v1.0/phase2-durability-execution-tickets.md)
+(durability & execution) are **done** — crash-safe atomic writes everywhere,
+cross-process locking, no restart amnesia, the server drives its own
+timers/schedules/crash-recovery, real workflow cancellation, `apex admin
+backup`/`restore`, and KMS root-key escrow with a proven restore drill.
+[Phase 3](docs/18-roadmap/v1.0/phase3-scale-distribution-tickets.md) (scale &
+distribution) is **in progress** — [ADR-0010](docs/17-adr/ADR-0010-ga-deployment-topology.md)
+ratified a single-node-appliance GA topology, deferring the distributed
+multi-replica scheduler to a v1.1 "Scale-Out" milestone.
+[Phase 4](docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md)
+(contract & operability) has not started.
+
+The implemented surface spans: an agent runtime with a real model/tool loop,
+an LLM gateway (chat + streaming + embeddings, mock/OpenAI-compatible/local
+mistral.rs backends, with retry/failover/circuit-breaking/caching), a tool
+runtime with a sandbox spectrum (native/WASI/container/gVisor/microVM), a
+**durable, event-sourced workflow engine** (checkpointing, retry, saga
+compensation, durable timers/schedules, distributed worker leases as tested
+library code), a **memory engine** (hybrid vector+keyword retrieval,
+encryption, ABAC), a **secret vault**, **envelope-encryption KMS**,
+**tamper-evident audit logging**, a **plugin engine + marketplace**,
+**multi-tenancy** (RBAC + quota), a single-node Axum server, an Angular
+dashboard, TypeScript/Python SDKs, and the `apex` CLI. See
+[`CLAUDE.md`](CLAUDE.md) for the authoritative, kept-current description of
+what each crate actually does.
 
 Current Version
 
-0.1.0
+Crate version `0.1.0` (unbumped since inception — "v0.1"/"v0.2"/"v0.3" above
+refer to roadmap milestones tracked in [`docs/18-roadmap/`](docs/18-roadmap/),
+not Cargo semver).
 
 ## Quickstart (code)
 
@@ -367,37 +390,18 @@ See [`docs/16-examples/hello-agent.md`](docs/16-examples/hello-agent.md) and
 
 # Roadmap
 
-Phase 1
+The real, actively-maintained roadmap lives in
+[`docs/18-roadmap/`](docs/18-roadmap/), not here — this section previously
+listed a generic 8-phase plan that no longer matched how the project is
+actually tracked and has been removed to avoid two conflicting sources of
+truth. See:
 
-Documentation
-
-Phase 2
-
-Architecture
-
-Phase 3
-
-Workflow Engine
-
-Phase 4
-
-Agent Runtime
-
-Phase 5
-
-Memory Engine
-
-Phase 6
-
-Plugin SDK
-
-Phase 7
-
-Dashboard
-
-Phase 8
-
-Cloud Deployment
+- [`docs/18-roadmap/v0.1.md`](docs/18-roadmap/v0.1.md) ·
+  [`v0.2.md`](docs/18-roadmap/v0.2.md) ·
+  [`v0.3.md`](docs/18-roadmap/v0.3.md) — shipped milestones
+- [`docs/18-roadmap/v1.0.md`](docs/18-roadmap/v1.0.md) — the GA hardening
+  effort in progress now, with per-phase ticket docs under
+  [`docs/18-roadmap/v1.0/`](docs/18-roadmap/v1.0/)
 
 ---
 

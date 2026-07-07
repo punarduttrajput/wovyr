@@ -7,10 +7,11 @@ Document ID: RM-GA-P3
 
 **Document ID:** RM-GA-P3
 **File Path:** `docs/18-roadmap/v1.0/phase3-scale-distribution-tickets.md`
-**Version:** 1.0.0
-**Status:** Track A ready for grooming (GA); Track B deferred to v1.1 (ADR-0010 Path A ratified 2026-07-06)
+**Version:** 1.2.0
+**Status:** Track A (GA) in progress — DOC-A2 done, MIG-A1 remaining; Track B
+deferred to v1.1 (ADR-0010 Path A ratified 2026-07-06)
 **Owner:** Engineering (Platform / Workflow)
-**Last Updated:** 2026-07-06
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -135,6 +136,18 @@ R-5.5; closes PP-06/PP-08 honesty.)
 **Files.** `README.md`, `docs/12-deployment/*.md`, `docs/18-roadmap/v1.0.md`,
 `docs/03-workflow-engine/distributed-execution.md`. **Size.** S. **Depends on:**
 ADR-0010 ratified.
+
+**Status: Done (2026-07-07).** `docs/18-roadmap/v1.0.md`,
+`docs/12-deployment/{kubernetes,helm,docker-compose}.md` already stated this
+plainly. Corrected: `README.md` (a stale, never-updated doc claiming a
+`gRPC`/multi-image/NATS/OAuth2/knowledge-graph surface and a fictional
+`crates/agent-runtime`-style repo layout that hasn't matched reality since
+before v0.1 — a much larger gap than this ticket anticipated), plus
+`docs/12-deployment/{index,docker,terraform}.md` and
+`docs/03-workflow-engine/distributed-execution.md`, each given a clear
+status-line disclaimer that the multi-service/distributed-scheduler/gRPC/
+NATS surface they describe is long-term aspirational or unwired library
+code, cross-referencing ADR-0010 and this ticket doc's Track B.
 
 ---
 
@@ -379,5 +392,6 @@ replica crash mid-workflow with exactly-once effects.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-07 | DOC-A2 done: corrected `README.md` (a much larger, long-stale gap than anticipated), `docs/12-deployment/{index,docker,terraform}.md`, and `docs/03-workflow-engine/distributed-execution.md` to state plainly what's shipped vs. aspirational/library-only |
 | 1.1.0 | 2026-07-06 | ADR-0010 ratified **Path A**: Track A confirmed as the entire Phase-3 GA scope; Track B confirmed deferred to the v1.1 "Scale-Out" milestone (status/gate wording updated accordingly) |
 | 1.0.0 | 2026-07-06 | Initial Phase-3 (scale & distribution) ticket breakdown: 2 Track-A (GA, both paths) + 8 Track-B (v1.1 Scale-Out, Path B only) tickets, gated on the ADR-0010 decision, with the real-scale-capacity boundary handed off to PRD-002/GA-001 |

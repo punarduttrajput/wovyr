@@ -36,21 +36,29 @@ These map to the deployment models in
 
 # 3. Components to Deploy
 
+> **Current (v1.0, [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)
+> Path A):** every service below runs inside **one `apex` binary** — there is
+> no independent-service deployment today. The table's per-service split is
+> the **aspirational v1.1+ topology**; see §10 of
+> [docker-compose.md](docker-compose.md) for what's actually shipped.
+
 ```text
 Stateless services        Stateful backends
 ─────────────────         ─────────────────
-API Gateway               PostgreSQL
-Agent Runtime             Redis
-Workflow Engine           Qdrant
-LLM Gateway               Object storage (S3-compatible)
-Memory Engine             NATS JetStream
-Tool Runtime (+ workers)
-Plugin Engine
-Dashboard (UI + BFF)
+API Gateway               PostgreSQL (optional — marketplace registry is
+Agent Runtime              wired; workflow store is library-only/unwired)
+Workflow Engine           Qdrant (optional — CLI-only tiered memory backend;
+LLM Gateway                gateway semantic cache is library-only/unwired)
+Memory Engine             Redis (library-only gateway breaker sharing;
+Tool Runtime (+ workers)   not attached by any shipping binary)
+Plugin Engine             Object storage (S3-compatible) — not implemented
+Dashboard (UI + BFF)      NATS JetStream — not used anywhere in this workspace
 ```
 
 Each service exposes `/healthz`, `/readyz`, `/metrics`
-([observability](../14-observability/index.md) — planned reference).
+([observability](../14-observability/index.md) — planned reference) once the
+service split above is actually built; today the single `apex` binary
+exposes `/healthz` and `/metrics` directly.
 
 ---
 
