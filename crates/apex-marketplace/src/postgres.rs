@@ -19,14 +19,72 @@
 //! so a blocking client — which manages its own internal runtime — fits without
 //! forcing async onto every caller (server routes, CLI, tests). Enabled by the
 //! `postgres` cargo feature.
+//!
+//! **Schema migrations (RM-GA-P3 MIG-A1):** `connect` used to run inline
+//! `CREATE TABLE IF NOT EXISTS` DDL on every call. Schema changes now live in
+//! versioned `migrations/*.sql` files (applied via [`refinery`], tracked in an
+//! `apex_marketplace_schema_history` table distinct from the other
+//! Postgres-backed crates' own history tables so all three can share one
+//! physical database without colliding). [`PostgresRegistryStore::run_migrations`]
+//! is the only thing that ever runs DDL — invoked explicitly via `apex admin
+//! migrate`, never by `connect`. `connect` only *reads* the schema version and
+//! fails closed (`Error::Config`) if it doesn't match this binary's expected
+//! version exactly.
 
 use crate::listing::{ListingRecord, PublishedVersion, Review};
 use crate::store::{RegistryState, RegistryStore};
 use apex_common::{Error, Result};
+use refinery::Migrate;
 use std::sync::Mutex;
+
+refinery::embed_migrations!("migrations");
+
+/// Distinct per-crate so `apex-workflow`/`apex-memory`/`apex-marketplace` can
+/// all migrate the same physical Postgres database without their version
+/// tracking colliding.
+const MIGRATION_TABLE: &str = "apex_marketplace_schema_history";
 
 fn pg_err(context: &str, e: impl std::fmt::Display) -> Error {
     Error::provider(format!("postgres {context}: {e}"))
+}
+
+/// This binary's expected schema version — the highest version among its own
+/// embedded migrations. Pure/local: no database round-trip needed to know it.
+fn expected_schema_version() -> u32 {
+    migrations::runner()
+        .get_migrations()
+        .iter()
+        .map(|m| m.version())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Read (never write) the schema version actually applied to `client`, and
+/// fail closed if it doesn't match [`expected_schema_version`] exactly.
+fn assert_schema_version(client: &mut postgres::Client) -> Result<()> {
+    let expected = expected_schema_version();
+    let applied = Migrate::get_last_applied_migration(client, MIGRATION_TABLE)
+        .map_err(|e| {
+            Error::config(format!(
+                "marketplace Postgres schema is not migrated (expected version {expected}): \
+                 {e}; run `apex admin migrate --target marketplace --database-url <url>` first"
+            ))
+        })?
+        .map(|m| m.version())
+        .unwrap_or(0);
+    if applied < expected {
+        return Err(Error::config(format!(
+            "marketplace Postgres schema is at version {applied}, but this binary needs \
+             version {expected}; run `apex admin migrate --target marketplace --database-url <url>`"
+        )));
+    }
+    if applied > expected {
+        return Err(Error::config(format!(
+            "marketplace Postgres schema is at version {applied}, newer than this binary's \
+             version {expected}; upgrade the apex binary before connecting to this database"
+        )));
+    }
+    Ok(())
 }
 
 /// A PostgreSQL-backed [`RegistryStore`].
@@ -35,21 +93,29 @@ pub struct PostgresRegistryStore {
 }
 
 impl PostgresRegistryStore {
-    /// Connect (NoTls — for a trusted/local DB) and ensure the schema exists.
+    /// Connect (NoTls — for a trusted/local DB) and verify the schema is at the
+    /// version this binary expects — never runs DDL. See [`Self::run_migrations`].
     pub fn connect(conn_str: &str) -> Result<Self> {
         let mut client = postgres::Client::connect(conn_str, postgres::NoTls)
             .map_err(|e| pg_err("connect", e))?;
-        client
-            .batch_execute(
-                "CREATE TABLE IF NOT EXISTS marketplace_listings (
-                     id      TEXT PRIMARY KEY,
-                     listing TEXT NOT NULL
-                 );",
-            )
-            .map_err(|e| pg_err("migrate", e))?;
+        assert_schema_version(&mut client)?;
         Ok(Self {
             client: Mutex::new(client),
         })
+    }
+
+    /// Apply every pending migration, creating the tracking table on first run.
+    /// The only place this crate ever issues DDL — called explicitly via
+    /// `apex admin migrate`, not from `connect`, so the serving/CLI query path
+    /// needs no schema-modification privilege.
+    pub fn run_migrations(conn_str: &str) -> Result<()> {
+        let mut client = postgres::Client::connect(conn_str, postgres::NoTls)
+            .map_err(|e| pg_err("connect", e))?;
+        migrations::runner()
+            .set_migration_table_name(MIGRATION_TABLE)
+            .run(&mut client)
+            .map_err(|e| pg_err("migrate", e))?;
+        Ok(())
     }
 
     fn load(client: &mut postgres::Client, id: &str) -> Result<Option<ListingRecord>> {

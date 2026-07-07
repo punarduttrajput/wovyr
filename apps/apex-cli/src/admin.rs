@@ -97,6 +97,63 @@ pub fn restore_cmd(src: &str, confirmed: bool) -> Result<()> {
     Ok(())
 }
 
+/// `apex admin migrate --target <workflow|memory|marketplace> --database-url
+/// <url>` — apply a Postgres-backed backend's versioned schema migrations
+/// (RM-GA-P3 MIG-A1). The only place any of these three backends' schema is
+/// ever created or altered: `serve`/CLI query paths only ever *read* the
+/// resulting schema version and refuse to run against an unmigrated or
+/// newer-than-expected one, so this is the one command that needs DDL
+/// privilege on the target database.
+pub async fn migrate_cmd(target: &str, database_url: &str) -> Result<()> {
+    match target {
+        "workflow" => run_workflow_migrations(database_url).await,
+        "memory" => run_memory_migrations(database_url).await,
+        "marketplace" => run_marketplace_migrations(database_url),
+        other => Err(Error::invalid(format!(
+            "unknown migration target `{other}` (expected one of: workflow, memory, marketplace)"
+        ))),
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn run_workflow_migrations(database_url: &str) -> Result<()> {
+    apex_workflow::PostgresStore::run_migrations(database_url).await?;
+    println!("workflow schema migrated");
+    Ok(())
+}
+#[cfg(not(feature = "postgres"))]
+async fn run_workflow_migrations(_database_url: &str) -> Result<()> {
+    Err(Error::config(
+        "migrating the workflow schema needs a --features postgres build",
+    ))
+}
+
+#[cfg(feature = "tiered-memory")]
+async fn run_memory_migrations(database_url: &str) -> Result<()> {
+    apex_memory::PostgresStore::run_migrations(database_url).await?;
+    println!("memory schema migrated");
+    Ok(())
+}
+#[cfg(not(feature = "tiered-memory"))]
+async fn run_memory_migrations(_database_url: &str) -> Result<()> {
+    Err(Error::config(
+        "migrating the memory schema needs a --features tiered-memory build",
+    ))
+}
+
+#[cfg(feature = "postgres")]
+fn run_marketplace_migrations(database_url: &str) -> Result<()> {
+    apex_marketplace::PostgresRegistryStore::run_migrations(database_url)?;
+    println!("marketplace schema migrated");
+    Ok(())
+}
+#[cfg(not(feature = "postgres"))]
+fn run_marketplace_migrations(_database_url: &str) -> Result<()> {
+    Err(Error::config(
+        "migrating the marketplace schema needs a --features postgres build",
+    ))
+}
+
 /// Snapshot every file under `source` into `dest` (created if missing) plus a
 /// manifest recording each file's relative path, size, and sha256 digest.
 /// Quiesces every existing immediate subdirectory of `source` (and `source`

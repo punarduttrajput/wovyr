@@ -10,7 +10,7 @@ description = "Durable workflow engine: DSL, event-sourced state machine, checkp
 [features]
 # Postgres-backed durable event log + checkpoint store, for cross-process/node
 # durable resume. Off by default (pulls tokio-postgres).
-postgres = ["dep:tokio-postgres"]
+postgres = ["dep:tokio-postgres", "dep:refinery"]
 
 [dependencies]
 apex-common.workspace = true
@@ -21,6 +21,10 @@ async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tokio-postgres = { version = "0.7", optional = true }
+# Versioned schema migrations (RM-GA-P3 MIG-A1): `apex admin migrate` applies
+# `migrations/*.sql` via refinery; `PostgresStore::connect` only ever reads the
+# resulting schema-version row, never runs DDL itself.
+refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

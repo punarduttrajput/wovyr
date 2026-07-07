@@ -7,9 +7,13 @@
 //! shape (versions, channels, categories, reviews, verified badge, install count)
 //! through the `RegistryStore` trait the same way `FileRegistryStore` is tested.
 //!
-//! Only compiled with `--features postgres`. To run locally:
+//! Only compiled with `--features postgres`. `connect` only ever *reads* the
+//! schema version (RM-GA-P3 MIG-A1) — migrate first, or every test here skips
+//! with a "not migrated" reason instead of running. To run locally:
 //!
 //! ```bash
+//! cargo run -p apex-cli --features postgres -- admin migrate --target marketplace \
+//!   --database-url postgres://apex:apex@127.0.0.1:5433/apex
 //! APEX_MARKETPLACE_POSTGRES_URL=postgres://apex:apex@127.0.0.1:5433/apex \
 //!   cargo test -p apex-marketplace --features postgres --test postgres_store -- --nocapture
 //! ```

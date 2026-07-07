@@ -28,7 +28,7 @@ keyless-rekor = ["apex-plugin/rekor"]
 # both `apex plugin publish|search|get` and the embedded `apex dev` server share the
 # same durable catalog instead of each process reading its own `registry.json`. Off by
 # default (pulls the `postgres` crate).
-postgres = ["apex-marketplace/postgres", "apex-server/postgres"]
+postgres = ["apex-marketplace/postgres", "apex-server/postgres", "apex-workflow/postgres"]
 # Real local-model inference via mistral.rs: `agents run --local --provider mistralrs`
 # for a one-off CLI run, or `APEX_PROVIDER=mistralrs apex dev` to make the embedded
 # server (and hence the dashboard) run every agent against it. Off by default (pulls

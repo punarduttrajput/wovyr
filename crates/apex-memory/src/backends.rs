@@ -14,11 +14,59 @@ use crate::record::{MemoryRecord, MemoryType};
 use crate::store::{MemoryStore, ScoredId};
 use apex_common::{Error, Result};
 use async_trait::async_trait;
+use refinery::AsyncMigrate;
 use serde_json::{Value, json};
 use std::hash::{Hash, Hasher};
 
+refinery::embed_migrations!("migrations");
+
+/// Distinct per-crate so `apex-workflow`/`apex-memory`/`apex-marketplace` can
+/// all migrate the same physical Postgres database without their version
+/// tracking colliding (RM-GA-P3 MIG-A1).
+const MIGRATION_TABLE: &str = "apex_memory_schema_history";
+
 fn pg_err(context: &str, e: impl std::fmt::Display) -> Error {
     Error::provider(format!("postgres {context}: {e}"))
+}
+
+/// This binary's expected schema version — the highest version among its own
+/// embedded migrations. Pure/local: no database round-trip needed to know it.
+fn expected_schema_version() -> u32 {
+    migrations::runner()
+        .get_migrations()
+        .iter()
+        .map(|m| m.version())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Read (never write) the schema version actually applied to `client`, and
+/// fail closed if it doesn't match [`expected_schema_version`] exactly.
+async fn assert_schema_version(client: &mut tokio_postgres::Client) -> Result<()> {
+    let expected = expected_schema_version();
+    let applied = AsyncMigrate::get_last_applied_migration(client, MIGRATION_TABLE)
+        .await
+        .map_err(|e| {
+            Error::config(format!(
+                "memory Postgres schema is not migrated (expected version {expected}): {e}; \
+                 run `apex admin migrate --target memory --database-url <url>` first"
+            ))
+        })?
+        .map(|m| m.version())
+        .unwrap_or(0);
+    if applied < expected {
+        return Err(Error::config(format!(
+            "memory Postgres schema is at version {applied}, but this binary needs version \
+             {expected}; run `apex admin migrate --target memory --database-url <url>`"
+        )));
+    }
+    if applied > expected {
+        return Err(Error::config(format!(
+            "memory Postgres schema is at version {applied}, newer than this binary's version \
+             {expected}; upgrade the apex binary before connecting to this database"
+        )));
+    }
+    Ok(())
 }
 
 fn make_id(namespace: &str, seq: u64) -> String {
@@ -54,9 +102,11 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
-    /// Connect (NoTls — for a trusted/local DB) and ensure the schema exists.
+    /// Connect (NoTls — for a trusted/local DB) and verify the schema is at the
+    /// version this binary expects — never runs DDL. See [`Self::run_migrations`]
+    /// (RM-GA-P3 MIG-A1).
     pub async fn connect(conn_str: &str) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(conn_str, tokio_postgres::NoTls)
+        let (mut client, connection) = tokio_postgres::connect(conn_str, tokio_postgres::NoTls)
             .await
             .map_err(|e| pg_err("connect", e))?;
         // Drive the connection in the background for the life of the client.
@@ -66,36 +116,27 @@ impl PostgresStore {
             }
         });
 
-        let store = Self { client };
-        store.migrate().await?;
-        Ok(store)
+        assert_schema_version(&mut client).await?;
+
+        Ok(Self { client })
     }
 
-    async fn migrate(&self) -> Result<()> {
-        self.client
-            .batch_execute(
-                "CREATE SEQUENCE IF NOT EXISTS memory_seq;
-                 CREATE TABLE IF NOT EXISTS memory_records (
-                     id              TEXT PRIMARY KEY,
-                     namespace       TEXT NOT NULL,
-                     content         TEXT NOT NULL,
-                     embedding       REAL[] NOT NULL,
-                     memory_type     TEXT NOT NULL,
-                     importance      REAL NOT NULL,
-                     tags            TEXT[] NOT NULL,
-                     required_scopes TEXT[] NOT NULL DEFAULT '{}',
-                     sensitive       BOOLEAN NOT NULL DEFAULT FALSE,
-                     seq             BIGINT NOT NULL
-                 );
-                 -- Backfill columns on databases created before they existed.
-                 ALTER TABLE memory_records
-                     ADD COLUMN IF NOT EXISTS required_scopes TEXT[] NOT NULL DEFAULT '{}';
-                 ALTER TABLE memory_records
-                     ADD COLUMN IF NOT EXISTS sensitive BOOLEAN NOT NULL DEFAULT FALSE;
-                 CREATE INDEX IF NOT EXISTS memory_records_ns ON memory_records (namespace);
-                 CREATE INDEX IF NOT EXISTS memory_records_fts
-                     ON memory_records USING GIN (to_tsvector('english', content));",
-            )
+    /// Apply every pending migration, creating the tracking table on first run.
+    /// The only place this crate ever issues DDL — called explicitly via
+    /// `apex admin migrate`, not from `connect`, so the serving/CLI query path
+    /// needs no schema-modification privilege.
+    pub async fn run_migrations(conn_str: &str) -> Result<()> {
+        let (mut client, connection) = tokio_postgres::connect(conn_str, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| pg_err("connect", e))?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                tracing::warn!("postgres connection closed: {e}");
+            }
+        });
+        migrations::runner()
+            .set_migration_table_name(MIGRATION_TABLE)
+            .run_async(&mut client)
             .await
             .map_err(|e| pg_err("migrate", e))?;
         Ok(())

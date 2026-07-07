@@ -130,6 +130,20 @@ enum AdminCommand {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Apply a Postgres-backed backend's versioned schema migrations
+    /// (RM-GA-P3 MIG-A1). Separate from `serve`/normal CLI use, which only
+    /// ever read the resulting schema version — this is the one command that
+    /// needs DDL privilege on the target database.
+    Migrate {
+        /// Which backend's schema to migrate.
+        #[arg(long, value_parser = ["workflow", "memory", "marketplace"])]
+        target: String,
+
+        /// Postgres connection string (e.g. postgres://user:pass@host/db).
+        #[arg(long)]
+        database_url: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -844,6 +858,10 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
         Command::Admin { command } => match command {
             AdminCommand::Backup { dest } => admin::backup_cmd(&dest),
             AdminCommand::Restore { src, yes } => admin::restore_cmd(&src, yes),
+            AdminCommand::Migrate {
+                target,
+                database_url,
+            } => admin::migrate_cmd(&target, &database_url).await,
         },
     }
 }

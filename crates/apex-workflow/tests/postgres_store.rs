@@ -6,9 +6,13 @@
 //! **resume across engine instances** through Postgres, without re-running completed
 //! activities — plus the raw event-log/checkpoint round-trip.
 //!
-//! Only compiled with `--features postgres`. To run locally:
+//! Only compiled with `--features postgres`. `connect` only ever *reads* the
+//! schema version (RM-GA-P3 MIG-A1) — migrate first, or every test here skips
+//! with a "not migrated" reason instead of running. To run locally:
 //!
 //! ```bash
+//! cargo run -p apex-cli --features postgres -- admin migrate --target workflow \
+//!   --database-url postgres://apex:apex@127.0.0.1:5433/apex
 //! APEX_WORKFLOW_POSTGRES_URL=postgres://apex:apex@127.0.0.1:5433/apex \
 //!   cargo test -p apex-workflow --features postgres --test postgres_store -- --nocapture
 //! ```
@@ -238,4 +242,56 @@ async fn distributed_workers_over_postgres_process_each_exactly_once() {
             "{id} should be completed"
         );
     }
+}
+
+/// RM-GA-P3 MIG-A1's version-skew acceptance criterion: "an old binary refuses
+/// a newer schema rather than corrupting it." Simulates the situation a
+/// partial fleet rollout creates — a migration this binary's embedded set
+/// doesn't know about already applied to the database — by inserting a fake
+/// future row directly into the tracking table, then asserting `connect`
+/// fails closed instead of silently proceeding against a schema shape it
+/// doesn't understand. `apex-memory`/`apex-marketplace`'s `PostgresStore`
+/// share this exact fail-closed mechanism (`assert_schema_version`), just
+/// against their own distinct tracking tables.
+#[tokio::test]
+async fn connect_refuses_a_schema_newer_than_this_binary_understands() {
+    // Also proves the schema is actually migrated (a prerequisite for the
+    // fake-future-row insert below to land in a real, already-existing table).
+    let Some(_) = store().await else { return };
+    let url = std::env::var("APEX_WORKFLOW_POSTGRES_URL").unwrap();
+
+    let (raw, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    raw.execute(
+        "INSERT INTO apex_workflow_schema_history (version, name, applied_on, checksum)
+         VALUES (999999, 'future', '2999-01-01T00:00:00.000000000+00:00', '0')
+         ON CONFLICT (version) DO NOTHING",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let result = PostgresStore::connect(&url).await;
+
+    // Clean up the fake row before asserting, so a failed assertion doesn't
+    // permanently poison every later run of this suite against this database.
+    raw.execute(
+        "DELETE FROM apex_workflow_schema_history WHERE version = 999999",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let err = match result {
+        Ok(_) => panic!("connect must refuse a schema newer than this binary's own"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("newer than this binary"),
+        "expected a version-skew error, got: {err}"
+    );
 }

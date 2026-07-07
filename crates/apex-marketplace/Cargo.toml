@@ -17,7 +17,7 @@ wasi = ["apex-plugin/wasi"]
 # `registry.json`. Off by default (pulls the `postgres` crate). Uses the
 # *synchronous* `postgres` crate (not `tokio-postgres`) since this whole crate is
 # deliberately sync — see `src/postgres.rs`.
-postgres = ["dep:postgres"]
+postgres = ["dep:postgres", "dep:refinery"]
 
 [dependencies]
 apex-common.workspace = true
@@ -31,6 +31,11 @@ sha2 = "0.10"
 semver = "1"
 # Synchronous Postgres client for the optional `postgres` feature.
 postgres = { version = "0.19", optional = true }
+# Versioned schema migrations (RM-GA-P3 MIG-A1): `apex admin migrate` applies
+# `migrations/*.sql` via refinery; `connect` only ever reads the resulting
+# schema-version row, never runs DDL itself. Sync variant (this crate is
+# deliberately sync throughout — see the module doc in `src/postgres.rs`).
+refinery = { version = "0.8", features = ["postgres"], optional = true }
 
 [dev-dependencies]
 # Produces signed test packages (ed25519) without an external toolchain.

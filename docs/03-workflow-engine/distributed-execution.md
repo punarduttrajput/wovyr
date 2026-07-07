@@ -1,10 +1,24 @@
 # Distributed Execution Specification
 
 **Document ID:** WF-012
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.1.0
+**Status:** Draft. **The `WorkQueue`/`Worker`/lease/partition machinery this
+document describes is real, tested library code in `apex-workflow`
+(§33's measured baselines are real runs, not projections) — but it is
+**not wired into the shipping `apex-server` binary**.
+`default_workflows_engine` hardwires a single-process `FileStore`; there is
+no queue, no lease, no worker pool in the running server today.
+[ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md) ratified a
+single-node-appliance GA (Path A) specifically because of this gap — wiring
+this machinery onto the default path (env-selecting a `PostgresStore`,
+routing submitted workflows through the queue/lease path, a multi-replica
+correctness suite) is the v1.1 "Scale-Out" milestone — Track B of
+[the Phase-3 ticket doc](../18-roadmap/v1.0/phase3-scale-distribution-tickets.md),
+gated on GA shipping first. Read this document as "what the library can
+do today, and what wiring it up will require," not as a description of the
+running platform.**
 **Owner:** Workflow Engine Team
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -759,3 +773,4 @@ floor and prints the live number so regressions surface.
 |---------|------|-------------|
 | 1.0.0 | 2026-06-26 | Initial Distributed Execution Specification |
 | 1.1.0 | 2026-06-29 | Added §33 Scaling Envelope (G6): partitioning + measured baselines |
+| 1.2.0 | 2026-07-07 | RM-GA-P3 DOC-A2: added a top-level status note clarifying this machinery is tested library code not wired into the shipping `apex-server` binary — wiring it is the v1.1 "Scale-Out" milestone per ADR-0010 |
