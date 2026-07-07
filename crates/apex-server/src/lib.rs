@@ -1275,6 +1275,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             rate_limit::enforce(limiter.clone(), headers, req, next)
         })
     };
+    // `Idempotency-Key` replay (overview §9, RM-GA-P4 API-703) for every mutating
+    // route — innermost of the per-group layers (added first below) so a cache hit
+    // still passes through auth/rate-limiting first, and only short-circuits the
+    // actual handler.
+    let idempotency =
+        || axum::middleware::from_fn_with_state(state.clone(), hardening::idempotency_middleware);
 
     // The direct agent-run endpoints call an LLM provider synchronously and can
     // legitimately run far longer than the rest of the API. Expensive, so a tighter
@@ -1285,6 +1291,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/agents/{id}/run", post(run_stored_handler))
         // Auth first, so the rate limiter keys off the *verified* principal
         // (auth overwrites `X-Apex-Principal`) — not a spoofable raw header.
+        .layer(idempotency())
         .layer(rate_limit_sensitive())
         .layer(auth())
         .layer(
@@ -1299,6 +1306,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let sensitive_routes = Router::new()
         .merge(secrets::routes())
         .merge(kms::routes())
+        .layer(idempotency())
         .layer(rate_limit_sensitive())
         .layer(auth())
         .layer(
@@ -1341,6 +1349,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(audit::routes())
         // Tool discovery: list registered tools (built-ins + enabled plugin tools).
         .merge(tools::routes())
+        .layer(idempotency())
         .layer(rate_limit_standard())
         .layer(auth())
         .layer(
@@ -1548,9 +1557,11 @@ fn wants_async(headers: &HeaderMap) -> bool {
 /// admitted and started on a background task holding the quota permit, and the
 /// response comes back immediately with a `run_id` to poll at `GET
 /// /api/v1/agents/runs/{run_id}` instead of waiting for the model/tool loop to
-/// finish. Idempotency-key replay only applies to the synchronous path — an async
-/// submission's whole point is not blocking on the eventual response, so there is no
-/// "original response" to cache and replay yet.
+/// finish. `Idempotency-Key` replay (overview §9) is handled uniformly for every
+/// mutating route by `hardening::idempotency_middleware` (RM-GA-P4 API-703), which
+/// wraps this route — so a repeated key replays the cached response whichever branch
+/// produced it, sync or async (an async retry gets back the same `run_id` rather than
+/// starting a second run).
 #[tracing::instrument(name = "api.agents_run", skip_all)]
 async fn run_handler(
     State(state): State<Arc<AppState>>,
@@ -1567,21 +1578,7 @@ async fn run_handler(
         return result;
     }
 
-    // Idempotency (overview §9): replay the original response for a repeated key.
-    let idem_key = hardening::idempotency_key(&headers);
-    if let Some(key) = &idem_key
-        && let Some(cached) = state.idempotency.get(&tenant, key)
-    {
-        return Ok(Json(cached));
-    }
-
     let result = run_inner(&state, tenant.clone(), project, req).await;
-
-    // Cache successful responses so a client retry with the same key is safe.
-    if let (Some(key), Ok(Json(body))) = (&idem_key, &result) {
-        state.idempotency.put(&tenant, key, body.clone());
-    }
-
     record_run_metrics(&state, "agents_run", &result, start);
     result
 }

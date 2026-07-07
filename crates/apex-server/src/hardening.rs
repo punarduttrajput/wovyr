@@ -4,16 +4,18 @@
 //! consistently, client retries are safe, and every response is traceable.
 
 use axum::{
+    Json,
     body::Body,
-    extract::Request,
-    http::{HeaderMap, header},
+    extract::{Request, State},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -282,6 +284,90 @@ pub(crate) fn idempotency_key(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A route is eligible for idempotency replay when it uses a mutating method
+/// (`agents:run` already qualified before RM-GA-P4 API-703; this widens the same
+/// treatment to every other mutating route) — except two POST routes that only *look*
+/// like mutations: `memory:query` is a read (nothing to protect against
+/// double-execution), and `agents:stream` returns an SSE body this middleware can't
+/// buffer and replay as an opaque JSON value.
+fn is_replay_eligible(method: &Method, path: &str) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) && !path.ends_with(":query")
+        && !path.ends_with(":stream")
+}
+
+/// Extend `Idempotency-Key` replay (overview §9) to every mutating route
+/// (RM-GA-P4 API-703), not just `agents:run`: a client retry of an unacknowledged
+/// POST/PUT/PATCH/DELETE carrying the same key gets back the original response
+/// instead of re-executing the mutation. Keyed by `(tenant, method, path, key)` — the
+/// method+path component is what `agents:run`'s original hand-rolled check lacked, so
+/// the same key reused (deliberately or by a buggy client) against two different
+/// routes can never collide. Tenant is read straight off `X-Apex-Tenant` (this layer
+/// sits innermost, right before the handler, so the route's own auth/RBAC has already
+/// run by the time a cache hit short-circuits it). Only a successful (2xx) response
+/// with a JSON-decodable (or empty, e.g. `204`) body is cached — anything this
+/// middleware can't confidently replay is served once and never stored.
+pub(crate) async fn idempotency_middleware(
+    State(state): State<Arc<crate::AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    if !is_replay_eligible(&method, &path) {
+        return next.run(request).await;
+    }
+    let Some(key) = idempotency_key(request.headers()) else {
+        return next.run(request).await;
+    };
+    let tenant = crate::tenancy::run_tenant(request.headers());
+    let scoped_key = format!("{method} {path}\u{1f}{key}");
+
+    if let Some(cached) = state.idempotency.get(&tenant, &scoped_key) {
+        return replay_cached(cached);
+    }
+
+    let response = next.run(request).await;
+    if !response.status().is_success() {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, 16 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return Response::from_parts(parts, Body::empty()),
+    };
+    let cacheable_body = if bytes.is_empty() {
+        Some(Value::Null)
+    } else {
+        serde_json::from_slice::<Value>(&bytes).ok()
+    };
+    if let Some(body_value) = cacheable_body {
+        state.idempotency.put(
+            &tenant,
+            &scoped_key,
+            json!({ "status": parts.status.as_u16(), "body": body_value }),
+        );
+    }
+    Response::from_parts(parts, Body::from(bytes))
+}
+
+/// Reconstruct a cached `{status, body}` entry into the response a fresh call to the
+/// same route would have produced.
+fn replay_cached(cached: Value) -> Response {
+    let status = cached
+        .get("status")
+        .and_then(Value::as_u64)
+        .and_then(|s| u16::try_from(s).ok())
+        .and_then(|s| StatusCode::from_u16(s).ok())
+        .unwrap_or(StatusCode::OK);
+    match cached.get("body") {
+        Some(Value::Null) | None => status.into_response(),
+        Some(body) => (status, Json(body.clone())).into_response(),
+    }
+}
+
 // --- optimistic concurrency (overview §10) ---------------------------------------
 
 /// The `ETag` header value for a resource version (a quoted version number).
@@ -372,6 +458,33 @@ mod tests {
         let c = encode_cursor(50);
         assert_eq!(decode_cursor(&c), Some(50));
         assert_eq!(decode_cursor("not-hex!"), None);
+    }
+
+    // --- RM-GA-P4 API-703: idempotency replay eligibility -----------------------------
+
+    #[test]
+    fn get_and_head_are_never_replay_eligible() {
+        assert!(!is_replay_eligible(&Method::GET, "/api/v1/organizations"));
+        assert!(!is_replay_eligible(&Method::HEAD, "/api/v1/organizations"));
+    }
+
+    #[test]
+    fn mutating_methods_are_replay_eligible_except_query_and_stream_shaped_routes() {
+        assert!(is_replay_eligible(&Method::POST, "/api/v1/organizations"));
+        assert!(is_replay_eligible(&Method::PUT, "/api/v1/projects/p1"));
+        assert!(is_replay_eligible(&Method::PATCH, "/api/v1/projects/p1"));
+        assert!(is_replay_eligible(&Method::DELETE, "/api/v1/webhooks/w1"));
+        assert!(!is_replay_eligible(&Method::POST, "/api/v1/memory:query"));
+        assert!(!is_replay_eligible(&Method::POST, "/api/v1/agents:stream"));
+    }
+
+    #[test]
+    fn replay_cached_reconstructs_status_and_body() {
+        let resp = replay_cached(json!({ "status": 201, "body": {"id": "org-1"} }));
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = replay_cached(json!({ "status": 204, "body": Value::Null }));
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
     #[test]

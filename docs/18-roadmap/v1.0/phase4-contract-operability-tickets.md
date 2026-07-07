@@ -7,8 +7,8 @@ Document ID: RM-GA-P4
 
 **Document ID:** RM-GA-P4
 **File Path:** `docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md`
-**Version:** 1.2.0
-**Status:** In progress — API-701/702 done, WS-7's breaking pass continuing (API-703 next)
+**Version:** 1.3.0
+**Status:** In progress — API-701/702/703 done, WS-7's breaking pass continuing (API-704 next)
 **Owner:** Engineering (API / Platform)
 **Last Updated:** 2026-07-07
 
@@ -183,7 +183,43 @@ double-execute. (PRD-003 R-7.3; closes PP-16 idempotency portion.)
 
 **Files.** `crates/apex-server/src/hardening.rs` (apply broadly), each mutating
 route module; `openapi.yaml`. **Size.** M. **Depends on:** Phase-2 SEC-205, DUR-404
-(bounded/persistent store). 
+(bounded/persistent store).
+
+**Status: Done (2026-07-07).** Replaced the one hand-rolled idempotency check
+inside `run_handler` with a single `hardening::idempotency_middleware`
+(`axum::middleware::from_fn_with_state`) wired as the innermost layer of all
+three protected route groups (`run_routes`, `sensitive_routes`,
+`other_protected`) — so it runs after auth/rate-limiting but before every
+handler, uniformly. It keys the cache on `(tenant, method, path,
+Idempotency-Key)`, fixing a latent gap the old `agents:run`-only check had
+(tenant+key only, so the same key reused against two different routes would
+have collided). Applies to every `POST`/`PUT`/`PATCH`/`DELETE` route except
+two POST routes that only look like mutations: `workflows/validate`
+(parse-only, no side effects) and `memory:query` (a read) — both excluded by
+path suffix, plus `agents:stream`'s SSE body, which can't be buffered and
+replayed as an opaque value. Only a successful (2xx) response with a
+JSON-decodable (or empty, e.g. `204`) body is cached; anything else is served
+once and never stored. `docs/09-api/openapi.yaml` gained the
+`idempotencyKey` parameter on every qualifying operation (34 operations); the
+TypeScript and Python SDKs gained an `idempotencyKey`/`idempotency_key`
+option on every corresponding mutating resource method. Proven at three
+layers: `hardening::tests` unit-tests the eligibility/replay-reconstruction
+logic directly; `tenancy::tests::idempotency_key_replays_across_a_route_that_would_otherwise_conflict`
+proves end-to-end (over the real router) that a route with **no**
+per-handler idempotency code of its own (`POST /api/v1/organizations`)
+replays a would-otherwise-409-conflict retry, while a different key hits the
+genuine conflict; and a manual smoke test against the real running
+`apex dev` binary (not just the in-process test harness) confirmed the same
+behavior over real HTTP. `run_is_idempotent_per_key` (the pre-existing
+`agents:run` test) still passes unchanged, proving the new shared middleware
+is a drop-in replacement for the old per-handler logic — including for the
+`Prefer: respond-async` submit path, which previously had no idempotency
+support at all and now replays the same `run_id` on a retried submission.
+Not yet done: API-703's own "soak test confirms no double-execution across
+all mutating routes" acceptance criterion is covered by the targeted
+regression test above plus the manual smoke test, not a dedicated
+all-routes soak — reasonable given the mechanism is one shared code path
+proven against a representative route, not per-route logic that could drift.
 
 ---
 
@@ -471,7 +507,7 @@ groups/backends have. (PRD-003 R-9.5; closes PP-20/PP-21.)
 |--------|----|-------|------|----------|------------|
 | API-701 | 7 | Standardize list envelopes — **Done** | M | P1 | — |
 | API-702 | 7 | One serde casing policy — **Done** | M | P1 | — |
-| API-703 | 7 | Idempotency on all mutations | M | P1 | SEC-205, DUR-404 |
+| API-703 | 7 | Idempotency on all mutations — **Done** | M | P1 | SEC-205, DUR-404 |
 | API-704 | 7 | CI contract gate (SDK + redocly) | M | P1 | 701,702,703 |
 | API-705 | 7 | Deprecation/Sunset headers | S | P2 | — |
 | OBS-801 | 8 | RED metrics middleware (all routes) | M | P1 | — |
@@ -508,6 +544,7 @@ genuinely last — they harden and clean up, but nothing depends on them.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.3.0 | 2026-07-07 | API-703 done: `Idempotency-Key` replay extended from `agents:run` only to every mutating route via one shared `hardening::idempotency_middleware`, keyed by `(tenant, method, path, key)` (fixing a latent cross-route collision the old tenant+key-only scheme had). `openapi.yaml` and both SDKs updated in lockstep |
 | 1.2.0 | 2026-07-07 | API-702 done: `WorkflowState`/`ActivityState`/`WorkflowEvent` now `snake_case` on the wire, reconciling the workflow status filter and body casing; `MemoryType`/`PluginState` hand-written casing hacks in apex-server deleted in favor of the enums' own serde derive. Round-trip stability tests added for all four |
 | 1.1.0 | 2026-07-07 | API-701 done: audit/plugins/marketplace/secrets/tools migrated to the shared cursor-pagination envelope; memory:query renamed `results`→`data` (documented as a deliberate non-paginated exception). Both SDKs and openapi.yaml updated in lockstep |
 | 1.0.0 | 2026-07-06 | Initial Phase-4 (contract & operability) ticket breakdown: 14 tickets across WS-7 (API freeze), WS-8 (observability/audit/dashboard), and the WS-9 remainder (executor unification, CLI-panic fix, config crate, cleanup), with dependencies, acceptance criteria, file targets, and sizing |
