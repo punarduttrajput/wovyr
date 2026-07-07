@@ -8,9 +8,13 @@
 //! type mapping, URL handling) is covered by the unit tests in `src/backends.rs`;
 //! this file verifies the store actually persists, indexes, and retrieves.
 //!
-//! Only compiled with `--features tiered`. To run locally:
+//! Only compiled with `--features tiered`. `PostgresStore::connect` only ever
+//! *reads* the schema version (RM-GA-P3 MIG-A1) — migrate first, or every test
+//! here skips with a "not migrated" reason instead of running. To run locally:
 //!
 //! ```bash
+//! cargo run -p apex-cli --features tiered-memory -- admin migrate --target memory \
+//!   --database-url postgres://apex:apex@127.0.0.1:5433/apex
 //! APEX_MEMORY_POSTGRES_URL=postgres://apex:apex@127.0.0.1:5433/apex \
 //! APEX_MEMORY_QDRANT_URL=http://127.0.0.1:6333 \
 //!   cargo test -p apex-memory --features tiered --test tiered_backend -- --nocapture

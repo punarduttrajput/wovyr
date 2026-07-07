@@ -7,6 +7,20 @@
 //! single upserted row per execution. Both payloads are stored as JSON text (the
 //! same encoding [`FileStore`](crate::FileStore) uses), so no extra Postgres type
 //! mapping is needed. Enabled by the `postgres` cargo feature.
+//!
+//! **Schema migrations (RM-GA-P3 MIG-A1):** `connect` used to run
+//! `CREATE TABLE IF NOT EXISTS`/ad-hoc `ALTER TABLE ADD COLUMN IF NOT EXISTS`
+//! inline on every call — no version tracking, no down-path, and every process
+//! needed DDL privilege just to start serving. Schema changes now live in
+//! versioned `migrations/*.sql` files (applied via [`refinery`], tracked in an
+//! `apex_workflow_schema_history` table distinct from the other Postgres-backed
+//! crates' own history tables so all three can share one physical database
+//! without colliding). [`PostgresStore::run_migrations`] is the only thing that
+//! ever runs DDL — invoked explicitly via `apex admin migrate`, never by
+//! `connect`. `connect` only *reads* the schema version and fails closed
+//! (`Error::Config`) if it doesn't match this binary's expected version exactly
+//! — too old ("run migrations first") or too new (an old binary must not touch
+//! a newer schema it doesn't understand).
 
 use crate::engine::{ExecutionFilter, ExecutionState};
 use crate::event::WorkflowEvent;
@@ -14,10 +28,58 @@ use crate::queue::{PartitionAssignment, WorkQueue, shard_of};
 use crate::store::{CheckpointStore, EventLog};
 use apex_common::{Error, Result};
 use async_trait::async_trait;
+use refinery::AsyncMigrate;
 use std::time::Duration;
+
+refinery::embed_migrations!("migrations");
+
+/// Distinct per-crate so `apex-workflow`/`apex-memory`/`apex-marketplace` can
+/// all migrate the same physical Postgres database without their version
+/// tracking colliding.
+const MIGRATION_TABLE: &str = "apex_workflow_schema_history";
 
 fn pg_err(context: &str, e: impl std::fmt::Display) -> Error {
     Error::provider(format!("postgres {context}: {e}"))
+}
+
+/// This binary's expected schema version — the highest version among its own
+/// embedded migrations. Pure/local: no database round-trip needed to know it.
+fn expected_schema_version() -> u32 {
+    migrations::runner()
+        .get_migrations()
+        .iter()
+        .map(|m| m.version())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Read (never write) the schema version actually applied to `client`, and
+/// fail closed if it doesn't match [`expected_schema_version`] exactly.
+async fn assert_schema_version(client: &mut tokio_postgres::Client) -> Result<()> {
+    let expected = expected_schema_version();
+    let applied = AsyncMigrate::get_last_applied_migration(client, MIGRATION_TABLE)
+        .await
+        .map_err(|e| {
+            Error::config(format!(
+                "workflow Postgres schema is not migrated (expected version {expected}): {e}; \
+                 run `apex admin migrate --target workflow --database-url <url>` first"
+            ))
+        })?
+        .map(|m| m.version())
+        .unwrap_or(0);
+    if applied < expected {
+        return Err(Error::config(format!(
+            "workflow Postgres schema is at version {applied}, but this binary needs version \
+             {expected}; run `apex admin migrate --target workflow --database-url <url>`"
+        )));
+    }
+    if applied > expected {
+        return Err(Error::config(format!(
+            "workflow Postgres schema is at version {applied}, newer than this binary's version \
+             {expected}; upgrade the apex binary before connecting to this database"
+        )));
+    }
+    Ok(())
 }
 
 /// A PostgreSQL-backed event log + checkpoint store.
@@ -30,9 +92,10 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
-    /// Connect (NoTls — for a trusted/local DB) and ensure the schema exists.
+    /// Connect (NoTls — for a trusted/local DB) and verify the schema is at the
+    /// version this binary expects — never runs DDL. See [`Self::run_migrations`].
     pub async fn connect(conn_str: &str) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(conn_str, tokio_postgres::NoTls)
+        let (mut client, connection) = tokio_postgres::connect(conn_str, tokio_postgres::NoTls)
             .await
             .map_err(|e| pg_err("connect", e))?;
         // Drive the connection in the background for the life of the client.
@@ -42,12 +105,33 @@ impl PostgresStore {
             }
         });
 
-        let store = Self {
+        assert_schema_version(&mut client).await?;
+
+        Ok(Self {
             client,
             partitions: 1,
-        };
-        store.migrate().await?;
-        Ok(store)
+        })
+    }
+
+    /// Apply every pending migration, creating the tracking table on first run.
+    /// The only place this crate ever issues DDL — called explicitly via
+    /// `apex admin migrate`, not from `connect`/`serve`, so the serving path
+    /// needs no schema-modification privilege.
+    pub async fn run_migrations(conn_str: &str) -> Result<()> {
+        let (mut client, connection) = tokio_postgres::connect(conn_str, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| pg_err("connect", e))?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                tracing::warn!("postgres connection closed: {e}");
+            }
+        });
+        migrations::runner()
+            .set_migration_table_name(MIGRATION_TABLE)
+            .run_async(&mut client)
+            .await
+            .map_err(|e| pg_err("migrate", e))?;
+        Ok(())
     }
 
     /// Set the number of queue partitions (must be done before enqueuing, and must
@@ -55,33 +139,6 @@ impl PostgresStore {
     pub fn with_partitions(mut self, partitions: u32) -> Self {
         self.partitions = partitions.max(1);
         self
-    }
-
-    async fn migrate(&self) -> Result<()> {
-        self.client
-            .batch_execute(
-                "CREATE TABLE IF NOT EXISTS workflow_events (
-                     execution_id TEXT   NOT NULL,
-                     seq          BIGINT NOT NULL,
-                     event        TEXT   NOT NULL,
-                     PRIMARY KEY (execution_id, seq)
-                 );
-                 CREATE TABLE IF NOT EXISTS workflow_checkpoints (
-                     execution_id TEXT PRIMARY KEY,
-                     snapshot     TEXT NOT NULL
-                 );
-                 CREATE TABLE IF NOT EXISTS workflow_queue (
-                     execution_id TEXT PRIMARY KEY,
-                     leased_by    TEXT,
-                     leased_until TIMESTAMPTZ,
-                     shard        INT NOT NULL DEFAULT 0
-                 );
-                 ALTER TABLE workflow_queue ADD COLUMN IF NOT EXISTS shard INT NOT NULL DEFAULT 0;
-                 CREATE INDEX IF NOT EXISTS workflow_queue_shard_idx ON workflow_queue (shard);",
-            )
-            .await
-            .map_err(|e| pg_err("migrate", e))?;
-        Ok(())
     }
 }
 
