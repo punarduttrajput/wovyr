@@ -399,41 +399,29 @@ async fn approve_handler(
 
 // ── cancel ────────────────────────────────────────────────────────────────────
 
-/// `DELETE /api/v1/workflows/{id}` — cancel a running or waiting execution by
-/// injecting a terminal `cancelled` variable and signalling a synthetic event.
-/// The execution remains in the durable store (visibility is unaffected); its
-/// status transitions to `Cancelled` on the next engine step.
+/// `DELETE /api/v1/workflows/{id}` — cancel a running or waiting execution
+/// (RM-GA-P2 EXE-603): [`Engine::cancel`] transitions it to the terminal
+/// `Cancelled` state, writes a `WorkflowCancelled` event, and marks every
+/// pending/waiting activity `Skipped`. Returns `200` only on a real state
+/// transition — an unknown or already-terminal execution is `404`/`409`, never a
+/// fake success.
 ///
-/// Note: cancellation is advisory — activities that are already in-flight complete
-/// normally; only pending/waiting activities are skipped.
+/// Note: cancellation is advisory for activities already **in flight** — this only
+/// mutates the durable checkpoint, so a step a concurrently-running driver commits
+/// immediately afterward is not retroactively undone.
 async fn cancel_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:write")?;
     crate::require_workflow_visible(&state, &id, &tenant)?;
-    // Check the execution exists before attempting cancellation.
-    state
-        .workflows
-        .status(&id)
-        .await
-        .map_err(ApiError::from)?
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                format!("execution `{id}` not found"),
-            )
-        })?;
-
-    // Inject a `cancelled` variable into the checkpoint so downstream guards
-    // and the UI can observe it. Full engine-level cancel support is a later slice.
-    // For now we mark the cancellation intent and return 202.
-    // (A production implementation would add Engine::cancel that transitions the
-    // state machine to Cancelled and writes a WorkflowCancelled event.)
-    tracing::info!(execution_id = %id, "cancel requested (advisory)");
-    Ok(StatusCode::ACCEPTED)
+    let cancelled = state.workflows.cancel(&id).await.map_err(ApiError::from)?;
+    tracing::info!(execution_id = %id, "execution cancelled");
+    Ok(Json(json!({
+        "execution_id": cancelled.execution_id,
+        "status": "cancelled",
+    })))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -550,6 +538,109 @@ metadata:\n  name: test-wf\nspec:\n  activities:\n    - id: echo-step\n      typ
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(body["execution_id"], "test-exec-1");
         assert_eq!(body["status"], "submitted");
+    }
+
+    const WAIT_YAML: &str = "\
+metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type: wait, inputs: {event: go}}\n";
+
+    /// Poll `GET /api/v1/workflows/{id}` until the named activity suspends
+    /// (`Waiting`) — unlike `wait_for_terminal`, a suspended execution's top-level
+    /// status stays `Running` forever (only the activity itself transitions), so
+    /// waiting for a terminal *workflow* status would hang.
+    async fn wait_for_activity_waiting(
+        state: &Arc<AppState>,
+        execution_id: &str,
+        activity_id: &str,
+    ) -> Value {
+        for _ in 0..100 {
+            let (st, body) =
+                post_json_state_get(state, &format!("/api/v1/workflows/{execution_id}")).await;
+            if st == StatusCode::OK && body["execution"]["activities"][activity_id] == "Waiting" {
+                return body;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("activity `{activity_id}` on `{execution_id}` did not suspend in time");
+    }
+
+    /// RM-GA-P2 EXE-603: `DELETE /api/v1/workflows/{id}` really cancels a suspended
+    /// execution — no more the old handler's unconditional `202` with no state
+    /// change. Success reports `Cancelled` with a trailing `WorkflowCancelled`
+    /// event and the pending activity `Skipped`; a second cancel is `409`, and an
+    /// unknown execution is `404`.
+    #[tokio::test]
+    async fn cancel_route_really_cancels_a_suspended_execution() {
+        let state = Arc::new(AppState::from_env().await);
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": WAIT_YAML, "execution_id": "cancel-route-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        let detail = wait_for_activity_waiting(&state, "cancel-route-test", "hold").await;
+        assert_eq!(detail["execution"]["status"], "Running");
+        assert_eq!(detail["execution"]["waiting_on"], json!(["hold"]));
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/workflows/cancel-route-test")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "cancelled");
+
+        let (st, detail) = post_json_state_get(&state, "/api/v1/workflows/cancel-route-test").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(detail["execution"]["status"], "Cancelled");
+        assert_eq!(detail["execution"]["activities"]["hold"], "Skipped");
+        assert!(
+            detail["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["type"] == "WorkflowCancelled"),
+            "expected a WorkflowCancelled event: {detail}"
+        );
+
+        // A second cancel of an already-terminal execution is a real error, not a
+        // repeated fake success.
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/workflows/cancel-route-test")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // An unknown execution is 404, not a fake success either.
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/workflows/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     const AGENT_YAML: &str = "\

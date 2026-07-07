@@ -4,7 +4,7 @@
 
 use apex_workflow::{
     ActivityError, ActivityState, CheckpointStore, ClosureExecutor, Definition, Engine, EventLog,
-    FileStore, InMemoryStore, RunOutcome,
+    FileStore, InMemoryStore, RunOutcome, WorkflowEvent, WorkflowState,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -529,4 +529,86 @@ async fn parallel_branch_failure_compensates_completed_siblings() {
     // c committed despite the sibling failure; rollback runs in reverse completed order.
     let order = log.lock().unwrap().clone();
     assert_eq!(order, vec!["a", "c", "undo_c", "undo_a"]);
+}
+
+// ---------------------------------------------------------------------------
+// EXE-603 — Engine::cancel (no more fake 202s from the server's DELETE route)
+// ---------------------------------------------------------------------------
+
+/// Cancelling a suspended execution transitions it to `Cancelled`, records a
+/// `WorkflowCancelled` event in history, and marks the still-pending activity
+/// `Skipped` rather than leaving it `Waiting` forever.
+#[tokio::test]
+async fn cancel_transitions_to_cancelled_and_skips_pending_activities() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: cancel-me\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n  transitions:\n    - {from: a, to: b}\n",
+    )
+    .unwrap();
+    let executor = ClosureExecutor::new()
+        .on("a", |_| async { Ok(json!({"a": true})) })
+        .on("b", |_| async {
+            Err(ActivityError::Interrupted("paused".into()))
+        });
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, state) = engine.run(&def, "wf-cancel-1", json!({})).await.unwrap();
+    assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+    assert_eq!(state.activities["a"].state, ActivityState::Completed);
+    assert_eq!(state.activities["b"].state, ActivityState::Ready);
+
+    let cancelled = engine.cancel("wf-cancel-1").await.unwrap();
+    assert_eq!(cancelled.status, WorkflowState::Cancelled);
+    // `a` already completed — untouched. `b` was pending, not yet failed/completed —
+    // skipped rather than left dangling.
+    assert_eq!(cancelled.activities["a"].state, ActivityState::Completed);
+    assert_eq!(cancelled.activities["b"].state, ActivityState::Skipped);
+
+    let history = engine.history("wf-cancel-1").await.unwrap();
+    assert!(
+        matches!(history.last(), Some(WorkflowEvent::WorkflowCancelled)),
+        "expected a trailing WorkflowCancelled event, got {history:?}"
+    );
+
+    // The cancellation is durable: a query (no side effects) reflects it too.
+    let queried = engine.query("wf-cancel-1").await.unwrap().unwrap();
+    assert_eq!(queried.status, WorkflowState::Cancelled);
+}
+
+/// Cancelling an execution that doesn't exist, or one already in a terminal state,
+/// fails closed rather than silently succeeding — the acceptance bar EXE-603 sets
+/// against the old handler's unconditional `202`.
+#[tokio::test]
+async fn cancel_fails_closed_on_unknown_or_already_terminal_executions() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: cancel-terminal\nspec:\n  activities:\n    - {id: a, type: function}\n",
+    )
+    .unwrap();
+    let executor = ClosureExecutor::new().on("a", |_| async { Ok(json!({"a": true})) });
+    let engine = engine_with(InMemoryStore::new(), executor);
+
+    assert!(engine.cancel("does-not-exist").await.is_err());
+
+    let (outcome, _) = engine.run(&def, "wf-cancel-2", json!({})).await.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
+    assert!(
+        engine.cancel("wf-cancel-2").await.is_err(),
+        "a completed execution must not be cancellable"
+    );
+
+    // A second cancel of an already-cancelled execution is not idempotent success
+    // either — it's still a terminal state.
+    let def2 = Definition::from_yaml(
+        "metadata:\n  name: cancel-twice\nspec:\n  activities:\n    - {id: a, type: function}\n",
+    )
+    .unwrap();
+    let executor2 = ClosureExecutor::new().on("a", |_| async {
+        Err(ActivityError::Interrupted("paused".into()))
+    });
+    let engine2 = engine_with(InMemoryStore::new(), executor2);
+    engine2.run(&def2, "wf-cancel-3", json!({})).await.unwrap();
+    engine2.cancel("wf-cancel-3").await.unwrap();
+    assert!(
+        engine2.cancel("wf-cancel-3").await.is_err(),
+        "cancelling an already-cancelled execution must not silently succeed again"
+    );
 }
