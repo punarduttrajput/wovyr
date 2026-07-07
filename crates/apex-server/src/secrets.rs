@@ -7,10 +7,11 @@
 //! — a secret's value is never returned here; values leave the vault only through the
 //! resolution/injection path ([§5](../../docs/13-security/secret-management.md#5-injection-into-tools--plugins)).
 
+use crate::hardening::{PageQuery, paginate};
 use crate::{ApiError, AppState};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     routing::{get, post},
 };
@@ -70,14 +71,21 @@ fn audit_secret(
     );
 }
 
-/// `GET /api/v1/secrets` — list the caller's tenant's secrets (metadata only).
+/// `GET /api/v1/secrets` — list the caller's tenant's secrets (metadata only),
+/// cursor-paginated (overview §6, RM-GA-P4 API-701).
 async fn list_secrets(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "secrets:read")?;
-    let items = state.secrets.list(&tenant)?;
-    Ok(Json(json!({ "secrets": items, "total": items.len() })))
+    let items: Vec<Value> = state
+        .secrets
+        .list(&tenant)?
+        .into_iter()
+        .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+        .collect();
+    Ok(Json(paginate(items, &page.page())))
 }
 
 /// `GET /api/v1/secrets/{name}` — a secret's metadata (never its value).

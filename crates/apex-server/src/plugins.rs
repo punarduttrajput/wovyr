@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use crate::ApiError;
 use crate::AppState;
-use axum::extract::State;
+use crate::hardening::{PageQuery, paginate};
+use axum::extract::{Query, State};
 
 fn plugins_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -302,11 +303,12 @@ fn plugin_json(p: &InstalledPlugin) -> Value {
     })
 }
 
-/// `GET /api/v1/plugins` — the installed plugin catalog.
-async fn list_plugins() -> Result<Json<Value>, ApiError> {
+/// `GET /api/v1/plugins` — the installed plugin catalog, cursor-paginated
+/// (overview §6, RM-GA-P4 API-701).
+async fn list_plugins(Query(page): Query<PageQuery>) -> Result<Json<Value>, ApiError> {
     let catalog = load_catalog()?;
     let items: Vec<Value> = catalog.iter().map(plugin_json).collect();
-    Ok(Json(json!({ "plugins": items, "total": items.len() })))
+    Ok(Json(paginate(items, &page.page())))
 }
 
 #[derive(Deserialize)]

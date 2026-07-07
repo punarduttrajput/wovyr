@@ -196,18 +196,26 @@ struct SearchParams {
     q: String,
     category: Option<String>,
     capability: Option<String>,
+    /// `limit` + `cursor` (overview §6, RM-GA-P4 API-701).
+    #[serde(flatten)]
+    page: crate::hardening::PageQuery,
 }
 
-/// `GET /api/v1/marketplace/listings?q=&category=&capability=` — search/browse.
+/// `GET /api/v1/marketplace/listings?q=&category=&capability=` — search/browse,
+/// cursor-paginated (overview §6).
 async fn search_listings(Query(params): Query<SearchParams>) -> Result<Json<Value>, ApiError> {
+    let page = params.page.page();
     let query = SearchQuery {
         text: params.q,
         category: params.category,
         capability: params.capability.as_deref().and_then(parse_capability),
     };
     let listings = with_registry(move |reg| Ok(reg.search(&query)?)).await?;
-    let total = listings.len();
-    Ok(Json(json!({ "listings": listings, "total": total })))
+    let items: Vec<Value> = listings
+        .into_iter()
+        .map(|l| serde_json::to_value(l).unwrap_or(Value::Null))
+        .collect();
+    Ok(Json(crate::hardening::paginate(items, &page)))
 }
 
 /// `GET /api/v1/marketplace/listings/{id}` — one listing's detail (`id` URL-encoded

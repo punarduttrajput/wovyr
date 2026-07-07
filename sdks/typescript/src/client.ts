@@ -204,8 +204,11 @@ class MemoryResource {
     return this.http.request("POST", "/api/v1/memory/records", req);
   }
 
-  /** `POST /api/v1/memory:query` — hybrid vector+keyword retrieval. */
-  async query(req: QueryMemoryRequest): Promise<{ results: MemoryQueryResult[]; count: number }> {
+  /** `POST /api/v1/memory:query` — hybrid vector+keyword retrieval. Returns a
+   * ranked result set, not a page — there is no cursor/`has_more`, since
+   * retrieval is bounded by `limit`/relevance, not an offset into a stable
+   * ordering (RM-GA-P4 API-701). */
+  async query(req: QueryMemoryRequest): Promise<{ data: MemoryQueryResult[]; count: number }> {
     return this.http.request("POST", "/api/v1/memory:query", req);
   }
 }
@@ -214,8 +217,8 @@ class PluginsResource {
   constructor(private readonly http: HttpClient) {}
 
   /** `GET /api/v1/plugins`. */
-  async list(): Promise<{ plugins: PluginSummary[]; total: number }> {
-    return this.http.request("GET", "/api/v1/plugins");
+  async list(params?: PageParams): Promise<Page<PluginSummary>> {
+    return this.http.request("GET", "/api/v1/plugins", undefined, { query: params });
   }
 
   /** `POST /api/v1/plugins:install` — `apexpkg` is the raw `.apexpkg` bytes. */
@@ -267,7 +270,7 @@ class MarketplaceResource {
   constructor(private readonly http: HttpClient) {}
 
   /** `GET /api/v1/marketplace/listings`. */
-  async search(params?: MarketplaceSearchParams): Promise<{ listings: unknown[]; total: number }> {
+  async search(params?: MarketplaceSearchParams & PageParams): Promise<Page<unknown>> {
     return this.http.request("GET", "/api/v1/marketplace/listings", undefined, { query: params });
   }
 
@@ -363,8 +366,8 @@ class SecretsResource {
   constructor(private readonly http: HttpClient) {}
 
   /** `GET /api/v1/secrets`. */
-  async list(): Promise<{ secrets: SecretMetadata[]; total: number }> {
-    return this.http.request("GET", "/api/v1/secrets");
+  async list(params?: PageParams): Promise<Page<SecretMetadata>> {
+    return this.http.request("GET", "/api/v1/secrets", undefined, { query: params });
   }
 
   /** `POST /api/v1/secrets` — value is never returned. */
@@ -508,11 +511,11 @@ class WebhooksResource {
 class AuditResource {
   constructor(private readonly http: HttpClient) {}
 
-  /** `GET /api/v1/audit` — tenant-scoped, tamper-evident hash-chained log. */
-  async query(params?: { principal?: string; action?: string; limit?: number }): Promise<{
-    entries: AuditEntry[];
-    total: number;
-  }> {
+  /** `GET /api/v1/audit` — tenant-scoped, tamper-evident hash-chained log,
+   * most-recent first, cursor-paginated (RM-GA-P4 API-701). */
+  async query(
+    params?: { principal?: string; action?: string } & PageParams,
+  ): Promise<Page<AuditEntry>> {
     return this.http.request("GET", "/api/v1/audit", undefined, { query: params });
   }
 }
@@ -521,7 +524,7 @@ class ToolsResource {
   constructor(private readonly http: HttpClient) {}
 
   /** `GET /api/v1/tools` — built-ins + enabled plugin tools. Unauthenticated. */
-  async list(): Promise<{ tools: ToolSummary[]; total: number }> {
-    return this.http.request("GET", "/api/v1/tools");
+  async list(params?: PageParams): Promise<Page<ToolSummary>> {
+    return this.http.request("GET", "/api/v1/tools", undefined, { query: params });
   }
 }

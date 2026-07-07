@@ -7,10 +7,10 @@ Document ID: RM-GA-P4
 
 **Document ID:** RM-GA-P4
 **File Path:** `docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md`
-**Version:** 1.0.0
-**Status:** Ready for grooming
+**Version:** 1.1.0
+**Status:** In progress — API-701 done, WS-7's breaking pass continuing (API-702/703 next)
 **Owner:** Engineering (API / Platform)
-**Last Updated:** 2026-07-06
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -94,6 +94,22 @@ closes PP-16 contract portion.)
 **Files.** `crates/apex-server/src/{audit,plugins,marketplace,secrets,tools,memory}.rs`;
 `docs/09-api/openapi.yaml`; `sdks/typescript`, `sdks/python`. **Size.** M. **Depends
 on:** none. **Blocks:** API-704.
+
+**Status: Done (2026-07-07).** All six ad-hoc endpoints migrated to
+`hardening::paginate()`'s `{data, has_more, next_cursor, total_estimate}`
+envelope, each gaining real `limit`/`cursor` query params in place of their old
+unbounded (or single-shot-capped, for audit) response. `GET /api/v1/audit` is
+now consistently most-recent-first regardless of whether a limit is supplied
+(previously only when the old ad-hoc `limit` param was set). `POST
+/api/v1/memory:query` is the documented exception per this ticket's own
+guidance: `results` → `data` for field-name consistency, but it keeps its
+`{data, count}` shape rather than the full envelope, since a ranked top-K
+result set has no cursor to page through. Both SDKs and `openapi.yaml` updated
+in lockstep; `redocly lint` still passes (same pre-existing warning set, no
+new errors); the TypeScript SDK's `tsc` build is clean. No schema-level check
+scripted yet for "no endpoint uses the old top-level array keys" — the six
+were verified by hand against every call site in the Rust test suite and both
+SDKs' test/type files.
 
 ---
 
@@ -429,7 +445,7 @@ groups/backends have. (PRD-003 R-9.5; closes PP-20/PP-21.)
 
 | Ticket | WS | Title | Size | Priority | Depends on |
 |--------|----|-------|------|----------|------------|
-| API-701 | 7 | Standardize list envelopes | M | P1 | — |
+| API-701 | 7 | Standardize list envelopes — **Done** | M | P1 | — |
 | API-702 | 7 | One serde casing policy | M | P1 | — |
 | API-703 | 7 | Idempotency on all mutations | M | P1 | SEC-205, DUR-404 |
 | API-704 | 7 | CI contract gate (SDK + redocly) | M | P1 | 701,702,703 |
@@ -468,4 +484,5 @@ genuinely last — they harden and clean up, but nothing depends on them.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-07 | API-701 done: audit/plugins/marketplace/secrets/tools migrated to the shared cursor-pagination envelope; memory:query renamed `results`→`data` (documented as a deliberate non-paginated exception). Both SDKs and openapi.yaml updated in lockstep |
 | 1.0.0 | 2026-07-06 | Initial Phase-4 (contract & operability) ticket breakdown: 14 tickets across WS-7 (API freeze), WS-8 (observability/audit/dashboard), and the WS-9 remainder (executor unification, CLI-panic fix, config crate, cleanup), with dependencies, acceptance criteria, file targets, and sizing |

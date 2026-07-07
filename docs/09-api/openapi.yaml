@@ -640,13 +640,16 @@ paths:
                 importance: { type: number, nullable: true }
       responses:
         '200':
-          description: Query results
+          description: >-
+            Query results — a ranked result set, not a page (no
+            cursor/has_more; retrieval is bounded by limit/relevance, not an
+            offset into a stable ordering).
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  results:
+                  data:
                     type: array
                     items:
                       type: object
@@ -672,36 +675,40 @@ paths:
     get:
       tags: [plugins]
       summary: List installed plugins
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
       responses:
         '200':
-          description: Plugins
+          description: Paginated installed plugins
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  plugins:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id: { type: string, description: 'publisher/name' }
-                        name: { type: string }
-                        version: { type: string }
-                        publisher: { type: string }
-                        description: { type: string }
-                        state: { type: string, enum: [enabled, disabled] }
-                        permissions: { type: array, items: { type: string } }
-                        granted: { type: array, items: { type: string } }
-                        capabilities:
-                          type: array
-                          items:
-                            type: object
-                            properties:
-                              kind: { type: string, enum: [tool, provider, memory_backend, policy, workflow_activity] }
-                              id: { type: string }
-                        platform_api: { type: string }
-                  total: { type: integer }
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string, description: 'publisher/name' }
+                            name: { type: string }
+                            version: { type: string }
+                            publisher: { type: string }
+                            description: { type: string }
+                            state: { type: string, enum: [enabled, disabled] }
+                            permissions: { type: array, items: { type: string } }
+                            granted: { type: array, items: { type: string } }
+                            capabilities:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  kind: { type: string, enum: [tool, provider, memory_backend, policy, workflow_activity] }
+                                  id: { type: string }
+                            platform_api: { type: string }
 
   /api/v1/plugins:install:
     post:
@@ -820,14 +827,18 @@ paths:
         - name: capability
           in: query
           schema: { type: string, enum: [tool, provider, memory_backend, policy, workflow_activity] }
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
       responses:
         '200':
-          description: Listings
+          description: Paginated listings
           content:
             application/json:
               schema:
-                type: object
-                properties: { listings: { type: array, items: { type: object } }, total: { type: integer } }
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties: { data: { type: array, items: { type: object } } }
 
   /api/v1/marketplace:publish:
     post:
@@ -1068,14 +1079,18 @@ paths:
       parameters:
         - $ref: '#/components/parameters/xApexTenant'
         - $ref: '#/components/parameters/xApexPrincipal'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
       responses:
         '200':
-          description: Secret metadata
+          description: Paginated secret metadata
           content:
             application/json:
               schema:
-                type: object
-                properties: { secrets: { type: array, items: { type: object } }, total: { type: integer } }
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties: { data: { type: array, items: { type: object } } }
     post:
       tags: [secrets]
       summary: Create a secret
@@ -1438,7 +1453,7 @@ paths:
   /api/v1/audit:
     get:
       tags: [audit]
-      summary: Query the tamper-evident audit log (tenant-scoped)
+      summary: Query the tamper-evident audit log (tenant-scoped), most-recent first
       parameters:
         - $ref: '#/components/parameters/xApexTenant'
         - $ref: '#/components/parameters/xApexPrincipal'
@@ -1448,17 +1463,18 @@ paths:
         - name: action
           in: query
           schema: { type: string }
-        - name: limit
-          in: query
-          schema: { type: integer }
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
       responses:
         '200':
-          description: Audit entries
+          description: Paginated audit entries
           content:
             application/json:
               schema:
-                type: object
-                properties: { entries: { type: array, items: { type: object } }, total: { type: integer } }
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties: { data: { type: array, items: { type: object } } }
 
   # ---------------------------------------------------------------- tools --
   /api/v1/tools:
@@ -1466,24 +1482,28 @@ paths:
       tags: [tools]
       summary: List available tools (built-ins + enabled plugin tools)
       security: []
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
       responses:
         '200':
-          description: Tools
+          description: Paginated tools
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  tools:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id: { type: string }
-                        description: { type: string }
-                        category: { type: string }
-                        permissions: { type: array, items: { type: string }, nullable: true }
-                  total: { type: integer }
+                allOf:
+                  - $ref: '#/components/schemas/PageMeta'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            description: { type: string }
+                            category: { type: string }
+                            permissions: { type: array, items: { type: string }, nullable: true }
 
 security:
   - tenantHeader: []

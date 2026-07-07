@@ -172,6 +172,10 @@ struct QueryRequest {
 }
 
 /// `POST /api/v1/memory:query` — hybrid retrieval with an explainable score breakdown.
+/// Returns a **ranked result set, not a page** of a larger collection — there is no
+/// cursor/`has_more`, since retrieval is bounded by `limit`/relevance, not an
+/// offset into a stable ordering. `data` matches the field name every other list
+/// route uses (RM-GA-P4 API-701) even though this route isn't cursor-paginated.
 async fn query(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -237,7 +241,7 @@ async fn query(
             })
         })
         .collect();
-    Ok(Json(json!({ "results": data, "count": data.len() })))
+    Ok(Json(json!({ "data": data, "count": data.len() })))
 }
 
 #[derive(Deserialize)]

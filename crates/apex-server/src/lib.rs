@@ -3145,7 +3145,7 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        let found: Vec<&str> = q["results"]
+        let found: Vec<&str> = q["data"]
             .as_array()
             .unwrap()
             .iter()
@@ -3190,7 +3190,7 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        let found: Vec<&str> = q["results"]
+        let found: Vec<&str> = q["data"]
             .as_array()
             .unwrap()
             .iter()
@@ -3281,7 +3281,7 @@ mod tests {
         let (st, list) =
             tenant_req(&state, "GET", "/api/v1/secrets", "beta", "bob", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(list["total"], 0, "beta has no secrets of its own");
+        assert_eq!(list["total_estimate"], 0, "beta has no secrets of its own");
         let (st, _) = tenant_req(
             &state,
             "GET",
@@ -3386,7 +3386,7 @@ mod tests {
         let (st, audit) =
             tenant_req(&state, "GET", "/api/v1/audit", "acme", "alice", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        let entries = audit["entries"].as_array().unwrap();
+        let entries = audit["data"].as_array().unwrap();
         let actions: Vec<&str> = entries
             .iter()
             .filter_map(|e| e["event"]["action"].as_str())
@@ -3408,7 +3408,7 @@ mod tests {
         let (st, beta) =
             tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(beta["total"], 0);
+        assert_eq!(beta["total_estimate"], 0);
     }
 
     /// A fresh in-memory-backed KMS for tests, isolated from the shared `~/.apex/kms`.
@@ -3568,7 +3568,7 @@ mod tests {
         let (st, audit) =
             tenant_req(&state, "GET", "/api/v1/audit", "acme", "alice", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        let entries = audit["entries"].as_array().unwrap();
+        let entries = audit["data"].as_array().unwrap();
         let actions: Vec<&str> = entries
             .iter()
             .filter_map(|e| e["event"]["action"].as_str())
@@ -3588,7 +3588,7 @@ mod tests {
         let (st, beta) =
             tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(beta["total"], 0);
+        assert_eq!(beta["total_estimate"], 0);
     }
 
     /// **SEC-102**: the anonymous default-tenant bypass (`tenant_authorize` skipping
@@ -3680,7 +3680,7 @@ mod tests {
         let state = Arc::new(AppState::from_env().await);
         let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        let tools = body["tools"].as_array().unwrap();
+        let tools = body["data"].as_array().unwrap();
         // The safe-by-default built-ins are always registered.
         let ids: Vec<&str> = tools.iter().filter_map(|t| t["id"].as_str()).collect();
         for id in ["echo", "fs_read", "http_get"] {
@@ -3707,7 +3707,7 @@ mod tests {
         );
         let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        let ids: Vec<&str> = body["tools"]
+        let ids: Vec<&str> = body["data"]
             .as_array()
             .unwrap()
             .iter()

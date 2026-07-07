@@ -7,7 +7,12 @@
 //! `/healthz` and `/metrics`.
 
 use crate::AppState;
-use axum::{Json, Router, extract::State, routing::get};
+use crate::hardening::{PageQuery, paginate};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -15,8 +20,12 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/v1/tools", get(list_tools))
 }
 
-/// `GET /api/v1/tools` — the registered tool catalog (id + description + category).
-async fn list_tools(State(state): State<Arc<AppState>>) -> Json<Value> {
+/// `GET /api/v1/tools` — the registered tool catalog (id + description +
+/// category), cursor-paginated (overview §6, RM-GA-P4 API-701).
+async fn list_tools(
+    State(state): State<Arc<AppState>>,
+    Query(page): Query<PageQuery>,
+) -> Json<Value> {
     let tools: Vec<Value> = state
         .registry
         .metadata()
@@ -30,6 +39,5 @@ async fn list_tools(State(state): State<Arc<AppState>>) -> Json<Value> {
             })
         })
         .collect();
-    let total = tools.len();
-    Json(json!({ "tools": tools, "total": total }))
+    Json(paginate(tools, &page.page()))
 }
