@@ -502,7 +502,7 @@ impl FileRegistryStore {
             std::fs::create_dir_all(parent)?;
         }
         let bytes = serde_json::to_vec_pretty(state)?;
-        std::fs::write(&self.path, bytes)?;
+        apex_common::fs::atomic_write(&self.path, bytes)?;
         Ok(())
     }
 

@@ -31,7 +31,7 @@ pub fn from_file(path: impl AsRef<Path>) -> Result<KeyBytes> {
         return decode_hex_key(hex_str.trim(), "root key file");
     }
     let key = generate_key()?;
-    std::fs::write(path, hex::encode(key))
+    apex_common::fs::atomic_write(path, hex::encode(key))
         .map_err(|e| Error::config(format!("write root key file: {e}")))?;
     restrict_permissions(path)?;
     Ok(key)

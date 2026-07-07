@@ -130,7 +130,7 @@ fn save_catalog(catalog: &[InstalledPlugin]) -> Result<(), ApiError> {
         )
     })?;
     std::fs::create_dir_all(&dir)
-        .and_then(|_| std::fs::write(dir.join("catalog.json"), bytes))
+        .and_then(|_| apex_common::fs::atomic_write(dir.join("catalog.json"), bytes))
         .map_err(|e| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -156,7 +156,7 @@ fn save_trust(trust: &TrustStore) -> Result<(), ApiError> {
         )
     })?;
     std::fs::create_dir_all(&dir)
-        .and_then(|_| std::fs::write(dir.join("trust.json"), bytes))
+        .and_then(|_| apex_common::fs::atomic_write(dir.join("trust.json"), bytes))
         .map_err(|e| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,

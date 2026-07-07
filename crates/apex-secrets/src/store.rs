@@ -115,7 +115,7 @@ impl FileSecretStore {
         let list: Vec<&Secret> = map.values().collect();
         let bytes = serde_json::to_vec_pretty(&list)
             .map_err(|e| Error::config(format!("encode secrets.json: {e}")))?;
-        std::fs::write(&self.path, bytes)
+        apex_common::fs::atomic_write(&self.path, bytes)
             .map_err(|e| Error::config(format!("write secrets.json: {e}")))
     }
 }

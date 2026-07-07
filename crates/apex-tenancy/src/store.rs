@@ -248,7 +248,7 @@ impl FileTenancyStore {
     }
 
     fn save(&self, state: &TenancyState) -> Result<()> {
-        std::fs::write(&self.path, serde_json::to_vec_pretty(state)?)?;
+        apex_common::fs::atomic_write(&self.path, serde_json::to_vec_pretty(state)?)?;
         Ok(())
     }
 

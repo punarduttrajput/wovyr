@@ -94,7 +94,7 @@ pub fn save_credentials(creds: &Credentials) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let path = credentials_path()?;
     let json = serde_json::to_string_pretty(creds)?;
-    std::fs::write(&path, json)?;
+    apex_common::fs::atomic_write(&path, json)?;
     restrict_permissions(&path);
     Ok(())
 }

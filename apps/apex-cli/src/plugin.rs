@@ -86,7 +86,7 @@ fn load_trust() -> Result<TrustStore> {
 
 fn save_trust(trust: &TrustStore) -> Result<()> {
     std::fs::create_dir_all(plugins_dir()?)?;
-    std::fs::write(trust_path()?, serde_json::to_vec_pretty(trust)?)?;
+    apex_common::fs::atomic_write(trust_path()?, serde_json::to_vec_pretty(trust)?)?;
     Ok(())
 }
 
@@ -102,7 +102,7 @@ fn load_catalog() -> Result<Vec<InstalledPlugin>> {
 
 fn save_catalog(catalog: &[InstalledPlugin]) -> Result<()> {
     std::fs::create_dir_all(plugins_dir()?)?;
-    std::fs::write(catalog_path()?, serde_json::to_vec_pretty(catalog)?)?;
+    apex_common::fs::atomic_write(catalog_path()?, serde_json::to_vec_pretty(catalog)?)?;
     Ok(())
 }
 

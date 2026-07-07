@@ -82,7 +82,7 @@ impl EncryptedFileWebhookStore {
         let list: Vec<&EncryptedSubscription> = map.values().collect();
         let bytes = serde_json::to_vec_pretty(&list)
             .map_err(|e| Error::config(format!("encode webhooks.enc.json: {e}")))?;
-        std::fs::write(&self.path, bytes)
+        apex_common::fs::atomic_write(&self.path, bytes)
             .map_err(|e| Error::config(format!("write webhooks.enc.json: {e}")))
     }
 

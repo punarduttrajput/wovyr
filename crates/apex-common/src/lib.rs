@@ -8,5 +8,7 @@
 mod error;
 mod usage;
 
+pub mod fs;
+
 pub use error::{Error, Result};
 pub use usage::Usage;
