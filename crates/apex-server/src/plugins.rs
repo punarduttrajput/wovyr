@@ -35,6 +35,30 @@ fn staging_dir() -> Option<PathBuf> {
     plugins_dir().map(|d| d.join("staging"))
 }
 
+/// Acquire the cross-process advisory lock over `~/.apex/plugins` (RM-GA-P2
+/// DUR-403), held for the duration of a mutating handler. Every lifecycle
+/// handler here does load-trust/catalog → mutate the in-memory `PluginEngine`
+/// → save-trust/catalog, all against files the CLI's `apex plugin` commands
+/// touch too; without a lock spanning that whole sequence, a concurrent writer
+/// (this or another process) could act on the same stale load and have its
+/// update silently clobbered by whichever saves last.
+fn acquire_lock() -> Result<apex_common::fs::FileLock, ApiError> {
+    let dir = plugins_dir().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "no home directory for plugin store",
+        )
+    })?;
+    apex_common::fs::FileLock::acquire(&dir).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("lock plugin store: {e}"),
+        )
+    })
+}
+
 fn read_json<T: serde::de::DeserializeOwned + Default>(path: PathBuf) -> Result<T, ApiError> {
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
@@ -301,6 +325,7 @@ async fn enable_plugin(
     Json(req): Json<PluginRef>,
 ) -> Result<Json<Value>, ApiError> {
     crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.enable(&req.id, &mut scratch)?;
@@ -316,6 +341,7 @@ async fn disable_plugin(
     Json(req): Json<PluginRef>,
 ) -> Result<Json<Value>, ApiError> {
     crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.disable(&req.id, &mut scratch)?;
@@ -351,6 +377,7 @@ async fn install_plugin(
 /// Install a verified [`Package`] into the durable catalog (disabled), returning its
 /// catalog JSON. Shared by the HTTP install route and the marketplace install bridge.
 pub(crate) fn install_package(package: &Package, grants: &[String]) -> Result<Value, ApiError> {
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let installed = engine.install(package, grants)?;
     let resp = plugin_json(installed);
@@ -370,6 +397,7 @@ async fn upgrade_plugin(
     crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let bytes = base64_decode(&req.apexpkg)?;
     let package = Package::from_apexpkg(&bytes)?;
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.upgrade(&package, &req.grants, &mut scratch)?;
@@ -391,6 +419,7 @@ async fn rollback_plugin(
     Json(req): Json<RollbackReq>,
 ) -> Result<Json<Value>, ApiError> {
     crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.rollback(&req.id, &mut scratch)?;
@@ -408,6 +437,7 @@ async fn uninstall_plugin(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.uninstall(&id, &mut scratch)?;
@@ -439,6 +469,7 @@ async fn trust_publisher(
             "public_key_hex must be valid hex (64 chars for a 32-byte ed25519 key)",
         )
     })?;
+    let _lock = acquire_lock()?;
     let mut trust = load_trust()?;
     trust.trust(req.publisher.clone(), key_bytes);
     save_trust(&trust)?;

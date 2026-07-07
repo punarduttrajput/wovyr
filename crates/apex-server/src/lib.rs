@@ -563,16 +563,21 @@ fn default_secrets_vault(kms: Arc<dyn apex_kms::Kms>) -> apex_secrets::Vault {
 }
 
 /// A tamper-evident [`AuditLog`](apex_audit::AuditLog) over a durable [`FileAuditSink`]
-/// at `~/.apex/audit`, falling back to an in-memory log.
+/// at `~/.apex/audit`, falling back to an in-memory log. Opened with cross-process
+/// locking (RM-GA-P2 DUR-403) over that same directory — the CLI can append to the
+/// identical `audit.jsonl` (e.g. via `apex plugin` commands, once wired), so a
+/// second writer must extend the chain, not fork it.
 fn default_audit_log() -> apex_audit::AuditLog {
-    let sink = std::env::var_os("HOME")
+    let dir = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| std::path::PathBuf::from(home).join(".apex").join("audit"))
+        .map(|home| std::path::PathBuf::from(home).join(".apex").join("audit"));
+    let sink = dir
+        .clone()
         .and_then(|dir| apex_audit::FileAuditSink::new(dir).ok());
-    match sink {
-        Some(s) => apex_audit::AuditLog::open(Box::new(s))
+    match (sink, dir) {
+        (Some(s), Some(dir)) => apex_audit::AuditLog::open_with_lock(Box::new(s), dir)
             .unwrap_or_else(|_| apex_audit::AuditLog::in_memory()),
-        None => apex_audit::AuditLog::in_memory(),
+        _ => apex_audit::AuditLog::in_memory(),
     }
 }
 

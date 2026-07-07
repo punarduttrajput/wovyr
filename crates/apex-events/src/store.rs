@@ -88,7 +88,10 @@ impl WebhookStore for InMemoryWebhookStore {
 }
 
 /// A durable webhook store backed by a single `webhooks.json` under a directory.
+/// Mutations are serialized by a process-local lock **and** a cross-process advisory
+/// file lock (RM-GA-P2 DUR-403), since the CLI and server share this directory.
 pub struct FileWebhookStore {
+    dir: PathBuf,
     path: PathBuf,
     lock: Mutex<()>,
 }
@@ -100,6 +103,7 @@ impl FileWebhookStore {
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
             path: dir.join("webhooks.json"),
+            dir,
             lock: Mutex::new(()),
         })
     }
@@ -119,9 +123,18 @@ impl FileWebhookStore {
     }
 }
 
+impl FileWebhookStore {
+    /// Cross-process lock guarding a read-modify-write cycle (DUR-403).
+    fn cross_process_lock(&self) -> Result<apex_common::fs::FileLock> {
+        apex_common::fs::FileLock::acquire(&self.dir)
+            .map_err(|e| Error::config(format!("lock webhook store: {e}")))
+    }
+}
+
 impl WebhookStore for FileWebhookStore {
     fn register(&self, sub: WebhookSubscription) -> Result<WebhookSubscription> {
         let _g = self.lock.lock().expect("webhook file lock poisoned");
+        let _flock = self.cross_process_lock()?;
         let mut state = self.load()?;
         state.subscriptions.insert(sub.id.clone(), sub.clone());
         self.save(&state)?;
@@ -142,6 +155,7 @@ impl WebhookStore for FileWebhookStore {
     }
     fn delete(&self, id: &str) -> Result<()> {
         let _g = self.lock.lock().expect("webhook file lock poisoned");
+        let _flock = self.cross_process_lock()?;
         let mut state = self.load()?;
         if state.subscriptions.remove(id).is_none() {
             return Err(Error::NotFound(format!("webhook `{id}` not found")));

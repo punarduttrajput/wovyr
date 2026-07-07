@@ -15,6 +15,16 @@
 //! file, a caller that also cares about the file's *existence* surviving a
 //! crash (e.g. its very first append, which creates the file) syncs the
 //! containing directory the same way `atomic_write`'s rename does.
+//!
+//! [`FileLock`] closes a gap `atomic_write` alone doesn't: two callers racing
+//! `atomic_write` on the *same* target share one fixed temp-file name, so
+//! without external synchronization their writes can interleave into that
+//! shared temp file before either renames — and, one level up, a
+//! read-modify-write cycle (load the whole document, mutate a field, write it
+//! back) can silently lose one side's update even when each individual write
+//! is torn-write-safe. The CLI and server share every `~/.apex` store
+//! directory by design, so this is a real cross-*process* hazard, not just a
+//! hypothetical one (RM-GA-P2 DUR-403).
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -69,6 +79,53 @@ pub fn sync_dir(dir: impl AsRef<Path>) -> io::Result<()> {
 #[cfg(not(unix))]
 pub fn sync_dir(_dir: impl AsRef<Path>) -> io::Result<()> {
     Ok(())
+}
+
+/// A held cross-process advisory exclusive lock on `<dir>/.lock` — `flock` on
+/// Unix, `LockFileEx` on Windows, via the `fs2` crate. Acquiring **blocks**
+/// the calling thread until the lock is held (a store's read-modify-write
+/// cycle should just wait its turn, not error out), and releases on `Drop`
+/// (or immediately if the process dies, so a crash can never leave a store
+/// permanently wedged).
+///
+/// Each open file description gets its own lock state, so this also
+/// correctly serializes concurrent callers *within* the same process (two
+/// threads each calling `acquire` on the same directory), not only across
+/// processes — there is no need to additionally guard it with an in-process
+/// `Mutex` for correctness, though callers may still keep one for other
+/// reasons (e.g. avoiding a syscall on an already-known-uncontended path).
+pub struct FileLock {
+    file: File,
+}
+
+impl FileLock {
+    /// Block until an exclusive lock on `<dir>/.lock` is held, creating `dir`
+    /// (and the lock file) if needed.
+    pub fn acquire(dir: impl AsRef<Path>) -> io::Result<FileLock> {
+        let dir = dir.as_ref();
+        fs::create_dir_all(dir)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(".lock"))?;
+        // Fully qualified rather than `use fs2::FileExt` + method-call syntax:
+        // this crate's MSRV (1.85) predates std's own `File::lock`/`unlock`
+        // (stabilized in 1.89), but on a newer toolchain the inherent std
+        // method of the same name would silently win method resolution and
+        // make the `use` look unused — naming the trait explicitly always
+        // picks fs2's impl, on any supported toolchain.
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(FileLock { file })
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Best-effort — closing the handle (right after this returns) releases
+        // the OS-level lock regardless of whether unlock() itself succeeds.
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +184,50 @@ mod tests {
 
         atomic_write(&path, b"hello").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"hello");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_acquire_blocks_until_the_first_is_dropped() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let dir = scratch_dir("filelock");
+        let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+        let lock1 = FileLock::acquire(&dir).unwrap();
+
+        let dir2 = dir.clone();
+        let order2 = order.clone();
+        let handle = std::thread::spawn(move || {
+            // Blocks here until `lock1` is dropped below.
+            let _lock2 = FileLock::acquire(&dir2).unwrap();
+            order2.lock().unwrap().push("second-acquired");
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        order.lock().unwrap().push("first-still-held");
+        drop(lock1);
+        handle.join().unwrap();
+
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["first-still-held", "second-acquired"],
+            "the second lock must not be acquired while the first is still held"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dropped_lock_can_be_reacquired_immediately() {
+        let dir = scratch_dir("filelock_reacquire");
+        {
+            let _lock = FileLock::acquire(&dir).unwrap();
+        }
+        // No hang, no error — the prior lock was released on drop.
+        let _lock = FileLock::acquire(&dir).unwrap();
 
         let _ = fs::remove_dir_all(&dir);
     }

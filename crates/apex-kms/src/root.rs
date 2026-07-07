@@ -21,10 +21,18 @@ pub fn from_env(var: &str) -> Result<KeyBytes> {
 /// deployment should prefer [`from_env`] (or, later, a real KMS-backed root).
 pub fn from_file(path: impl AsRef<Path>) -> Result<KeyBytes> {
     let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| Error::config(format!("create kms root key dir: {e}")))?;
-    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|e| Error::config(format!("create kms root key dir: {e}")))?;
+
+    // Cross-process lock (RM-GA-P2 DUR-403) spanning the whole "check, else
+    // generate+write" sequence: two processes racing to create the root key
+    // for the first time must not each generate an independent key while
+    // only one survives on disk — the loser's in-memory key would silently
+    // seal data nothing else can ever decrypt.
+    let _flock = apex_common::fs::FileLock::acquire(parent)
+        .map_err(|e| Error::config(format!("lock kms root key dir: {e}")))?;
+
     if path.exists() {
         let hex_str = std::fs::read_to_string(path)
             .map_err(|e| Error::config(format!("read root key file: {e}")))?;

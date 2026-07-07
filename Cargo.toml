@@ -46,6 +46,9 @@ apex-kms = { path = "crates/apex-kms" }
 apex-server = { path = "crates/apex-server" }
 
 # External
+# Cross-process advisory file locking (RM-GA-P2 DUR-403) — flock/LockFileEx via a
+# tiny, dependency-light crate rather than hand-rolled platform FFI.
+fs2 = "0.4"
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }

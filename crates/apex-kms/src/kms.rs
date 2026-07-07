@@ -126,6 +126,11 @@ fn to_key_bytes(bytes: Vec<u8>) -> Result<KeyBytes> {
 
 impl Kms for LocalKms {
     fn generate_data_key(&self, tenant: &str) -> Result<DataKey> {
+        // Held across the whole read-provision-write cycle (DUR-403): first use
+        // for a tenant auto-provisions a tenant key, and two concurrent first
+        // calls must not each provision an independent key while only one
+        // survives in the store.
+        let _flock = self.store.lock()?;
         let record = self.record_or_provision(tenant)?;
         let current = record
             .current_version()
@@ -166,6 +171,10 @@ impl Kms for LocalKms {
     }
 
     fn rotate_tenant_key(&self, tenant: &str) -> Result<u32> {
+        // Held across read + write (DUR-403): two concurrent rotations reading
+        // the same version must not both mint the same "next" version, each
+        // clobbering the other on write.
+        let _flock = self.store.lock()?;
         let mut record = self.record_or_provision(tenant)?;
         let next_version = record.versions.last().map_or(1, |v| v.version + 1);
         let tenant_key = crypto::generate_key()?;
@@ -179,6 +188,8 @@ impl Kms for LocalKms {
     }
 
     fn destroy_tenant_key(&self, tenant: &str) -> Result<()> {
+        // Held across read + write (DUR-403), same reasoning as rotate.
+        let _flock = self.store.lock()?;
         let mut record = self.active_record(tenant)?;
         record.versions.clear();
         record.destroyed = true;

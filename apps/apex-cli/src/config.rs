@@ -92,6 +92,11 @@ pub fn kms() -> Arc<dyn apex_kms::Kms> {
 pub fn save_credentials(creds: &Credentials) -> Result<()> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir)?;
+    // Cross-process lock (RM-GA-P2 DUR-403): `atomic_write`'s temp file has a
+    // fixed name, so two concurrent `login`/`logout` invocations racing on it
+    // could otherwise interleave into that shared temp file before either
+    // renames.
+    let _lock = apex_common::fs::FileLock::acquire(&dir)?;
     let path = credentials_path()?;
     let json = serde_json::to_string_pretty(creds)?;
     apex_common::fs::atomic_write(&path, json)?;

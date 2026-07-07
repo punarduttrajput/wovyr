@@ -13,6 +13,10 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+fn lock_config_err(e: std::io::Error) -> Error {
+    Error::config(format!("lock audit log: {e}"))
+}
+
 /// A persisted audit record: the event plus its position and hash-chain links.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -136,32 +140,46 @@ pub struct AuditFilter {
 }
 
 /// The audit log: chains events onto a [`AuditSink`] and reads them back.
+///
+/// `record()` always re-derives the chain tip (next sequence + last hash) from
+/// `sink.all()` rather than trusting an in-memory cache across calls — for a
+/// file-backed sink shared with another process (the CLI racing the server), a
+/// cached tip would let a second writer append onto a stale predecessor,
+/// **forking** the chain; `verify()` would then report tampering that never
+/// happened (RM-GA-P2 DUR-403). A process-local `Mutex` still serializes
+/// concurrent `record()` calls within this instance, and — when opened via
+/// [`open_with_lock`](Self::open_with_lock) — a cross-process advisory file lock
+/// additionally spans the re-derive-then-append sequence so a second *process*
+/// extends the same chain instead of forking it too.
 pub struct AuditLog {
     sink: Box<dyn AuditSink>,
-    state: Mutex<ChainState>,
-}
-
-struct ChainState {
-    next_seq: u64,
-    last_hash: String,
+    guard: Mutex<()>,
+    lock_dir: Option<PathBuf>,
 }
 
 impl AuditLog {
-    /// Open a log over `sink`, recovering the chain tip (seq + last hash) from any
-    /// existing entries so appends continue the chain across restarts.
+    /// Open a log over `sink` (no cross-process locking — single-process use, or
+    /// a purely in-memory sink where there's nothing to protect against another
+    /// process). Fails if `sink.all()` itself is broken, so a fundamentally
+    /// unreadable store surfaces immediately rather than on first `record()`.
     pub fn open(sink: Box<dyn AuditSink>) -> Result<Self> {
-        let existing = sink.all()?;
-        let (next_seq, last_hash) = existing
-            .last()
-            .map(|e| (e.seq + 1, e.hash.clone()))
-            .unwrap_or((0, String::new()));
+        sink.all()?;
         Ok(Self {
             sink,
-            state: Mutex::new(ChainState {
-                next_seq,
-                last_hash,
-            }),
+            guard: Mutex::new(()),
+            lock_dir: None,
         })
+    }
+
+    /// Open a log over `sink` with cross-process append safety: each `record()`
+    /// holds an advisory lock on `lock_dir` (RM-GA-P2 DUR-403) spanning the
+    /// re-derive-tip-then-append sequence, so a second process sharing the same
+    /// directory (e.g. the CLI and server both writing `~/.apex/audit`) extends
+    /// one chain instead of forking it.
+    pub fn open_with_lock(sink: Box<dyn AuditSink>, lock_dir: impl Into<PathBuf>) -> Result<Self> {
+        let mut log = Self::open(sink)?;
+        log.lock_dir = Some(lock_dir.into());
+        Ok(log)
     }
 
     /// A log over a fresh [`InMemoryAuditSink`].
@@ -171,20 +189,30 @@ impl AuditLog {
 
     /// Record `event`, appending a hash-chained entry. Returns the persisted entry.
     pub fn record(&self, event: AuditEvent) -> Result<AuditEntry> {
-        let mut st = self.state.lock().expect("audit log poisoned");
-        let seq = st.next_seq;
+        let _guard = self.guard.lock().expect("audit log poisoned");
+        let _flock = match &self.lock_dir {
+            Some(dir) => Some(apex_common::fs::FileLock::acquire(dir).map_err(lock_config_err)?),
+            None => None,
+        };
+
+        // Re-derive the tip fresh under the lock — never trust a cached value,
+        // since another process may have appended since we last looked.
+        let existing = self.sink.all()?;
+        let (seq, prev_hash) = existing
+            .last()
+            .map(|e| (e.seq + 1, e.hash.clone()))
+            .unwrap_or((0, String::new()));
+
         let id = format!("aud-{seq}");
-        let hash = chain_hash(&st.last_hash, &id, seq, &event);
+        let hash = chain_hash(&prev_hash, &id, seq, &event);
         let entry = AuditEntry {
             id,
             seq,
             event,
-            prev_hash: st.last_hash.clone(),
+            prev_hash,
             hash,
         };
         self.sink.append(&entry)?;
-        st.next_seq = seq + 1;
-        st.last_hash = entry.hash.clone();
         Ok(entry)
     }
 
