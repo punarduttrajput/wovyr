@@ -19,7 +19,9 @@
 //!
 //! Execution uses [`ServerExecutor`], a type-dispatch executor that handles
 //! `function` activities via the tool registry, `ai` activities via the gateway,
-//! and `human` activities by suspending durably (returning `Interrupted`).
+//! and `human` activities by suspending durably (returning `Interrupted`) until
+//! `/approve`'s decision has been injected, at which point it resolves instead of
+//! interrupting again.
 
 use apex_agent::{NullSink, RunOptions, run_agent};
 use apex_provider::Gateway;
@@ -61,8 +63,11 @@ use crate::{AgentStore, ApiError, AppState, tenancy};
 ///   instead of N independent, unmetered ones. A quota-exceeded rejection is
 ///   [`ActivityError::Retryable`]: the blocking slot is held only for a sibling
 ///   activity's duration, so a retry can succeed once it frees.
-/// - `human`             — returns [`ActivityError::Interrupted`] so the engine
-///   durably suspends; the run is resumed by `POST …/{id}/approve`.
+/// - `human`             — checks `ctx.variables` for a decision already injected
+///   under the `event.<id>` key (the convention `POST …/{id}/approve` writes
+///   through `Engine::signal_event`) and resolves with it if present; otherwise
+///   returns [`ActivityError::Interrupted`] so the engine durably suspends until
+///   that approval arrives.
 /// - anything else       — permanent failure (activity type unknown to server).
 pub struct ServerExecutor {
     gateway: Arc<Gateway>,
@@ -176,11 +181,24 @@ impl ActivityExecutor for ServerExecutor {
                 Ok(json!({ "message": output.text, "steps": output.steps }))
             }
             "human" => {
-                // Suspend durably; the caller resumes via POST …/{id}/approve.
-                Err(ActivityError::Interrupted(format!(
-                    "human activity `{}` is awaiting approval",
-                    ctx.id
-                )))
+                // `approve_handler` resumes via `Engine::signal_event(def, id,
+                // activity_id, decision)`, which (via `deliver`) injects the
+                // decision under the `event.<activity_id>` variable key — the same
+                // convention the engine-native `wait: {event: <name>}` activity
+                // type checks. A plain, unqualified `ctx.id` key (as the CLI's
+                // local `PlatformExecutor` checks) is never written by this path,
+                // since the CLI resumes by mutating the checkpoint directly rather
+                // than through `signal_event`. Without this check every resume
+                // re-interrupted unconditionally, so an approval decision was
+                // accepted by the HTTP route but silently never consumed — the
+                // execution suspended forever instead of completing.
+                match ctx.variables.get(&format!("event.{}", ctx.id)) {
+                    Some(decision) => Ok(decision.clone()),
+                    None => Err(ActivityError::Interrupted(format!(
+                        "human activity `{}` is awaiting approval",
+                        ctx.id
+                    ))),
+                }
             }
             other => Err(ActivityError::Permanent(format!(
                 "activity type `{other}` is not handled by the server executor"
@@ -970,6 +988,83 @@ metadata:\n  name: dur405-signal-wait\nspec:\n  activities:\n    - {id: hold, ty
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["error"]["code"], "definition_not_found", "{body}");
+    }
+
+    const HUMAN_YAML: &str = "\
+metadata:\n  name: human-approval-wf\nspec:\n  activities:\n    - {id: review, type: human}\n";
+
+    /// Poll `GET /api/v1/workflows/{id}` until a `WorkflowInterrupted` event for
+    /// `activity_id` appears. Unlike the engine-native `wait` activity type, a
+    /// `human` activity never transitions to `ActivityState::Waiting` — an
+    /// `ActivityError::Interrupted` resets it to `Ready` instead — so
+    /// `wait_for_activity_waiting` doesn't apply here; the interrupted event is
+    /// the only durable signal that the submit's background drive actually
+    /// reached and attempted the activity before the test approves it.
+    async fn wait_for_interrupted_event(
+        state: &Arc<AppState>,
+        execution_id: &str,
+        activity_id: &str,
+    ) -> Value {
+        for _ in 0..100 {
+            let (st, body) =
+                post_json_state_get(state, &format!("/api/v1/workflows/{execution_id}")).await;
+            if st == StatusCode::OK
+                && body["events"].as_array().is_some_and(|events| {
+                    events
+                        .iter()
+                        .any(|e| e["type"] == "WorkflowInterrupted" && e["activity"] == activity_id)
+                })
+            {
+                return body;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("activity `{activity_id}` on `{execution_id}` did not interrupt in time");
+    }
+
+    /// Regression: `approve_handler`'s decision must actually resolve the
+    /// suspended `human` activity, not be silently discarded on every resume.
+    /// Before this fix, `ServerExecutor`'s `"human"` branch unconditionally
+    /// returned `Interrupted` even after `signal_event` had injected the
+    /// decision, so the execution could never leave `Running` no matter how many
+    /// times `/approve` was called — the HTTP route reported `200 approved` but
+    /// nothing was actually consumed.
+    ///
+    /// Uses `isolated_state()` (an in-memory event log/checkpoint store), not the
+    /// shared `~/.apex/workflows` `AppState::from_env()` most of this file's other
+    /// tests use for a fixed execution id: `wait_for_interrupted_event` polls the
+    /// *accumulated* event history, and a prior run's `WorkflowInterrupted` event
+    /// for the same id/activity would satisfy that poll immediately on a repeat
+    /// `cargo test` invocation, racing the fresh submission's own background
+    /// drive instead of actually waiting for it.
+    #[tokio::test]
+    async fn approve_decision_is_consumed_and_the_execution_completes() {
+        let state = isolated_state().await;
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": HUMAN_YAML, "execution_id": "human-approve-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_for_interrupted_event(&state, "human-approve-test", "review").await;
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows/human-approve-test/approve",
+            json!({ "activity_id": "review", "decision": { "approved": true } }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "approved");
+
+        let detail = wait_for_terminal(&state, "human-approve-test").await;
+        assert_eq!(
+            detail["execution"]["status"], "Completed",
+            "the approval decision must be consumed, not discarded: {detail}"
+        );
     }
 
     const AGENT_YAML: &str = "\
