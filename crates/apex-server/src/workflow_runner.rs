@@ -256,6 +256,11 @@ async fn submit_handler(
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
     let def = Definition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
+    // Persist the manifest by workflow name (RM-GA-P2 EXE-601) so the background
+    // timer/schedule dispatchers can resolve a Definition for this execution long
+    // after this request's connection is gone — a durable timer can fire days later,
+    // with no caller left to re-supply the YAML.
+    crate::save_definition(&def.metadata.name, &req.manifest);
 
     let mut input = if req.input.is_null() {
         json!({})
@@ -430,17 +435,23 @@ async fn cancel_handler(
 mod tests {
     use super::*;
     use crate::AppState;
-    use apex_workflow::{CheckpointStore, Engine, EventLog, InMemoryStore};
+    use apex_workflow::{
+        CheckpointStore, ClosureExecutor, Engine, EventLog, FileStore, InMemoryStore, RunOutcome,
+    };
     use axum::body::to_bytes;
     use axum::http::Request;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
-    /// State with a fresh, isolated agent store *and* workflow engine (both
-    /// in-memory), so a test doesn't observe agents/executions persisted by a
-    /// prior test or process run against the real `~/.apex/workflows` (DUR-404
-    /// made both durable there) — every other piece of state (gateway, registry,
-    /// tenancy, quota) is the real default. Needed by any test whose assertions
-    /// depend on a stored agent or execution *not* already existing.
+    /// State with a fresh, isolated agent store, timer store, *and* workflow engine
+    /// (all in-memory), so a test doesn't observe agents/executions/timers
+    /// persisted by a prior test or process run against the real
+    /// `~/.apex/workflows` (DUR-404/EXE-601 made all three durable there) — every
+    /// other piece of state (gateway, registry, tenancy, quota) is the real
+    /// default. Needed by any test whose assertions depend on a stored agent,
+    /// execution, or timer *not* already existing. The timer store is attached to
+    /// both the engine (so a `wait` activity actually schedules into it) and
+    /// `AppState.timers` (so `spawn_dispatch_loops` polls that same store).
     async fn isolated_state() -> Arc<AppState> {
         let state = AppState::from_env().await;
         let agents = Arc::new(AgentStore::new(None));
@@ -454,8 +465,15 @@ mod tests {
         let store = InMemoryStore::new();
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
         let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
-        let engine = Engine::new(events, checkpoints, executor);
-        Arc::new(state.with_agents(agents).with_workflows(engine))
+        let timers: Arc<dyn apex_workflow::TimerStore> =
+            Arc::new(apex_workflow::InMemoryTimerStore::new());
+        let engine = Engine::new(events, checkpoints, executor).with_timer_store(timers.clone());
+        Arc::new(
+            state
+                .with_agents(agents)
+                .with_workflows(engine)
+                .with_timers(timers),
+        )
     }
 
     async fn test_app() -> axum::Router {
@@ -641,6 +659,137 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    const TIMER_YAML: &str = "\
+metadata:\n  name: exe601-timer\nspec:\n  activities:\n    - {id: wait_a, type: wait, inputs: {timer: {after: \"1s\"}}}\n    - {id: after, type: function, name: echo, inputs: {message: done}}\n  transitions:\n    - {from: wait_a, to: after}\n";
+
+    /// RM-GA-P2 EXE-601 acceptance: a workflow submitted over HTTP with a durable
+    /// wall-clock timer resumes and completes with the background dispatcher loop
+    /// alone — no `apex workflows tick` CLI invocation. Before this, the server's
+    /// engine had no timer store at all (a `wait` with a wall-clock deadline would
+    /// error immediately), and even with one attached, nothing ever polled it.
+    #[tokio::test]
+    async fn durable_timer_fires_via_the_background_dispatcher_with_no_cli_invocation() {
+        let state = isolated_state().await;
+        // Persist the definition by name (normally done by submit_handler itself,
+        // done here explicitly since isolated_state's engine bypasses AppState's
+        // own construction path) so the dispatcher's resolver can find it.
+        crate::save_definition("exe601-timer", TIMER_YAML);
+        let handles = crate::spawn_dispatch_loops(&state, std::time::Duration::from_millis(50));
+
+        let (st, body) = post_json(
+            crate::router(state.clone()),
+            "/api/v1/workflows",
+            json!({ "manifest": TIMER_YAML, "execution_id": "exe601-timer-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        // The timer fires ~1s from now; the dispatcher polls every 50ms, so this
+        // must land comfortably within the retry budget below (10s).
+        let detail = wait_for_terminal(&state, "exe601-timer-test").await;
+        assert_eq!(
+            detail["execution"]["status"], "Completed",
+            "the durable timer must fire and let the workflow complete on its own: {detail}"
+        );
+
+        for h in handles {
+            h.abort();
+        }
+    }
+
+    /// RM-GA-P2 EXE-602 acceptance: a server restart no longer strands an
+    /// in-flight execution forever. `submit_handler` drives a run on a
+    /// fire-and-forget `tokio::spawn`, so a process killed mid-drive leaves the
+    /// execution wherever its last checkpoint landed; nothing used to re-scan the
+    /// store on the next startup. `resume_in_flight_executions` is that scan.
+    #[tokio::test]
+    async fn startup_resume_drives_an_interrupted_execution_to_completion_with_no_duplicate_effects()
+     {
+        let dir = std::env::temp_dir().join(format!("apex_server_exe602_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let def = apex_workflow::Definition::from_yaml(
+            "metadata:\n  name: exe602-restart\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n  transitions:\n    - {from: a, to: b}\n",
+        )
+        .unwrap();
+        // The dispatcher's resolver reads by name from the real, shared
+        // definitions directory (unlike the checkpoint store below, this isn't
+        // test-injectable) — persist it there so resume_in_flight_executions can
+        // find it after the simulated restart.
+        crate::save_definition(
+            "exe602-restart",
+            "metadata:\n  name: exe602-restart\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n  transitions:\n    - {from: a, to: b}\n",
+        );
+
+        let a_runs = Arc::new(AtomicUsize::new(0));
+
+        // --- "Instance 1": completes `a`, then interrupts on `b` (simulated crash
+        // mid-drive — the same worker-yield `ActivityError::Interrupted` a real
+        // crash would leave behind at the last checkpoint). ---
+        {
+            let store = FileStore::new(&dir).unwrap();
+            let events: Arc<dyn EventLog> = Arc::new(store.clone());
+            let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+            let executor = ClosureExecutor::new()
+                .on("a", {
+                    let a_runs = a_runs.clone();
+                    move |_| {
+                        let a_runs = a_runs.clone();
+                        async move {
+                            a_runs.fetch_add(1, Ordering::SeqCst);
+                            Ok(json!({"a": true}))
+                        }
+                    }
+                })
+                .on("b", |_| async {
+                    Err(ActivityError::Interrupted("worker crash".into()))
+                });
+            let engine = Engine::new(events, checkpoints, Arc::new(executor));
+            let (outcome, _) = engine
+                .run(&def, "exe602-restart-1", json!({}))
+                .await
+                .unwrap();
+            assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+        }
+
+        // --- "Instance 2" (a fresh AppState/engine, the shape a restarted process
+        // takes): `b` now succeeds — the transient condition that interrupted it
+        // has cleared, the same as a real worker restarting cleanly. ---
+        let state2 = {
+            let base = AppState::from_env().await;
+            let store = FileStore::new(&dir).unwrap();
+            let events: Arc<dyn EventLog> = Arc::new(store.clone());
+            let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+            let executor = ClosureExecutor::new()
+                .on("a", |_| async {
+                    panic!("completed activity `a` must not be re-executed")
+                })
+                .on("b", |_| async { Ok(json!({"b": true})) });
+            let engine = Engine::new(events, checkpoints, Arc::new(executor));
+            Arc::new(base.with_workflows(engine))
+        };
+
+        crate::resume_in_flight_executions(&state2).await;
+
+        let status = state2
+            .workflows
+            .status("exe602-restart-1")
+            .await
+            .unwrap()
+            .expect("execution still exists after the simulated restart");
+        assert_eq!(
+            status.status,
+            apex_workflow::WorkflowState::Completed,
+            "startup resume must drive the interrupted execution to completion"
+        );
+        assert_eq!(
+            a_runs.load(Ordering::SeqCst),
+            1,
+            "`a` ran exactly once across the crash + startup resume"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     const AGENT_YAML: &str = "\

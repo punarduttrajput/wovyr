@@ -39,7 +39,10 @@ use apex_telemetry::Metrics;
 use apex_tenancy::{FileTenancyStore, InMemoryTenancyStore, TenancyStore};
 use apex_tools::ToolRegistry;
 use apex_workflow::{
-    CheckpointStore, Engine, EventLog, ExecutionFilter, FileStore, InMemoryStore, WorkflowState,
+    CheckpointStore, Clock, Definition, DefinitionResolver, Engine, EventLog, ExecutionFilter,
+    FileScheduleStore, FileStore, FileTimerStore, InMemoryScheduleStore, InMemoryStore,
+    InMemoryTimerStore, ScheduleDispatcher, ScheduleStore, SystemClock, TimerDispatcher,
+    TimerStore, WorkflowState,
 };
 use axum::{
     BoxError, Json, Router,
@@ -212,6 +215,17 @@ pub struct AppState {
     workflow_owners: RwLock<BTreeMap<String, String>>,
     /// Where `workflow_owners` persists (`None` = in-memory only, what tests use).
     workflow_owners_path: Option<PathBuf>,
+    /// Durable registry for wall-clock timers (G1) — the same store attached to
+    /// `workflows` via `Engine::with_timer_store` and polled by the background
+    /// dispatcher loop `serve()` spawns (RM-GA-P2 EXE-601). Exposed here (rather than
+    /// only living inside the `Engine`) so `serve()` can build a `TimerDispatcher`
+    /// without reaching into the engine's private fields.
+    pub(crate) timers: Arc<dyn TimerStore>,
+    /// Durable recurring-schedule registry (G2), shared with the CLI's `apex
+    /// workflows schedule create` — the background dispatcher loop `serve()` spawns
+    /// (RM-GA-P2 EXE-601) is what lets a CLI-created schedule fire without an
+    /// operator ever running `apex workflows tick`.
+    pub(crate) schedules: Arc<dyn ScheduleStore>,
     /// Tenancy catalog backing the org/project/membership/quota routes (G: tenancy).
     pub(crate) tenancy: Arc<dyn TenancyStore>,
     /// Per-project run-path quota usage (concurrent runs + daily LLM spend). An `Arc`
@@ -314,6 +328,11 @@ impl AppState {
         let quota = Arc::new(tenancy::QuotaTracker::new(
             server_state_dir().map(|d| d.join("quota.json")),
         ));
+        // Durable G1/G2 registries, shared with the CLI's `apex workflows tick`/
+        // `schedule create` — attached to the engine (timers) and polled by the
+        // background dispatcher loops `serve()` spawns (RM-GA-P2 EXE-601).
+        let timers = default_timer_store();
+        let schedules = default_schedule_store();
         // Thread gateway + registry + the agent store + tenancy/quota into the workflow
         // engine so the ServerExecutor can actually drive function/ai/agent activities
         // when the submit route runs a workflow (an `agent` activity looks up a stored
@@ -324,6 +343,7 @@ impl AppState {
             agents.clone(),
             tenancy_store.clone(),
             quota.clone(),
+            timers.clone(),
         );
         let workflow_owners_path = workflows_dir().map(|d| d.join("owners.json"));
         let workflow_owners = load_owners(workflow_owners_path.as_deref());
@@ -336,6 +356,8 @@ impl AppState {
             workflows,
             workflow_owners: RwLock::new(workflow_owners),
             workflow_owners_path,
+            timers,
+            schedules,
             tenancy: tenancy_store,
             quota,
             webhooks: default_webhook_store(kms.clone()),
@@ -508,6 +530,17 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn with_agents(mut self, agents: Arc<AgentStore>) -> Self {
         self.agents = agents;
+        self
+    }
+
+    /// Override the timer store (RM-GA-P2 EXE-601) — tests that exercise the
+    /// background dispatcher against an isolated engine (`with_workflows`) must
+    /// point `spawn_dispatch_loops`'s `state.timers` at the *same* store the
+    /// isolated engine's `wait` activities actually schedule into, or the
+    /// dispatcher polls a store nothing was ever written to.
+    #[cfg(test)]
+    pub(crate) fn with_timers(mut self, timers: Arc<dyn TimerStore>) -> Self {
+        self.timers = timers;
         self
     }
 
@@ -724,13 +757,17 @@ fn default_webhook_store(kms: Arc<dyn apex_kms::Kms>) -> Arc<dyn WebhookStore> {
 /// `function`/`ai`/`agent`/`human` activities so the write-path submit route can
 /// actually drive workflow runs — including enforcing the submitting project's quota
 /// on `agent` activities, the same gate a direct `agents:run` call goes through.  The
-/// read paths (`list`/`status`/`history`) are unaffected.
+/// read paths (`list`/`status`/`history`) are unaffected. Attaches `timers` (RM-GA-P2
+/// EXE-601) so a `wait: {timer: ...}}` activity can actually register a durable
+/// deadline — before this the server's engine had no timer store at all, so any such
+/// activity failed immediately with "no timer store" rather than suspending.
 fn default_workflows_engine(
     gateway: Arc<Gateway>,
     registry: ToolRegistry,
     agents: Arc<AgentStore>,
     tenancy: Arc<dyn TenancyStore>,
     quota: Arc<tenancy::QuotaTracker>,
+    timers: Arc<dyn TimerStore>,
 ) -> Engine {
     let executor = Arc::new(workflow_runner::ServerExecutor::new(
         gateway, registry, agents, tenancy, quota,
@@ -740,12 +777,194 @@ fn default_workflows_engine(
     {
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
         let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
-        return Engine::new(events, checkpoints, executor);
+        return Engine::new(events, checkpoints, executor).with_timer_store(timers);
     }
     let store = InMemoryStore::new();
     let events: Arc<dyn EventLog> = Arc::new(store.clone());
     let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
-    Engine::new(events, checkpoints, executor)
+    Engine::new(events, checkpoints, executor).with_timer_store(timers)
+}
+
+/// A durable [`TimerStore`] at `~/.apex/workflows` (shared with the CLI's `apex
+/// workflows tick`), falling back to an in-memory store if that directory is
+/// unavailable (RM-GA-P2 EXE-601).
+fn default_timer_store() -> Arc<dyn TimerStore> {
+    if let Some(dir) = workflows_dir()
+        && let Ok(store) = FileTimerStore::new(dir)
+    {
+        return Arc::new(store);
+    }
+    Arc::new(InMemoryTimerStore::new())
+}
+
+/// A durable [`ScheduleStore`] at `~/.apex/workflows` (shared with the CLI's `apex
+/// workflows schedule create`), falling back to an in-memory store if that directory
+/// is unavailable (RM-GA-P2 EXE-601).
+fn default_schedule_store() -> Arc<dyn ScheduleStore> {
+    if let Some(dir) = workflows_dir()
+        && let Ok(store) = FileScheduleStore::new(dir)
+    {
+        return Arc::new(store);
+    }
+    Arc::new(InMemoryScheduleStore::new())
+}
+
+/// `~/.apex/workflows/definitions` — where `POST /api/v1/workflows` persists the
+/// submitted manifest by workflow name (RM-GA-P2 EXE-601), so the background
+/// timer/schedule dispatchers can resolve a `Definition` for an execution that
+/// suspends long after the original HTTP request is gone (no caller left to
+/// re-supply the manifest). Server-local only — the CLI has no equivalent concept
+/// (it always drives one definition file at a time), so this doesn't need
+/// DUR-403's cross-process lock.
+fn definitions_dir() -> Option<PathBuf> {
+    workflows_dir().map(|d| d.join("definitions"))
+}
+
+/// Sanitize a workflow name into a safe filename stem (mirrors
+/// `apex_workflow::FileStore`'s execution-id sanitization).
+fn sanitize_workflow_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Persist `manifest` as the latest known definition for `workflow_name`
+/// (RM-GA-P2 EXE-601), best-effort: a failure here doesn't fail the submission
+/// itself, it only means a *later* timer/schedule fire for this execution won't
+/// find a resolvable definition (a clear, fail-closed error at that point — not a
+/// silent misbehavior).
+fn save_definition(workflow_name: &str, manifest: &str) {
+    let Some(dir) = definitions_dir() else { return };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::error!(error = %e, "failed to create definitions directory");
+        return;
+    }
+    let path = dir.join(format!("{}.yaml", sanitize_workflow_name(workflow_name)));
+    if let Err(e) = apex_common::fs::atomic_write(&path, manifest) {
+        tracing::error!(error = %e, "failed to persist workflow definition");
+    }
+}
+
+/// Build a [`DefinitionResolver`] over the persisted-by-name definitions
+/// (RM-GA-P2 EXE-601): looks up the *latest* manifest submitted under a workflow
+/// name. If that content has since drifted from what a specific still-suspended
+/// execution was pinned to at submission time, `Engine::resume`'s G7 pin check
+/// rejects it fail-closed (a clear "definition drifted" error, not a silent
+/// wrong-DAG replay) — the same guarantee G7 already gives every other resume path.
+fn definition_resolver() -> DefinitionResolver {
+    Arc::new(move |name: &str| {
+        let dir = definitions_dir()?;
+        let path = dir.join(format!("{}.yaml", sanitize_workflow_name(name)));
+        let yaml = std::fs::read_to_string(path).ok()?;
+        Definition::from_yaml(&yaml).ok()
+    })
+}
+
+/// Spawn the background dispatcher loops that fire due wall-clock timers (G1) and
+/// start due schedules (G2) without an operator ever running `apex workflows tick`
+/// (RM-GA-P2 EXE-601), polling every `interval` (`serve()` reads
+/// `APEX_DISPATCH_INTERVAL_SECS`, default 5s; tests pass a short interval directly
+/// rather than racing on the process-global env var). Returns the task handles so
+/// the caller can abort them when the server itself stops serving — the loops are
+/// not meant to outlive the process's HTTP server.
+fn spawn_dispatch_loops(
+    state: &Arc<AppState>,
+    interval: Duration,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let resolver = definition_resolver();
+
+    let timer_dispatcher = TimerDispatcher::new(
+        state.workflows.clone(),
+        state.timers.clone(),
+        clock.clone(),
+        resolver.clone(),
+    );
+    let timers_handle = tokio::spawn(async move {
+        loop {
+            if let Err(e) = timer_dispatcher.poll().await {
+                tracing::error!(error = %e, "timer dispatcher poll failed");
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+
+    let schedule_dispatcher = ScheduleDispatcher::new(
+        state.workflows.clone(),
+        state.schedules.clone(),
+        clock,
+        resolver,
+    );
+    let schedules_handle = tokio::spawn(async move {
+        loop {
+            if let Err(e) = schedule_dispatcher.poll().await {
+                tracing::error!(error = %e, "schedule dispatcher poll failed");
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+
+    vec![timers_handle, schedules_handle]
+}
+
+/// Re-drive every execution left in a non-terminal state via the idempotent
+/// `resume` (RM-GA-P2 EXE-602) — the crash-recovery entry point: `submit_handler`
+/// drives an execution on a fire-and-forget `tokio::spawn`, so a server killed
+/// mid-drive strands it wherever the last checkpoint landed, and nothing else ever
+/// re-scans the store to pick it back up. Bounded concurrency guards against a
+/// thundering herd if the store holds many in-flight executions at once.
+async fn resume_in_flight_executions(state: &Arc<AppState>) {
+    const MAX_CONCURRENT_RESUMES: usize = 8;
+
+    let summaries = match state.workflows.list(&ExecutionFilter::default()).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to list executions for startup resume");
+            return;
+        }
+    };
+    let pending: Vec<_> = summaries
+        .into_iter()
+        .filter(|s| !s.status.is_terminal())
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    tracing::info!(
+        count = pending.len(),
+        "resuming in-flight executions from startup"
+    );
+
+    let resolver = definition_resolver();
+    futures::stream::iter(pending)
+        .for_each_concurrent(MAX_CONCURRENT_RESUMES, |summary| {
+            let engine = state.workflows.clone();
+            let resolver = resolver.clone();
+            async move {
+                let Some(def) = (resolver)(&summary.workflow_name) else {
+                    tracing::warn!(
+                        execution_id = %summary.execution_id,
+                        workflow = %summary.workflow_name,
+                        "cannot resume at startup: no resolvable definition"
+                    );
+                    return;
+                };
+                if let Err(e) = engine.resume(&def, &summary.execution_id).await {
+                    tracing::error!(
+                        execution_id = %summary.execution_id,
+                        error = %e,
+                        "startup resume failed"
+                    );
+                }
+            }
+        })
+        .await;
 }
 
 /// `~/.apex/workflows` — shared with the CLI. Also where the agent store
@@ -1124,34 +1343,55 @@ pub async fn serve(addr: SocketAddr) -> apex_common::Result<()> {
     check_insecure_bind(tls.is_some(), addr)?;
 
     let state = Arc::new(AppState::from_env().await);
+    // Crash recovery (RM-GA-P2 EXE-602): a `tokio::spawn`'d `resume` that never got
+    // to run (the prior process died mid-drive) would otherwise strand its
+    // execution in a non-terminal state forever — nothing else re-scans the store.
+    resume_in_flight_executions(&state).await;
+    // Background dispatcher loops (RM-GA-P2 EXE-601): without these, G1 durable
+    // timers and G2 schedules only ever fired when an operator ran the CLI's
+    // `apex workflows tick` on the same host — a `wait: {timer: {after: "30d"}}`
+    // workflow submitted over HTTP would simply never resume. Aborted below
+    // whenever this function's serving future returns, so they don't outlive the
+    // HTTP server itself.
+    let dispatch_interval = Duration::from_secs(env_u64("APEX_DISPATCH_INTERVAL_SECS", 5));
+    let dispatch_handles = spawn_dispatch_loops(&state, dispatch_interval);
     let app = router(state);
 
-    match tls {
+    let result = match tls {
         Some((cert, key)) => {
             install_default_crypto_provider();
-            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
-                .await
-                .map_err(|e| Error::config(format!("failed to load TLS cert/key: {e}")))?;
-            tracing::info!(%addr, "apex server listening (https)");
-            // `with_connect_info` so `rate_limit`'s client-IP fallback (SEC-203) sees
-            // the real peer address for callers with no verified principal.
-            axum_server::bind_rustls(addr, config)
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-                .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
+            match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key).await {
+                Ok(config) => {
+                    tracing::info!(%addr, "apex server listening (https)");
+                    // `with_connect_info` so `rate_limit`'s client-IP fallback
+                    // (SEC-203) sees the real peer address for callers with no
+                    // verified principal.
+                    axum_server::bind_rustls(addr, config)
+                        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                        .await
+                        .map_err(|e| Error::Runtime(format!("server error: {e}")))
+                }
+                Err(e) => Err(Error::config(format!("failed to load TLS cert/key: {e}"))),
+            }
         }
-        None => {
-            let listener = tokio::net::TcpListener::bind(addr).await?;
-            tracing::info!(%addr, "apex server listening (http)");
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
-        }
+        None => match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                tracing::info!(%addr, "apex server listening (http)");
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .map_err(|e| Error::Runtime(format!("server error: {e}")))
+            }
+            Err(e) => Err(Error::Io(e)),
+        },
+    };
+
+    for handle in dispatch_handles {
+        handle.abort();
     }
-    Ok(())
+    result
 }
 
 /// Liveness probe.
