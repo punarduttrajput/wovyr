@@ -28,6 +28,12 @@ pub struct RunOptions {
     /// The tenant this run acts in — propagated to each tool's [`ToolContext`] so a
     /// plugin tool's secret references resolve within it. Empty for the unscoped default.
     pub tenant: String,
+    /// Whether this run is network-facing/hosted (SEC-303) — a manifest with no
+    /// `permissions:` block then means **deny-all** for permissioned tools, not
+    /// unrestricted. `false` (unrestricted, back-compat) by default: this is what
+    /// preserves the CLI's `agents run --local`/eval-harness/test ergonomics; the
+    /// server's run endpoints opt in via [`Self::with_hosted`].
+    pub hosted: bool,
 }
 
 impl RunOptions {
@@ -37,6 +43,7 @@ impl RunOptions {
             input,
             max_steps: DEFAULT_MAX_STEPS,
             tenant: String::new(),
+            hosted: false,
         }
     }
 
@@ -49,6 +56,15 @@ impl RunOptions {
     /// Override the model/tool iteration cap (default [`DEFAULT_MAX_STEPS`]).
     pub fn with_max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = max_steps;
+        self
+    }
+
+    /// Mark this run as network-facing/hosted (SEC-303): a manifest without an
+    /// explicit `permissions:` block gets **no** tool permissions rather than an
+    /// unrestricted grant. `APEX_UNRESTRICTED_TOOLS=1` is the escape hatch for a
+    /// trusted first-party deployment that still wants the old behavior.
+    pub fn with_hosted(mut self, hosted: bool) -> Self {
+        self.hosted = hosted;
         self
     }
 }
@@ -89,6 +105,16 @@ fn format_context(hits: &[RetrievedContext]) -> String {
         block.push_str(&format!("[{}] {}\n", hit.source, hit.content));
     }
     block
+}
+
+/// `APEX_UNRESTRICTED_TOOLS=1` — the documented escape hatch (SEC-303) letting a
+/// trusted first-party *hosted* deployment keep today's unrestricted-by-default
+/// behavior for a manifest with no `permissions:` block, instead of the new deny-all
+/// default.
+fn unrestricted_tools_escape_hatch() -> bool {
+    std::env::var("APEX_UNRESTRICTED_TOOLS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 /// Build the tool specs advertised to the model from the agent's allowed tools.
@@ -212,8 +238,7 @@ async fn run_agent_inner(
                 arguments: &call.arguments,
             });
 
-            let result_text =
-                execute_tool_call(def, registry, &opts.tenant, step, idx, call, sink).await;
+            let result_text = execute_tool_call(def, registry, &opts, step, idx, call, sink).await;
 
             messages.push(Message::tool_result(&call.id, &call.name, result_text));
         }
@@ -264,7 +289,7 @@ async fn stream_chat(
 async fn execute_tool_call(
     def: &AgentDefinition,
     registry: &ToolRegistry,
-    tenant: &str,
+    opts: &RunOptions,
     step: usize,
     idx: usize,
     call: &apex_provider::ToolCall,
@@ -283,15 +308,25 @@ async fn execute_tool_call(
 
     let parameters: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
     // Deterministic execution id: no clocks or randomness in core logic. The agent's
-    // declared `permissions` (if any) form the grant set enforced against each tool;
-    // absent → unrestricted (back-compat).
+    // declared `permissions` (if any) form the grant set enforced against each tool.
+    // Absent (`None`) is unrestricted for an unhosted (CLI/local/eval) run — back-compat
+    // — but **deny-all** (`Some(vec![])`) for a hosted run (SEC-303): a network-facing
+    // deployment must not hand every agent every permissioned tool just because its
+    // manifest forgot to list one. `APEX_UNRESTRICTED_TOOLS=1` is the documented escape
+    // hatch for a trusted first-party hosted deployment that still wants the old
+    // behavior.
+    let granted_permissions = match &def.spec.permissions {
+        Some(perms) => Some(perms.clone()),
+        None if opts.hosted && !unrestricted_tools_escape_hatch() => Some(Vec::new()),
+        None => None,
+    };
     let ctx = ToolContext {
         execution_id: format!("{}-s{step}-t{idx}", def.metadata.name),
         agent_id: def.metadata.name.clone(),
         workdir: ".".to_string(),
         // The run's tenant — scopes plugin secret resolution to this tenant's namespace.
-        tenant: tenant.to_string(),
-        granted_permissions: def.spec.permissions.clone(),
+        tenant: opts.tenant.clone(),
+        granted_permissions,
     };
 
     // Fail closed: a tool requiring a permission the agent wasn't granted is denied.

@@ -921,7 +921,10 @@ async fn run_local(
 ) -> apex_common::Result<()> {
     let def = AgentDefinition::from_file(file)?;
     let gateway = build_local_gateway(provider).await?;
-    let mut registry = ToolRegistry::with_builtins();
+    // `agents run --local` is a trusted, first-party/local context (SEC-301's
+    // documented escape hatch) — shell stays available here, unlike the server's
+    // default registry.
+    let mut registry = ToolRegistry::with_privileged_builtins();
     // image_generate needs a real, billed API key, so it's only registered when one is
     // configured — same signal build_local_gateway/Gateway::from_env use to pick a real
     // vs. mock provider.

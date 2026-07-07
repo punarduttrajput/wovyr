@@ -168,7 +168,10 @@ fn engine(agents_dir: &str) -> apex_common::Result<Engine> {
     let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
     let timers: Arc<dyn TimerStore> = Arc::new(FileTimerStore::new(dir)?);
     let executor = Arc::new(PlatformExecutor {
-        registry: ToolRegistry::with_builtins(),
+        // `workflows run --local` is a trusted, first-party/local context (SEC-301's
+        // documented escape hatch) — shell stays available here, unlike the server's
+        // default registry.
+        registry: ToolRegistry::with_privileged_builtins(),
         gateway: Gateway::from_env(),
         agents_dir: agents_dir.to_string(),
     });

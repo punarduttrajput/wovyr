@@ -18,6 +18,11 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Serializes the two SEC-303 tests that read/mutate the process-global
+/// `APEX_UNRESTRICTED_TOOLS` env var, so they can't race each other. `tokio::sync`
+/// (not `std::sync`) since both tests hold the guard across an `.await`.
+static UNRESTRICTED_TOOLS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A provider whose behavior is fixed for the test: ask for the `echo` tool once,
 /// then summarize the tool result. Deterministic — no clocks, no randomness.
 struct ScriptedProvider {
@@ -319,7 +324,9 @@ async fn agent_denies_tool_requiring_an_ungranted_permission() {
     )
     .unwrap();
     let gateway = Gateway::new(Box::new(RequestsShell));
-    let registry = ToolRegistry::with_builtins();
+    // shell is opt-in (SEC-301) — this test exercises permission denial, not
+    // registration, so it needs shell actually registered.
+    let registry = ToolRegistry::with_privileged_builtins();
 
     let mut capture = Capture::default();
     let out = run_agent(
@@ -344,5 +351,141 @@ async fn agent_denies_tool_requiring_an_ungranted_permission() {
         out.text.contains("permission denied"),
         "model should see the permission denial, got: {}",
         out.text
+    );
+}
+
+/// A provider that requests `fs_read` on `Cargo.toml` (present in every crate root),
+/// then answers.
+struct RequestsFsRead;
+#[async_trait]
+impl AIProvider for RequestsFsRead {
+    fn name(&self) -> &str {
+        "scripted"
+    }
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+        if let Some(tool_msg) = request.messages.iter().rev().find(|m| m.role == Role::Tool) {
+            let observed = tool_msg.content.clone().unwrap_or_default();
+            return Ok(ChatResponse {
+                message: Message::assistant(format!("done: {observed}")),
+                model: request.model,
+                usage: Usage::new(1, 1, 0.0),
+                finish_reason: "stop".to_string(),
+            });
+        }
+        Ok(ChatResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "fs_read".to_string(),
+                    arguments: json!({ "path": "Cargo.toml" }).to_string(),
+                }],
+                tool_call_id: None,
+                name: None,
+            },
+            model: request.model,
+            usage: Usage::new(1, 0, 0.0),
+            finish_reason: "tool_calls".to_string(),
+        })
+    }
+}
+
+fn no_permissions_block_def() -> AgentDefinition {
+    // Deliberately no `permissions:` block.
+    AgentDefinition::from_yaml(
+        "metadata:\n  name: unscoped\nspec:\n  instructions: x\n  tools: [fs_read]\n",
+    )
+    .unwrap()
+}
+
+/// RM-GA-P1 SEC-303: a hosted run's manifest with no `permissions:` block gets
+/// **no** tool permissions — `fs_read` (which declares `filesystem.read`) is denied,
+/// not silently allowed the way an unhosted (CLI/local/eval) run still is.
+#[tokio::test]
+async fn hosted_run_denies_a_permissioned_tool_when_manifest_has_no_permissions_block() {
+    let _guard = UNRESTRICTED_TOOLS_ENV_LOCK.lock().await;
+    let def = no_permissions_block_def();
+    let gateway = Gateway::new(Box::new(RequestsFsRead));
+    let registry = ToolRegistry::with_builtins();
+
+    let mut capture = Capture::default();
+    run_agent(
+        &def,
+        &gateway,
+        &registry,
+        RunOptions::new(json!({})).with_hosted(true),
+        &mut capture,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        capture
+            .events
+            .contains(&"toolresult:fs_read:false".to_string()),
+        "expected a denied tool result for a hosted run, got {:?}",
+        capture.events
+    );
+}
+
+/// The same manifest, run *unhosted* (the CLI/local/eval default) — still
+/// unrestricted, preserving today's back-compat behavior.
+#[tokio::test]
+async fn unhosted_run_still_allows_the_same_manifest() {
+    let def = no_permissions_block_def();
+    let gateway = Gateway::new(Box::new(RequestsFsRead));
+    let registry = ToolRegistry::with_builtins();
+
+    let mut capture = Capture::default();
+    run_agent(
+        &def,
+        &gateway,
+        &registry,
+        RunOptions::new(json!({})),
+        &mut capture,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        capture
+            .events
+            .contains(&"toolresult:fs_read:true".to_string()),
+        "expected the unhosted run to still allow the tool, got {:?}",
+        capture.events
+    );
+}
+
+/// `APEX_UNRESTRICTED_TOOLS=1` restores the old unrestricted behavior even for a
+/// hosted run — the documented escape hatch for a trusted first-party deployment.
+#[tokio::test]
+async fn unrestricted_tools_escape_hatch_restores_old_behavior_for_hosted_runs() {
+    let _guard = UNRESTRICTED_TOOLS_ENV_LOCK.lock().await;
+    unsafe { std::env::set_var("APEX_UNRESTRICTED_TOOLS", "1") };
+
+    let def = no_permissions_block_def();
+    let gateway = Gateway::new(Box::new(RequestsFsRead));
+    let registry = ToolRegistry::with_builtins();
+
+    let mut capture = Capture::default();
+    run_agent(
+        &def,
+        &gateway,
+        &registry,
+        RunOptions::new(json!({})).with_hosted(true),
+        &mut capture,
+    )
+    .await
+    .unwrap();
+
+    unsafe { std::env::remove_var("APEX_UNRESTRICTED_TOOLS") };
+
+    assert!(
+        capture
+            .events
+            .contains(&"toolresult:fs_read:true".to_string()),
+        "expected the escape hatch to restore unrestricted access, got {:?}",
+        capture.events
     );
 }

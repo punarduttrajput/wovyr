@@ -50,7 +50,42 @@ impl Tool for EchoTool {
     }
 }
 
-/// Read a UTF-8 text file from disk.
+/// Resolve `requested` against the confinement root `root` (`ctx.workdir`),
+/// canonicalizing both and rejecting any resolved path that escapes `root`
+/// ([RM-GA-P1 SEC-302](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)).
+/// Canonicalization resolves symlinks (and `..` segments) *before* the prefix check,
+/// so a symlink inside the root pointing outside it is caught too, not just literal
+/// `../` traversal. An absolute `requested` path is honored as a candidate location
+/// (not auto-rejected) but still must canonicalize to somewhere under `root` — the
+/// same bar a relative path is held to.
+async fn confine_path(root: &str, requested: &str) -> Result<std::path::PathBuf, ToolError> {
+    let root = if root.is_empty() { "." } else { root };
+    let root_canonical = tokio::fs::canonicalize(root).await.map_err(|e| {
+        ToolError::Internal(format!("could not resolve workspace root `{root}`: {e}"))
+    })?;
+
+    let requested_path = std::path::Path::new(requested);
+    let candidate = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        root_canonical.join(requested_path)
+    };
+
+    let candidate_canonical = tokio::fs::canonicalize(&candidate)
+        .await
+        .map_err(|e| ToolError::Internal(format!("could not read {requested}: {e}")))?;
+
+    if !candidate_canonical.starts_with(&root_canonical) {
+        return Err(ToolError::PermissionDenied(format!(
+            "path `{requested}` escapes the confined workspace root `{root}`"
+        )));
+    }
+    Ok(candidate_canonical)
+}
+
+/// Read a UTF-8 text file from disk, confined to the run's workspace root
+/// (`ctx.workdir`) — SEC-302. Never able to read outside it (e.g. `~/.apex`'s
+/// platform state — secrets, the KMS root key), symlink escapes included.
 pub struct FsReadTool;
 
 #[async_trait]
@@ -77,7 +112,7 @@ impl Tool for FsReadTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
         request: ToolRequest,
     ) -> Result<ToolResponse, ToolError> {
         let path = request
@@ -86,7 +121,8 @@ impl Tool for FsReadTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::Validation("missing required string field `path`".into()))?;
 
-        let content = tokio::fs::read_to_string(path)
+        let confined = confine_path(&ctx.workdir, path).await?;
+        let content = tokio::fs::read_to_string(&confined)
             .await
             .map_err(|e| ToolError::Internal(format!("could not read {path}: {e}")))?;
 
@@ -554,6 +590,147 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    // --- RM-GA-P1 SEC-302: fs_read confinement --------------------------------------
+
+    /// A scratch workspace root with a file inside it, and a sibling file *outside*
+    /// it — the confinement boundary a test needs both sides of.
+    fn workspace_fixture() -> (tempfile_dir::TempDir, std::path::PathBuf) {
+        let root = tempfile_dir::TempDir::new();
+        std::fs::write(root.path().join("inside.txt"), "inside content").unwrap();
+        let outside_dir = tempfile_dir::TempDir::new();
+        std::fs::write(outside_dir.path().join("secret.txt"), "outside content").unwrap();
+        let outside_file = outside_dir.path().join("secret.txt");
+        // Keep `outside_dir` alive for the caller by leaking it deliberately — a test
+        // fixture, not long-lived process state.
+        std::mem::forget(outside_dir);
+        (root, outside_file)
+    }
+
+    /// A minimal `TempDir` (create on `new`, `rmdir -rf` on `Drop`) — avoids adding a
+    /// dev-dependency just for this test module.
+    mod tempfile_dir {
+        pub(super) struct TempDir(std::path::PathBuf);
+        impl TempDir {
+            pub(super) fn new() -> Self {
+                let dir = std::env::temp_dir().join(format!(
+                    "apex-fs-read-test-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                std::fs::create_dir_all(&dir).unwrap();
+                Self(dir)
+            }
+            pub(super) fn path(&self) -> &std::path::Path {
+                &self.0
+            }
+        }
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fs_read_allows_a_path_inside_the_workspace_root() {
+        let (root, _outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let resp = FsReadTool
+            .execute(&ctx, ToolRequest::new(json!({"path": "inside.txt"})))
+            .await
+            .unwrap();
+        assert_eq!(resp.payload["content"], "inside content");
+    }
+
+    #[tokio::test]
+    async fn fs_read_denies_dot_dot_traversal_out_of_the_root() {
+        let (root, outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        // Reach the outside file via `../<outside-dir-name>/secret.txt`.
+        let traversal = format!(
+            "../{}/{}",
+            outside
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            outside.file_name().unwrap().to_string_lossy()
+        );
+        let err = FsReadTool
+            .execute(&ctx, ToolRequest::new(json!({"path": traversal})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn fs_read_denies_an_absolute_path_outside_the_root() {
+        let (root, outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let err = FsReadTool
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"path": outside.to_string_lossy()})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_read_denies_a_symlink_that_escapes_the_root() {
+        let (root, outside) = workspace_fixture();
+        let link = root.path().join("escape-link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let err = FsReadTool
+            .execute(&ctx, ToolRequest::new(json!({"path": "escape-link"})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    /// The concrete regression the ticket calls out: confined to a scratch
+    /// workspace, `fs_read` cannot reach `~/.apex/kms/root.key` regardless of how
+    /// the path is spelled.
+    #[tokio::test]
+    async fn fs_read_cannot_reach_the_kms_root_key() {
+        let root = tempfile_dir::TempDir::new();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let kms_key = format!("{home}/.apex/kms/root.key");
+        let err = FsReadTool
+            .execute(&ctx, ToolRequest::new(json!({"path": kms_key})))
+            .await
+            .unwrap_err();
+        // Denied one way or another: PermissionDenied if it resolves and escapes,
+        // Internal (not found) if this machine has no such file — never a success.
+        assert!(
+            matches!(err, ToolError::PermissionDenied(_) | ToolError::Internal(_)),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

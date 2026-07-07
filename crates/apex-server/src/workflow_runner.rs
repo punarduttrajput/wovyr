@@ -152,7 +152,7 @@ impl ActivityExecutor for ServerExecutor {
                     ))
                 })?;
                 let input = if inputs.is_null() { json!({}) } else { inputs };
-                let mut opts = RunOptions::new(input).with_tenant(tenant);
+                let mut opts = RunOptions::new(input).with_tenant(tenant).with_hosted(true);
                 if let Some(n) = def.spec.max_steps {
                     opts = opts.with_max_steps(n);
                 }

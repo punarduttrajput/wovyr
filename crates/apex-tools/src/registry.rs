@@ -21,14 +21,33 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// A registry pre-populated with the v0.1 built-in tools.
+    /// A registry pre-populated with the **safe-by-default** built-in tools
+    /// ([RM-GA-P1 SEC-301](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
+    /// `echo`, `fs_read`, `http_get` — no arbitrary command execution. `shell` is a
+    /// separate, explicit opt-in ([`Self::with_shell`]/[`Self::with_privileged_builtins`]):
+    /// a hosted/server context must not hand every agent a shell by default.
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
         r.register(Arc::new(crate::builtin::EchoTool));
         r.register(Arc::new(crate::builtin::FsReadTool));
         r.register(Arc::new(crate::builtin::HttpGetTool::new()));
-        r.register(Arc::new(crate::builtin::ShellTool));
         r
+    }
+
+    /// Register `shell` into this registry — the explicit opt-in `with_builtins()`
+    /// deliberately withholds (SEC-301). For trusted first-party/local contexts only
+    /// (e.g. the CLI's `agents run --local`, or a server explicitly setting
+    /// `APEX_ENABLE_SHELL_TOOL=1`).
+    pub fn with_shell(mut self) -> Self {
+        self.register(Arc::new(crate::builtin::ShellTool));
+        self
+    }
+
+    /// `with_builtins()` plus `shell` — a convenience for trusted first-party/local
+    /// contexts that want the full v0.1 built-in set, including arbitrary command
+    /// execution (SEC-301).
+    pub fn with_privileged_builtins() -> Self {
+        Self::with_builtins().with_shell()
     }
 
     /// Register a tool, overwriting any existing tool with the same id.
@@ -92,8 +111,19 @@ mod tests {
         assert!(r.contains("echo"));
         assert!(r.contains("fs_read"));
         assert!(r.contains("http_get"));
-        assert!(r.contains("shell"));
-        assert_eq!(r.ids().len(), 4);
+        // shell is not a default builtin (SEC-301) — explicit opt-in only.
+        assert!(!r.contains("shell"));
+        assert_eq!(r.ids().len(), 3);
+    }
+
+    #[test]
+    fn shell_is_an_explicit_opt_in() {
+        assert!(!ToolRegistry::with_builtins().contains("shell"));
+        assert!(ToolRegistry::with_builtins().with_shell().contains("shell"));
+        let privileged = ToolRegistry::with_privileged_builtins();
+        for id in ["echo", "fs_read", "http_get", "shell"] {
+            assert!(privileged.contains(id), "missing {id}");
+        }
     }
 
     #[test]
@@ -118,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_denies_ungranted_permission() {
-        let r = ToolRegistry::with_builtins();
+        let r = ToolRegistry::with_privileged_builtins();
         // `shell` requires `shell.execute`; a caller granted only `net.egress` is denied.
         let err = r
             .execute("shell", &ctx(Some(&["net.egress"])), echo_request())

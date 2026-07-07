@@ -213,6 +213,15 @@ impl AppState {
         let kms = default_kms();
         let secrets = default_secrets_vault(kms.clone());
         let mut registry = ToolRegistry::with_builtins();
+        // shell is NOT a default builtin for a hosted server (SEC-301) — arbitrary
+        // command execution as the server's own user, available to every agent run,
+        // is exactly the risk this ticket closes. An operator opts in explicitly.
+        if std::env::var("APEX_ENABLE_SHELL_TOOL")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            registry = registry.with_shell();
+        }
         // image_generate needs a real, billed API key, so it's only registered when one
         // is configured — same signal default_gateway() uses to pick a real vs. mock
         // provider.
@@ -1142,7 +1151,7 @@ async fn run_stream_handler(
         Err(e) => return e.into_response(),
     };
 
-    let mut opts = RunOptions::new(input).with_tenant(tenant);
+    let mut opts = RunOptions::new(input).with_tenant(tenant).with_hosted(true);
     // An explicit per-run override wins; otherwise fall back to the agent's own default.
     if let Some(n) = req.max_steps.or(def.spec.max_steps) {
         opts = opts.with_max_steps(n);
@@ -1185,7 +1194,7 @@ async fn run_definition(
     // Quota gate: hold a concurrency slot for the duration of the run (released on
     // drop), then record the run's cost against the project's daily budget.
     let _permit = tenancy::admit_run(&state.tenancy, &state.quota, project)?;
-    let mut opts = RunOptions::new(input).with_tenant(tenant);
+    let mut opts = RunOptions::new(input).with_tenant(tenant).with_hosted(true);
     // An explicit per-run override wins; otherwise fall back to the agent's own default.
     if let Some(n) = max_steps.or(def.spec.max_steps) {
         opts = opts.with_max_steps(n);
@@ -2884,14 +2893,34 @@ mod tests {
         let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
         let tools = body["tools"].as_array().unwrap();
-        // The four built-ins are always registered.
+        // The safe-by-default built-ins are always registered.
         let ids: Vec<&str> = tools.iter().filter_map(|t| t["id"].as_str()).collect();
-        for id in ["echo", "fs_read", "http_get", "shell"] {
+        for id in ["echo", "fs_read", "http_get"] {
             assert!(ids.contains(&id), "missing built-in tool `{id}`: {ids:?}");
         }
+        // shell is NOT registered by default in a hosted server (SEC-301).
+        assert!(!ids.contains(&"shell"), "shell must be opt-in: {ids:?}");
         // Each entry carries a non-empty description (what the UI shows).
         let fs_read = tools.iter().find(|t| t["id"] == "fs_read").unwrap();
         assert!(!fs_read["description"].as_str().unwrap_or("").is_empty());
+    }
+
+    /// `APEX_ENABLE_SHELL_TOOL=1` is the explicit operator opt-in (SEC-301) that
+    /// re-enables `shell` in the server's own registry.
+    #[tokio::test]
+    async fn shell_tool_opt_in_env_var_re_enables_it() {
+        unsafe { std::env::set_var("APEX_ENABLE_SHELL_TOOL", "1") };
+        let state = Arc::new(AppState::from_env().await);
+        unsafe { std::env::remove_var("APEX_ENABLE_SHELL_TOOL") };
+        let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        let ids: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"shell"));
     }
 
     #[tokio::test]
