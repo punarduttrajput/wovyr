@@ -248,6 +248,7 @@ async fn publish_listing(
     headers: HeaderMap,
     Json(req): Json<PublishReq>,
 ) -> Result<Json<Value>, ApiError> {
+    require_authenticated_principal(&headers)?;
     let bytes = base64_decode(&req.apexpkg)?;
     let categories = req.categories;
     let channel = req.channel;
@@ -394,11 +395,15 @@ fn default_true() -> bool {
 
 /// `POST /api/v1/marketplace/listings/{id}/verify` — operator sets the verified badge
 /// directly, bypassing the request/approve/reject workflow below (e.g. an immediate
-/// takedown, or back-compat with a pre-workflow verified listing).
+/// takedown, or back-compat with a pre-workflow verified listing). `marketplace:moderate`-
+/// gated ([RM-GA-P1 SEC-104](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)).
 async fn verify_listing(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<VerifyReq>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let id_for_resp = id.clone();
     let verified = req.verified;
     with_registry(move |reg| Ok(reg.set_verified(&id, verified)?)).await?;
@@ -435,13 +440,32 @@ fn actor_identity(headers: &HeaderMap, body_value: Option<&str>, default: &str) 
         .to_string()
 }
 
+/// Require a non-anonymous, verified principal ([RM-GA-P1 SEC-104](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
+/// `publish` must be attributable to a real caller, not an anonymous string —
+/// distinct from RBAC (any authenticated principal may publish; moderation actions
+/// additionally require `marketplace:moderate`).
+fn require_authenticated_principal(headers: &HeaderMap) -> Result<String, ApiError> {
+    let principal = crate::tenancy::principal(headers);
+    if principal.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "marketplace:publish requires an authenticated principal",
+        ));
+    }
+    Ok(principal)
+}
+
 /// `POST /api/v1/marketplace/listings/{id}/approve` — a reviewer approves the
 /// listing's pending review, setting the verified badge ([Marketplace §6]).
+/// `marketplace:moderate`-gated (SEC-104).
 async fn approve_review(
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(req): Json<ReviewDecisionReq>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let reviewer = actor_identity(&headers, req.reviewer.as_deref(), "operator");
     let id_for_resp = id.clone();
     let reviewer_for_task = reviewer.clone();
@@ -462,12 +486,15 @@ struct RejectReviewReq {
 
 /// `POST /api/v1/marketplace/listings/{id}/reject` — a reviewer rejects the listing's
 /// pending review with actionable feedback ([Marketplace §6]), clearing the verified
-/// badge; the publisher may address it and request review again.
+/// badge; the publisher may address it and request review again. `marketplace:moderate`-
+/// gated (SEC-104).
 async fn reject_review(
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(req): Json<RejectReviewReq>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let reviewer = actor_identity(&headers, req.reviewer.as_deref(), "operator");
     let id_for_resp = id.clone();
     let reviewer_for_task = reviewer.clone();
@@ -579,12 +606,14 @@ struct ResolveAbuseReportReq {
 /// `POST /api/v1/marketplace/listings/{id}/reports/{report_id}/resolve` — a
 /// moderator resolves an open abuse report as valid ([Marketplace §8]), optionally
 /// delisting the listing. Emits `plugin.delisted` when `delist` is `true`.
+/// `marketplace:moderate`-gated (SEC-104).
 async fn resolve_abuse_report(
     State(state): State<Arc<AppState>>,
     Path((id, report_id)): Path<(String, u64)>,
     headers: HeaderMap,
     Json(req): Json<ResolveAbuseReportReq>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let moderator = actor_identity(&headers, req.moderator.as_deref(), "operator");
     let id_for_resp = id.clone();
     let moderator_for_task = moderator.clone();
@@ -626,11 +655,14 @@ struct DismissAbuseReportReq {
 
 /// `POST /api/v1/marketplace/listings/{id}/reports/{report_id}/dismiss` — a
 /// moderator dismisses an open abuse report as not actionable ([Marketplace §8]).
+/// `marketplace:moderate`-gated (SEC-104).
 async fn dismiss_abuse_report(
+    State(state): State<Arc<AppState>>,
     Path((id, report_id)): Path<(String, u64)>,
     headers: HeaderMap,
     Json(req): Json<DismissAbuseReportReq>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let moderator = actor_identity(&headers, req.moderator.as_deref(), "operator");
     let id_for_resp = id.clone();
     let moderator_for_task = moderator.clone();
@@ -771,5 +803,81 @@ metadata: { name: bare, version: 1.0.0, publisher: acme }
         assert_eq!(actor_identity(&empty, None, "operator"), "operator");
         assert_eq!(actor_identity(&empty, Some(""), "operator"), "operator");
         assert_eq!(actor_identity(&empty, None, "anonymous"), "anonymous");
+    }
+
+    // --- RM-GA-P1 SEC-104: moderation + publish routes are RBAC-gated ---------------
+
+    use apex_tenancy::{
+        InMemoryTenancyStore, MemberScope, Membership, Organization, Role, TenancyStore,
+    };
+    use axum::http::{Request, StatusCode as HttpStatus};
+    use tower::ServiceExt;
+
+    async fn call(state: &Arc<AppState>, method: &str, uri: &str, principal: &str) -> HttpStatus {
+        let resp = crate::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("x-apex-principal", principal)
+                    .body(axum::body::Body::from(
+                        json!({ "reason": "test" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    /// Every moderation route requires `marketplace:moderate` — a non-member (even
+    /// against a listing that doesn't exist) is refused *before* the registry is ever
+    /// consulted, so this needs no real published listing to prove.
+    #[tokio::test]
+    async fn moderation_routes_require_marketplace_moderate() {
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org = tenancy
+            .create_org(Organization::new("default", "Moderation Test Co"))
+            .unwrap();
+        tenancy
+            .add_membership(Membership {
+                user: "admin".to_string(),
+                role: Role::OrgAdmin,
+                scope: MemberScope::Organization(org.id.clone()),
+            })
+            .unwrap();
+        let state = Arc::new(crate::AppState::from_env().await.with_tenancy(tenancy));
+
+        for uri in [
+            "/api/v1/marketplace/listings/nonexistent%2Flisting/verify",
+            "/api/v1/marketplace/listings/nonexistent%2Flisting/approve",
+            "/api/v1/marketplace/listings/nonexistent%2Flisting/reject",
+            "/api/v1/marketplace/listings/nonexistent%2Flisting/reports/1/resolve",
+            "/api/v1/marketplace/listings/nonexistent%2Flisting/reports/1/dismiss",
+        ] {
+            assert_eq!(
+                call(&state, "POST", uri, "mallory").await,
+                HttpStatus::FORBIDDEN,
+                "{uri}"
+            );
+            // The org admin passes the RBAC gate (whatever the registry itself then
+            // does with a nonexistent listing is a separate, not-found concern).
+            let status = call(&state, "POST", uri, "admin").await;
+            assert_ne!(status, HttpStatus::FORBIDDEN, "{uri}");
+            assert_ne!(status, HttpStatus::UNAUTHORIZED, "{uri}");
+        }
+    }
+
+    /// `publish` requires a real, non-anonymous principal (PP-03) — independent of
+    /// `marketplace:moderate`, which only gates moderation actions.
+    #[tokio::test]
+    async fn publish_requires_an_authenticated_principal() {
+        let headers = HeaderMap::new();
+        assert!(require_authenticated_principal(&headers).is_err());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-apex-principal", "alice".parse().unwrap());
+        assert_eq!(require_authenticated_principal(&headers).unwrap(), "alice");
     }
 }

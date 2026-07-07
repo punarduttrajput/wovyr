@@ -14,6 +14,7 @@
 //! Local (`--local`) and remote runs are both supported. Remote streaming (SSE)
 //! and a persistent agent store arrive in a later milestone.
 
+mod auth;
 mod config;
 mod kms;
 mod memory;
@@ -92,6 +93,21 @@ enum Command {
     Kms {
         #[command(subcommand)]
         command: KmsCommand,
+    },
+
+    /// Manage API keys for `APEX_AUTH_MODE=apikey` (RM-GA-P1 SEC-101).
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// Mint a fresh API key that authenticates as `principal`, printed once.
+    CreateKey {
+        /// The principal the minted key authenticates as.
+        principal: String,
     },
 }
 
@@ -792,6 +808,9 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
             KmsCommand::Rotate { tenant } => kms::rotate_cmd(&tenant),
             KmsCommand::Destroy { tenant, yes } => kms::destroy_cmd(&tenant, yes),
         },
+        Command::Auth { command } => match command {
+            AuthCommand::CreateKey { principal } => auth::create_key_cmd(&principal),
+        },
     }
 }
 
@@ -839,6 +858,9 @@ fn whoami_cmd() -> apex_common::Result<()> {
     Ok(())
 }
 
+// Pre-existing CLI arg surface (one flag per `agents run` option); a builder/options
+// struct is a larger refactor than this unrelated lint warrants on its own.
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_cmd(
     file: &str,
     input: &str,

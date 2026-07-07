@@ -15,8 +15,10 @@
 //! **idempotency keys** (§9) on runs, and a **request-id** on every response (§14).
 
 mod audit;
+mod auth;
 mod hardening;
 mod kms;
+pub use auth::{ApiKeyStore, AuthMode, FileApiKeyStore, InMemoryApiKeyStore};
 mod marketplace;
 mod memory;
 mod plugins;
@@ -163,6 +165,15 @@ pub struct AppState {
     pub(crate) kms: Arc<dyn apex_kms::Kms>,
     /// Tamper-evident audit log; security-sensitive routes append to it.
     pub(crate) audit: apex_audit::AuditLog,
+    /// API-key store backing `APEX_AUTH_MODE=apikey` ([SEC-101]).
+    pub(crate) api_keys: Arc<dyn auth::ApiKeyStore>,
+    /// Whether the anonymous default-tenant identity is granted a role set at all
+    /// ([SEC-102]), resolved once at construction — see
+    /// [`auth::resolve_anonymous_allowed`].
+    pub(crate) anonymous_allowed: bool,
+    /// Which credential scheme [`auth::authenticate`] verifies ([SEC-101]), resolved
+    /// once at construction from `APEX_AUTH_MODE` — see [`auth::AuthMode::from_env`].
+    pub(crate) auth_mode: auth::AuthMode,
 }
 
 impl AppState {
@@ -231,6 +242,9 @@ impl AppState {
             secrets,
             kms,
             audit: default_audit_log(),
+            api_keys: auth::default_api_key_store(),
+            anonymous_allowed: auth::resolve_anonymous_allowed(),
+            auth_mode: auth::AuthMode::from_env(),
         }
     }
 
@@ -299,6 +313,31 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn with_kms(mut self, kms: Arc<dyn apex_kms::Kms>) -> Self {
         self.kms = kms;
+        self
+    }
+
+    /// Override the API-key store — tests (this crate's own, an `authz_matrix`
+    /// integration suite per SEC-105, or an embedder's) seed principals without
+    /// touching `~/.apex/auth`.
+    pub fn with_api_keys(mut self, store: Arc<dyn auth::ApiKeyStore>) -> Self {
+        self.api_keys = store;
+        self
+    }
+
+    /// Override whether the anonymous default-tenant identity is granted a role set
+    /// (SEC-102), without mutating the process-global `APEX_ALLOW_ANONYMOUS` (which
+    /// every other test in this crate's default-anonymous-in-`cfg(test)` behavior
+    /// depends on, and would otherwise race against).
+    pub fn with_anonymous_allowed(mut self, allowed: bool) -> Self {
+        self.anonymous_allowed = allowed;
+        self
+    }
+
+    /// Override the credential scheme `auth::authenticate` verifies (SEC-101), without
+    /// mutating the process-global `APEX_AUTH_MODE` (which every other test in this
+    /// crate's default `disabled-loopback` behavior depends on).
+    pub fn with_auth_mode(mut self, mode: auth::AuthMode) -> Self {
+        self.auth_mode = mode;
         self
     }
 
@@ -557,10 +596,12 @@ impl CostObserver for MetricsCostObserver {
 }
 
 /// Build the application router over the given state.
+///
+/// Every route is gated by [`auth::authenticate`] (SEC-101) except the public
+/// `/healthz` and `/metrics` — mounted on a separate, unauthenticated sub-router so a
+/// load balancer's health probe never needs a credential.
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/metrics", get(metrics_handler))
+    let protected = Router::new()
         .route("/api/v1/agents:run", post(run_handler))
         .route("/api/v1/agents:stream", post(run_stream_handler))
         // Agent persistence: register agents once, then run/inspect them by id.
@@ -597,6 +638,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(audit::routes())
         // Tool discovery: list registered tools (built-ins + enabled plugin tools).
         .merge(tools::routes())
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::authenticate,
+        ));
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics_handler))
+        .merge(protected)
         .with_state(state)
         // Stamp every response (incl. errors) with a request id (API overview §14).
         .layer(axum::middleware::from_fn(hardening::request_id))
@@ -633,6 +683,7 @@ async fn metrics_handler(headers: HeaderMap, State(state): State<Arc<AppState>>)
 
 /// Bind to `addr` and serve until the process is stopped.
 pub async fn serve(addr: SocketAddr) -> apex_common::Result<()> {
+    auth::refuse_anonymous_on_non_loopback(addr)?;
     let state = Arc::new(AppState::from_env().await);
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1928,7 +1979,8 @@ mod tests {
         let store: Arc<dyn apex_memory::MemoryStore> = Arc::new(InMemoryStore::new());
         let engine = MemoryEngine::new(Gateway::from_env(), store.clone());
         let state = Arc::new(
-            AppState::from_env().await
+            AppState::from_env()
+                .await
                 .with_tenancy(tenancy)
                 .with_memory(engine, store),
         );
@@ -2075,7 +2127,8 @@ mod tests {
             .add_membership(m("bob", Role::OrgAdmin, &org_b.id))
             .unwrap();
         let state = Arc::new(
-            AppState::from_env().await
+            AppState::from_env()
+                .await
                 .with_tenancy(tenancy)
                 .with_secrets(Vault::new(Arc::new(InMemorySecretStore::new()))),
         );
@@ -2196,7 +2249,8 @@ mod tests {
         tenancy.add_membership(m("alice", &org_a.id)).unwrap();
         tenancy.add_membership(m("bob", &org_b.id)).unwrap();
         let state = Arc::new(
-            AppState::from_env().await
+            AppState::from_env()
+                .await
                 .with_tenancy(tenancy)
                 .with_secrets(Vault::new(Arc::new(InMemorySecretStore::new())))
                 .with_audit(AuditLog::in_memory()),
@@ -2279,7 +2333,8 @@ mod tests {
         tenancy.add_membership(m("edna", Role::Editor)).unwrap();
         tenancy.add_membership(m("alice", Role::OrgAdmin)).unwrap();
         let state = Arc::new(
-            AppState::from_env().await
+            AppState::from_env()
+                .await
                 .with_tenancy(tenancy)
                 .with_kms(test_kms()),
         );
@@ -2378,7 +2433,8 @@ mod tests {
         tenancy.add_membership(m("alice", &org_a.id)).unwrap();
         tenancy.add_membership(m("bob", &org_b.id)).unwrap();
         let state = Arc::new(
-            AppState::from_env().await
+            AppState::from_env()
+                .await
                 .with_tenancy(tenancy)
                 .with_kms(test_kms())
                 .with_audit(AuditLog::in_memory()),
@@ -2431,27 +2487,28 @@ mod tests {
         assert_eq!(beta["total"], 0);
     }
 
-    /// **Documented, known gap** (see
-    /// [compliance-mapping.md §7](../../docs/13-security/compliance-mapping.md#7-residual-risk-and-gaps)),
-    /// not a regression to fix here: `tenant_authorize` skips its RBAC check
-    /// entirely for a request with no `X-Apex-Principal` against the default
-    /// tenant ([tenancy.rs](tenancy.rs) — "anonymous default tenant retained
-    /// for back-compat"), and that bypass is shared by every tenant-scoped
-    /// route, `kms:admin` included. This test proves — rather than assumes —
-    /// that an *unauthenticated* caller (no principal header at all) can
-    /// currently crypto-shred the default tenant's key material through the
-    /// public KMS route, with zero grant. A production deployment handling
-    /// real tenant data must configure `X-Apex-Principal`/memberships (or
-    /// reject anonymous default-tenant traffic upstream) rather than rely on
-    /// this back-compat mode.
+    /// **SEC-102**: the anonymous default-tenant bypass (`tenant_authorize` skipping
+    /// its RBAC check for a request with no `X-Apex-Principal` against the default
+    /// tenant) is no longer unconditional — it requires `AppState.anonymous_allowed`
+    /// (`APEX_ALLOW_ANONYMOUS=1` in production, refused by [`crate::serve`] on any
+    /// non-loopback bind; enabled here only via the explicit override). With it
+    /// enabled, an anonymous caller can still crypto-shred the default tenant's key
+    /// material through the public KMS route — the documented, explicit dev/local
+    /// escape hatch, not an accidental gap (see
+    /// [compliance-mapping.md §7](../../docs/13-security/compliance-mapping.md#7-residual-risk-and-gaps)).
+    /// With it disabled (the production default), the same request is `403`.
     #[tokio::test]
-    async fn known_gap_anonymous_default_tenant_caller_reaches_kms_admin_with_no_grant() {
-        let state = Arc::new(AppState::from_env().await.with_kms(test_kms()));
+    async fn anonymous_default_tenant_bypass_is_gated_by_the_allow_anonymous_flag() {
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_kms(test_kms())
+                .with_anonymous_allowed(true),
+        );
 
-        // No `X-Apex-Principal` header, default tenant — the anonymous
-        // back-compat path, not a configured role. Rotate first so the
-        // default tenant has key material to destroy (a never-provisioned
-        // tenant would 404, which would be testing the wrong thing).
+        // No `X-Apex-Principal` header, default tenant — the anonymous escape hatch,
+        // not a configured role. Rotate first so the default tenant has key material
+        // to destroy (a never-provisioned tenant would 404, testing the wrong thing).
         let (st, _) = tenant_req(
             &state,
             "POST",
@@ -2472,14 +2529,7 @@ mod tests {
             Value::Null,
         )
         .await;
-        assert_eq!(
-            st,
-            StatusCode::OK,
-            "documents the current (accepted, flagged) behavior — if this ever \
-             starts failing, the anonymous back-compat bypass has been narrowed \
-             and this test (and the compliance doc's residual-risk entry) should \
-             be updated, not just re-asserted"
-        );
+        assert_eq!(st, StatusCode::OK, "explicit dev/local escape hatch");
         assert_eq!(body["status"], "destroyed");
 
         // Once shredded, even the *same* anonymous caller is fail-closed again —
@@ -2495,6 +2545,30 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::FORBIDDEN);
+    }
+
+    /// **SEC-102, production default**: with the anonymous escape hatch disabled (no
+    /// `APEX_ALLOW_ANONYMOUS`), a credential-less request to a protected route is
+    /// rejected at the perimeter by [`auth::authenticate`] (SEC-101) before
+    /// `tenant_authorize`'s own (now equally fail-closed) RBAC check ever runs.
+    #[tokio::test]
+    async fn anonymous_default_tenant_caller_is_denied_when_the_flag_is_off() {
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_kms(test_kms())
+                .with_anonymous_allowed(false),
+        );
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/kms/tenant-key/rotate",
+            "default",
+            "",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

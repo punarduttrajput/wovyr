@@ -127,21 +127,29 @@ the test code is the authoritative record; this section summarizes it.
 
 Found during this pass, not fixed here (see rationale per item):
 
-1. **Anonymous default-tenant bypass reaches `kms:admin`.**
-   `tenant_authorize` ([tenancy.rs](../../crates/apex-server/src/tenancy.rs))
-   skips its RBAC check entirely when a request carries no `X-Apex-Principal`
-   against the default tenant — a deliberate, existing back-compat behavior
-   shared by *every* tenant-scoped route (agents/workflows/memory/secrets/kms
-   alike), not something introduced by the KMS work. Left unchanged here
-   because narrowing it is a systemic change to shared tenancy code with a
-   much larger blast radius than this slice; instead it's proven and
-   documented by
-   `known_gap_anonymous_default_tenant_caller_reaches_kms_admin_with_no_grant`
-   ([lib.rs](../../crates/apex-server/src/lib.rs)). **Operationally: any
-   deployment handling real tenant data must configure `X-Apex-Principal` /
-   memberships (or reject anonymous default-tenant traffic upstream, e.g. at
-   a gateway) before exposing `/api/v1/kms/*` — do not rely on the
-   default-tenant back-compat mode in production.**
+1. **Anonymous default-tenant bypass reaches `kms:admin` — now gated, not open by
+   default (RM-GA-P1 SEC-102).** `tenant_authorize`
+   ([tenancy.rs](../../crates/apex-server/src/tenancy.rs)) still skips its RBAC
+   check for a request with no `X-Apex-Principal` against the default tenant, but
+   only when `AppState.anonymous_allowed` is set — resolved once at construction
+   from `APEX_ALLOW_ANONYMOUS=1`, **off by default**, and refused outright by
+   [`serve()`](../../crates/apex-server/src/lib.rs) on any non-loopback bind (see
+   [`auth::refuse_anonymous_on_non_loopback`](../../crates/apex-server/src/auth.rs)).
+   Proven both ways by
+   `anonymous_default_tenant_bypass_is_gated_by_the_allow_anonymous_flag` (flag on
+   → same historical behavior) and
+   `anonymous_default_tenant_caller_is_denied_when_the_flag_is_off` (flag off, the
+   production default → `403`) in
+   [lib.rs](../../crates/apex-server/src/lib.rs). Additionally, SEC-101 closes the
+   deeper hole this item didn't cover: raw `X-Apex-Principal`/bearer values are no
+   longer trusted outright once `APEX_AUTH_MODE=jwt|apikey` is configured — the
+   verified auth middleware ([auth.rs](../../crates/apex-server/src/auth.rs))
+   overwrites the header with the verified principal before any handler runs.
+   **Operationally: production deployments must set `APEX_AUTH_MODE=jwt` or
+   `apikey` and leave `APEX_ALLOW_ANONYMOUS` unset** — the residual gap is now
+   `APEX_AUTH_MODE` defaulting to `disabled-loopback` when unset, which still
+   trusts raw headers exactly as before on a loopback bind (an explicit,
+   documented dev-only mode, not a network-reachable default).
 2. **`kms.json` (the wrapped tenant-key catalog) has no restricted file
    permissions.** `FileKmsStore::new` ([store.rs](../../crates/apex-kms/src/store.rs))
    writes it with whatever the process umask/ACL defaults to — unlike
