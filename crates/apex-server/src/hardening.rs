@@ -10,12 +10,13 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // --- pagination (overview §6) ----------------------------------------------------
 
@@ -95,7 +96,27 @@ const DEFAULT_IDEMPOTENCY_MAX_ENTRIES: usize = 10_000;
 
 struct IdempotencyEntry {
     body: Value,
-    inserted_at: Instant,
+    inserted_at_ms: u64,
+}
+
+/// The on-disk shape (RM-GA-P2 DUR-404): a flat list in `order`'s sequence, so
+/// reloading rebuilds both `entries` and the FIFO `order` queue identically.
+#[derive(Serialize, Deserialize)]
+struct PersistedEntry {
+    key: String,
+    body: Value,
+    inserted_at_ms: u64,
+}
+
+/// Wall-clock milliseconds since the epoch — read only at this boundary (`get`/`put`
+/// below), never in core logic. Used instead of `Instant` so an entry's age is
+/// meaningful after a process restart (an `Instant` has no fixed epoch and can't be
+/// persisted).
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Insertion-ordered map + a FIFO eviction queue, so both TTL expiry and the max-entry
@@ -107,16 +128,19 @@ struct IdempotencyInner {
 }
 
 /// Caches responses to mutating requests by `Idempotency-Key`, so a client retry
-/// returns the original result instead of acting twice. In-memory + tenant-scoped,
-/// bounded two ways (SEC-205): entries older than `ttl` expire (checked lazily, on
-/// each `get`/`put`, rather than a background sweeper — no extra task, no clock read
+/// returns the original result instead of acting twice. Tenant-scoped, bounded two
+/// ways (SEC-205): entries older than `ttl` expire (checked lazily, on each
+/// `get`/`put`, rather than a background sweeper — no extra task, no clock read
 /// outside these two call sites), and the map never exceeds `max_entries` — a client
 /// minting unique keys faster than the TTL elapses evicts the oldest tracked key
-/// (FIFO) rather than growing without bound.
+/// (FIFO) rather than growing without bound. Durable when opened with a path
+/// (RM-GA-P2 DUR-404, [`new_with_path`](Self::new_with_path)) — otherwise
+/// ([`new`](Self::new), what tests use) purely in-memory, exactly as before.
 pub(crate) struct IdempotencyStore {
     inner: Mutex<IdempotencyInner>,
     ttl: Duration,
     max_entries: usize,
+    path: Option<PathBuf>,
 }
 
 impl Default for IdempotencyStore {
@@ -129,12 +153,40 @@ impl Default for IdempotencyStore {
 }
 
 impl IdempotencyStore {
-    /// A store retaining entries for `ttl`, capped at `max_entries`.
+    /// A purely in-memory store retaining entries for `ttl`, capped at `max_entries`.
     pub(crate) fn new(ttl: Duration, max_entries: usize) -> Self {
+        Self::new_with_path(ttl, max_entries, None)
+    }
+
+    /// Open a store retaining entries for `ttl` (capped at `max_entries`), loading any
+    /// persisted entries from `path` (best-effort: a missing or corrupt file starts
+    /// empty rather than failing server startup). `path: None` behaves exactly like
+    /// [`new`](Self::new).
+    pub(crate) fn new_with_path(ttl: Duration, max_entries: usize, path: Option<PathBuf>) -> Self {
+        let inner = path
+            .as_deref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice::<Vec<PersistedEntry>>(&bytes).ok())
+            .map(|records| {
+                let mut inner = IdempotencyInner::default();
+                for r in records {
+                    inner.entries.insert(
+                        r.key.clone(),
+                        IdempotencyEntry {
+                            body: r.body,
+                            inserted_at_ms: r.inserted_at_ms,
+                        },
+                    );
+                    inner.order.push_back(r.key);
+                }
+                inner
+            })
+            .unwrap_or_default();
         Self {
-            inner: Mutex::new(IdempotencyInner::default()),
+            inner: Mutex::new(inner),
             ttl,
             max_entries,
+            path,
         }
     }
 
@@ -143,11 +195,12 @@ impl IdempotencyStore {
     /// more. Removing a key already absent from `entries` (a stale duplicate left in
     /// `order` by an overwritten `put`) is a harmless no-op.
     fn evict(inner: &mut IdempotencyInner, ttl: Duration, max_entries: usize, make_room: bool) {
+        let now = now_ms();
         while let Some(front) = inner.order.front() {
             let expired = inner
                 .entries
                 .get(front)
-                .is_none_or(|e| e.inserted_at.elapsed() > ttl);
+                .is_none_or(|e| now.saturating_sub(e.inserted_at_ms) > ttl.as_millis() as u64);
             let over_capacity = make_room && inner.entries.len() >= max_entries;
             if !expired && !over_capacity {
                 break;
@@ -168,19 +221,51 @@ impl IdempotencyStore {
             .map(|e| e.body.clone())
     }
 
-    /// Remember `body` as the response for `(tenant, key)`.
+    /// Remember `body` as the response for `(tenant, key)`, persisting the store
+    /// (RM-GA-P2 DUR-404) if opened with a path.
     pub(crate) fn put(&self, tenant: &str, key: &str, body: Value) {
-        let mut inner = self.inner.lock().expect("idempotency mutex poisoned");
-        Self::evict(&mut inner, self.ttl, self.max_entries, true);
-        let scoped_key = scoped(tenant, key);
-        inner.entries.insert(
-            scoped_key.clone(),
-            IdempotencyEntry {
-                body,
-                inserted_at: Instant::now(),
-            },
-        );
-        inner.order.push_back(scoped_key);
+        let persisted = {
+            let mut inner = self.inner.lock().expect("idempotency mutex poisoned");
+            Self::evict(&mut inner, self.ttl, self.max_entries, true);
+            let scoped_key = scoped(tenant, key);
+            inner.entries.insert(
+                scoped_key.clone(),
+                IdempotencyEntry {
+                    body,
+                    inserted_at_ms: now_ms(),
+                },
+            );
+            inner.order.push_back(scoped_key);
+            self.path.as_ref().map(|_| {
+                inner
+                    .order
+                    .iter()
+                    .filter_map(|k| {
+                        inner.entries.get(k).map(|e| PersistedEntry {
+                            key: k.clone(),
+                            body: e.body.clone(),
+                            inserted_at_ms: e.inserted_at_ms,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        if let (Some(path), Some(records)) = (&self.path, persisted) {
+            if let Some(parent) = path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                tracing::error!(error = %e, "failed to create idempotency store directory");
+                return;
+            }
+            match serde_json::to_vec_pretty(&records) {
+                Ok(bytes) => {
+                    if let Err(e) = apex_common::fs::atomic_write(path, bytes) {
+                        tracing::error!(error = %e, "failed to persist idempotency store");
+                    }
+                }
+                Err(e) => tracing::error!(error = %e, "failed to encode idempotency store"),
+            }
+        }
     }
 }
 

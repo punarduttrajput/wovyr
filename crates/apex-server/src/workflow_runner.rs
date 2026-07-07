@@ -442,9 +442,33 @@ async fn cancel_handler(
 mod tests {
     use super::*;
     use crate::AppState;
+    use apex_workflow::{CheckpointStore, Engine, EventLog, InMemoryStore};
     use axum::body::to_bytes;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    /// State with a fresh, isolated agent store *and* workflow engine (both
+    /// in-memory), so a test doesn't observe agents/executions persisted by a
+    /// prior test or process run against the real `~/.apex/workflows` (DUR-404
+    /// made both durable there) — every other piece of state (gateway, registry,
+    /// tenancy, quota) is the real default. Needed by any test whose assertions
+    /// depend on a stored agent or execution *not* already existing.
+    async fn isolated_state() -> Arc<AppState> {
+        let state = AppState::from_env().await;
+        let agents = Arc::new(AgentStore::new(None));
+        let executor = Arc::new(ServerExecutor::new(
+            state.gateway.clone(),
+            state.registry.clone(),
+            agents.clone(),
+            state.tenancy.clone(),
+            state.quota.clone(),
+        ));
+        let store = InMemoryStore::new();
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+        let engine = Engine::new(events, checkpoints, executor);
+        Arc::new(state.with_agents(agents).with_workflows(engine))
+    }
 
     async fn test_app() -> axum::Router {
         crate::router(Arc::new(AppState::from_env().await))
@@ -571,7 +595,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
     /// lands in the activity's `ActivityCompleted` event.
     #[tokio::test]
     async fn agent_activity_runs_a_stored_agent() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
 
         let (st, body) = post_json(
             crate::router(state.clone()),
@@ -614,7 +638,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
     /// panicking or hanging.
     #[tokio::test]
     async fn agent_activity_fails_for_unknown_agent() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         let (st, body) = post_json(
             crate::router(state.clone()),
             "/api/v1/workflows",
@@ -641,7 +665,7 @@ metadata:\n  name: research-team\nspec:\n  activities:\n    - id: proResearch\n 
 
     #[tokio::test]
     async fn research_team_fans_out_and_joins_two_agents() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         let router = crate::router(state.clone());
 
         for name in ["pro-researcher", "con-researcher", "synthesizer"] {
@@ -712,7 +736,7 @@ metadata:\n  name: agent-wf-quota\nspec:\n  activities:\n    - id: greet\n      
 
     #[tokio::test]
     async fn agent_activity_respects_project_quota() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         state
             .tenancy
             .set_quota(

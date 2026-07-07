@@ -54,36 +54,101 @@ use axum::{
     routing::{get, post},
 };
 use futures::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tower::ServiceBuilder;
 
-/// In-memory registry of stored agent manifests, keyed by `(tenant, agent id)` so a
-/// tenant only ever sees and mutates its own agents (the `metadata.name` is the id,
-/// unique *within* a tenant — two tenants may reuse a name without colliding).
-/// Manifests are validated on create; durability (file/db) is a later slice.
+/// One persisted agent record (RM-GA-P2 DUR-404): a `BTreeMap` keyed by a `(tenant,
+/// id)` tuple can't round-trip through `serde_json` (object keys must be strings), so
+/// the on-disk shape is a flat list instead — the same convention every other
+/// `Vec<Record>` <-> `BTreeMap<Key, Record>` file store in the workspace uses.
+#[derive(Clone, Serialize, Deserialize)]
+struct AgentRecord {
+    tenant: String,
+    id: String,
+    manifest: String,
+}
+
+/// Registry of stored agent manifests, keyed by `(tenant, agent id)` so a tenant only
+/// ever sees and mutates its own agents (the `metadata.name` is the id, unique
+/// *within* a tenant — two tenants may reuse a name without colliding). Manifests are
+/// validated on create. Durable when opened with a `path` (RM-GA-P2 DUR-404): every
+/// mutation re-persists the whole catalog via `atomic_write`, and a fresh instance
+/// loads it back — otherwise (`path: None`, what tests use for a guaranteed-empty,
+/// non-leaking store) it behaves exactly as the original in-memory-only version did.
 #[derive(Default)]
 struct AgentStore {
     inner: RwLock<BTreeMap<(String, String), String>>,
+    path: Option<PathBuf>,
 }
 
 impl AgentStore {
+    /// Open a store, loading any existing catalog from `path` (best-effort: a missing
+    /// or corrupt file starts empty rather than failing server startup). `path: None`
+    /// is a purely in-memory store — what every test that cares about a clean,
+    /// non-leaking agent list uses via [`AppState::with_agents`].
+    fn new(path: Option<PathBuf>) -> Self {
+        let inner = path
+            .as_deref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice::<Vec<AgentRecord>>(&bytes).ok())
+            .map(|records| {
+                records
+                    .into_iter()
+                    .map(|r| ((r.tenant, r.id), r.manifest))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            inner: RwLock::new(inner),
+            path,
+        }
+    }
+
+    /// Persist the current catalog (best-effort — logged, not propagated, since the
+    /// in-memory mutation this follows has already succeeded either way).
+    fn persist(&self, map: &BTreeMap<(String, String), String>) {
+        let Some(path) = &self.path else { return };
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::error!(error = %e, "failed to create agent store directory");
+            return;
+        }
+        let records: Vec<AgentRecord> = map
+            .iter()
+            .map(|((tenant, id), manifest)| AgentRecord {
+                tenant: tenant.clone(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+            })
+            .collect();
+        match serde_json::to_vec_pretty(&records) {
+            Ok(bytes) => {
+                if let Err(e) = apex_common::fs::atomic_write(path, bytes) {
+                    tracing::error!(error = %e, "failed to persist agent store");
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "failed to encode agent store"),
+        }
+    }
+
     /// Validate and store a manifest under `tenant`, returning the agent id.
     fn create(&self, tenant: &str, manifest: String) -> Result<String, ApiError> {
         let def = AgentDefinition::from_yaml(&manifest).map_err(|e| {
             ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
         })?;
         let id = def.metadata.name.clone();
-        self.inner
-            .write()
-            .expect("agent store poisoned")
-            .insert((tenant.to_string(), id.clone()), manifest);
+        let mut inner = self.inner.write().expect("agent store poisoned");
+        inner.insert((tenant.to_string(), id.clone()), manifest);
+        self.persist(&inner);
         Ok(id)
     }
 
@@ -115,11 +180,14 @@ impl AgentStore {
 
     /// Remove `id` within `tenant`; returns whether it existed.
     fn delete(&self, tenant: &str, id: &str) -> bool {
-        self.inner
-            .write()
-            .expect("agent store poisoned")
+        let mut inner = self.inner.write().expect("agent store poisoned");
+        let existed = inner
             .remove(&(tenant.to_string(), id.to_string()))
-            .is_some()
+            .is_some();
+        if existed {
+            self.persist(&inner);
+        }
+        existed
     }
 }
 
@@ -137,8 +205,13 @@ pub struct AppState {
     /// Workflow execution id → owning tenant, stamped at submit so the workflow routes
     /// enforce per-tenant isolation without the (tenant-agnostic) engine. An execution
     /// with no recorded owner belongs to the anonymous `default` space (back-compat).
-    /// In-memory for now — durable backing tracks the agent store (a later slice).
+    /// Durable when opened with a path (RM-GA-P2 DUR-404) — without this, a restart
+    /// dropped every execution's tenant binding, so the owning tenant got 404s while
+    /// the anonymous `default` space could see all of them (a tenant-isolation
+    /// regression on restart, per `workflow_visible`).
     workflow_owners: RwLock<BTreeMap<String, String>>,
+    /// Where `workflow_owners` persists (`None` = in-memory only, what tests use).
+    workflow_owners_path: Option<PathBuf>,
     /// Tenancy catalog backing the org/project/membership/quota routes (G: tenancy).
     pub(crate) tenancy: Arc<dyn TenancyStore>,
     /// Per-project run-path quota usage (concurrent runs + daily LLM spend). An `Arc`
@@ -234,9 +307,13 @@ impl AppState {
         // Done before the registry is shared with the workflow engine below.
         plugins::register_enabled_tools(&mut registry, &secrets);
         let (memory, memory_store) = memory::default_engine(kms.clone());
-        let agents = Arc::new(AgentStore::default());
+        let agents = Arc::new(AgentStore::new(
+            workflows_dir().map(|d| d.join("agents.json")),
+        ));
         let tenancy_store = default_tenancy_store();
-        let quota = Arc::new(tenancy::QuotaTracker::new());
+        let quota = Arc::new(tenancy::QuotaTracker::new(
+            server_state_dir().map(|d| d.join("quota.json")),
+        ));
         // Thread gateway + registry + the agent store + tenancy/quota into the workflow
         // engine so the ServerExecutor can actually drive function/ai/agent activities
         // when the submit route runs a workflow (an `agent` activity looks up a stored
@@ -248,6 +325,8 @@ impl AppState {
             tenancy_store.clone(),
             quota.clone(),
         );
+        let workflow_owners_path = workflows_dir().map(|d| d.join("owners.json"));
+        let workflow_owners = load_owners(workflow_owners_path.as_deref());
         Self {
             gateway,
             registry,
@@ -255,16 +334,18 @@ impl AppState {
             agents,
             run_counter: AtomicU64::new(1),
             workflows,
-            workflow_owners: RwLock::new(BTreeMap::new()),
+            workflow_owners: RwLock::new(workflow_owners),
+            workflow_owners_path,
             tenancy: tenancy_store,
             quota,
             webhooks: default_webhook_store(kms.clone()),
             webhook_sender: Arc::new(webhooks::ReqwestSender::default()),
             webhook_policy: BackoffPolicy::default(),
             event_counter: AtomicU64::new(1),
-            idempotency: hardening::IdempotencyStore::new(
+            idempotency: hardening::IdempotencyStore::new_with_path(
                 Duration::from_secs(env_u64("APEX_IDEMPOTENCY_TTL_SECS", 24 * 60 * 60)),
                 env_u64("APEX_IDEMPOTENCY_MAX_ENTRIES", 10_000) as usize,
+                server_state_dir().map(|d| d.join("idempotency.json")),
             ),
             memory,
             memory_store,
@@ -420,12 +501,40 @@ impl AppState {
         self
     }
 
-    /// Record the owning tenant of a workflow execution (called at submit).
+    /// Override the agent store (RM-GA-P2 DUR-404) — tests that assert an exact,
+    /// non-accumulating agent list use a fresh in-memory store (`AgentStore::new(None)`)
+    /// so they don't observe agents persisted by a prior test run or process, the same
+    /// isolation `with_tenancy`/`with_secrets`/etc. give their own durable resource.
+    #[cfg(test)]
+    pub(crate) fn with_agents(mut self, agents: Arc<AgentStore>) -> Self {
+        self.agents = agents;
+        self
+    }
+
+    /// Record the owning tenant of a workflow execution (called at submit), persisting
+    /// the index (RM-GA-P2 DUR-404) so the binding survives a restart.
     fn record_workflow_owner(&self, execution_id: &str, tenant: &str) {
-        self.workflow_owners
+        let mut owners = self
+            .workflow_owners
             .write()
-            .expect("workflow owners poisoned")
-            .insert(execution_id.to_string(), tenant.to_string());
+            .expect("workflow owners poisoned");
+        owners.insert(execution_id.to_string(), tenant.to_string());
+        if let Some(path) = &self.workflow_owners_path {
+            if let Some(parent) = path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                tracing::error!(error = %e, "failed to create workflow owners directory");
+                return;
+            }
+            match serde_json::to_vec_pretty(&*owners) {
+                Ok(bytes) => {
+                    if let Err(e) = apex_common::fs::atomic_write(path, bytes) {
+                        tracing::error!(error = %e, "failed to persist workflow owners");
+                    }
+                }
+                Err(e) => tracing::error!(error = %e, "failed to encode workflow owners"),
+            }
+        }
     }
 
     /// Whether `tenant` may see/act on workflow execution `execution_id`. An execution
@@ -626,14 +735,7 @@ fn default_workflows_engine(
     let executor = Arc::new(workflow_runner::ServerExecutor::new(
         gateway, registry, agents, tenancy, quota,
     ));
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| {
-            std::path::PathBuf::from(home)
-                .join(".apex")
-                .join("workflows")
-        });
-    if let Some(dir) = dir
+    if let Some(dir) = workflows_dir()
         && let Ok(store) = FileStore::new(dir)
     {
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
@@ -644,6 +746,34 @@ fn default_workflows_engine(
     let events: Arc<dyn EventLog> = Arc::new(store.clone());
     let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
     Engine::new(events, checkpoints, executor)
+}
+
+/// `~/.apex/workflows` — shared with the CLI. Also where the agent store
+/// (`agents.json`) and the workflow-owners index (`owners.json`) persist
+/// (RM-GA-P2 DUR-404): both are execution-adjacent state, so they live beside the
+/// workflow checkpoints they describe rather than in a separate directory.
+fn workflows_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".apex").join("workflows"))
+}
+
+/// `~/.apex/server` — durable state that is server-process-local, never shared with
+/// or read by the CLI (RM-GA-P2 DUR-404: the idempotency cache and the daily quota
+/// accumulator). Kept in its own directory rather than `workflows_dir()` precisely
+/// *because* it isn't shared — mixing the two would blur that boundary.
+fn server_state_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".apex").join("server"))
+}
+
+/// Load the persisted workflow-owners index from `path` (best-effort: a missing or
+/// corrupt file starts empty rather than failing server startup).
+fn load_owners(path: Option<&std::path::Path>) -> BTreeMap<String, String> {
+    path.and_then(|p| std::fs::read(p).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 /// Translates gateway [`CostEvent`]s into Prometheus metrics
@@ -2942,9 +3072,52 @@ mod tests {
         assert!(ids.contains(&"shell"));
     }
 
+    /// RM-GA-P2 DUR-404 acceptance: create an agent as tenant T, then open a *fresh*
+    /// `AgentStore` instance against the same directory (the same "simulated restart"
+    /// stand-in the crash-recovery tests elsewhere in this workspace use, since a real
+    /// process restart isn't practical inside a unit test) — T's agent must still be
+    /// visible, and it alone: the anonymous `default` tenant must not see it.
+    #[test]
+    fn agent_store_survives_a_restart_and_stays_tenant_scoped() {
+        let dir =
+            std::env::temp_dir().join(format!("apex_server_agent_restart_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("agents.json");
+
+        {
+            let store = AgentStore::new(Some(path.clone()));
+            store
+                .create(
+                    "acme",
+                    "metadata:\n  name: restart-test\nspec:\n  instructions: hi\n".to_string(),
+                )
+                .unwrap();
+        }
+
+        // A fresh instance — no in-memory state carried over — reopened against the
+        // same path, the same shape a server restart takes.
+        let reopened = AgentStore::new(Some(path));
+        assert_eq!(reopened.list("acme"), vec!["restart-test".to_string()]);
+        assert!(
+            reopened.list("default").is_empty(),
+            "the anonymous default tenant must not see acme's agent after a restart"
+        );
+        assert!(reopened.manifest("acme", "restart-test").is_some());
+        assert!(reopened.manifest("default", "restart-test").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn agent_persistence_lifecycle() {
-        let state = Arc::new(AppState::from_env().await);
+        // A fresh in-memory agent store (DUR-404 persists the real default to disk,
+        // which would accumulate agents from every prior test run and break this
+        // test's exact-list assertions below).
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_agents(Arc::new(AgentStore::new(None))),
+        );
         let manifest = "metadata:\n  name: persisted\nspec:\n  instructions: Be friendly.\n";
 
         // Create → returns the agent id.
@@ -3148,7 +3321,12 @@ mod tests {
 
     #[tokio::test]
     async fn agent_list_is_cursor_paginated() {
-        let state = Arc::new(AppState::from_env().await);
+        // A fresh in-memory agent store — see agent_persistence_lifecycle's comment.
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_agents(Arc::new(AgentStore::new(None))),
+        );
         for name in ["alpha", "bravo", "charlie"] {
             let m = format!("metadata:\n  name: {name}\nspec:\n  instructions: hi\n");
             req(&state, "POST", "/api/v1/agents", json!({ "manifest": m })).await;
