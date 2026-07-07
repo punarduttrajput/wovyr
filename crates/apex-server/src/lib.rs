@@ -39,7 +39,10 @@ use apex_telemetry::Metrics;
 use apex_tenancy::{FileTenancyStore, InMemoryTenancyStore, TenancyStore};
 use apex_tools::ToolRegistry;
 use apex_workflow::{
-    CheckpointStore, Engine, EventLog, ExecutionFilter, FileStore, InMemoryStore, WorkflowState,
+    CheckpointStore, Clock, Definition, DefinitionResolver, Engine, EventLog, ExecutionFilter,
+    FileScheduleStore, FileStore, FileTimerStore, InMemoryScheduleStore, InMemoryStore,
+    InMemoryTimerStore, ScheduleDispatcher, ScheduleStore, SystemClock, TimerDispatcher,
+    TimerStore, WorkflowState,
 };
 use axum::{
     BoxError, Json, Router,
@@ -54,36 +57,101 @@ use axum::{
     routing::{get, post},
 };
 use futures::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tower::ServiceBuilder;
 
-/// In-memory registry of stored agent manifests, keyed by `(tenant, agent id)` so a
-/// tenant only ever sees and mutates its own agents (the `metadata.name` is the id,
-/// unique *within* a tenant — two tenants may reuse a name without colliding).
-/// Manifests are validated on create; durability (file/db) is a later slice.
+/// One persisted agent record (RM-GA-P2 DUR-404): a `BTreeMap` keyed by a `(tenant,
+/// id)` tuple can't round-trip through `serde_json` (object keys must be strings), so
+/// the on-disk shape is a flat list instead — the same convention every other
+/// `Vec<Record>` <-> `BTreeMap<Key, Record>` file store in the workspace uses.
+#[derive(Clone, Serialize, Deserialize)]
+struct AgentRecord {
+    tenant: String,
+    id: String,
+    manifest: String,
+}
+
+/// Registry of stored agent manifests, keyed by `(tenant, agent id)` so a tenant only
+/// ever sees and mutates its own agents (the `metadata.name` is the id, unique
+/// *within* a tenant — two tenants may reuse a name without colliding). Manifests are
+/// validated on create. Durable when opened with a `path` (RM-GA-P2 DUR-404): every
+/// mutation re-persists the whole catalog via `atomic_write`, and a fresh instance
+/// loads it back — otherwise (`path: None`, what tests use for a guaranteed-empty,
+/// non-leaking store) it behaves exactly as the original in-memory-only version did.
 #[derive(Default)]
 struct AgentStore {
     inner: RwLock<BTreeMap<(String, String), String>>,
+    path: Option<PathBuf>,
 }
 
 impl AgentStore {
+    /// Open a store, loading any existing catalog from `path` (best-effort: a missing
+    /// or corrupt file starts empty rather than failing server startup). `path: None`
+    /// is a purely in-memory store — what every test that cares about a clean,
+    /// non-leaking agent list uses via [`AppState::with_agents`].
+    fn new(path: Option<PathBuf>) -> Self {
+        let inner = path
+            .as_deref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice::<Vec<AgentRecord>>(&bytes).ok())
+            .map(|records| {
+                records
+                    .into_iter()
+                    .map(|r| ((r.tenant, r.id), r.manifest))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            inner: RwLock::new(inner),
+            path,
+        }
+    }
+
+    /// Persist the current catalog (best-effort — logged, not propagated, since the
+    /// in-memory mutation this follows has already succeeded either way).
+    fn persist(&self, map: &BTreeMap<(String, String), String>) {
+        let Some(path) = &self.path else { return };
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::error!(error = %e, "failed to create agent store directory");
+            return;
+        }
+        let records: Vec<AgentRecord> = map
+            .iter()
+            .map(|((tenant, id), manifest)| AgentRecord {
+                tenant: tenant.clone(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+            })
+            .collect();
+        match serde_json::to_vec_pretty(&records) {
+            Ok(bytes) => {
+                if let Err(e) = apex_common::fs::atomic_write(path, bytes) {
+                    tracing::error!(error = %e, "failed to persist agent store");
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "failed to encode agent store"),
+        }
+    }
+
     /// Validate and store a manifest under `tenant`, returning the agent id.
     fn create(&self, tenant: &str, manifest: String) -> Result<String, ApiError> {
         let def = AgentDefinition::from_yaml(&manifest).map_err(|e| {
             ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
         })?;
         let id = def.metadata.name.clone();
-        self.inner
-            .write()
-            .expect("agent store poisoned")
-            .insert((tenant.to_string(), id.clone()), manifest);
+        let mut inner = self.inner.write().expect("agent store poisoned");
+        inner.insert((tenant.to_string(), id.clone()), manifest);
+        self.persist(&inner);
         Ok(id)
     }
 
@@ -115,11 +183,118 @@ impl AgentStore {
 
     /// Remove `id` within `tenant`; returns whether it existed.
     fn delete(&self, tenant: &str, id: &str) -> bool {
-        self.inner
-            .write()
-            .expect("agent store poisoned")
+        let mut inner = self.inner.write().expect("agent store poisoned");
+        let existed = inner
             .remove(&(tenant.to_string(), id.to_string()))
-            .is_some()
+            .is_some();
+        if existed {
+            self.persist(&inner);
+        }
+        existed
+    }
+}
+
+/// The current disposition of an asynchronously-submitted agent run (RM-GA-P2
+/// EXE-604).
+#[derive(Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum AsyncRunStatus {
+    Running,
+    Succeeded {
+        output: Value,
+        steps: usize,
+        usage: Value,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+struct RunRecord {
+    tenant: String,
+    status: AsyncRunStatus,
+    inserted_at: Instant,
+}
+
+/// Tracks runs submitted via `POST /api/v1/agents:run` with `Prefer: respond-async`
+/// (RM-GA-P2 EXE-604), so `GET /api/v1/agents/runs/{id}` has something to poll.
+/// In-memory only, unlike `AgentStore`/`workflow_owners`/etc. (DUR-404's durable
+/// pieces): an agent run has no checkpoint to resume from, so a run truly in flight
+/// when the process dies is gone regardless of whether its *record* survives —
+/// persisting just the record would misleadingly suggest otherwise. Bounded the
+/// same way `hardening::IdempotencyStore` is (SEC-205's discipline): entries expire
+/// after `ttl` and the map is capped at `max_entries`, so a long-lived server
+/// doesn't accumulate one entry per run forever.
+struct RunStore {
+    inner: Mutex<RunStoreInner>,
+    ttl: Duration,
+    max_entries: usize,
+}
+
+#[derive(Default)]
+struct RunStoreInner {
+    entries: HashMap<String, RunRecord>,
+    order: VecDeque<String>,
+}
+
+impl RunStore {
+    fn new(ttl: Duration, max_entries: usize) -> Self {
+        Self {
+            inner: Mutex::new(RunStoreInner::default()),
+            ttl,
+            max_entries,
+        }
+    }
+
+    /// Mirrors `IdempotencyStore::evict`: drop expired entries, or — once at
+    /// capacity — the single oldest entry regardless of expiry, to admit one more.
+    fn evict(inner: &mut RunStoreInner, ttl: Duration, max_entries: usize, make_room: bool) {
+        while let Some(front) = inner.order.front() {
+            let expired = inner
+                .entries
+                .get(front)
+                .is_none_or(|r| r.inserted_at.elapsed() > ttl);
+            let over_capacity = make_room && inner.entries.len() >= max_entries;
+            if !expired && !over_capacity {
+                break;
+            }
+            let key = inner.order.pop_front().expect("front just checked Some");
+            inner.entries.remove(&key);
+        }
+    }
+
+    /// Record a newly-submitted run as `Running`.
+    fn insert_running(&self, run_id: String, tenant: String) {
+        let mut inner = self.inner.lock().expect("run store poisoned");
+        Self::evict(&mut inner, self.ttl, self.max_entries, true);
+        inner.entries.insert(
+            run_id.clone(),
+            RunRecord {
+                tenant,
+                status: AsyncRunStatus::Running,
+                inserted_at: Instant::now(),
+            },
+        );
+        inner.order.push_back(run_id);
+    }
+
+    /// Move a run to its terminal status. A no-op if the run was already evicted
+    /// (TTL/capacity) before it finished — the poller will see a 404, which is
+    /// honest: this server instance no longer has anything to report.
+    fn finish(&self, run_id: &str, status: AsyncRunStatus) {
+        let mut inner = self.inner.lock().expect("run store poisoned");
+        if let Some(record) = inner.entries.get_mut(run_id) {
+            record.status = status;
+        }
+    }
+
+    /// The run's tenant + current status, if it's still tracked.
+    fn get(&self, run_id: &str) -> Option<(String, AsyncRunStatus)> {
+        let inner = self.inner.lock().expect("run store poisoned");
+        inner
+            .entries
+            .get(run_id)
+            .map(|r| (r.tenant.clone(), r.status.clone()))
     }
 }
 
@@ -137,8 +312,24 @@ pub struct AppState {
     /// Workflow execution id → owning tenant, stamped at submit so the workflow routes
     /// enforce per-tenant isolation without the (tenant-agnostic) engine. An execution
     /// with no recorded owner belongs to the anonymous `default` space (back-compat).
-    /// In-memory for now — durable backing tracks the agent store (a later slice).
+    /// Durable when opened with a path (RM-GA-P2 DUR-404) — without this, a restart
+    /// dropped every execution's tenant binding, so the owning tenant got 404s while
+    /// the anonymous `default` space could see all of them (a tenant-isolation
+    /// regression on restart, per `workflow_visible`).
     workflow_owners: RwLock<BTreeMap<String, String>>,
+    /// Where `workflow_owners` persists (`None` = in-memory only, what tests use).
+    workflow_owners_path: Option<PathBuf>,
+    /// Durable registry for wall-clock timers (G1) — the same store attached to
+    /// `workflows` via `Engine::with_timer_store` and polled by the background
+    /// dispatcher loop `serve()` spawns (RM-GA-P2 EXE-601). Exposed here (rather than
+    /// only living inside the `Engine`) so `serve()` can build a `TimerDispatcher`
+    /// without reaching into the engine's private fields.
+    pub(crate) timers: Arc<dyn TimerStore>,
+    /// Durable recurring-schedule registry (G2), shared with the CLI's `apex
+    /// workflows schedule create` — the background dispatcher loop `serve()` spawns
+    /// (RM-GA-P2 EXE-601) is what lets a CLI-created schedule fire without an
+    /// operator ever running `apex workflows tick`.
+    pub(crate) schedules: Arc<dyn ScheduleStore>,
     /// Tenancy catalog backing the org/project/membership/quota routes (G: tenancy).
     pub(crate) tenancy: Arc<dyn TenancyStore>,
     /// Per-project run-path quota usage (concurrent runs + daily LLM spend). An `Arc`
@@ -156,6 +347,9 @@ pub struct AppState {
     pub(crate) event_counter: AtomicU64,
     /// Caches responses by `Idempotency-Key` so client retries of mutations are safe.
     pub(crate) idempotency: hardening::IdempotencyStore,
+    /// Tracks runs submitted via `agents:run` with `Prefer: respond-async`
+    /// (RM-GA-P2 EXE-604) so `GET /api/v1/agents/runs/{id}` has something to poll.
+    pub(crate) runs: Arc<RunStore>,
     /// Memory engine backing the memory-explorer routes (embeds via the gateway).
     pub(crate) memory: apex_memory::MemoryEngine,
     /// The memory store the engine writes to, kept alongside for namespace/record
@@ -234,9 +428,18 @@ impl AppState {
         // Done before the registry is shared with the workflow engine below.
         plugins::register_enabled_tools(&mut registry, &secrets);
         let (memory, memory_store) = memory::default_engine(kms.clone());
-        let agents = Arc::new(AgentStore::default());
+        let agents = Arc::new(AgentStore::new(
+            workflows_dir().map(|d| d.join("agents.json")),
+        ));
         let tenancy_store = default_tenancy_store();
-        let quota = Arc::new(tenancy::QuotaTracker::new());
+        let quota = Arc::new(tenancy::QuotaTracker::new(
+            server_state_dir().map(|d| d.join("quota.json")),
+        ));
+        // Durable G1/G2 registries, shared with the CLI's `apex workflows tick`/
+        // `schedule create` — attached to the engine (timers) and polled by the
+        // background dispatcher loops `serve()` spawns (RM-GA-P2 EXE-601).
+        let timers = default_timer_store();
+        let schedules = default_schedule_store();
         // Thread gateway + registry + the agent store + tenancy/quota into the workflow
         // engine so the ServerExecutor can actually drive function/ai/agent activities
         // when the submit route runs a workflow (an `agent` activity looks up a stored
@@ -247,7 +450,10 @@ impl AppState {
             agents.clone(),
             tenancy_store.clone(),
             quota.clone(),
+            timers.clone(),
         );
+        let workflow_owners_path = workflows_dir().map(|d| d.join("owners.json"));
+        let workflow_owners = load_owners(workflow_owners_path.as_deref());
         Self {
             gateway,
             registry,
@@ -255,17 +461,25 @@ impl AppState {
             agents,
             run_counter: AtomicU64::new(1),
             workflows,
-            workflow_owners: RwLock::new(BTreeMap::new()),
+            workflow_owners: RwLock::new(workflow_owners),
+            workflow_owners_path,
+            timers,
+            schedules,
             tenancy: tenancy_store,
             quota,
             webhooks: default_webhook_store(kms.clone()),
             webhook_sender: Arc::new(webhooks::ReqwestSender::default()),
             webhook_policy: BackoffPolicy::default(),
             event_counter: AtomicU64::new(1),
-            idempotency: hardening::IdempotencyStore::new(
+            idempotency: hardening::IdempotencyStore::new_with_path(
                 Duration::from_secs(env_u64("APEX_IDEMPOTENCY_TTL_SECS", 24 * 60 * 60)),
                 env_u64("APEX_IDEMPOTENCY_MAX_ENTRIES", 10_000) as usize,
+                server_state_dir().map(|d| d.join("idempotency.json")),
             ),
+            runs: Arc::new(RunStore::new(
+                Duration::from_secs(env_u64("APEX_ASYNC_RUN_TTL_SECS", 60 * 60)),
+                env_u64("APEX_ASYNC_RUN_MAX_ENTRIES", 10_000) as usize,
+            )),
             memory,
             memory_store,
             secrets,
@@ -420,12 +634,51 @@ impl AppState {
         self
     }
 
-    /// Record the owning tenant of a workflow execution (called at submit).
+    /// Override the agent store (RM-GA-P2 DUR-404) — tests that assert an exact,
+    /// non-accumulating agent list use a fresh in-memory store (`AgentStore::new(None)`)
+    /// so they don't observe agents persisted by a prior test run or process, the same
+    /// isolation `with_tenancy`/`with_secrets`/etc. give their own durable resource.
+    #[cfg(test)]
+    pub(crate) fn with_agents(mut self, agents: Arc<AgentStore>) -> Self {
+        self.agents = agents;
+        self
+    }
+
+    /// Override the timer store (RM-GA-P2 EXE-601) — tests that exercise the
+    /// background dispatcher against an isolated engine (`with_workflows`) must
+    /// point `spawn_dispatch_loops`'s `state.timers` at the *same* store the
+    /// isolated engine's `wait` activities actually schedule into, or the
+    /// dispatcher polls a store nothing was ever written to.
+    #[cfg(test)]
+    pub(crate) fn with_timers(mut self, timers: Arc<dyn TimerStore>) -> Self {
+        self.timers = timers;
+        self
+    }
+
+    /// Record the owning tenant of a workflow execution (called at submit), persisting
+    /// the index (RM-GA-P2 DUR-404) so the binding survives a restart.
     fn record_workflow_owner(&self, execution_id: &str, tenant: &str) {
-        self.workflow_owners
+        let mut owners = self
+            .workflow_owners
             .write()
-            .expect("workflow owners poisoned")
-            .insert(execution_id.to_string(), tenant.to_string());
+            .expect("workflow owners poisoned");
+        owners.insert(execution_id.to_string(), tenant.to_string());
+        if let Some(path) = &self.workflow_owners_path {
+            if let Some(parent) = path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                tracing::error!(error = %e, "failed to create workflow owners directory");
+                return;
+            }
+            match serde_json::to_vec_pretty(&*owners) {
+                Ok(bytes) => {
+                    if let Err(e) = apex_common::fs::atomic_write(path, bytes) {
+                        tracing::error!(error = %e, "failed to persist workflow owners");
+                    }
+                }
+                Err(e) => tracing::error!(error = %e, "failed to encode workflow owners"),
+            }
+        }
     }
 
     /// Whether `tenant` may see/act on workflow execution `execution_id`. An execution
@@ -563,16 +816,21 @@ fn default_secrets_vault(kms: Arc<dyn apex_kms::Kms>) -> apex_secrets::Vault {
 }
 
 /// A tamper-evident [`AuditLog`](apex_audit::AuditLog) over a durable [`FileAuditSink`]
-/// at `~/.apex/audit`, falling back to an in-memory log.
+/// at `~/.apex/audit`, falling back to an in-memory log. Opened with cross-process
+/// locking (RM-GA-P2 DUR-403) over that same directory — the CLI can append to the
+/// identical `audit.jsonl` (e.g. via `apex plugin` commands, once wired), so a
+/// second writer must extend the chain, not fork it.
 fn default_audit_log() -> apex_audit::AuditLog {
-    let sink = std::env::var_os("HOME")
+    let dir = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| std::path::PathBuf::from(home).join(".apex").join("audit"))
+        .map(|home| std::path::PathBuf::from(home).join(".apex").join("audit"));
+    let sink = dir
+        .clone()
         .and_then(|dir| apex_audit::FileAuditSink::new(dir).ok());
-    match sink {
-        Some(s) => apex_audit::AuditLog::open(Box::new(s))
+    match (sink, dir) {
+        (Some(s), Some(dir)) => apex_audit::AuditLog::open_with_lock(Box::new(s), dir)
             .unwrap_or_else(|_| apex_audit::AuditLog::in_memory()),
-        None => apex_audit::AuditLog::in_memory(),
+        _ => apex_audit::AuditLog::in_memory(),
     }
 }
 
@@ -610,35 +868,242 @@ fn default_webhook_store(kms: Arc<dyn apex_kms::Kms>) -> Arc<dyn WebhookStore> {
 /// `function`/`ai`/`agent`/`human` activities so the write-path submit route can
 /// actually drive workflow runs — including enforcing the submitting project's quota
 /// on `agent` activities, the same gate a direct `agents:run` call goes through.  The
-/// read paths (`list`/`status`/`history`) are unaffected.
+/// read paths (`list`/`status`/`history`) are unaffected. Attaches `timers` (RM-GA-P2
+/// EXE-601) so a `wait: {timer: ...}}` activity can actually register a durable
+/// deadline — before this the server's engine had no timer store at all, so any such
+/// activity failed immediately with "no timer store" rather than suspending.
 fn default_workflows_engine(
     gateway: Arc<Gateway>,
     registry: ToolRegistry,
     agents: Arc<AgentStore>,
     tenancy: Arc<dyn TenancyStore>,
     quota: Arc<tenancy::QuotaTracker>,
+    timers: Arc<dyn TimerStore>,
 ) -> Engine {
     let executor = Arc::new(workflow_runner::ServerExecutor::new(
         gateway, registry, agents, tenancy, quota,
     ));
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| {
-            std::path::PathBuf::from(home)
-                .join(".apex")
-                .join("workflows")
-        });
-    if let Some(dir) = dir
+    if let Some(dir) = workflows_dir()
         && let Ok(store) = FileStore::new(dir)
     {
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
         let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
-        return Engine::new(events, checkpoints, executor);
+        return Engine::new(events, checkpoints, executor).with_timer_store(timers);
     }
     let store = InMemoryStore::new();
     let events: Arc<dyn EventLog> = Arc::new(store.clone());
     let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
-    Engine::new(events, checkpoints, executor)
+    Engine::new(events, checkpoints, executor).with_timer_store(timers)
+}
+
+/// A durable [`TimerStore`] at `~/.apex/workflows` (shared with the CLI's `apex
+/// workflows tick`), falling back to an in-memory store if that directory is
+/// unavailable (RM-GA-P2 EXE-601).
+fn default_timer_store() -> Arc<dyn TimerStore> {
+    if let Some(dir) = workflows_dir()
+        && let Ok(store) = FileTimerStore::new(dir)
+    {
+        return Arc::new(store);
+    }
+    Arc::new(InMemoryTimerStore::new())
+}
+
+/// A durable [`ScheduleStore`] at `~/.apex/workflows` (shared with the CLI's `apex
+/// workflows schedule create`), falling back to an in-memory store if that directory
+/// is unavailable (RM-GA-P2 EXE-601).
+fn default_schedule_store() -> Arc<dyn ScheduleStore> {
+    if let Some(dir) = workflows_dir()
+        && let Ok(store) = FileScheduleStore::new(dir)
+    {
+        return Arc::new(store);
+    }
+    Arc::new(InMemoryScheduleStore::new())
+}
+
+/// `~/.apex/workflows/definitions` — where `POST /api/v1/workflows` persists the
+/// submitted manifest by workflow name (RM-GA-P2 EXE-601), so the background
+/// timer/schedule dispatchers can resolve a `Definition` for an execution that
+/// suspends long after the original HTTP request is gone (no caller left to
+/// re-supply the manifest). Server-local only — the CLI has no equivalent concept
+/// (it always drives one definition file at a time), so this doesn't need
+/// DUR-403's cross-process lock.
+fn definitions_dir() -> Option<PathBuf> {
+    workflows_dir().map(|d| d.join("definitions"))
+}
+
+/// Sanitize a workflow name into a safe filename stem (mirrors
+/// `apex_workflow::FileStore`'s execution-id sanitization).
+fn sanitize_workflow_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Persist `manifest` as the latest known definition for `workflow_name`
+/// (RM-GA-P2 EXE-601), best-effort: a failure here doesn't fail the submission
+/// itself, it only means a *later* timer/schedule fire for this execution won't
+/// find a resolvable definition (a clear, fail-closed error at that point — not a
+/// silent misbehavior).
+fn save_definition(workflow_name: &str, manifest: &str) {
+    let Some(dir) = definitions_dir() else { return };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::error!(error = %e, "failed to create definitions directory");
+        return;
+    }
+    let path = dir.join(format!("{}.yaml", sanitize_workflow_name(workflow_name)));
+    if let Err(e) = apex_common::fs::atomic_write(&path, manifest) {
+        tracing::error!(error = %e, "failed to persist workflow definition");
+    }
+}
+
+/// Build a [`DefinitionResolver`] over the persisted-by-name definitions
+/// (RM-GA-P2 EXE-601): looks up the *latest* manifest submitted under a workflow
+/// name. If that content has since drifted from what a specific still-suspended
+/// execution was pinned to at submission time, `Engine::resume`'s G7 pin check
+/// rejects it fail-closed (a clear "definition drifted" error, not a silent
+/// wrong-DAG replay) — the same guarantee G7 already gives every other resume path.
+fn definition_resolver() -> DefinitionResolver {
+    Arc::new(move |name: &str| {
+        let dir = definitions_dir()?;
+        let path = dir.join(format!("{}.yaml", sanitize_workflow_name(name)));
+        let yaml = std::fs::read_to_string(path).ok()?;
+        Definition::from_yaml(&yaml).ok()
+    })
+}
+
+/// Spawn the background dispatcher loops that fire due wall-clock timers (G1) and
+/// start due schedules (G2) without an operator ever running `apex workflows tick`
+/// (RM-GA-P2 EXE-601), polling every `interval` (`serve()` reads
+/// `APEX_DISPATCH_INTERVAL_SECS`, default 5s; tests pass a short interval directly
+/// rather than racing on the process-global env var). Returns the task handles so
+/// the caller can abort them when the server itself stops serving — the loops are
+/// not meant to outlive the process's HTTP server.
+fn spawn_dispatch_loops(
+    state: &Arc<AppState>,
+    interval: Duration,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let resolver = definition_resolver();
+
+    let timer_dispatcher = TimerDispatcher::new(
+        state.workflows.clone(),
+        state.timers.clone(),
+        clock.clone(),
+        resolver.clone(),
+    );
+    let timers_handle = tokio::spawn(async move {
+        loop {
+            if let Err(e) = timer_dispatcher.poll().await {
+                tracing::error!(error = %e, "timer dispatcher poll failed");
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+
+    let schedule_dispatcher = ScheduleDispatcher::new(
+        state.workflows.clone(),
+        state.schedules.clone(),
+        clock,
+        resolver,
+    );
+    let schedules_handle = tokio::spawn(async move {
+        loop {
+            if let Err(e) = schedule_dispatcher.poll().await {
+                tracing::error!(error = %e, "schedule dispatcher poll failed");
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+
+    vec![timers_handle, schedules_handle]
+}
+
+/// Re-drive every execution left in a non-terminal state via the idempotent
+/// `resume` (RM-GA-P2 EXE-602) — the crash-recovery entry point: `submit_handler`
+/// drives an execution on a fire-and-forget `tokio::spawn`, so a server killed
+/// mid-drive strands it wherever the last checkpoint landed, and nothing else ever
+/// re-scans the store to pick it back up. Bounded concurrency guards against a
+/// thundering herd if the store holds many in-flight executions at once.
+async fn resume_in_flight_executions(state: &Arc<AppState>) {
+    const MAX_CONCURRENT_RESUMES: usize = 8;
+
+    let summaries = match state.workflows.list(&ExecutionFilter::default()).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to list executions for startup resume");
+            return;
+        }
+    };
+    let pending: Vec<_> = summaries
+        .into_iter()
+        .filter(|s| !s.status.is_terminal())
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    tracing::info!(
+        count = pending.len(),
+        "resuming in-flight executions from startup"
+    );
+
+    let resolver = definition_resolver();
+    futures::stream::iter(pending)
+        .for_each_concurrent(MAX_CONCURRENT_RESUMES, |summary| {
+            let engine = state.workflows.clone();
+            let resolver = resolver.clone();
+            async move {
+                let Some(def) = (resolver)(&summary.workflow_name) else {
+                    tracing::warn!(
+                        execution_id = %summary.execution_id,
+                        workflow = %summary.workflow_name,
+                        "cannot resume at startup: no resolvable definition"
+                    );
+                    return;
+                };
+                if let Err(e) = engine.resume(&def, &summary.execution_id).await {
+                    tracing::error!(
+                        execution_id = %summary.execution_id,
+                        error = %e,
+                        "startup resume failed"
+                    );
+                }
+            }
+        })
+        .await;
+}
+
+/// `~/.apex/workflows` — shared with the CLI. Also where the agent store
+/// (`agents.json`) and the workflow-owners index (`owners.json`) persist
+/// (RM-GA-P2 DUR-404): both are execution-adjacent state, so they live beside the
+/// workflow checkpoints they describe rather than in a separate directory.
+fn workflows_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".apex").join("workflows"))
+}
+
+/// `~/.apex/server` — durable state that is server-process-local, never shared with
+/// or read by the CLI (RM-GA-P2 DUR-404: the idempotency cache and the daily quota
+/// accumulator). Kept in its own directory rather than `workflows_dir()` precisely
+/// *because* it isn't shared — mixing the two would blur that boundary.
+fn server_state_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".apex").join("server"))
+}
+
+/// Load the persisted workflow-owners index from `path` (best-effort: a missing or
+/// corrupt file starts empty rather than failing server startup).
+fn load_owners(path: Option<&std::path::Path>) -> BTreeMap<String, String> {
+    path.and_then(|p| std::fs::read(p).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 /// Translates gateway [`CostEvent`]s into Prometheus metrics
@@ -852,6 +1317,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/v1/agents/{id}",
             get(get_agent_handler).delete(delete_agent_handler),
         )
+        // Poll a run submitted via `agents:run` with `Prefer: respond-async`
+        // (RM-GA-P2 EXE-604) — a cheap in-memory lookup, not an LLM call, so it
+        // belongs in the standard rate-limit tier rather than `run_routes`'.
+        .route("/api/v1/agents/runs/{run_id}", get(get_run_handler))
         // Workflow visibility (G4): list/inspect executions + a minimal read-only UI.
         .route("/api/v1/workflows", get(list_workflows_handler))
         .route("/api/v1/workflows/{id}", get(get_workflow_handler))
@@ -989,34 +1458,55 @@ pub async fn serve(addr: SocketAddr) -> apex_common::Result<()> {
     check_insecure_bind(tls.is_some(), addr)?;
 
     let state = Arc::new(AppState::from_env().await);
+    // Crash recovery (RM-GA-P2 EXE-602): a `tokio::spawn`'d `resume` that never got
+    // to run (the prior process died mid-drive) would otherwise strand its
+    // execution in a non-terminal state forever — nothing else re-scans the store.
+    resume_in_flight_executions(&state).await;
+    // Background dispatcher loops (RM-GA-P2 EXE-601): without these, G1 durable
+    // timers and G2 schedules only ever fired when an operator ran the CLI's
+    // `apex workflows tick` on the same host — a `wait: {timer: {after: "30d"}}`
+    // workflow submitted over HTTP would simply never resume. Aborted below
+    // whenever this function's serving future returns, so they don't outlive the
+    // HTTP server itself.
+    let dispatch_interval = Duration::from_secs(env_u64("APEX_DISPATCH_INTERVAL_SECS", 5));
+    let dispatch_handles = spawn_dispatch_loops(&state, dispatch_interval);
     let app = router(state);
 
-    match tls {
+    let result = match tls {
         Some((cert, key)) => {
             install_default_crypto_provider();
-            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
-                .await
-                .map_err(|e| Error::config(format!("failed to load TLS cert/key: {e}")))?;
-            tracing::info!(%addr, "apex server listening (https)");
-            // `with_connect_info` so `rate_limit`'s client-IP fallback (SEC-203) sees
-            // the real peer address for callers with no verified principal.
-            axum_server::bind_rustls(addr, config)
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-                .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
+            match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key).await {
+                Ok(config) => {
+                    tracing::info!(%addr, "apex server listening (https)");
+                    // `with_connect_info` so `rate_limit`'s client-IP fallback
+                    // (SEC-203) sees the real peer address for callers with no
+                    // verified principal.
+                    axum_server::bind_rustls(addr, config)
+                        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                        .await
+                        .map_err(|e| Error::Runtime(format!("server error: {e}")))
+                }
+                Err(e) => Err(Error::config(format!("failed to load TLS cert/key: {e}"))),
+            }
         }
-        None => {
-            let listener = tokio::net::TcpListener::bind(addr).await?;
-            tracing::info!(%addr, "apex server listening (http)");
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
-        }
+        None => match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                tracing::info!(%addr, "apex server listening (http)");
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .map_err(|e| Error::Runtime(format!("server error: {e}")))
+            }
+            Err(e) => Err(Error::Io(e)),
+        },
+    };
+
+    for handle in dispatch_handles {
+        handle.abort();
     }
-    Ok(())
+    result
 }
 
 /// Liveness probe.
@@ -1037,8 +1527,30 @@ struct RunRequest {
     max_steps: Option<usize>,
 }
 
+/// Whether the caller asked for the async submit→poll shape (RM-GA-P2 EXE-604) via
+/// a standard `Prefer: respond-async` request header (RFC 7240) rather than a
+/// separate `:submit` route — a comma-separated list of preferences is allowed, so
+/// this checks each token rather than requiring an exact match.
+fn wants_async(headers: &HeaderMap) -> bool {
+    headers
+        .get("prefer")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .any(|p| p.trim().eq_ignore_ascii_case("respond-async"))
+        })
+}
+
 /// Run an agent, recording RED golden-signal metrics for the route. Instrumented so
-/// the request runs under a trace whose id becomes the latency exemplar.
+/// the request runs under a trace whose id becomes the latency exemplar. Synchronous
+/// by default (unchanged from before EXE-604); `Prefer: respond-async` switches to
+/// the async submit→poll shape (mirroring the workflow submit route): the run is
+/// admitted and started on a background task holding the quota permit, and the
+/// response comes back immediately with a `run_id` to poll at `GET
+/// /api/v1/agents/runs/{run_id}` instead of waiting for the model/tool loop to
+/// finish. Idempotency-key replay only applies to the synchronous path — an async
+/// submission's whole point is not blocking on the eventual response, so there is no
+/// "original response" to cache and replay yet.
 #[tracing::instrument(name = "api.agents_run", skip_all)]
 async fn run_handler(
     State(state): State<Arc<AppState>>,
@@ -1047,6 +1559,13 @@ async fn run_handler(
 ) -> Result<Json<Value>, ApiError> {
     let start = Instant::now();
     let tenant = tenancy::run_tenant(&headers);
+    let project = tenancy::run_project(&headers);
+
+    if wants_async(&headers) {
+        let result = run_async_inner(&state, tenant, project, req).await;
+        record_run_metrics(&state, "agents_run_async", &result, start);
+        return result;
+    }
 
     // Idempotency (overview §9): replay the original response for a repeated key.
     let idem_key = hardening::idempotency_key(&headers);
@@ -1056,27 +1575,37 @@ async fn run_handler(
         return Ok(Json(cached));
     }
 
-    let result = run_inner(&state, tenant.clone(), tenancy::run_project(&headers), req).await;
+    let result = run_inner(&state, tenant.clone(), project, req).await;
 
     // Cache successful responses so a client retry with the same key is safe.
     if let (Some(key), Ok(Json(body))) = (&idem_key, &result) {
         state.idempotency.put(&tenant, key, body.clone());
     }
 
-    let status = match &result {
+    record_run_metrics(&state, "agents_run", &result, start);
+    result
+}
+
+/// Record the standard RED metrics for an `agents:run` variant.
+fn record_run_metrics(
+    state: &AppState,
+    route: &str,
+    result: &Result<Json<Value>, ApiError>,
+    start: Instant,
+) {
+    let status = match result {
         Ok(_) => 200u16,
         Err(e) => e.status.as_u16(),
     };
     state.metrics.counter_inc(
         "apex_api_requests_total",
-        &[("route", "agents_run"), ("status", &status.to_string())],
+        &[("route", route), ("status", &status.to_string())],
     );
     state.metrics.histogram_observe(
         "apex_api_request_duration_seconds",
-        &[("route", "agents_run")],
+        &[("route", route)],
         start.elapsed().as_secs_f64(),
     );
-    result
 }
 
 /// Parse the inline manifest then run it ([Agents API §5](../../docs/09-api/agents.md)).
@@ -1097,6 +1626,122 @@ async fn run_inner(
         req.max_steps,
     )
     .await
+}
+
+/// Parse + admit the run, then drive it on a background task that holds the quota
+/// permit for its own duration (not the HTTP connection) — the async counterpart of
+/// [`run_definition`]. Returns immediately once the run is admitted and the task is
+/// spawned; the task records the terminal outcome into `state.runs` for
+/// [`get_run_handler`] to serve.
+async fn run_async_inner(
+    state: &Arc<AppState>,
+    tenant: String,
+    project: Option<String>,
+    req: RunRequest,
+) -> Result<Json<Value>, ApiError> {
+    let def = AgentDefinition::from_yaml(&req.manifest)
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
+    let input = if req.input.is_null() {
+        json!({})
+    } else {
+        req.input
+    };
+
+    // Quota gate up front, same as the synchronous path: a rejected run never gets a
+    // run id at all, rather than reporting `failed` later for a run that never
+    // started.
+    let permit = tenancy::admit_run(&state.tenancy, &state.quota, project.as_deref())?;
+
+    let run_id = format!("run_{}", state.run_counter.fetch_add(1, Ordering::SeqCst));
+    state.runs.insert_running(run_id.clone(), tenant.clone());
+
+    let mut opts = RunOptions::new(input)
+        .with_tenant(tenant.clone())
+        .with_hosted(true);
+    if let Some(n) = req.max_steps.or(def.spec.max_steps) {
+        opts = opts.with_max_steps(n);
+    }
+
+    let state2 = state.clone();
+    let run_id2 = run_id.clone();
+    tokio::spawn(async move {
+        let _permit = permit; // held for the run's duration, not the HTTP connection
+        match run_agent(&def, &state2.gateway, &state2.registry, opts, &mut NullSink).await {
+            Ok(out) => {
+                tenancy::record_run_cost(&state2.quota, project.as_deref(), out.usage.cost_usd);
+                webhooks::emit(
+                    &state2,
+                    "agent.run.completed",
+                    &tenant,
+                    json!({ "run_id": run_id2, "total_tokens": out.usage.total_tokens }),
+                );
+                state2.runs.finish(
+                    &run_id2,
+                    AsyncRunStatus::Succeeded {
+                        output: json!({ "message": out.text }),
+                        steps: out.steps,
+                        usage: json!({
+                            "total_tokens": out.usage.total_tokens,
+                            "cost_usd": out.usage.cost_usd,
+                        }),
+                    },
+                );
+            }
+            Err(e) => {
+                webhooks::emit(
+                    &state2,
+                    "agent.run.failed",
+                    &tenant,
+                    json!({ "error": e.to_string() }),
+                );
+                state2.runs.finish(
+                    &run_id2,
+                    AsyncRunStatus::Failed {
+                        error: e.to_string(),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(Json(json!({ "run_id": run_id, "status": "running" })))
+}
+
+/// `GET /api/v1/agents/runs/{run_id}` — poll a run submitted via `agents:run` with
+/// `Prefer: respond-async` (RM-GA-P2 EXE-604). Tenant-scoped like every other
+/// resource: a run belonging to another tenant is hidden behind the same `404` an
+/// unknown run gets, rather than a `403` that would confirm it exists.
+async fn get_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let tenant = tenancy::run_tenant(&headers);
+    let missing = || {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("run `{run_id}` not found"),
+        )
+    };
+    let (owner, status) = state.runs.get(&run_id).ok_or_else(missing)?;
+    if owner != tenant {
+        return Err(missing());
+    }
+    let mut body = json!({ "run_id": run_id });
+    match serde_json::to_value(&status).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            e.to_string(),
+        )
+    })? {
+        Value::Object(fields) => {
+            body.as_object_mut().unwrap().extend(fields);
+        }
+        _ => unreachable!("AsyncRunStatus always serializes to an object"),
+    }
+    Ok(Json(body))
 }
 
 /// A [`RunEventSink`] that forwards each run event to an SSE channel as a JSON frame.
@@ -1756,6 +2401,140 @@ mod tests {
         assert_eq!(v["status"], "succeeded");
         assert!(v["run_id"].as_str().unwrap().starts_with("run_"));
         assert!(v["output"]["message"].as_str().unwrap().contains("ping"));
+    }
+
+    /// RM-GA-P2 EXE-604 acceptance: `Prefer: respond-async` returns a run id
+    /// immediately (before the model/tool loop even starts), and polling `GET
+    /// /api/v1/agents/runs/{id}` observes `running` then `succeeded` with the same
+    /// output shape the synchronous path returns inline.
+    #[tokio::test]
+    async fn async_run_returns_immediately_then_polling_reflects_completion() {
+        let state = Arc::new(AppState::from_env().await);
+        let body = json!({
+            "manifest": "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
+            "input": { "message": "ping" }
+        });
+
+        let resp = raw(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            &[("prefer", "respond-async")],
+            body,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let submitted: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(submitted["status"], "running");
+        let run_id = submitted["run_id"].as_str().unwrap().to_string();
+        assert!(run_id.starts_with("run_"));
+
+        // Poll until it finishes — the mock provider is near-instant, but the result
+        // lands on a background task, not synchronously with the submit response.
+        let mut final_body = None;
+        for _ in 0..100 {
+            let (st, poll_body) = req(
+                &state,
+                "GET",
+                &format!("/api/v1/agents/runs/{run_id}"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            if poll_body["status"] != "running" {
+                final_body = Some(poll_body);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let final_body = final_body.expect("async run did not finish in time");
+        assert_eq!(final_body["status"], "succeeded");
+        assert_eq!(final_body["run_id"], run_id);
+        assert!(
+            final_body["output"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ping")
+        );
+        assert!(final_body["usage"]["total_tokens"].is_number());
+    }
+
+    /// A run rejected by the project quota gate never gets a run id at all — the
+    /// async path fails closed up front rather than reporting `failed` later for a
+    /// run that never started.
+    #[tokio::test]
+    async fn async_run_quota_rejection_returns_no_run_id() {
+        let state = Arc::new(AppState::from_env().await);
+        state
+            .tenancy
+            .set_quota(
+                "prj-async-block",
+                apex_tenancy::QuotaLimits {
+                    concurrent_agent_runs: Some(0),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let resp = raw(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            &[
+                ("prefer", "respond-async"),
+                ("x-apex-project", "prj-async-block"),
+            ],
+            json!({
+                "manifest": "metadata:\n  name: q\nspec:\n  instructions: Hi.\n",
+                "input": { "message": "hi" }
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Polling an unknown run, or one belonging to another tenant, is `404` — the
+    /// same "hidden behind not-found" discipline every other tenant-scoped resource
+    /// in this crate uses (never a `403` that would confirm the run exists).
+    #[tokio::test]
+    async fn async_run_polling_is_tenant_scoped_and_404s_on_unknown() {
+        let state = Arc::new(AppState::from_env().await);
+
+        let (st, _) = req(
+            &state,
+            "GET",
+            "/api/v1/agents/runs/run_does_not_exist",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+
+        let resp = raw(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            &[("prefer", "respond-async")],
+            json!({
+                "manifest": "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
+                "input": { "message": "ping" }
+            }),
+        )
+        .await;
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let submitted: Value = serde_json::from_slice(&bytes).unwrap();
+        let run_id = submitted["run_id"].as_str().unwrap();
+
+        // A different tenant polling the same run id sees the same 404 as unknown.
+        let resp = raw(
+            &state,
+            "GET",
+            &format!("/api/v1/agents/runs/{run_id}"),
+            &[("x-apex-tenant", "someone-else")],
+            Value::Null,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// A caller-supplied `max_steps` reaches [`apex_agent::RunOptions`] rather than
@@ -2937,9 +3716,52 @@ mod tests {
         assert!(ids.contains(&"shell"));
     }
 
+    /// RM-GA-P2 DUR-404 acceptance: create an agent as tenant T, then open a *fresh*
+    /// `AgentStore` instance against the same directory (the same "simulated restart"
+    /// stand-in the crash-recovery tests elsewhere in this workspace use, since a real
+    /// process restart isn't practical inside a unit test) — T's agent must still be
+    /// visible, and it alone: the anonymous `default` tenant must not see it.
+    #[test]
+    fn agent_store_survives_a_restart_and_stays_tenant_scoped() {
+        let dir =
+            std::env::temp_dir().join(format!("apex_server_agent_restart_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("agents.json");
+
+        {
+            let store = AgentStore::new(Some(path.clone()));
+            store
+                .create(
+                    "acme",
+                    "metadata:\n  name: restart-test\nspec:\n  instructions: hi\n".to_string(),
+                )
+                .unwrap();
+        }
+
+        // A fresh instance — no in-memory state carried over — reopened against the
+        // same path, the same shape a server restart takes.
+        let reopened = AgentStore::new(Some(path));
+        assert_eq!(reopened.list("acme"), vec!["restart-test".to_string()]);
+        assert!(
+            reopened.list("default").is_empty(),
+            "the anonymous default tenant must not see acme's agent after a restart"
+        );
+        assert!(reopened.manifest("acme", "restart-test").is_some());
+        assert!(reopened.manifest("default", "restart-test").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn agent_persistence_lifecycle() {
-        let state = Arc::new(AppState::from_env().await);
+        // A fresh in-memory agent store (DUR-404 persists the real default to disk,
+        // which would accumulate agents from every prior test run and break this
+        // test's exact-list assertions below).
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_agents(Arc::new(AgentStore::new(None))),
+        );
         let manifest = "metadata:\n  name: persisted\nspec:\n  instructions: Be friendly.\n";
 
         // Create → returns the agent id.
@@ -3143,7 +3965,12 @@ mod tests {
 
     #[tokio::test]
     async fn agent_list_is_cursor_paginated() {
-        let state = Arc::new(AppState::from_env().await);
+        // A fresh in-memory agent store — see agent_persistence_lifecycle's comment.
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_agents(Arc::new(AgentStore::new(None))),
+        );
         for name in ["alpha", "bravo", "charlie"] {
             let m = format!("metadata:\n  name: {name}\nspec:\n  instructions: hi\n");
             req(&state, "POST", "/api/v1/agents", json!({ "manifest": m })).await;

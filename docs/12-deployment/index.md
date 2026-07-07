@@ -63,6 +63,7 @@ Each service exposes `/healthz`, `/readyz`, `/metrics`
 | [kubernetes.md](kubernetes.md) | Manifests, scaling, probes, networking |
 | [helm.md](helm.md) | Helm chart, values, upgrades |
 | [terraform.md](terraform.md) | Cloud infrastructure provisioning |
+| [backup-and-restore.md](backup-and-restore.md) | `apex admin backup`/`restore`, KMS root-key escrow, RPO/RTO targets |
 
 ---
 

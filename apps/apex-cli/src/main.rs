@@ -14,6 +14,7 @@
 //! Local (`--local`) and remote runs are both supported. Remote streaming (SSE)
 //! and a persistent agent store arrive in a later milestone.
 
+mod admin;
 mod auth;
 mod config;
 mod kms;
@@ -99,6 +100,35 @@ enum Command {
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
+    },
+
+    /// Backup and restore the local `~/.apex` state directory (RM-GA-P2 DR-1001).
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminCommand {
+    /// Snapshot `~/.apex` into `<dest>` (agents, secrets, memory, workflows,
+    /// tenancy, kms, and every other local store), quiescing every
+    /// DUR-403-locked store directory for a consistent point-in-time copy.
+    Backup {
+        /// Destination directory to write the backup into (created if missing).
+        dest: String,
+    },
+
+    /// Restore `~/.apex` from a backup made by `apex admin backup`. Overwrites
+    /// the live `~/.apex` — irreversible for anything written there since the
+    /// backup was taken.
+    Restore {
+        /// Source backup directory, as produced by `apex admin backup`.
+        src: String,
+
+        /// Confirm the overwrite (required).
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -810,6 +840,10 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
         },
         Command::Auth { command } => match command {
             AuthCommand::CreateKey { principal } => auth::create_key_cmd(&principal),
+        },
+        Command::Admin { command } => match command {
+            AdminCommand::Backup { dest } => admin::backup_cmd(&dest),
+            AdminCommand::Restore { src, yes } => admin::restore_cmd(&src, yes),
         },
     }
 }

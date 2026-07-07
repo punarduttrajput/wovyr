@@ -7,13 +7,15 @@ Document ID: GA-002
 
 **Document ID:** GA-002
 **File Path:** `docs/18-roadmap/v1.0/A2-reliability-ha-dr.md`
-**Version:** 1.1.0
+**Version:** 1.2.0
 **Status:** In progress — a first slice (single-node compose) has landed, plus
 a first Kubernetes artifact (a Helm chart for that same single-node topology,
-§2). Neither is HA, and the chart has not been validated against a real
+§2), and backup/restore + DR targets are now real for the single-node
+appliance (§2, RM-GA-P2 DR-1001/DR-1002/DR-1003). Neither the Kubernetes
+chart nor the DR targets have been validated against a real multi-replica
 cluster — still gated per §7's own risk note.
 **Owner:** Reliability / Deployment Team
-**Last Updated:** 2026-07-05
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -62,6 +64,24 @@ remainder is scoped here.
   workflow-engine/… services, each with an HPA); the platform is still one
   binary. [terraform.md](../../12-deployment/terraform.md) has no artifacts
   at all yet.
+- **Backup/restore and DR targets are now real for the single-node appliance
+  (Phase-2 DR-1001/DR-1002/DR-1003)** — the single-node slice of this
+  document's §4.1 "backup/restore procedures" and "DR runbook with RPO/RTO
+  targets" deliverables, done ahead of the multi-replica remainder they were
+  originally scoped alongside: `apex admin backup`/`restore` snapshots and
+  restores the *entire* `~/.apex` state directory (agents, secrets, memory,
+  workflows, tenancy, the KMS tenant-key catalog, the marketplace registry,
+  …) in one pass, quiescing every DUR-403-locked store directory for a
+  consistent point-in-time copy; the KMS root key has a documented, mandatory
+  escrow step (`APEX_KMS_ROOT_KEY`) with its own proven restore test. RPO
+  (≤15 min, backup-cadence-driven) and RTO (<5 min restore) targets for this
+  topology are defined and validated by a real timed drill at two data
+  scales (425 files/8.8 MiB → 1.9 s restore; 4,025 files/74.5 MiB → 17.0 s
+  restore) — see
+  [backup-and-restore.md](../../12-deployment/backup-and-restore.md). This
+  closes the single-node portion of §5's exit criterion; the **multi-replica,
+  real-cluster** "node-loss drill" §5 also requires remains open, gated on
+  the same missing live cluster as the rest of this document's HA remainder.
 
 ---
 
@@ -136,7 +156,8 @@ Feeds the v1.0 exit criterion of meeting published SLOs in production
 - [`12-deployment/docker-compose.md`](../../12-deployment/docker-compose.md) ·
   [kubernetes.md](../../12-deployment/kubernetes.md) ·
   [helm.md](../../12-deployment/helm.md) ·
-  [terraform.md](../../12-deployment/terraform.md)
+  [terraform.md](../../12-deployment/terraform.md) ·
+  [backup-and-restore.md](../../12-deployment/backup-and-restore.md)
 - [`deployment/helm/apex/README.md`](../../../deployment/helm/apex/README.md) — the chart itself
 
 ---
@@ -145,5 +166,6 @@ Feeds the v1.0 exit criterion of meeting published SLOs in production
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-07 | Recorded the single-node slice of §4.1's backup/restore + DR-runbook deliverables as done (RM-GA-P2 DR-1001/DR-1002/DR-1003): `apex admin backup`/`restore`, mandatory KMS root-key escrow, and RPO/RTO targets validated by a real timed drill — see [backup-and-restore.md](../../12-deployment/backup-and-restore.md). Updated §2 to record it; §5's exit criterion remains unmet for the multi-replica/real-cluster case, which this doesn't address |
 | 1.1.0 | 2026-07-05 | Recorded the first real Kubernetes artifact: `deployment/helm/apex/` (single-replica Helm chart for the existing single-binary topology), offline-validated with downloaded `helm`/`kubectl`/`kubeconform` (caught a real duplicate-label bug). Updated §2/§4.1/§6/§7 to state plainly this is not HA and not validated against a real cluster — the exit criterion in §5 is unchanged and unmet |
 | 1.0.0 | 2026-07-05 | Initial GA-completion delivery doc for reliability (HA/DR/deployment artifacts); records the shipped single-node compose slice and scopes the HA remainder |

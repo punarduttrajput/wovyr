@@ -502,13 +502,23 @@ impl FileRegistryStore {
             std::fs::create_dir_all(parent)?;
         }
         let bytes = serde_json::to_vec_pretty(state)?;
-        std::fs::write(&self.path, bytes)?;
+        apex_common::fs::atomic_write(&self.path, bytes)?;
         Ok(())
     }
 
-    /// Run `f` against the loaded state and persist the result atomically under the lock.
+    /// Run `f` against the loaded state and persist the result atomically under the
+    /// lock — a process-local `Mutex` plus a cross-process advisory file lock over
+    /// the store's directory (RM-GA-P2 DUR-403), since the CLI and server can share
+    /// this same `registry.json`.
     fn mutate<T>(&self, f: impl FnOnce(&mut RegistryState) -> Result<T>) -> Result<T> {
         let _guard = self.lock.lock().unwrap();
+        let lock_dir = self
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::create_dir_all(lock_dir)?;
+        let _flock = apex_common::fs::FileLock::acquire(lock_dir)
+            .map_err(|e| Error::config(format!("lock registry store: {e}")))?;
         let mut state = self.load()?;
         let out = f(&mut state)?;
         self.save(&state)?;

@@ -39,6 +39,18 @@ fn staging_dir() -> Result<PathBuf> {
     Ok(plugins_dir()?.join("staging"))
 }
 
+/// Acquire the cross-process advisory lock over `~/.apex/plugins` (RM-GA-P2
+/// DUR-403), held for the duration of a mutating command. Every lifecycle
+/// command here does load-trust/catalog → mutate the in-memory `PluginEngine`
+/// → save-trust/catalog, against the same files the server's plugin routes
+/// touch — without a lock spanning that whole sequence, a concurrent writer
+/// (the CLI racing the server, or two CLI invocations) could act on the same
+/// stale load and have its update silently clobbered by whichever saves last.
+fn acquire_lock() -> Result<apex_common::fs::FileLock> {
+    apex_common::fs::FileLock::acquire(plugins_dir()?)
+        .map_err(|e| Error::config(format!("lock plugin store: {e}")))
+}
+
 fn trust_path() -> Result<PathBuf> {
     Ok(plugins_dir()?.join("trust.json"))
 }
@@ -86,7 +98,7 @@ fn load_trust() -> Result<TrustStore> {
 
 fn save_trust(trust: &TrustStore) -> Result<()> {
     std::fs::create_dir_all(plugins_dir()?)?;
-    std::fs::write(trust_path()?, serde_json::to_vec_pretty(trust)?)?;
+    apex_common::fs::atomic_write(trust_path()?, serde_json::to_vec_pretty(trust)?)?;
     Ok(())
 }
 
@@ -102,7 +114,7 @@ fn load_catalog() -> Result<Vec<InstalledPlugin>> {
 
 fn save_catalog(catalog: &[InstalledPlugin]) -> Result<()> {
     std::fs::create_dir_all(plugins_dir()?)?;
-    std::fs::write(catalog_path()?, serde_json::to_vec_pretty(catalog)?)?;
+    apex_common::fs::atomic_write(catalog_path()?, serde_json::to_vec_pretty(catalog)?)?;
     Ok(())
 }
 
@@ -384,6 +396,7 @@ fn rekor_log(_url: &str) -> Result<Box<dyn apex_plugin::keyless::TransparencyLog
 pub fn trust_cmd(publisher: &str, key: &str) -> Result<()> {
     let public = std::fs::read(key)
         .map_err(|e| Error::config(format!("could not read public key {key}: {e}")))?;
+    let _lock = acquire_lock()?;
     let mut trust = load_trust()?;
     trust.trust(publisher, public);
     save_trust(&trust)?;
@@ -473,6 +486,7 @@ pub fn pack_cmd(dir: &str, out: Option<String>) -> Result<()> {
 /// (disabled). `grants` must cover every permission the manifest requests.
 pub fn install_cmd(source: &str, grants: Vec<String>) -> Result<()> {
     let (package, manifest) = load_package(source)?;
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let installed = engine.install(&package, &grants)?;
     let reference = installed.manifest.reference();
@@ -501,6 +515,7 @@ pub fn install_cmd(source: &str, grants: Vec<String>) -> Result<()> {
 pub fn upgrade_cmd(source: &str, grants: Vec<String>) -> Result<()> {
     let (package, manifest) = load_package(source)?;
     let id = manifest.qualified_id();
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let from = engine
         .get(&id)
@@ -516,6 +531,7 @@ pub fn upgrade_cmd(source: &str, grants: Vec<String>) -> Result<()> {
 
 /// `apex plugin rollback <id>` — revert a plugin to its retained previous version.
 pub fn rollback_cmd(id: &str) -> Result<()> {
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut registry = ToolRegistry::new();
     engine.rollback(id, &mut registry)?;
@@ -606,6 +622,7 @@ pub fn list_cmd() -> Result<()> {
 
 /// `apex plugin enable <id>` — make a plugin's capabilities live (persisted).
 pub fn enable_cmd(id: &str) -> Result<()> {
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     // The registry handed to enable is ephemeral here; the durable effect is the
     // state flip persisted to the catalog (agents rehydrate tools via register_enabled).
@@ -618,6 +635,7 @@ pub fn enable_cmd(id: &str) -> Result<()> {
 
 /// `apex plugin disable <id>` — withdraw a plugin's capabilities (state retained).
 pub fn disable_cmd(id: &str) -> Result<()> {
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.disable(id, &mut scratch)?;
@@ -629,6 +647,7 @@ pub fn disable_cmd(id: &str) -> Result<()> {
 /// `apex plugin uninstall <id>` — withdraw and drop from the catalog, removing staged
 /// artifacts.
 pub fn uninstall_cmd(id: &str) -> Result<()> {
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     // Capture the staged dir before removal so we can clean it up afterwards.
     let staged = engine.get(id).and_then(|p| p.artifact_dir.clone());
@@ -754,6 +773,7 @@ pub fn market_install_cmd(id: &str, version: Option<String>, grants: Vec<String>
     let reg = marketplace_registry()?;
     let bytes = reg.download(id, version.as_deref())?;
     let package = Package::from_apexpkg(&bytes)?;
+    let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let installed = engine.install(&package, &grants)?;
     let reference = installed.manifest.reference();

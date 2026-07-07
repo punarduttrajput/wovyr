@@ -519,6 +519,48 @@ impl Engine {
         .await
     }
 
+    /// Cancel an execution ([gap closure](../../docs/18-roadmap/v1.0/phase2-durability-execution-tickets.md)
+    /// EXE-603): writes a `WorkflowCancelled` event, transitions the execution to the
+    /// terminal `Cancelled` state, and marks every activity that hasn't already
+    /// reached a terminal state of its own (`Completed`/`Failed`/`Skipped`) as
+    /// `Skipped` — so a pending or `wait`-suspended activity is not later picked up
+    /// by a `resume`. Cancellation is advisory for activities already **in flight**:
+    /// this only mutates the durable checkpoint, so a concurrently-running `drive`
+    /// loop for this same execution (another worker, or a task racing this call) can
+    /// still commit a step afterward — the same boundary a distributed lease-based
+    /// worker already has to tolerate. Fails closed (`Error::NotFound` /
+    /// `Error::Conflict`) rather than silently succeeding on an unknown or already-
+    /// terminal execution.
+    pub async fn cancel(&self, execution_id: &str) -> Result<ExecutionState> {
+        let mut state = self
+            .checkpoints
+            .latest(execution_id)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("execution `{execution_id}` not found")))?;
+        if state.status.is_terminal() {
+            return Err(Error::conflict(format!(
+                "execution `{execution_id}` is already {:?} and cannot be cancelled",
+                state.status
+            )));
+        }
+        for record in state.activities.values_mut() {
+            if !matches!(
+                record.state,
+                ActivityState::Completed | ActivityState::Failed | ActivityState::Skipped
+            ) {
+                record.state = ActivityState::Skipped;
+            }
+        }
+        self.transition(
+            &mut state,
+            WorkflowState::Cancelled,
+            WorkflowEvent::WorkflowCancelled,
+        )
+        .await?;
+        self.checkpoint(&mut state).await?;
+        Ok(state)
+    }
+
     /// Inject a delivered signal into the durable checkpoint, then resume.
     async fn deliver(
         &self,

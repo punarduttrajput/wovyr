@@ -29,6 +29,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// The tenancy sub-router, merged into the main app router.
@@ -378,15 +379,60 @@ struct QuotaUsage {
 }
 
 /// Tracks per-project quota usage for the run path ([Projects API §5](../../docs/09-api/projects.md#5-quotas)).
-#[derive(Default)]
+///
+/// The daily-cost accumulator persists (RM-GA-P2 DUR-404) when opened with a path —
+/// without this, a crash-loop reset every project's spend to $0, silently bypassing
+/// its daily budget. `concurrent` (in-flight runs) deliberately does **not** persist:
+/// a restart means nothing is actually still running, so carrying over a stale count
+/// would incorrectly throttle the runs that follow.
 pub(crate) struct QuotaTracker {
     usage: Mutex<QuotaUsage>,
+    path: Option<PathBuf>,
+}
+
+impl Default for QuotaTracker {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl QuotaTracker {
-    /// A fresh tracker.
-    pub(crate) fn new() -> Self {
-        Self::default()
+    /// Open a tracker, loading any persisted daily-cost accumulator from `path`
+    /// (best-effort: a missing or corrupt file starts empty). `path: None` is a
+    /// purely in-memory tracker (what tests use).
+    pub(crate) fn new(path: Option<PathBuf>) -> Self {
+        let cost = path
+            .as_deref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Self {
+            usage: Mutex::new(QuotaUsage {
+                concurrent: BTreeMap::new(),
+                cost,
+            }),
+            path,
+        }
+    }
+
+    /// Persist the daily-cost accumulator (best-effort — logged, not propagated,
+    /// since the in-memory update this follows has already succeeded either way).
+    fn persist(&self, cost: &BTreeMap<String, (u64, f64)>) {
+        let Some(path) = &self.path else { return };
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::error!(error = %e, "failed to create quota accumulator directory");
+            return;
+        }
+        match serde_json::to_vec_pretty(cost) {
+            Ok(bytes) => {
+                if let Err(e) = apex_common::fs::atomic_write(path, bytes) {
+                    tracing::error!(error = %e, "failed to persist quota accumulator");
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "failed to encode quota accumulator"),
+        }
     }
 }
 
@@ -463,18 +509,24 @@ pub(crate) fn admit_run(
     })
 }
 
-/// Record `cost` USD of LLM spend against `project`'s current-day budget (after a run).
+/// Record `cost` USD of LLM spend against `project`'s current-day budget (after a
+/// run), persisting the accumulator (RM-GA-P2 DUR-404) so it survives a restart
+/// within the same UTC day.
 pub(crate) fn record_run_cost(quota: &Arc<QuotaTracker>, project: Option<&str>, cost: f64) {
     let Some(project) = project else {
         return;
     };
     let day = current_day();
-    let mut u = quota.usage.lock().expect("quota mutex poisoned");
-    let entry = u.cost.entry(project.to_string()).or_insert((day, 0.0));
-    if entry.0 != day {
-        *entry = (day, 0.0);
-    }
-    entry.1 += cost;
+    let snapshot = {
+        let mut u = quota.usage.lock().expect("quota mutex poisoned");
+        let entry = u.cost.entry(project.to_string()).or_insert((day, 0.0));
+        if entry.0 != day {
+            *entry = (day, 0.0);
+        }
+        entry.1 += cost;
+        u.cost.clone()
+    };
+    quota.persist(&snapshot);
 }
 
 /// Resolve the request's effective roles **narrowed to the asserted tenant**: an org
@@ -751,6 +803,45 @@ mod tests {
         // A project with no quota, and a run with no project, are unmetered.
         assert!(admit_run(&st.tenancy, &st.quota, Some("prj-none")).is_ok());
         assert!(admit_run(&st.tenancy, &st.quota, None).is_ok());
+    }
+
+    /// RM-GA-P2 DUR-404 acceptance: a daily-cost accumulator survives a restart within
+    /// the same UTC day. A fresh `QuotaTracker` opened against the same path (the same
+    /// "simulated restart" stand-in used throughout this workspace's crash-recovery
+    /// tests) picks up right where the recorded spend left off — a crash-loop must not
+    /// silently reset a project back to a $0 budget.
+    #[test]
+    fn quota_accumulator_survives_a_restart_within_the_same_day() {
+        let dir =
+            std::env::temp_dir().join(format!("apex_server_quota_restart_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("quota.json");
+
+        {
+            let quota = Arc::new(QuotaTracker::new(Some(path.clone())));
+            record_run_cost(&quota, Some("prj-restart"), 3.5);
+            record_run_cost(&quota, Some("prj-restart"), 1.5);
+        }
+
+        // A fresh tracker — no in-memory state carried over — reopened against the
+        // same path, the same shape a server restart takes. The prior $5.00 spend is
+        // still enforced: a $4.00/day limit now rejects a run that would exceed it.
+        let reopened = QuotaTracker::new(Some(path));
+        let spent = reopened.usage.lock().unwrap().cost["prj-restart"].1;
+        assert_eq!(
+            spent, 5.0,
+            "the prior $3.50 + $1.50 spend must round-trip exactly"
+        );
+        let limits = QuotaLimits {
+            llm_cost_per_day_usd: Some(4.0),
+            ..Default::default()
+        };
+        assert!(
+            limits.check_llm_cost(spent, 0.0).is_err(),
+            "the $5.00 spent before the simulated restart must still count against today's budget"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

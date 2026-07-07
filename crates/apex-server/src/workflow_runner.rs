@@ -12,9 +12,16 @@
 //! - `POST /api/v1/workflows/{id}/approve` — approve a suspended `human` activity
 //!   (maps to a signal whose key matches the activity id).
 //!
+//! `signal`/`approve` no longer require the client to re-upload the definition YAML
+//! on every call (RM-GA-P2 DUR-405): the server resolves the execution's own
+//! pinned workflow definition when `manifest` is omitted — see
+//! [`resolve_definition`].
+//!
 //! Execution uses [`ServerExecutor`], a type-dispatch executor that handles
 //! `function` activities via the tool registry, `ai` activities via the gateway,
-//! and `human` activities by suspending durably (returning `Interrupted`).
+//! and `human` activities by suspending durably (returning `Interrupted`) until
+//! `/approve`'s decision has been injected, at which point it resolves instead of
+//! interrupting again.
 
 use apex_agent::{NullSink, RunOptions, run_agent};
 use apex_provider::Gateway;
@@ -56,8 +63,11 @@ use crate::{AgentStore, ApiError, AppState, tenancy};
 ///   instead of N independent, unmetered ones. A quota-exceeded rejection is
 ///   [`ActivityError::Retryable`]: the blocking slot is held only for a sibling
 ///   activity's duration, so a retry can succeed once it frees.
-/// - `human`             — returns [`ActivityError::Interrupted`] so the engine
-///   durably suspends; the run is resumed by `POST …/{id}/approve`.
+/// - `human`             — checks `ctx.variables` for a decision already injected
+///   under the `event.<id>` key (the convention `POST …/{id}/approve` writes
+///   through `Engine::signal_event`) and resolves with it if present; otherwise
+///   returns [`ActivityError::Interrupted`] so the engine durably suspends until
+///   that approval arrives.
 /// - anything else       — permanent failure (activity type unknown to server).
 pub struct ServerExecutor {
     gateway: Arc<Gateway>,
@@ -171,11 +181,24 @@ impl ActivityExecutor for ServerExecutor {
                 Ok(json!({ "message": output.text, "steps": output.steps }))
             }
             "human" => {
-                // Suspend durably; the caller resumes via POST …/{id}/approve.
-                Err(ActivityError::Interrupted(format!(
-                    "human activity `{}` is awaiting approval",
-                    ctx.id
-                )))
+                // `approve_handler` resumes via `Engine::signal_event(def, id,
+                // activity_id, decision)`, which (via `deliver`) injects the
+                // decision under the `event.<activity_id>` variable key — the same
+                // convention the engine-native `wait: {event: <name>}` activity
+                // type checks. A plain, unqualified `ctx.id` key (as the CLI's
+                // local `PlatformExecutor` checks) is never written by this path,
+                // since the CLI resumes by mutating the checkpoint directly rather
+                // than through `signal_event`. Without this check every resume
+                // re-interrupted unconditionally, so an approval decision was
+                // accepted by the HTTP route but silently never consumed — the
+                // execution suspended forever instead of completing.
+                match ctx.variables.get(&format!("event.{}", ctx.id)) {
+                    Some(decision) => Ok(decision.clone()),
+                    None => Err(ActivityError::Interrupted(format!(
+                        "human activity `{}` is awaiting approval",
+                        ctx.id
+                    ))),
+                }
             }
             other => Err(ActivityError::Permanent(format!(
                 "activity type `{other}` is not handled by the server executor"
@@ -256,6 +279,11 @@ async fn submit_handler(
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
     let def = Definition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
+    // Persist the manifest by workflow name (RM-GA-P2 EXE-601) so the background
+    // timer/schedule dispatchers can resolve a Definition for this execution long
+    // after this request's connection is gone — a durable timer can fire days later,
+    // with no caller left to re-supply the YAML.
+    crate::save_definition(&def.metadata.name, &req.manifest);
 
     let mut input = if req.input.is_null() {
         json!({})
@@ -308,12 +336,65 @@ async fn submit_handler(
     })))
 }
 
+// ── definition resolution (RM-GA-P2 DUR-405) ────────────────────────────────────
+
+/// Resolve the `Definition` a signal/approve call needs to resume `execution_id`.
+///
+/// Prefers an explicitly supplied `manifest` (kept for back-compat and for a
+/// caller resuming an execution whose workflow was never `POST /api/v1/workflows`-
+/// submitted, e.g. one started only through the CLI's local runner) — a
+/// mismatched one is still rejected fail-closed by G7's pin check inside
+/// `Engine::resume`, so re-uploading the *wrong* definition can't silently replay
+/// a different DAG. Otherwise looks the execution's workflow name up via
+/// `Engine::query` and resolves it through the same persisted-by-name
+/// [`crate::definition_resolver`] EXE-601's background dispatchers already use —
+/// `submit_handler` persists every submitted manifest there, so the common case
+/// (signal/approve an execution this server itself started) needs only the
+/// execution id and event/decision payload, no manifest re-upload.
+async fn resolve_definition(
+    state: &AppState,
+    execution_id: &str,
+    manifest: Option<&str>,
+) -> Result<Definition, ApiError> {
+    if let Some(manifest) = manifest {
+        return Definition::from_yaml(manifest).map_err(|e| {
+            ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
+        });
+    }
+    let execution = state
+        .workflows
+        .query(execution_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("execution `{execution_id}` not found"),
+            )
+        })?;
+    crate::definition_resolver()(&execution.workflow_name).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "definition_not_found",
+            format!(
+                "no persisted definition found for workflow `{}`; supply `manifest` explicitly",
+                execution.workflow_name
+            ),
+        )
+    })
+}
+
 // ── signal ────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct SignalRequest {
-    /// The workflow definition YAML (needed to resume the execution).
-    manifest: String,
+    /// The workflow definition YAML. Optional (RM-GA-P2 DUR-405): when omitted,
+    /// the server resolves the execution's own workflow definition instead of
+    /// requiring the client to re-upload it on every call — see
+    /// [`resolve_definition`].
+    #[serde(default)]
+    manifest: Option<String>,
     /// The event name to deliver (matches `wait: {event: <name>}` in the definition).
     event: String,
     /// Payload injected into `event.<name>` in the workflow variables.
@@ -331,8 +412,7 @@ async fn signal_handler(
 ) -> Result<Json<Value>, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
     crate::require_workflow_visible(&state, &id, &tenant)?;
-    let def = Definition::from_yaml(&req.manifest)
-        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
+    let def = resolve_definition(&state, &id, req.manifest.as_deref()).await?;
     let payload = if req.payload.is_null() {
         json!({})
     } else {
@@ -356,8 +436,10 @@ async fn signal_handler(
 
 #[derive(Deserialize)]
 struct ApproveRequest {
-    /// The workflow definition YAML.
-    manifest: String,
+    /// The workflow definition YAML. Optional (RM-GA-P2 DUR-405) — see
+    /// [`resolve_definition`].
+    #[serde(default)]
+    manifest: Option<String>,
     /// The `human` activity id being approved.
     activity_id: String,
     /// Approval decision payload (e.g. `{"approved": true, "comment": "LGTM"}`).
@@ -376,8 +458,7 @@ async fn approve_handler(
 ) -> Result<Json<Value>, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
     crate::require_workflow_visible(&state, &id, &tenant)?;
-    let def = Definition::from_yaml(&req.manifest)
-        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
+    let def = resolve_definition(&state, &id, req.manifest.as_deref()).await?;
     let decision = if req.decision.is_null() {
         json!({ "approved": true })
     } else {
@@ -399,41 +480,29 @@ async fn approve_handler(
 
 // ── cancel ────────────────────────────────────────────────────────────────────
 
-/// `DELETE /api/v1/workflows/{id}` — cancel a running or waiting execution by
-/// injecting a terminal `cancelled` variable and signalling a synthetic event.
-/// The execution remains in the durable store (visibility is unaffected); its
-/// status transitions to `Cancelled` on the next engine step.
+/// `DELETE /api/v1/workflows/{id}` — cancel a running or waiting execution
+/// (RM-GA-P2 EXE-603): [`Engine::cancel`] transitions it to the terminal
+/// `Cancelled` state, writes a `WorkflowCancelled` event, and marks every
+/// pending/waiting activity `Skipped`. Returns `200` only on a real state
+/// transition — an unknown or already-terminal execution is `404`/`409`, never a
+/// fake success.
 ///
-/// Note: cancellation is advisory — activities that are already in-flight complete
-/// normally; only pending/waiting activities are skipped.
+/// Note: cancellation is advisory for activities already **in flight** — this only
+/// mutates the durable checkpoint, so a step a concurrently-running driver commits
+/// immediately afterward is not retroactively undone.
 async fn cancel_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:write")?;
     crate::require_workflow_visible(&state, &id, &tenant)?;
-    // Check the execution exists before attempting cancellation.
-    state
-        .workflows
-        .status(&id)
-        .await
-        .map_err(ApiError::from)?
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                format!("execution `{id}` not found"),
-            )
-        })?;
-
-    // Inject a `cancelled` variable into the checkpoint so downstream guards
-    // and the UI can observe it. Full engine-level cancel support is a later slice.
-    // For now we mark the cancellation intent and return 202.
-    // (A production implementation would add Engine::cancel that transitions the
-    // state machine to Cancelled and writes a WorkflowCancelled event.)
-    tracing::info!(execution_id = %id, "cancel requested (advisory)");
-    Ok(StatusCode::ACCEPTED)
+    let cancelled = state.workflows.cancel(&id).await.map_err(ApiError::from)?;
+    tracing::info!(execution_id = %id, "execution cancelled");
+    Ok(Json(json!({
+        "execution_id": cancelled.execution_id,
+        "status": "cancelled",
+    })))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -442,9 +511,46 @@ async fn cancel_handler(
 mod tests {
     use super::*;
     use crate::AppState;
+    use apex_workflow::{
+        CheckpointStore, ClosureExecutor, Engine, EventLog, FileStore, InMemoryStore, RunOutcome,
+    };
     use axum::body::to_bytes;
     use axum::http::Request;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
+
+    /// State with a fresh, isolated agent store, timer store, *and* workflow engine
+    /// (all in-memory), so a test doesn't observe agents/executions/timers
+    /// persisted by a prior test or process run against the real
+    /// `~/.apex/workflows` (DUR-404/EXE-601 made all three durable there) — every
+    /// other piece of state (gateway, registry, tenancy, quota) is the real
+    /// default. Needed by any test whose assertions depend on a stored agent,
+    /// execution, or timer *not* already existing. The timer store is attached to
+    /// both the engine (so a `wait` activity actually schedules into it) and
+    /// `AppState.timers` (so `spawn_dispatch_loops` polls that same store).
+    async fn isolated_state() -> Arc<AppState> {
+        let state = AppState::from_env().await;
+        let agents = Arc::new(AgentStore::new(None));
+        let executor = Arc::new(ServerExecutor::new(
+            state.gateway.clone(),
+            state.registry.clone(),
+            agents.clone(),
+            state.tenancy.clone(),
+            state.quota.clone(),
+        ));
+        let store = InMemoryStore::new();
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+        let timers: Arc<dyn apex_workflow::TimerStore> =
+            Arc::new(apex_workflow::InMemoryTimerStore::new());
+        let engine = Engine::new(events, checkpoints, executor).with_timer_store(timers.clone());
+        Arc::new(
+            state
+                .with_agents(agents)
+                .with_workflows(engine)
+                .with_timers(timers),
+        )
+    }
 
     async fn test_app() -> axum::Router {
         crate::router(Arc::new(AppState::from_env().await))
@@ -528,6 +634,439 @@ metadata:\n  name: test-wf\nspec:\n  activities:\n    - id: echo-step\n      typ
         assert_eq!(body["status"], "submitted");
     }
 
+    const WAIT_YAML: &str = "\
+metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type: wait, inputs: {event: go}}\n";
+
+    /// Poll `GET /api/v1/workflows/{id}` until the named activity suspends
+    /// (`Waiting`) — unlike `wait_for_terminal`, a suspended execution's top-level
+    /// status stays `Running` forever (only the activity itself transitions), so
+    /// waiting for a terminal *workflow* status would hang.
+    async fn wait_for_activity_waiting(
+        state: &Arc<AppState>,
+        execution_id: &str,
+        activity_id: &str,
+    ) -> Value {
+        for _ in 0..100 {
+            let (st, body) =
+                post_json_state_get(state, &format!("/api/v1/workflows/{execution_id}")).await;
+            if st == StatusCode::OK && body["execution"]["activities"][activity_id] == "Waiting" {
+                return body;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("activity `{activity_id}` on `{execution_id}` did not suspend in time");
+    }
+
+    /// RM-GA-P2 EXE-603: `DELETE /api/v1/workflows/{id}` really cancels a suspended
+    /// execution — no more the old handler's unconditional `202` with no state
+    /// change. Success reports `Cancelled` with a trailing `WorkflowCancelled`
+    /// event and the pending activity `Skipped`; a second cancel is `409`, and an
+    /// unknown execution is `404`.
+    #[tokio::test]
+    async fn cancel_route_really_cancels_a_suspended_execution() {
+        let state = Arc::new(AppState::from_env().await);
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": WAIT_YAML, "execution_id": "cancel-route-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        let detail = wait_for_activity_waiting(&state, "cancel-route-test", "hold").await;
+        assert_eq!(detail["execution"]["status"], "Running");
+        assert_eq!(detail["execution"]["waiting_on"], json!(["hold"]));
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/workflows/cancel-route-test")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "cancelled");
+
+        let (st, detail) = post_json_state_get(&state, "/api/v1/workflows/cancel-route-test").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(detail["execution"]["status"], "Cancelled");
+        assert_eq!(detail["execution"]["activities"]["hold"], "Skipped");
+        assert!(
+            detail["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["type"] == "WorkflowCancelled"),
+            "expected a WorkflowCancelled event: {detail}"
+        );
+
+        // A second cancel of an already-terminal execution is a real error, not a
+        // repeated fake success.
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/workflows/cancel-route-test")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // An unknown execution is 404, not a fake success either.
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/workflows/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    const TIMER_YAML: &str = "\
+metadata:\n  name: exe601-timer\nspec:\n  activities:\n    - {id: wait_a, type: wait, inputs: {timer: {after: \"1s\"}}}\n    - {id: after, type: function, name: echo, inputs: {message: done}}\n  transitions:\n    - {from: wait_a, to: after}\n";
+
+    /// RM-GA-P2 EXE-601 acceptance: a workflow submitted over HTTP with a durable
+    /// wall-clock timer resumes and completes with the background dispatcher loop
+    /// alone — no `apex workflows tick` CLI invocation. Before this, the server's
+    /// engine had no timer store at all (a `wait` with a wall-clock deadline would
+    /// error immediately), and even with one attached, nothing ever polled it.
+    #[tokio::test]
+    async fn durable_timer_fires_via_the_background_dispatcher_with_no_cli_invocation() {
+        let state = isolated_state().await;
+        // Persist the definition by name (normally done by submit_handler itself,
+        // done here explicitly since isolated_state's engine bypasses AppState's
+        // own construction path) so the dispatcher's resolver can find it.
+        crate::save_definition("exe601-timer", TIMER_YAML);
+        let handles = crate::spawn_dispatch_loops(&state, std::time::Duration::from_millis(50));
+
+        let (st, body) = post_json(
+            crate::router(state.clone()),
+            "/api/v1/workflows",
+            json!({ "manifest": TIMER_YAML, "execution_id": "exe601-timer-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        // The timer fires ~1s from now; the dispatcher polls every 50ms, so this
+        // must land comfortably within the retry budget below (10s).
+        let detail = wait_for_terminal(&state, "exe601-timer-test").await;
+        assert_eq!(
+            detail["execution"]["status"], "Completed",
+            "the durable timer must fire and let the workflow complete on its own: {detail}"
+        );
+
+        for h in handles {
+            h.abort();
+        }
+    }
+
+    /// RM-GA-P2 EXE-602 acceptance: a server restart no longer strands an
+    /// in-flight execution forever. `submit_handler` drives a run on a
+    /// fire-and-forget `tokio::spawn`, so a process killed mid-drive leaves the
+    /// execution wherever its last checkpoint landed; nothing used to re-scan the
+    /// store on the next startup. `resume_in_flight_executions` is that scan.
+    #[tokio::test]
+    async fn startup_resume_drives_an_interrupted_execution_to_completion_with_no_duplicate_effects()
+     {
+        let dir = std::env::temp_dir().join(format!("apex_server_exe602_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let def = apex_workflow::Definition::from_yaml(
+            "metadata:\n  name: exe602-restart\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n  transitions:\n    - {from: a, to: b}\n",
+        )
+        .unwrap();
+        // The dispatcher's resolver reads by name from the real, shared
+        // definitions directory (unlike the checkpoint store below, this isn't
+        // test-injectable) — persist it there so resume_in_flight_executions can
+        // find it after the simulated restart.
+        crate::save_definition(
+            "exe602-restart",
+            "metadata:\n  name: exe602-restart\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n  transitions:\n    - {from: a, to: b}\n",
+        );
+
+        let a_runs = Arc::new(AtomicUsize::new(0));
+
+        // --- "Instance 1": completes `a`, then interrupts on `b` (simulated crash
+        // mid-drive — the same worker-yield `ActivityError::Interrupted` a real
+        // crash would leave behind at the last checkpoint). ---
+        {
+            let store = FileStore::new(&dir).unwrap();
+            let events: Arc<dyn EventLog> = Arc::new(store.clone());
+            let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+            let executor = ClosureExecutor::new()
+                .on("a", {
+                    let a_runs = a_runs.clone();
+                    move |_| {
+                        let a_runs = a_runs.clone();
+                        async move {
+                            a_runs.fetch_add(1, Ordering::SeqCst);
+                            Ok(json!({"a": true}))
+                        }
+                    }
+                })
+                .on("b", |_| async {
+                    Err(ActivityError::Interrupted("worker crash".into()))
+                });
+            let engine = Engine::new(events, checkpoints, Arc::new(executor));
+            let (outcome, _) = engine
+                .run(&def, "exe602-restart-1", json!({}))
+                .await
+                .unwrap();
+            assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+        }
+
+        // --- "Instance 2" (a fresh AppState/engine, the shape a restarted process
+        // takes): `b` now succeeds — the transient condition that interrupted it
+        // has cleared, the same as a real worker restarting cleanly. ---
+        let state2 = {
+            let base = AppState::from_env().await;
+            let store = FileStore::new(&dir).unwrap();
+            let events: Arc<dyn EventLog> = Arc::new(store.clone());
+            let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+            let executor = ClosureExecutor::new()
+                .on("a", |_| async {
+                    panic!("completed activity `a` must not be re-executed")
+                })
+                .on("b", |_| async { Ok(json!({"b": true})) });
+            let engine = Engine::new(events, checkpoints, Arc::new(executor));
+            Arc::new(base.with_workflows(engine))
+        };
+
+        crate::resume_in_flight_executions(&state2).await;
+
+        let status = state2
+            .workflows
+            .status("exe602-restart-1")
+            .await
+            .unwrap()
+            .expect("execution still exists after the simulated restart");
+        assert_eq!(
+            status.status,
+            apex_workflow::WorkflowState::Completed,
+            "startup resume must drive the interrupted execution to completion"
+        );
+        assert_eq!(
+            a_runs.load(Ordering::SeqCst),
+            1,
+            "`a` ran exactly once across the crash + startup resume"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const DUR405_SIGNAL_YAML: &str = "\
+metadata:\n  name: dur405-signal-wait\nspec:\n  activities:\n    - {id: hold, type: wait, inputs: {event: go}}\n";
+
+    /// RM-GA-P2 DUR-405 acceptance: `POST …/signal` resolves the execution's own
+    /// pinned definition (persisted by `submit_handler`, EXE-601) instead of
+    /// requiring the client to re-upload the workflow YAML on every call — the
+    /// request body carries only the event name.
+    #[tokio::test]
+    async fn signal_succeeds_with_only_execution_id_and_event_when_manifest_is_omitted() {
+        let state = Arc::new(AppState::from_env().await);
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": DUR405_SIGNAL_YAML, "execution_id": "dur405-signal-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_for_activity_waiting(&state, "dur405-signal-test", "hold").await;
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows/dur405-signal-test/signal",
+            json!({ "event": "go" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "signalled");
+
+        let detail = wait_for_terminal(&state, "dur405-signal-test").await;
+        assert_eq!(detail["execution"]["status"], "Completed", "{detail}");
+    }
+
+    const DUR405_APPROVE_YAML: &str = "\
+metadata:\n  name: dur405-approve-wait\nspec:\n  activities:\n    - {id: review, type: wait, inputs: {event: review}}\n";
+
+    /// Same acceptance for `/approve`: internally a signal keyed by activity id
+    /// ([`approve_handler`]), so it resolves the definition the same way.
+    #[tokio::test]
+    async fn approve_succeeds_with_only_execution_id_when_manifest_is_omitted() {
+        let state = Arc::new(AppState::from_env().await);
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": DUR405_APPROVE_YAML, "execution_id": "dur405-approve-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_for_activity_waiting(&state, "dur405-approve-test", "review").await;
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows/dur405-approve-test/approve",
+            json!({ "activity_id": "review" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "approved");
+
+        let detail = wait_for_terminal(&state, "dur405-approve-test").await;
+        assert_eq!(detail["execution"]["status"], "Completed", "{detail}");
+    }
+
+    /// A re-uploaded manifest that has drifted from the pinned definition is still
+    /// rejected fail-closed (G7). DUR-405 makes `manifest` optional; it doesn't
+    /// weaken the drift guard for a caller that still supplies one.
+    #[tokio::test]
+    async fn signal_rejects_a_drifted_re_uploaded_manifest() {
+        let state = Arc::new(AppState::from_env().await);
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": DUR405_SIGNAL_YAML, "execution_id": "dur405-drift-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_for_activity_waiting(&state, "dur405-drift-test", "hold").await;
+
+        let drifted_yaml = "\
+metadata:\n  name: dur405-signal-wait\nspec:\n  activities:\n    - {id: hold, type: wait, inputs: {event: go}}\n    - {id: extra, type: function, name: echo}\n  transitions:\n    - {from: hold, to: extra}\n";
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows/dur405-drift-test/signal",
+            json!({ "manifest": drifted_yaml, "event": "go" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// When no manifest is supplied and the server has no persisted definition for
+    /// the execution's workflow name (an execution started without ever going
+    /// through `submit_handler`'s `save_definition` step), the fallback is a clear
+    /// error asking for the manifest — not a panic or a silent resume-with-nothing.
+    #[tokio::test]
+    async fn signal_without_manifest_and_without_a_persisted_definition_is_a_clear_error() {
+        let state = isolated_state().await;
+        let def = apex_workflow::Definition::from_yaml(
+            "metadata:\n  name: dur405-unpersisted\nspec:\n  activities:\n    - {id: hold, type: wait, inputs: {event: go}}\n",
+        )
+        .unwrap();
+        state
+            .workflows
+            .run(&def, "dur405-unpersisted-test", json!({}))
+            .await
+            .unwrap();
+        state.record_workflow_owner("dur405-unpersisted-test", "default");
+
+        let (st, body) = post_json(
+            crate::router(state.clone()),
+            "/api/v1/workflows/dur405-unpersisted-test/signal",
+            json!({ "event": "go" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "definition_not_found", "{body}");
+    }
+
+    const HUMAN_YAML: &str = "\
+metadata:\n  name: human-approval-wf\nspec:\n  activities:\n    - {id: review, type: human}\n";
+
+    /// Poll `GET /api/v1/workflows/{id}` until a `WorkflowInterrupted` event for
+    /// `activity_id` appears. Unlike the engine-native `wait` activity type, a
+    /// `human` activity never transitions to `ActivityState::Waiting` — an
+    /// `ActivityError::Interrupted` resets it to `Ready` instead — so
+    /// `wait_for_activity_waiting` doesn't apply here; the interrupted event is
+    /// the only durable signal that the submit's background drive actually
+    /// reached and attempted the activity before the test approves it.
+    async fn wait_for_interrupted_event(
+        state: &Arc<AppState>,
+        execution_id: &str,
+        activity_id: &str,
+    ) -> Value {
+        for _ in 0..100 {
+            let (st, body) =
+                post_json_state_get(state, &format!("/api/v1/workflows/{execution_id}")).await;
+            if st == StatusCode::OK
+                && body["events"].as_array().is_some_and(|events| {
+                    events
+                        .iter()
+                        .any(|e| e["type"] == "WorkflowInterrupted" && e["activity"] == activity_id)
+                })
+            {
+                return body;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("activity `{activity_id}` on `{execution_id}` did not interrupt in time");
+    }
+
+    /// Regression: `approve_handler`'s decision must actually resolve the
+    /// suspended `human` activity, not be silently discarded on every resume.
+    /// Before this fix, `ServerExecutor`'s `"human"` branch unconditionally
+    /// returned `Interrupted` even after `signal_event` had injected the
+    /// decision, so the execution could never leave `Running` no matter how many
+    /// times `/approve` was called — the HTTP route reported `200 approved` but
+    /// nothing was actually consumed.
+    ///
+    /// Uses `isolated_state()` (an in-memory event log/checkpoint store), not the
+    /// shared `~/.apex/workflows` `AppState::from_env()` most of this file's other
+    /// tests use for a fixed execution id: `wait_for_interrupted_event` polls the
+    /// *accumulated* event history, and a prior run's `WorkflowInterrupted` event
+    /// for the same id/activity would satisfy that poll immediately on a repeat
+    /// `cargo test` invocation, racing the fresh submission's own background
+    /// drive instead of actually waiting for it.
+    #[tokio::test]
+    async fn approve_decision_is_consumed_and_the_execution_completes() {
+        let state = isolated_state().await;
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": HUMAN_YAML, "execution_id": "human-approve-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_for_interrupted_event(&state, "human-approve-test", "review").await;
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows/human-approve-test/approve",
+            json!({ "activity_id": "review", "decision": { "approved": true } }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "approved");
+
+        let detail = wait_for_terminal(&state, "human-approve-test").await;
+        assert_eq!(
+            detail["execution"]["status"], "Completed",
+            "the approval decision must be consumed, not discarded: {detail}"
+        );
+    }
+
     const AGENT_YAML: &str = "\
 metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: agent\n      name: greeter\n      inputs:\n        message: hi\n";
 
@@ -571,7 +1110,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
     /// lands in the activity's `ActivityCompleted` event.
     #[tokio::test]
     async fn agent_activity_runs_a_stored_agent() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
 
         let (st, body) = post_json(
             crate::router(state.clone()),
@@ -614,7 +1153,7 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
     /// panicking or hanging.
     #[tokio::test]
     async fn agent_activity_fails_for_unknown_agent() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         let (st, body) = post_json(
             crate::router(state.clone()),
             "/api/v1/workflows",
@@ -641,7 +1180,7 @@ metadata:\n  name: research-team\nspec:\n  activities:\n    - id: proResearch\n 
 
     #[tokio::test]
     async fn research_team_fans_out_and_joins_two_agents() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         let router = crate::router(state.clone());
 
         for name in ["pro-researcher", "con-researcher", "synthesizer"] {
@@ -712,7 +1251,7 @@ metadata:\n  name: agent-wf-quota\nspec:\n  activities:\n    - id: greet\n      
 
     #[tokio::test]
     async fn agent_activity_respects_project_quota() {
-        let state = Arc::new(AppState::from_env().await);
+        let state = isolated_state().await;
         state
             .tenancy
             .set_quota(

@@ -17,6 +17,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+type SecretMap = BTreeMap<(String, String), Secret>;
+
 /// A durable catalog of secrets, keyed by `(namespace, name)`.
 pub trait SecretStore: Send + Sync {
     /// Create or replace a secret.
@@ -78,64 +80,76 @@ impl SecretStore for InMemorySecretStore {
 }
 
 /// Filesystem store: the whole catalog in one `secrets.json` under a directory.
+///
+/// Every mutation re-reads `secrets.json` from disk under a cross-process advisory
+/// lock (RM-GA-P2 DUR-403) rather than caching the catalog in memory across calls —
+/// the CLI and server share this directory by design, so a persistent in-memory
+/// cache would let one process's write silently clobber a concurrent writer's
+/// change (a lost update) even though `atomic_write` alone keeps each individual
+/// write torn-write-safe.
 pub struct FileSecretStore {
+    dir: PathBuf,
     path: PathBuf,
-    inner: Mutex<BTreeMap<(String, String), Secret>>,
 }
 
 impl FileSecretStore {
-    /// Open (or create) the store under `dir` (loads any existing `secrets.json`).
+    /// Open (or create) the store under `dir` (`dir/secrets.json` is read lazily,
+    /// fresh, on every operation — nothing is cached at construction time).
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::config(format!("create secrets dir: {e}")))?;
         let path = dir.join("secrets.json");
-        let inner = if path.exists() {
-            let bytes = std::fs::read(&path)
-                .map_err(|e| Error::config(format!("read secrets.json: {e}")))?;
-            let list: Vec<Secret> = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::config(format!("parse secrets.json: {e}")))?;
-            list.into_iter()
-                .map(|s| ((s.namespace.clone(), s.name.clone()), s))
-                .collect()
-        } else {
-            BTreeMap::new()
-        };
-        Ok(Self {
-            path,
-            inner: Mutex::new(inner),
-        })
+        Ok(Self { dir, path })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<(String, String), Secret>> {
-        self.inner.lock().expect("secret store mutex poisoned")
+    fn load(&self) -> Result<SecretMap> {
+        if !self.path.exists() {
+            return Ok(BTreeMap::new());
+        }
+        let bytes = std::fs::read(&self.path)
+            .map_err(|e| Error::config(format!("read secrets.json: {e}")))?;
+        let list: Vec<Secret> = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::config(format!("parse secrets.json: {e}")))?;
+        Ok(list
+            .into_iter()
+            .map(|s| ((s.namespace.clone(), s.name.clone()), s))
+            .collect())
     }
 
-    fn persist(&self, map: &BTreeMap<(String, String), Secret>) -> Result<()> {
+    fn persist(&self, map: &SecretMap) -> Result<()> {
         let list: Vec<&Secret> = map.values().collect();
         let bytes = serde_json::to_vec_pretty(&list)
             .map_err(|e| Error::config(format!("encode secrets.json: {e}")))?;
-        std::fs::write(&self.path, bytes)
+        apex_common::fs::atomic_write(&self.path, bytes)
             .map_err(|e| Error::config(format!("write secrets.json: {e}")))
+    }
+
+    /// Cross-process lock guarding a read-modify-write cycle (DUR-403).
+    fn lock(&self) -> Result<apex_common::fs::FileLock> {
+        apex_common::fs::FileLock::acquire(&self.dir)
+            .map_err(|e| Error::config(format!("lock secrets store: {e}")))
     }
 }
 
 impl SecretStore for FileSecretStore {
     fn put(&self, secret: Secret) -> Result<()> {
-        let mut map = self.lock();
+        let _flock = self.lock()?;
+        let mut map = self.load()?;
         map.insert((secret.namespace.clone(), secret.name.clone()), secret);
         self.persist(&map)
     }
 
     fn get(&self, namespace: &str, name: &str) -> Result<Option<Secret>> {
         Ok(self
-            .lock()
+            .load()?
             .get(&(namespace.to_string(), name.to_string()))
             .cloned())
     }
 
     fn delete(&self, namespace: &str, name: &str) -> Result<bool> {
-        let mut map = self.lock();
+        let _flock = self.lock()?;
+        let mut map = self.load()?;
         let existed = map
             .remove(&(namespace.to_string(), name.to_string()))
             .is_some();
@@ -147,7 +161,7 @@ impl SecretStore for FileSecretStore {
 
     fn list(&self, namespace: &str) -> Result<Vec<SecretMetadata>> {
         Ok(self
-            .lock()
+            .load()?
             .values()
             .filter(|s| s.namespace == namespace)
             .map(Secret::metadata)

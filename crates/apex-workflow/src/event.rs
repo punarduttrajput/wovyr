@@ -70,4 +70,6 @@ pub enum WorkflowEvent {
     },
     /// Rollback completed; the workflow is consistently rolled back.
     CompensationCompleted,
+    /// Execution cancelled by an operator ([`Engine::cancel`](crate::Engine::cancel)).
+    WorkflowCancelled,
 }

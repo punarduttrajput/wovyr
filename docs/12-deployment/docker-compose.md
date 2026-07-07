@@ -196,6 +196,28 @@ cert/key env vars (with the PEM files bind-mounted in) for a self-contained
 compose stack, or `APEX_TLS_TERMINATED_UPSTREAM=1` if fronting it with an
 ingress/load balancer that already speaks TLS to clients.
 
+**Backup, restore, and root-key escrow (RM-GA-P2 DR-1001/DR-1002) — mandatory
+before running against real data.** The `apex` binary's own durable state
+(agents, secrets, memory, workflows, tenancy, the KMS tenant-key catalog, …)
+lives entirely under `~/.apex` inside the container — mount that path to a
+named volume so it survives a container recreate, then snapshot it with
+`docker compose -f deployment/docker-compose.yml exec apex apex admin backup
+<dest>` (or `run --rm -v <host-dir>:/backup apex apex admin backup /backup`
+against a stopped/paused container for a guaranteed-quiescent snapshot).
+Restore the same way with `apex admin restore <src> --yes` into a fresh
+`~/.apex`. **Separately from that directory backup**, `APEX_KMS_ROOT_KEY`
+(hex-encoded, injected via the compose `environment:`/`env_file`, never
+committed) is the supported production mode for the platform's root
+encryption key — every secret and sensitive memory record is unrecoverable
+without it, and it is deliberately never written to a file in this mode, so
+it cannot be recovered from an `~/.apex` backup alone. Escrow the exact value
+set in `APEX_KMS_ROOT_KEY` (a secrets manager, an HSM export, a sealed
+document) before this stack ever touches real data — see
+[encryption.md §5](../13-security/encryption.md#5-key-management) for the
+full escrow rationale and a proven restore test. See
+[backup-and-restore.md](backup-and-restore.md) for the recommended backup
+cadence and the RPO/RTO targets a real timed drill validated (DR-1003).
+
 ---
 
 # 11. Related Documents
@@ -203,6 +225,7 @@ ingress/load balancer that already speaks TLS to clients.
 - [`12-deployment/docker.md`](docker.md)
 - [`12-deployment/kubernetes.md`](kubernetes.md)
 - [`12-deployment/index.md`](index.md)
+- [`12-deployment/backup-and-restore.md`](backup-and-restore.md)
 
 ---
 

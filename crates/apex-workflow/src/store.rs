@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
 
 /// Append-only log of workflow events.
 #[async_trait]
@@ -136,6 +137,15 @@ impl CheckpointStore for InMemoryStore {
 #[derive(Clone)]
 pub struct FileStore {
     dir: PathBuf,
+    /// In-process cache of each execution's last-appended sequence number, so a
+    /// warm append is O(1) instead of re-reading the whole event file to count
+    /// lines. Seeded lazily (once per execution id, per `FileStore` instance) from
+    /// the file's actual line count — the source of truth stays the file itself,
+    /// this is purely an amortization of repeated appends within one process's
+    /// lifetime. A fresh `FileStore` opened later (e.g. after a restart) reseeds
+    /// from disk on its own first append, so this cache never needs to survive a
+    /// process boundary.
+    seqs: Arc<AsyncMutex<HashMap<String, u64>>>,
 }
 
 impl FileStore {
@@ -143,7 +153,10 @@ impl FileStore {
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            seqs: Arc::new(AsyncMutex::new(HashMap::new())),
+        })
     }
 
     /// Sanitize an execution id into a safe filename stem.
@@ -186,10 +199,26 @@ impl EventLog for FileStore {
             .open(&path)
             .await?;
         file.write_all(line.as_bytes()).await?;
-        file.flush().await?;
+        // Durability, not just page-cache durability (DUR-402): an
+        // acknowledged append must survive a crash immediately after it
+        // returns, since `resume` trusts the event log as the source of
+        // truth.
+        file.sync_data().await?;
+        drop(file);
+        sync_dir(&self.dir).await?;
 
-        // Sequence = line count after append.
-        let seq = load_lines(&path).await?.len() as u64;
+        let mut seqs = self.seqs.lock().await;
+        let seq = match seqs.get(execution_id) {
+            // Warm path: O(1), no re-read of the file.
+            Some(&last) => last + 1,
+            // Cold path (first append this `FileStore` has seen for this
+            // execution): seed the counter from the file's line count, which
+            // already includes the append above. Paid once per execution per
+            // process lifetime, not once per append — the fix for the O(N^2)
+            // total-append cost across an execution's lifetime.
+            None => load_lines(&path).await?.len() as u64,
+        };
+        seqs.insert(execution_id.to_string(), seq);
         Ok(seq)
     }
 
@@ -209,11 +238,12 @@ impl CheckpointStore for FileStore {
     async fn save(&self, snapshot: &ExecutionState) -> Result<()> {
         let path = self.checkpoint_path(&snapshot.execution_id);
         let json = serde_json::to_string_pretty(snapshot)?;
-        // Write to a temp file then rename for atomicity (no partial snapshots,
-        // per checkpointing §17).
-        let tmp = path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, json).await?;
-        tokio::fs::rename(&tmp, &path).await?;
+        // Temp file + fsync + rename + fsync-the-directory (no partial
+        // snapshots, per checkpointing §17, and DUR-402: the rename itself
+        // must survive a crash, not just land in the page cache).
+        tokio::task::spawn_blocking(move || apex_common::fs::atomic_write(&path, json))
+            .await
+            .map_err(|e| Error::Runtime(format!("checkpoint save task panicked: {e}")))??;
         Ok(())
     }
 
@@ -255,4 +285,14 @@ async fn load_lines(path: &Path) -> Result<Vec<String>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(Error::Io(e)),
     }
+}
+
+/// `fsync` `dir` on a blocking thread (a directory `fsync` is a syscall that
+/// can block, so it shouldn't run inline on the async executor).
+async fn sync_dir(dir: &Path) -> Result<()> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || apex_common::fs::sync_dir(&dir))
+        .await
+        .map_err(|e| Error::Runtime(format!("fsync task panicked: {e}")))??;
+    Ok(())
 }

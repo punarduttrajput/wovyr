@@ -113,6 +113,21 @@ fmt+clippy → build → unit → integration → package(images/SDK) → sign
 
 Matches the [testing CI pipeline](../15-testing/index.md#5-ci-pipeline-overview).
 
+Two additional jobs run in parallel with the default-feature pipeline
+(RM-GA-P2 CI-901):
+
+- **Feature matrix** — `cargo hack clippy --each-feature --workspace` lints every
+  feature-gated code path under the same `-D warnings` policy as default-feature
+  code. The one exclusion is `mistralrs` (the full mistral.rs inference engine —
+  a compile too heavy for every PR; it stays buildable locally).
+- **Service-container integration** — Postgres, Qdrant, and Redis run as CI
+  service containers, and the capability-gated integration tests
+  (`apex-workflow`/`apex-marketplace` Postgres stores, `apex-memory` tiered
+  backend, `apex-provider` Qdrant semantic cache + Redis breaker) run against
+  them with their gating env vars set. The job greps for the tests' `skipping:`
+  convention and fails on it, so a silently-skipped test can never read as
+  green coverage.
+
 ---
 
 # 9. Related
@@ -128,3 +143,4 @@ Matches the [testing CI pipeline](../15-testing/index.md#5-ci-pipeline-overview)
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-06-27 | Initial Build System & SDK guide |
+| 1.1.0 | 2026-07-07 | §8: CI-901 feature-matrix (cargo-hack each-feature clippy) + service-container integration jobs |

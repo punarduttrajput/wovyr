@@ -220,9 +220,11 @@ impl TenancyStore for InMemoryTenancyStore {
 }
 
 /// A durable tenancy store backed by a single `tenancy.json` document under a directory.
-/// Reads/writes the whole state per operation (control-plane scale), serialized by a
-/// process-local lock.
+/// Reads/writes the whole state per operation (control-plane scale). Mutations are
+/// serialized by a process-local lock **and** a cross-process advisory file lock
+/// (RM-GA-P2 DUR-403), since the CLI and server share this directory by design.
 pub struct FileTenancyStore {
+    dir: PathBuf,
     path: PathBuf,
     lock: Mutex<()>,
 }
@@ -234,6 +236,7 @@ impl FileTenancyStore {
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
             path: dir.join("tenancy.json"),
+            dir,
             lock: Mutex::new(()),
         })
     }
@@ -248,13 +251,17 @@ impl FileTenancyStore {
     }
 
     fn save(&self, state: &TenancyState) -> Result<()> {
-        std::fs::write(&self.path, serde_json::to_vec_pretty(state)?)?;
+        apex_common::fs::atomic_write(&self.path, serde_json::to_vec_pretty(state)?)?;
         Ok(())
     }
 
-    /// Run `f` against the loaded state under the lock, persisting on success.
+    /// Run `f` against the loaded state under both locks, persisting on success. The
+    /// cross-process lock spans load→mutate→save so a concurrent writer (this or
+    /// another process) can't silently lose the other's update.
     fn with_mut<T>(&self, f: impl FnOnce(&mut TenancyState) -> Result<T>) -> Result<T> {
         let _guard = self.lock.lock().expect("tenancy file lock poisoned");
+        let _flock = apex_common::fs::FileLock::acquire(&self.dir)
+            .map_err(|e| Error::config(format!("lock tenancy store: {e}")))?;
         let mut state = self.load()?;
         let out = f(&mut state)?;
         self.save(&state)?;

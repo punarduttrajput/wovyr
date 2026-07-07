@@ -22,7 +22,9 @@ use apex_kms::{Kms, SealedData};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+type EncryptedSubscriptionMap = BTreeMap<String, EncryptedSubscription>;
 
 /// The on-disk shape: `secret` is sealed via [`Kms`], never plaintext at rest.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -42,48 +44,52 @@ fn default_true() -> bool {
 
 /// Filesystem store whose persisted `webhooks.enc.json` never holds a
 /// plaintext `secret`.
+///
+/// Like [`FileWebhookStore`](crate::FileWebhookStore), every mutation re-reads
+/// `webhooks.enc.json` from disk under a cross-process advisory lock (RM-GA-P2
+/// DUR-403) rather than caching the catalog in memory — the CLI and server share
+/// this directory by design.
 pub struct EncryptedFileWebhookStore {
+    dir: PathBuf,
     path: PathBuf,
     kms: Arc<dyn Kms>,
-    inner: Mutex<BTreeMap<String, EncryptedSubscription>>,
 }
 
 impl EncryptedFileWebhookStore {
-    /// Open (or create) the store under `dir` (loads any existing
-    /// `webhooks.enc.json`), sealing/unsealing every `secret` through `kms`.
+    /// Open (or create) the store under `dir` (`dir/webhooks.enc.json` is read
+    /// lazily, fresh, on every operation), sealing/unsealing every `secret`
+    /// through `kms`.
     pub fn new(dir: impl Into<PathBuf>, kms: Arc<dyn Kms>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::config(format!("create webhooks dir: {e}")))?;
         let path = dir.join("webhooks.enc.json");
-        let inner = if path.exists() {
-            let bytes = std::fs::read(&path)
-                .map_err(|e| Error::config(format!("read webhooks.enc.json: {e}")))?;
-            let list: Vec<EncryptedSubscription> = serde_json::from_slice(&bytes)
-                .map_err(|e| Error::config(format!("parse webhooks.enc.json: {e}")))?;
-            list.into_iter().map(|r| (r.id.clone(), r)).collect()
-        } else {
-            BTreeMap::new()
-        };
-        Ok(Self {
-            path,
-            kms,
-            inner: Mutex::new(inner),
-        })
+        Ok(Self { dir, path, kms })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, EncryptedSubscription>> {
-        self.inner
-            .lock()
-            .expect("encrypted webhook store mutex poisoned")
+    fn load(&self) -> Result<EncryptedSubscriptionMap> {
+        if !self.path.exists() {
+            return Ok(BTreeMap::new());
+        }
+        let bytes = std::fs::read(&self.path)
+            .map_err(|e| Error::config(format!("read webhooks.enc.json: {e}")))?;
+        let list: Vec<EncryptedSubscription> = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::config(format!("parse webhooks.enc.json: {e}")))?;
+        Ok(list.into_iter().map(|r| (r.id.clone(), r)).collect())
     }
 
-    fn persist(&self, map: &BTreeMap<String, EncryptedSubscription>) -> Result<()> {
+    fn persist(&self, map: &EncryptedSubscriptionMap) -> Result<()> {
         let list: Vec<&EncryptedSubscription> = map.values().collect();
         let bytes = serde_json::to_vec_pretty(&list)
             .map_err(|e| Error::config(format!("encode webhooks.enc.json: {e}")))?;
-        std::fs::write(&self.path, bytes)
+        apex_common::fs::atomic_write(&self.path, bytes)
             .map_err(|e| Error::config(format!("write webhooks.enc.json: {e}")))
+    }
+
+    /// Cross-process lock guarding a read-modify-write cycle (DUR-403).
+    fn lock(&self) -> Result<apex_common::fs::FileLock> {
+        apex_common::fs::FileLock::acquire(&self.dir)
+            .map_err(|e| Error::config(format!("lock webhook store: {e}")))
     }
 
     fn encrypt(&self, sub: &WebhookSubscription) -> Result<EncryptedSubscription> {
@@ -118,19 +124,20 @@ impl EncryptedFileWebhookStore {
 impl WebhookStore for EncryptedFileWebhookStore {
     fn register(&self, sub: WebhookSubscription) -> Result<WebhookSubscription> {
         let record = self.encrypt(&sub)?;
-        let mut map = self.lock();
+        let _flock = self.lock()?;
+        let mut map = self.load()?;
         map.insert(record.id.clone(), record);
         self.persist(&map)?;
         Ok(sub)
     }
 
     fn get(&self, id: &str) -> Result<Option<WebhookSubscription>> {
-        let record = self.lock().get(id).cloned();
+        let record = self.load()?.get(id).cloned();
         record.map(|r| self.decrypt(&r)).transpose()
     }
 
     fn list(&self, tenant: &str) -> Result<Vec<WebhookSubscription>> {
-        self.lock()
+        self.load()?
             .values()
             .filter(|r| r.tenant == tenant)
             .map(|r| self.decrypt(r))
@@ -138,7 +145,8 @@ impl WebhookStore for EncryptedFileWebhookStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let mut map = self.lock();
+        let _flock = self.lock()?;
+        let mut map = self.load()?;
         if map.remove(id).is_none() {
             return Err(Error::NotFound(format!("webhook `{id}` not found")));
         }
