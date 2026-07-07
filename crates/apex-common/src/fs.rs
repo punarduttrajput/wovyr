@@ -1,4 +1,4 @@
-//! Crash-safe whole-file writes.
+//! Crash-safe whole-file writes and append durability.
 //!
 //! Every single-document JSON store in the workspace holds its state as a
 //! whole-file rewrite: read the old file, mutate in memory, write out the
@@ -9,6 +9,12 @@
 //! closes that window: write to a temp file in the same directory, `fsync`
 //! it, `rename` over the target (atomic on the same filesystem), then
 //! `fsync` the parent directory so the rename itself survives a crash.
+//!
+//! [`sync_parent_dir`] is also exposed standalone for append-only logs (the
+//! workflow event log, the audit chain): after appending to and `fsync`ing a
+//! file, a caller that also cares about the file's *existence* surviving a
+//! crash (e.g. its very first append, which creates the file) syncs the
+//! containing directory the same way `atomic_write`'s rename does.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -39,18 +45,29 @@ fn tmp_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-#[cfg(unix)]
-fn sync_parent_dir(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        File::open(parent)?.sync_all()?;
+/// `fsync` the directory containing `path` (a no-op on non-Unix, where there
+/// is no directory-handle fsync equivalent — NTFS's metadata journaling makes
+/// a rename/create durable without one).
+pub fn sync_parent_dir(path: impl AsRef<Path>) -> io::Result<()> {
+    match path.as_ref().parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => sync_dir(parent),
+        None => Ok(()),
     }
-    Ok(())
 }
 
+/// `fsync` `dir` itself (a no-op on non-Unix — see [`sync_parent_dir`]).
+/// Callers that create or rename an entry *within* a directory (an
+/// append-only log's first write, an `atomic_write` rename) sync the
+/// directory afterward so that directory-entry change survives a crash too,
+/// not just the file's own `fsync`.
+#[cfg(unix)]
+pub fn sync_dir(dir: impl AsRef<Path>) -> io::Result<()> {
+    File::open(dir)?.sync_all()
+}
+
+/// `fsync` `dir` itself (a no-op on non-Unix — see [`sync_parent_dir`]).
 #[cfg(not(unix))]
-fn sync_parent_dir(_path: &Path) -> io::Result<()> {
-    // Windows has no directory-handle fsync equivalent here; NTFS's metadata
-    // journaling makes the rename durable without one.
+pub fn sync_dir(_dir: impl AsRef<Path>) -> io::Result<()> {
     Ok(())
 }
 

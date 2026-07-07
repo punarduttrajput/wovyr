@@ -101,7 +101,12 @@ impl AuditSink for FileAuditSink {
             .open(&self.path)
             .map_err(|e| Error::config(format!("open audit.jsonl: {e}")))?;
         f.write_all(&line)
-            .map_err(|e| Error::config(format!("write audit.jsonl: {e}")))
+            .map_err(|e| Error::config(format!("write audit.jsonl: {e}")))?;
+        f.sync_data()
+            .map_err(|e| Error::config(format!("fsync audit.jsonl: {e}")))?;
+        drop(f);
+        apex_common::fs::sync_parent_dir(&self.path)
+            .map_err(|e| Error::config(format!("fsync audit dir: {e}")))
     }
 
     fn all(&self) -> Result<Vec<AuditEntry>> {

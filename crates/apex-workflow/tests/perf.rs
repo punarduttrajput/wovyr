@@ -13,8 +13,8 @@
 //! Postgres queue is the horizontal-scale path.
 
 use apex_workflow::{
-    CheckpointStore, ClosureExecutor, Definition, Engine, EventLog, InMemoryStore,
-    InMemoryWorkQueue, RunOutcome, WorkQueue,
+    CheckpointStore, ClosureExecutor, Definition, Engine, EventLog, FileStore, InMemoryStore,
+    InMemoryWorkQueue, RunOutcome, WorkQueue, WorkflowEvent,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -91,4 +91,77 @@ async fn lease_queue_throughput_baseline() {
         per_sec > FLOOR_PER_SEC,
         "lease throughput {per_sec:.0}/sec below the {FLOOR_PER_SEC}/sec floor"
     );
+}
+
+/// RM-GA-P2 DUR-402: `FileStore::append` used to recompute its sequence number
+/// by re-reading and re-splitting the *entire* event file on every single
+/// call — O(events) per append, O(N^2) over an execution's lifetime. It now
+/// keeps an in-process monotonic counter and only re-reads the file once
+/// (per execution, per `FileStore` instance) to seed it. This asserts the
+/// fix held: appending a fixed-size batch late in a long-lived log must not
+/// cost meaningfully more than the same-sized batch early on.
+#[tokio::test]
+async fn file_event_log_append_latency_does_not_grow_with_log_length() {
+    let dir =
+        std::env::temp_dir().join(format!("apex_workflow_perf_append_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = FileStore::new(&dir).unwrap();
+    let exec_id = "perf-append";
+
+    const WARMUP: usize = 50;
+    const BATCH: usize = 200;
+    const GROWTH: usize = 2_000;
+
+    for _ in 0..WARMUP {
+        store
+            .append(exec_id, WorkflowEvent::WorkflowStarted)
+            .await
+            .unwrap();
+    }
+
+    let early_start = Instant::now();
+    for _ in 0..BATCH {
+        store
+            .append(exec_id, WorkflowEvent::WorkflowStarted)
+            .await
+            .unwrap();
+    }
+    let early = early_start.elapsed();
+
+    // Grow the log well past its earlier size, then re-measure a same-sized batch.
+    for _ in 0..GROWTH {
+        store
+            .append(exec_id, WorkflowEvent::WorkflowStarted)
+            .await
+            .unwrap();
+    }
+
+    let late_start = Instant::now();
+    for _ in 0..BATCH {
+        store
+            .append(exec_id, WorkflowEvent::WorkflowStarted)
+            .await
+            .unwrap();
+    }
+    let late = late_start.elapsed();
+
+    eprintln!(
+        "event log append: {BATCH} appends at ~{WARMUP} prior events = {early:?}, \
+         {BATCH} appends at ~{} prior events = {late:?}",
+        WARMUP + BATCH + GROWTH
+    );
+
+    // A conservative ratio with real headroom for fsync jitter: with the old
+    // O(N) re-read-the-whole-file-every-append behavior, the log is ~45x
+    // longer by the second batch, so append cost would grow roughly
+    // proportionally. With the O(1) warm path, it should not grow at all
+    // beyond fsync noise.
+    assert!(
+        late.as_secs_f64() < early.as_secs_f64() * 5.0 + 0.05,
+        "append latency grew from {early:?} (early, ~{WARMUP} events) to {late:?} \
+         (late, ~{} events) — looks quadratic again",
+        WARMUP + BATCH + GROWTH
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
