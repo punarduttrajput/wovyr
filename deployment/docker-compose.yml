@@ -19,6 +19,16 @@
 #   docker compose -f deployment/docker-compose.yml up -d --build
 #   curl http://localhost:8080/healthz
 #
+# RM-GA-P1 SEC-101/102/202: `apex dev` binds 0.0.0.0 here (not loopback), so it now
+# refuses to boot without either real auth (`APEX_AUTH_MODE`, set below to `apikey`)
+# or TLS configured/declared (`APEX_TLS_TERMINATED_UPSTREAM=1` — this compose stack
+# doesn't terminate TLS itself; put a real reverse proxy in front for anything beyond
+# local/integration use). Mint a key before calling the API:
+#   docker compose -f deployment/docker-compose.yml run --rm apex \
+#     auth create-key demo-user
+# (the `apex-home` volume below is what makes that minted key visible to the
+# long-running `apex` service — both share the same `~/.apex/auth`.)
+#
 # Exercise the CLI-side tiered memory backend against the same stack:
 #   docker compose -f deployment/docker-compose.yml run --rm apex \
 #     memory put --namespace demo --content "hello from compose"
@@ -35,6 +45,12 @@ services:
       APEX_MARKETPLACE_POSTGRES_URL: postgres://apex:apex@postgres:5432/apex
       APEX_MEMORY_POSTGRES_URL: postgres://apex:apex@postgres:5432/apex
       APEX_MEMORY_QDRANT_URL: http://qdrant:6333
+      # Real auth (SEC-101) — mint a key with `run --rm apex auth create-key <name>`.
+      APEX_AUTH_MODE: apikey
+      # This stack doesn't terminate TLS itself (SEC-202) — front it with a real
+      # reverse proxy for anything beyond local/integration use.
+      APEX_TLS_TERMINATED_UPSTREAM: "1"
+    volumes: ["apex-home:/home/apex/.apex"]
     entrypoint: ["apex"]
     command: ["dev", "--addr", "0.0.0.0:8080"]
     depends_on:
@@ -68,3 +84,4 @@ services:
 volumes:
   pgdata: {}
   qdrant-data: {}
+  apex-home: {}

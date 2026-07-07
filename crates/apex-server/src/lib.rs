@@ -41,8 +41,9 @@ use apex_workflow::{
     CheckpointStore, Engine, EventLog, ExecutionFilter, FileStore, InMemoryStore, WorkflowState,
 };
 use axum::{
-    Json, Router,
-    extract::{Path, Query, State},
+    BoxError, Json, Router,
+    error_handling::HandleErrorLayer,
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{
         Html, IntoResponse, Response,
@@ -58,7 +59,8 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tower::ServiceBuilder;
 
 /// In-memory registry of stored agent manifests, keyed by `(tenant, agent id)` so a
 /// tenant only ever sees and mutates its own agents (the `metadata.name` is the id,
@@ -174,6 +176,9 @@ pub struct AppState {
     /// Which credential scheme [`auth::authenticate`] verifies ([SEC-101]), resolved
     /// once at construction from `APEX_AUTH_MODE` — see [`auth::AuthMode::from_env`].
     pub(crate) auth_mode: auth::AuthMode,
+    /// Cross-cutting HTTP resource limits (timeout/body/concurrency, [SEC-201]),
+    /// resolved once at construction — see [`HttpLimits::from_env`].
+    pub(crate) http_limits: HttpLimits,
 }
 
 impl AppState {
@@ -245,6 +250,7 @@ impl AppState {
             api_keys: auth::default_api_key_store(),
             anonymous_allowed: auth::resolve_anonymous_allowed(),
             auth_mode: auth::AuthMode::from_env(),
+            http_limits: HttpLimits::from_env(),
         }
     }
 
@@ -338,6 +344,15 @@ impl AppState {
     /// crate's default `disabled-loopback` behavior depends on).
     pub fn with_auth_mode(mut self, mode: auth::AuthMode) -> Self {
         self.auth_mode = mode;
+        self
+    }
+
+    /// Override the HTTP resource limits (SEC-201) — timeout/body/concurrency —
+    /// without mutating the process-global `APEX_HTTP_*` env vars (which every other
+    /// test in this crate's default-limits behavior depends on).
+    #[cfg(test)]
+    pub(crate) fn with_http_limits(mut self, limits: HttpLimits) -> Self {
+        self.http_limits = limits;
         self
     }
 
@@ -595,15 +610,102 @@ impl CostObserver for MetricsCostObserver {
     }
 }
 
+/// Cross-cutting HTTP resource limits (SEC-201), resolved **once** at
+/// [`AppState`] construction — not re-read from the environment on every request, so
+/// a test can override them per-`AppState` (`with_http_limits`) without racing the
+/// process-global env vars other tests implicitly depend on the defaults of.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HttpLimits {
+    /// `APEX_HTTP_TIMEOUT_SECS` — the default per-request timeout, applied to every
+    /// route except the direct agent-run endpoints.
+    pub(crate) timeout_secs: u64,
+    /// `APEX_HTTP_RUN_TIMEOUT_SECS` — a longer timeout for the direct agent-run
+    /// endpoints (`agents:run`/`agents:stream`/`agents/{id}/run`), which call an LLM
+    /// provider synchronously and can legitimately run far longer than the rest of
+    /// the API. A route-scoped override rather than stretching the global timeout.
+    pub(crate) run_timeout_secs: u64,
+    /// `APEX_HTTP_MAX_BODY_BYTES` — the request body size cap; default 1 MiB.
+    pub(crate) max_body_bytes: usize,
+    /// `APEX_HTTP_MAX_CONCURRENCY` — the server-wide in-flight request cap; load past
+    /// it is shed (`503`) rather than queued unboundedly.
+    pub(crate) max_concurrency: usize,
+}
+
+impl HttpLimits {
+    fn from_env() -> Self {
+        Self {
+            timeout_secs: env_u64("APEX_HTTP_TIMEOUT_SECS", 30),
+            run_timeout_secs: env_u64("APEX_HTTP_RUN_TIMEOUT_SECS", 300),
+            max_body_bytes: env_u64("APEX_HTTP_MAX_BODY_BYTES", 1024 * 1024) as usize,
+            max_concurrency: env_u64("APEX_HTTP_MAX_CONCURRENCY", 512) as usize,
+        }
+    }
+}
+
+fn env_u64(var: &str, default: u64) -> u64 {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Convert a boxed error from the timeout/load-shed layers into the standard error
+/// envelope (SEC-201): a request that ran past its timeout is `408`; a request that
+/// arrived while the server was already at `APEX_HTTP_MAX_CONCURRENCY` is `503` (the
+/// caller should retry, not treat it as a permanent failure). Every layer these two
+/// wrap is itself infallible, so no other error should reach here.
+async fn handle_overload_or_timeout(err: BoxError) -> Response {
+    if err.is::<tower::timeout::error::Elapsed>() {
+        ApiError::new(
+            StatusCode::REQUEST_TIMEOUT,
+            "request_timeout",
+            "the request exceeded the server's timeout",
+        )
+        .into_response()
+    } else if err.is::<tower::load_shed::error::Overloaded>() {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded",
+            "the server is at its concurrency limit; retry shortly",
+        )
+        .into_response()
+    } else {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            err.to_string(),
+        )
+        .into_response()
+    }
+}
+
 /// Build the application router over the given state.
 ///
 /// Every route is gated by [`auth::authenticate`] (SEC-101) except the public
 /// `/healthz` and `/metrics` — mounted on a separate, unauthenticated sub-router so a
-/// load balancer's health probe never needs a credential.
+/// load balancer's health probe never needs a credential. Cross-cutting resource
+/// limits (SEC-201) wrap the whole router: a body-size cap, then a concurrency cap
+/// with load-shedding (`503` past the limit, rather than an unboundedly growing
+/// pending-request queue). The direct agent-run endpoints get a longer, dedicated
+/// timeout than the rest of the API.
 pub fn router(state: Arc<AppState>) -> Router {
-    let protected = Router::new()
+    let limits = state.http_limits;
+    let auth = || axum::middleware::from_fn_with_state(state.clone(), auth::authenticate);
+
+    // The direct agent-run endpoints call an LLM provider synchronously and can
+    // legitimately run far longer than the rest of the API.
+    let run_routes = Router::new()
         .route("/api/v1/agents:run", post(run_handler))
         .route("/api/v1/agents:stream", post(run_stream_handler))
+        .route("/api/v1/agents/{id}/run", post(run_stored_handler))
+        .layer(auth())
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(handle_overload_or_timeout))
+                .timeout(Duration::from_secs(limits.run_timeout_secs)),
+        );
+
+    let other_protected = Router::new()
         // Agent persistence: register agents once, then run/inspect them by id.
         .route(
             "/api/v1/agents",
@@ -613,7 +715,6 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/v1/agents/{id}",
             get(get_agent_handler).delete(delete_agent_handler),
         )
-        .route("/api/v1/agents/{id}/run", post(run_stored_handler))
         // Workflow visibility (G4): list/inspect executions + a minimal read-only UI.
         .route("/api/v1/workflows", get(list_workflows_handler))
         .route("/api/v1/workflows/{id}", get(get_workflow_handler))
@@ -638,18 +739,35 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(audit::routes())
         // Tool discovery: list registered tools (built-ins + enabled plugin tools).
         .merge(tools::routes())
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth::authenticate,
-        ));
+        .layer(auth())
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(handle_overload_or_timeout))
+                .timeout(Duration::from_secs(limits.timeout_secs)),
+        );
 
-    Router::new()
+    let public = Router::new()
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_handler))
-        .merge(protected)
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(handle_overload_or_timeout))
+                .timeout(Duration::from_secs(limits.timeout_secs)),
+        );
+
+    public
+        .merge(run_routes)
+        .merge(other_protected)
         .with_state(state)
         // Stamp every response (incl. errors) with a request id (API overview §14).
         .layer(axum::middleware::from_fn(hardening::request_id))
+        .layer(DefaultBodyLimit::max(limits.max_body_bytes))
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(handle_overload_or_timeout))
+                .load_shed()
+                .concurrency_limit(limits.max_concurrency),
+        )
 }
 
 /// Metrics endpoint ([metrics §2](../../docs/14-observability/metrics.md)). Serves
@@ -681,16 +799,75 @@ async fn metrics_handler(headers: HeaderMap, State(state): State<Arc<AppState>>)
     }
 }
 
-/// Bind to `addr` and serve until the process is stopped.
+/// Install rustls' `ring` `CryptoProvider` as the process default, idempotently. Both
+/// `ring` (via `reqwest`'s rustls-tls elsewhere in this dependency graph) and
+/// `aws-lc-rs` can end up link-able in the same binary; rustls then refuses to guess
+/// and panics on the first TLS connection unless one is installed explicitly first.
+fn install_default_crypto_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+/// TLS material paths from `APEX_TLS_CERT`/`APEX_TLS_KEY` (PEM files), if both are
+/// configured ([SEC-202](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)).
+fn tls_cert_key_paths() -> Option<(String, String)> {
+    let cert = std::env::var("APEX_TLS_CERT").ok()?;
+    let key = std::env::var("APEX_TLS_KEY").ok()?;
+    Some((cert, key))
+}
+
+/// Refuse a non-loopback bind that is neither TLS-terminated by this process
+/// (`has_tls`) nor explicitly declared as terminated upstream by a reverse proxy
+/// (`APEX_TLS_TERMINATED_UPSTREAM`) — cleartext HTTP (carrying credentials post-SEC-101
+/// and secret responses) must never be the network-facing default (SEC-202). A
+/// loopback bind is always allowed TLS-free, matching local/dev ergonomics elsewhere
+/// in this hardening pass (SEC-102).
+fn check_insecure_bind(has_tls: bool, addr: SocketAddr) -> apex_common::Result<()> {
+    let terminated_upstream = std::env::var_os("APEX_TLS_TERMINATED_UPSTREAM").is_some();
+    if !has_tls && !terminated_upstream && !addr.ip().is_loopback() {
+        return Err(apex_common::Error::config(format!(
+            "refusing to bind {addr} without TLS: set APEX_TLS_CERT and APEX_TLS_KEY \
+             (PEM files), or APEX_TLS_TERMINATED_UPSTREAM=1 if a reverse proxy already \
+             terminates TLS in front of this process"
+        )));
+    }
+    Ok(())
+}
+
+/// Bind to `addr` and serve until the process is stopped. Serves HTTPS via an
+/// in-process rustls acceptor when `APEX_TLS_CERT`/`APEX_TLS_KEY` are set (SEC-202);
+/// otherwise refuses to bind a non-loopback address unless
+/// `APEX_TLS_TERMINATED_UPSTREAM` declares TLS is handled by a reverse proxy.
 pub async fn serve(addr: SocketAddr) -> apex_common::Result<()> {
     auth::refuse_anonymous_on_non_loopback(addr)?;
+    let tls = tls_cert_key_paths();
+    check_insecure_bind(tls.is_some(), addr)?;
+
     let state = Arc::new(AppState::from_env().await);
     let app = router(state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "apex server listening");
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
+
+    match tls {
+        Some((cert, key)) => {
+            install_default_crypto_provider();
+            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+                .await
+                .map_err(|e| Error::config(format!("failed to load TLS cert/key: {e}")))?;
+            tracing::info!(%addr, "apex server listening (https)");
+            axum_server::bind_rustls(addr, config)
+                .serve(app.into_make_service())
+                .await
+                .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            tracing::info!(%addr, "apex server listening (http)");
+            axum::serve(listener, app)
+                .await
+                .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
+        }
+    }
     Ok(())
 }
 
@@ -2815,5 +2992,227 @@ mod tests {
         assert_eq!(p2["data"].as_array().unwrap().len(), 1);
         assert_eq!(p2["has_more"], false);
         assert_eq!(p2["next_cursor"], Value::Null);
+    }
+
+    // --- RM-GA-P1 SEC-201: timeout / body-size / concurrency ------------------------
+
+    fn default_limits() -> HttpLimits {
+        HttpLimits::from_env()
+    }
+
+    #[tokio::test]
+    async fn oversized_body_is_rejected_with_413() {
+        let state = Arc::new(AppState::from_env().await.with_http_limits(HttpLimits {
+            max_body_bytes: 10,
+            ..default_limits()
+        }));
+        let body = json!({
+            "manifest": "metadata:\n  name: too-big\nspec:\n  instructions: hi\n",
+            "input": { "message": "hi" }
+        });
+        let resp = raw(&state, "POST", "/api/v1/agents:run", &[], body).await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// Direct proof of the layer stack `router()` wires for the default/run timeouts
+    /// (SEC-201): a request that outruns its timeout gets the standard `408` envelope,
+    /// not a raw/unhandled error — built standalone (rather than against a real, fast
+    /// mock-provider route) so the test is deterministic regardless of provider speed.
+    #[tokio::test]
+    async fn timeout_layer_converts_elapsed_into_408() {
+        async fn slow() -> &'static str {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            "too slow"
+        }
+        let app: Router = Router::new().route("/slow", get(slow)).layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(handle_overload_or_timeout))
+                .timeout(Duration::from_millis(5)),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/slow")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["code"], "request_timeout");
+    }
+
+    /// SEC-201: "the run permit is released when the client-facing timeout fires."
+    /// Proves the general mechanism `RunPermit`'s `Drop` impl relies on — tower's
+    /// `Timeout` drops the inner future outright on expiry, so any RAII guard held
+    /// across the timed-out `.await` is released — without depending on the real
+    /// (near-instant, hard-to-artificially-slow) mock provider actually timing out.
+    #[tokio::test]
+    async fn timeout_drops_the_inner_future_releasing_raii_guards_held_across_it() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct Permit(Arc<AtomicUsize>);
+        impl Drop for Permit {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let held = Arc::new(AtomicUsize::new(0));
+        let counter = held.clone();
+        let app: Router = Router::new()
+            .route(
+                "/slow",
+                get(move || {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        let _permit = Permit(counter.clone());
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        "done"
+                    }
+                }),
+            )
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(handle_overload_or_timeout))
+                    .timeout(Duration::from_millis(10)),
+            );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/slow")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
+
+        // The dropped future's Drop glue runs synchronously as part of the timeout
+        // race resolving; a short grace sleep just avoids asserting mid-poll.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            held.load(Ordering::SeqCst),
+            0,
+            "the RAII guard held across the timed-out .await must be dropped"
+        );
+    }
+
+    /// SEC-201: "load past the concurrency cap sheds cleanly" — a request arriving
+    /// while the server is already at `APEX_HTTP_MAX_CONCURRENCY` is refused
+    /// (`Overloaded`, which `handle_overload_or_timeout` maps to `503`) rather than
+    /// queued, and the limit isn't a one-shot: once the in-flight call completes, the
+    /// next one is admitted again. Exercises the exact `tower::ServiceBuilder` stack
+    /// `router()` wires (`load_shed().concurrency_limit(n)`) directly over a bare
+    /// `tower::service_fn`, rather than through a full `axum::Router` — axum's Router
+    /// always reports itself ready regardless of inner backpressure (by design, so a
+    /// single route's slowness can't stall routing to other routes), which would hide
+    /// the very backpressure this test needs to observe.
+    #[tokio::test]
+    async fn concurrency_limit_sheds_load_past_the_cap_then_recovers() {
+        use tower::Service;
+        use tower::service_fn;
+
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let held = notify.clone();
+        let inner = service_fn(move |_req: ()| {
+            let held = held.clone();
+            async move {
+                held.notified().await;
+                Ok::<_, Infallible>("done")
+            }
+        });
+        let svc = ServiceBuilder::new()
+            .load_shed()
+            .concurrency_limit(1)
+            .service(inner);
+
+        // The first call occupies the single concurrency slot, blocked on the notify
+        // (standing in for a slow real request).
+        let mut svc1 = svc.clone();
+        let first = tokio::spawn(async move { svc1.ready().await.unwrap().call(()).await });
+        // Let the first call actually get admitted and start waiting.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // A second, concurrent call is shed — an error, not queued.
+        let mut svc2 = svc.clone();
+        let result2 = svc2.ready().await.unwrap().call(()).await;
+        assert!(result2.is_err(), "expected the second call to be shed");
+
+        // Releasing the first call frees the slot for the next caller.
+        notify.notify_one();
+        let result1 = first.await.unwrap();
+        assert!(result1.is_ok());
+    }
+
+    // --- RM-GA-P1 SEC-202: TLS termination or refuse insecure non-loopback bind -----
+
+    #[test]
+    fn insecure_bind_is_refused_only_without_tls_and_without_upstream_termination_on_non_loopback()
+    {
+        let non_loopback: SocketAddr = "0.0.0.0:8443".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:8443".parse().unwrap();
+
+        // Loopback is always fine, TLS or not — local/dev ergonomics (SEC-102 parity).
+        assert!(check_insecure_bind(false, loopback).is_ok());
+        assert!(check_insecure_bind(true, loopback).is_ok());
+
+        // Non-loopback with no TLS and no upstream-termination declaration → refused.
+        assert!(check_insecure_bind(false, non_loopback).is_err());
+        // This process terminating TLS itself → fine.
+        assert!(check_insecure_bind(true, non_loopback).is_ok());
+    }
+
+    /// Real end-to-end proof the TLS path actually serves HTTPS (not just compiles):
+    /// a self-signed cert (minted fresh via `rcgen`, never touching disk) is loaded
+    /// through the exact same `RustlsConfig::from_pem_file` + `axum_server::bind_rustls`
+    /// call `serve()` makes, and a real TLS client round-trips `/healthz` over it.
+    #[tokio::test]
+    async fn tls_config_serves_https_end_to_end() {
+        // Mint a self-signed cert for `127.0.0.1` and write it to a temp dir — same
+        // shape an operator's real PEM files would take (`from_pem_file` reads paths).
+        install_default_crypto_provider();
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let dir = std::env::temp_dir().join(format!("apex-tls-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&key_path, key_pair.serialize_pem()).unwrap();
+
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+            .await
+            .unwrap();
+
+        // Bind an OS-assigned port, then hand it to axum-server's TLS acceptor.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router(Arc::new(AppState::from_env().await));
+        let server = tokio::spawn(async move {
+            axum_server::from_tcp_rustls(listener, config)
+                .unwrap()
+                .serve(app.into_make_service())
+                .await
+        });
+
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true) // self-signed — the point under test
+            .build()
+            .unwrap();
+        let resp = client
+            .get(format!("https://{addr}/healthz"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

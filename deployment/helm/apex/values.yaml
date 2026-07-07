@@ -19,6 +19,20 @@ apex:
     # APEX_PLATFORM_ADMINS — comma-separated principal ids with platform-admin
     # scope. Optional; empty means no platform admins (fail-closed default).
     platformAdmins: ""
+    # RM-GA-P1 SEC-101: apex_server::serve() refuses every request without a
+    # verified credential once bound to a non-loopback address (this pod's
+    # 0.0.0.0 bind always is) — apikey is the scheme with no extra chart wiring
+    # (no JWT issuer/secret to provision here). Mint a key against the pod's
+    # `~/.apex/auth` (the same PVC the running server reads):
+    #   kubectl exec -it <pod> -- apex auth create-key <principal>
+    authMode: "apikey"
+    # RM-GA-P1 SEC-202: this chart has no ingress/TLS termination of its own —
+    # `serve()` refuses to bind non-loopback without either real TLS or this
+    # explicit acknowledgment that TLS is terminated in front of it (an
+    # Ingress/Gateway/service mesh sidecar). Set to "" only if you've wired
+    # in-process TLS via APEX_TLS_CERT/APEX_TLS_KEY (not templated by this
+    # chart yet) instead.
+    tlsTerminatedUpstream: "1"
   secrets:
     # APEX_KMS_ROOT_KEY (hex). Empty -> apex-server falls back to a fully
     # ephemeral in-process root key (logged loudly) — fine for a smoke test,

@@ -48,6 +48,15 @@ exactly that, honestly.
   [`deployment/docker/Dockerfile`](../docker/Dockerfile)'s image (built with
   `--build-arg FEATURES=tiered-memory,postgres` to match this chart's
   Postgres/Qdrant wiring) to a real registry and set these before deploying.
+- **No TLS termination or ingress of its own (RM-GA-P1 SEC-202).** The pod
+  binds `0.0.0.0`, so `apex_server::serve()` refuses to start without either
+  real TLS (not templated by this chart) or `apex.env.tlsTerminatedUpstream`
+  acknowledging a proxy/mesh sidecar handles it — defaulted to `"1"` here,
+  since this chart has no Ingress/Gateway resource. Put a real TLS-terminating
+  proxy in front before exposing this outside the cluster. Real auth
+  (RM-GA-P1 SEC-101) is also required now — `apex.env.authMode` defaults to
+  `apikey`; mint a key post-deploy with `kubectl exec -it <pod> -- apex auth
+  create-key <principal>` (persisted to the same PVC the server reads).
 
 ## Installing
 

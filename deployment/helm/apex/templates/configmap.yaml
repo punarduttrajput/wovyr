@@ -20,3 +20,9 @@ data:
   {{- if .Values.apex.env.platformAdmins }}
   APEX_PLATFORM_ADMINS: {{ .Values.apex.env.platformAdmins | quote }}
   {{- end }}
+  {{- if .Values.apex.env.authMode }}
+  APEX_AUTH_MODE: {{ .Values.apex.env.authMode | quote }}
+  {{- end }}
+  {{- if .Values.apex.env.tlsTerminatedUpstream }}
+  APEX_TLS_TERMINATED_UPSTREAM: {{ .Values.apex.env.tlsTerminatedUpstream | quote }}
+  {{- end }}
