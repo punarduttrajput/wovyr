@@ -59,12 +59,12 @@ use axum::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tower::ServiceBuilder;
 
@@ -194,6 +194,110 @@ impl AgentStore {
     }
 }
 
+/// The current disposition of an asynchronously-submitted agent run (RM-GA-P2
+/// EXE-604).
+#[derive(Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum AsyncRunStatus {
+    Running,
+    Succeeded {
+        output: Value,
+        steps: usize,
+        usage: Value,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+struct RunRecord {
+    tenant: String,
+    status: AsyncRunStatus,
+    inserted_at: Instant,
+}
+
+/// Tracks runs submitted via `POST /api/v1/agents:run` with `Prefer: respond-async`
+/// (RM-GA-P2 EXE-604), so `GET /api/v1/agents/runs/{id}` has something to poll.
+/// In-memory only, unlike `AgentStore`/`workflow_owners`/etc. (DUR-404's durable
+/// pieces): an agent run has no checkpoint to resume from, so a run truly in flight
+/// when the process dies is gone regardless of whether its *record* survives —
+/// persisting just the record would misleadingly suggest otherwise. Bounded the
+/// same way `hardening::IdempotencyStore` is (SEC-205's discipline): entries expire
+/// after `ttl` and the map is capped at `max_entries`, so a long-lived server
+/// doesn't accumulate one entry per run forever.
+struct RunStore {
+    inner: Mutex<RunStoreInner>,
+    ttl: Duration,
+    max_entries: usize,
+}
+
+#[derive(Default)]
+struct RunStoreInner {
+    entries: HashMap<String, RunRecord>,
+    order: VecDeque<String>,
+}
+
+impl RunStore {
+    fn new(ttl: Duration, max_entries: usize) -> Self {
+        Self {
+            inner: Mutex::new(RunStoreInner::default()),
+            ttl,
+            max_entries,
+        }
+    }
+
+    /// Mirrors `IdempotencyStore::evict`: drop expired entries, or — once at
+    /// capacity — the single oldest entry regardless of expiry, to admit one more.
+    fn evict(inner: &mut RunStoreInner, ttl: Duration, max_entries: usize, make_room: bool) {
+        while let Some(front) = inner.order.front() {
+            let expired = inner
+                .entries
+                .get(front)
+                .is_none_or(|r| r.inserted_at.elapsed() > ttl);
+            let over_capacity = make_room && inner.entries.len() >= max_entries;
+            if !expired && !over_capacity {
+                break;
+            }
+            let key = inner.order.pop_front().expect("front just checked Some");
+            inner.entries.remove(&key);
+        }
+    }
+
+    /// Record a newly-submitted run as `Running`.
+    fn insert_running(&self, run_id: String, tenant: String) {
+        let mut inner = self.inner.lock().expect("run store poisoned");
+        Self::evict(&mut inner, self.ttl, self.max_entries, true);
+        inner.entries.insert(
+            run_id.clone(),
+            RunRecord {
+                tenant,
+                status: AsyncRunStatus::Running,
+                inserted_at: Instant::now(),
+            },
+        );
+        inner.order.push_back(run_id);
+    }
+
+    /// Move a run to its terminal status. A no-op if the run was already evicted
+    /// (TTL/capacity) before it finished — the poller will see a 404, which is
+    /// honest: this server instance no longer has anything to report.
+    fn finish(&self, run_id: &str, status: AsyncRunStatus) {
+        let mut inner = self.inner.lock().expect("run store poisoned");
+        if let Some(record) = inner.entries.get_mut(run_id) {
+            record.status = status;
+        }
+    }
+
+    /// The run's tenant + current status, if it's still tracked.
+    fn get(&self, run_id: &str) -> Option<(String, AsyncRunStatus)> {
+        let inner = self.inner.lock().expect("run store poisoned");
+        inner
+            .entries
+            .get(run_id)
+            .map(|r| (r.tenant.clone(), r.status.clone()))
+    }
+}
+
 /// Shared server state: the LLM gateway, tool registry, metrics, a run counter, and a
 /// read-only workflow engine over the durable store (for visibility endpoints).
 pub struct AppState {
@@ -243,6 +347,9 @@ pub struct AppState {
     pub(crate) event_counter: AtomicU64,
     /// Caches responses by `Idempotency-Key` so client retries of mutations are safe.
     pub(crate) idempotency: hardening::IdempotencyStore,
+    /// Tracks runs submitted via `agents:run` with `Prefer: respond-async`
+    /// (RM-GA-P2 EXE-604) so `GET /api/v1/agents/runs/{id}` has something to poll.
+    pub(crate) runs: Arc<RunStore>,
     /// Memory engine backing the memory-explorer routes (embeds via the gateway).
     pub(crate) memory: apex_memory::MemoryEngine,
     /// The memory store the engine writes to, kept alongside for namespace/record
@@ -369,6 +476,10 @@ impl AppState {
                 env_u64("APEX_IDEMPOTENCY_MAX_ENTRIES", 10_000) as usize,
                 server_state_dir().map(|d| d.join("idempotency.json")),
             ),
+            runs: Arc::new(RunStore::new(
+                Duration::from_secs(env_u64("APEX_ASYNC_RUN_TTL_SECS", 60 * 60)),
+                env_u64("APEX_ASYNC_RUN_MAX_ENTRIES", 10_000) as usize,
+            )),
             memory,
             memory_store,
             secrets,
@@ -1206,6 +1317,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/v1/agents/{id}",
             get(get_agent_handler).delete(delete_agent_handler),
         )
+        // Poll a run submitted via `agents:run` with `Prefer: respond-async`
+        // (RM-GA-P2 EXE-604) — a cheap in-memory lookup, not an LLM call, so it
+        // belongs in the standard rate-limit tier rather than `run_routes`'.
+        .route("/api/v1/agents/runs/{run_id}", get(get_run_handler))
         // Workflow visibility (G4): list/inspect executions + a minimal read-only UI.
         .route("/api/v1/workflows", get(list_workflows_handler))
         .route("/api/v1/workflows/{id}", get(get_workflow_handler))
@@ -1412,8 +1527,30 @@ struct RunRequest {
     max_steps: Option<usize>,
 }
 
+/// Whether the caller asked for the async submit→poll shape (RM-GA-P2 EXE-604) via
+/// a standard `Prefer: respond-async` request header (RFC 7240) rather than a
+/// separate `:submit` route — a comma-separated list of preferences is allowed, so
+/// this checks each token rather than requiring an exact match.
+fn wants_async(headers: &HeaderMap) -> bool {
+    headers
+        .get("prefer")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .any(|p| p.trim().eq_ignore_ascii_case("respond-async"))
+        })
+}
+
 /// Run an agent, recording RED golden-signal metrics for the route. Instrumented so
-/// the request runs under a trace whose id becomes the latency exemplar.
+/// the request runs under a trace whose id becomes the latency exemplar. Synchronous
+/// by default (unchanged from before EXE-604); `Prefer: respond-async` switches to
+/// the async submit→poll shape (mirroring the workflow submit route): the run is
+/// admitted and started on a background task holding the quota permit, and the
+/// response comes back immediately with a `run_id` to poll at `GET
+/// /api/v1/agents/runs/{run_id}` instead of waiting for the model/tool loop to
+/// finish. Idempotency-key replay only applies to the synchronous path — an async
+/// submission's whole point is not blocking on the eventual response, so there is no
+/// "original response" to cache and replay yet.
 #[tracing::instrument(name = "api.agents_run", skip_all)]
 async fn run_handler(
     State(state): State<Arc<AppState>>,
@@ -1422,6 +1559,13 @@ async fn run_handler(
 ) -> Result<Json<Value>, ApiError> {
     let start = Instant::now();
     let tenant = tenancy::run_tenant(&headers);
+    let project = tenancy::run_project(&headers);
+
+    if wants_async(&headers) {
+        let result = run_async_inner(&state, tenant, project, req).await;
+        record_run_metrics(&state, "agents_run_async", &result, start);
+        return result;
+    }
 
     // Idempotency (overview §9): replay the original response for a repeated key.
     let idem_key = hardening::idempotency_key(&headers);
@@ -1431,27 +1575,37 @@ async fn run_handler(
         return Ok(Json(cached));
     }
 
-    let result = run_inner(&state, tenant.clone(), tenancy::run_project(&headers), req).await;
+    let result = run_inner(&state, tenant.clone(), project, req).await;
 
     // Cache successful responses so a client retry with the same key is safe.
     if let (Some(key), Ok(Json(body))) = (&idem_key, &result) {
         state.idempotency.put(&tenant, key, body.clone());
     }
 
-    let status = match &result {
+    record_run_metrics(&state, "agents_run", &result, start);
+    result
+}
+
+/// Record the standard RED metrics for an `agents:run` variant.
+fn record_run_metrics(
+    state: &AppState,
+    route: &str,
+    result: &Result<Json<Value>, ApiError>,
+    start: Instant,
+) {
+    let status = match result {
         Ok(_) => 200u16,
         Err(e) => e.status.as_u16(),
     };
     state.metrics.counter_inc(
         "apex_api_requests_total",
-        &[("route", "agents_run"), ("status", &status.to_string())],
+        &[("route", route), ("status", &status.to_string())],
     );
     state.metrics.histogram_observe(
         "apex_api_request_duration_seconds",
-        &[("route", "agents_run")],
+        &[("route", route)],
         start.elapsed().as_secs_f64(),
     );
-    result
 }
 
 /// Parse the inline manifest then run it ([Agents API §5](../../docs/09-api/agents.md)).
@@ -1472,6 +1626,122 @@ async fn run_inner(
         req.max_steps,
     )
     .await
+}
+
+/// Parse + admit the run, then drive it on a background task that holds the quota
+/// permit for its own duration (not the HTTP connection) — the async counterpart of
+/// [`run_definition`]. Returns immediately once the run is admitted and the task is
+/// spawned; the task records the terminal outcome into `state.runs` for
+/// [`get_run_handler`] to serve.
+async fn run_async_inner(
+    state: &Arc<AppState>,
+    tenant: String,
+    project: Option<String>,
+    req: RunRequest,
+) -> Result<Json<Value>, ApiError> {
+    let def = AgentDefinition::from_yaml(&req.manifest)
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
+    let input = if req.input.is_null() {
+        json!({})
+    } else {
+        req.input
+    };
+
+    // Quota gate up front, same as the synchronous path: a rejected run never gets a
+    // run id at all, rather than reporting `failed` later for a run that never
+    // started.
+    let permit = tenancy::admit_run(&state.tenancy, &state.quota, project.as_deref())?;
+
+    let run_id = format!("run_{}", state.run_counter.fetch_add(1, Ordering::SeqCst));
+    state.runs.insert_running(run_id.clone(), tenant.clone());
+
+    let mut opts = RunOptions::new(input)
+        .with_tenant(tenant.clone())
+        .with_hosted(true);
+    if let Some(n) = req.max_steps.or(def.spec.max_steps) {
+        opts = opts.with_max_steps(n);
+    }
+
+    let state2 = state.clone();
+    let run_id2 = run_id.clone();
+    tokio::spawn(async move {
+        let _permit = permit; // held for the run's duration, not the HTTP connection
+        match run_agent(&def, &state2.gateway, &state2.registry, opts, &mut NullSink).await {
+            Ok(out) => {
+                tenancy::record_run_cost(&state2.quota, project.as_deref(), out.usage.cost_usd);
+                webhooks::emit(
+                    &state2,
+                    "agent.run.completed",
+                    &tenant,
+                    json!({ "run_id": run_id2, "total_tokens": out.usage.total_tokens }),
+                );
+                state2.runs.finish(
+                    &run_id2,
+                    AsyncRunStatus::Succeeded {
+                        output: json!({ "message": out.text }),
+                        steps: out.steps,
+                        usage: json!({
+                            "total_tokens": out.usage.total_tokens,
+                            "cost_usd": out.usage.cost_usd,
+                        }),
+                    },
+                );
+            }
+            Err(e) => {
+                webhooks::emit(
+                    &state2,
+                    "agent.run.failed",
+                    &tenant,
+                    json!({ "error": e.to_string() }),
+                );
+                state2.runs.finish(
+                    &run_id2,
+                    AsyncRunStatus::Failed {
+                        error: e.to_string(),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(Json(json!({ "run_id": run_id, "status": "running" })))
+}
+
+/// `GET /api/v1/agents/runs/{run_id}` — poll a run submitted via `agents:run` with
+/// `Prefer: respond-async` (RM-GA-P2 EXE-604). Tenant-scoped like every other
+/// resource: a run belonging to another tenant is hidden behind the same `404` an
+/// unknown run gets, rather than a `403` that would confirm it exists.
+async fn get_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let tenant = tenancy::run_tenant(&headers);
+    let missing = || {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("run `{run_id}` not found"),
+        )
+    };
+    let (owner, status) = state.runs.get(&run_id).ok_or_else(missing)?;
+    if owner != tenant {
+        return Err(missing());
+    }
+    let mut body = json!({ "run_id": run_id });
+    match serde_json::to_value(&status).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            e.to_string(),
+        )
+    })? {
+        Value::Object(fields) => {
+            body.as_object_mut().unwrap().extend(fields);
+        }
+        _ => unreachable!("AsyncRunStatus always serializes to an object"),
+    }
+    Ok(Json(body))
 }
 
 /// A [`RunEventSink`] that forwards each run event to an SSE channel as a JSON frame.
@@ -2131,6 +2401,140 @@ mod tests {
         assert_eq!(v["status"], "succeeded");
         assert!(v["run_id"].as_str().unwrap().starts_with("run_"));
         assert!(v["output"]["message"].as_str().unwrap().contains("ping"));
+    }
+
+    /// RM-GA-P2 EXE-604 acceptance: `Prefer: respond-async` returns a run id
+    /// immediately (before the model/tool loop even starts), and polling `GET
+    /// /api/v1/agents/runs/{id}` observes `running` then `succeeded` with the same
+    /// output shape the synchronous path returns inline.
+    #[tokio::test]
+    async fn async_run_returns_immediately_then_polling_reflects_completion() {
+        let state = Arc::new(AppState::from_env().await);
+        let body = json!({
+            "manifest": "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
+            "input": { "message": "ping" }
+        });
+
+        let resp = raw(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            &[("prefer", "respond-async")],
+            body,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let submitted: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(submitted["status"], "running");
+        let run_id = submitted["run_id"].as_str().unwrap().to_string();
+        assert!(run_id.starts_with("run_"));
+
+        // Poll until it finishes — the mock provider is near-instant, but the result
+        // lands on a background task, not synchronously with the submit response.
+        let mut final_body = None;
+        for _ in 0..100 {
+            let (st, poll_body) = req(
+                &state,
+                "GET",
+                &format!("/api/v1/agents/runs/{run_id}"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            if poll_body["status"] != "running" {
+                final_body = Some(poll_body);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let final_body = final_body.expect("async run did not finish in time");
+        assert_eq!(final_body["status"], "succeeded");
+        assert_eq!(final_body["run_id"], run_id);
+        assert!(
+            final_body["output"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ping")
+        );
+        assert!(final_body["usage"]["total_tokens"].is_number());
+    }
+
+    /// A run rejected by the project quota gate never gets a run id at all — the
+    /// async path fails closed up front rather than reporting `failed` later for a
+    /// run that never started.
+    #[tokio::test]
+    async fn async_run_quota_rejection_returns_no_run_id() {
+        let state = Arc::new(AppState::from_env().await);
+        state
+            .tenancy
+            .set_quota(
+                "prj-async-block",
+                apex_tenancy::QuotaLimits {
+                    concurrent_agent_runs: Some(0),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let resp = raw(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            &[
+                ("prefer", "respond-async"),
+                ("x-apex-project", "prj-async-block"),
+            ],
+            json!({
+                "manifest": "metadata:\n  name: q\nspec:\n  instructions: Hi.\n",
+                "input": { "message": "hi" }
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Polling an unknown run, or one belonging to another tenant, is `404` — the
+    /// same "hidden behind not-found" discipline every other tenant-scoped resource
+    /// in this crate uses (never a `403` that would confirm the run exists).
+    #[tokio::test]
+    async fn async_run_polling_is_tenant_scoped_and_404s_on_unknown() {
+        let state = Arc::new(AppState::from_env().await);
+
+        let (st, _) = req(
+            &state,
+            "GET",
+            "/api/v1/agents/runs/run_does_not_exist",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+
+        let resp = raw(
+            &state,
+            "POST",
+            "/api/v1/agents:run",
+            &[("prefer", "respond-async")],
+            json!({
+                "manifest": "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
+                "input": { "message": "ping" }
+            }),
+        )
+        .await;
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let submitted: Value = serde_json::from_slice(&bytes).unwrap();
+        let run_id = submitted["run_id"].as_str().unwrap();
+
+        // A different tenant polling the same run id sees the same 404 as unknown.
+        let resp = raw(
+            &state,
+            "GET",
+            &format!("/api/v1/agents/runs/{run_id}"),
+            &[("x-apex-tenant", "someone-else")],
+            Value::Null,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// A caller-supplied `max_steps` reaches [`apex_agent::RunOptions`] rather than
