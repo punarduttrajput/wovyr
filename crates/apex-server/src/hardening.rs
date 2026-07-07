@@ -12,9 +12,10 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 // --- pagination (overview §6) ----------------------------------------------------
 
@@ -85,30 +86,101 @@ fn decode_cursor(cursor: &str) -> Option<usize> {
 
 // --- idempotency (overview §9) ---------------------------------------------------
 
-/// Caches responses to mutating requests by `Idempotency-Key`, so a client retry
-/// returns the original result instead of acting twice. In-memory + tenant-scoped;
-/// a TTL/eviction policy is a later refinement.
+/// Default idempotency-key retention (SEC-205): long enough to cover a client's
+/// realistic retry window, short enough that memory doesn't grow forever.
+const DEFAULT_IDEMPOTENCY_TTL_SECS: u64 = 24 * 60 * 60;
+/// Default cap on distinct tracked keys (SEC-205) — bounds memory even under a burst
+/// of unique keys arriving faster than the TTL sweeps them.
+const DEFAULT_IDEMPOTENCY_MAX_ENTRIES: usize = 10_000;
+
+struct IdempotencyEntry {
+    body: Value,
+    inserted_at: Instant,
+}
+
+/// Insertion-ordered map + a FIFO eviction queue, so both TTL expiry and the max-entry
+/// bound can cheaply find "the oldest entries" without scanning the whole map.
 #[derive(Default)]
+struct IdempotencyInner {
+    entries: HashMap<String, IdempotencyEntry>,
+    order: VecDeque<String>,
+}
+
+/// Caches responses to mutating requests by `Idempotency-Key`, so a client retry
+/// returns the original result instead of acting twice. In-memory + tenant-scoped,
+/// bounded two ways (SEC-205): entries older than `ttl` expire (checked lazily, on
+/// each `get`/`put`, rather than a background sweeper — no extra task, no clock read
+/// outside these two call sites), and the map never exceeds `max_entries` — a client
+/// minting unique keys faster than the TTL elapses evicts the oldest tracked key
+/// (FIFO) rather than growing without bound.
 pub(crate) struct IdempotencyStore {
-    inner: Mutex<HashMap<String, Value>>,
+    inner: Mutex<IdempotencyInner>,
+    ttl: Duration,
+    max_entries: usize,
+}
+
+impl Default for IdempotencyStore {
+    fn default() -> Self {
+        Self::new(
+            Duration::from_secs(DEFAULT_IDEMPOTENCY_TTL_SECS),
+            DEFAULT_IDEMPOTENCY_MAX_ENTRIES,
+        )
+    }
 }
 
 impl IdempotencyStore {
-    /// The cached response body for `(tenant, key)`, if this key was already handled.
+    /// A store retaining entries for `ttl`, capped at `max_entries`.
+    pub(crate) fn new(ttl: Duration, max_entries: usize) -> Self {
+        Self {
+            inner: Mutex::new(IdempotencyInner::default()),
+            ttl,
+            max_entries,
+        }
+    }
+
+    /// Drop entries at the front of `order` (the oldest) that have expired, or — once
+    /// at `max_entries` — the single oldest entry regardless of expiry, to admit one
+    /// more. Removing a key already absent from `entries` (a stale duplicate left in
+    /// `order` by an overwritten `put`) is a harmless no-op.
+    fn evict(inner: &mut IdempotencyInner, ttl: Duration, max_entries: usize, make_room: bool) {
+        while let Some(front) = inner.order.front() {
+            let expired = inner
+                .entries
+                .get(front)
+                .is_none_or(|e| e.inserted_at.elapsed() > ttl);
+            let over_capacity = make_room && inner.entries.len() >= max_entries;
+            if !expired && !over_capacity {
+                break;
+            }
+            let key = inner.order.pop_front().expect("front just checked Some");
+            inner.entries.remove(&key);
+        }
+    }
+
+    /// The cached response body for `(tenant, key)`, if this key was already handled
+    /// and hasn't expired.
     pub(crate) fn get(&self, tenant: &str, key: &str) -> Option<Value> {
-        self.inner
-            .lock()
-            .expect("idempotency mutex poisoned")
+        let mut inner = self.inner.lock().expect("idempotency mutex poisoned");
+        Self::evict(&mut inner, self.ttl, self.max_entries, false);
+        inner
+            .entries
             .get(&scoped(tenant, key))
-            .cloned()
+            .map(|e| e.body.clone())
     }
 
     /// Remember `body` as the response for `(tenant, key)`.
     pub(crate) fn put(&self, tenant: &str, key: &str, body: Value) {
-        self.inner
-            .lock()
-            .expect("idempotency mutex poisoned")
-            .insert(scoped(tenant, key), body);
+        let mut inner = self.inner.lock().expect("idempotency mutex poisoned");
+        Self::evict(&mut inner, self.ttl, self.max_entries, true);
+        let scoped_key = scoped(tenant, key);
+        inner.entries.insert(
+            scoped_key.clone(),
+            IdempotencyEntry {
+                body,
+                inserted_at: Instant::now(),
+            },
+        );
+        inner.order.push_back(scoped_key);
     }
 }
 
@@ -300,5 +372,52 @@ mod tests {
         // Same key, different tenant → independent.
         assert_eq!(store.get("other", "k1"), None);
         assert_eq!(store.get("acme", "k2"), None);
+    }
+
+    // --- RM-GA-P1 SEC-205: bounded + TTL-evicted --------------------------------------
+
+    #[test]
+    fn entries_expire_after_the_configured_ttl() {
+        let store = IdempotencyStore::new(Duration::from_millis(10), 100);
+        store.put("acme", "k1", json!({"run": "a"}));
+        assert_eq!(store.get("acme", "k1"), Some(json!({"run": "a"})));
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            store.get("acme", "k1"),
+            None,
+            "expired entry must not be returned"
+        );
+    }
+
+    #[test]
+    fn total_entries_are_capped_evicting_the_oldest_first() {
+        let store = IdempotencyStore::new(Duration::from_secs(3600), 2);
+        store.put("acme", "k1", json!(1));
+        store.put("acme", "k2", json!(2));
+        // A third distinct key exceeds the cap — the oldest (k1) is evicted to admit
+        // it, not the just-inserted k2.
+        store.put("acme", "k3", json!(3));
+        assert_eq!(
+            store.get("acme", "k1"),
+            None,
+            "oldest entry should be evicted"
+        );
+        assert_eq!(store.get("acme", "k2"), Some(json!(2)));
+        assert_eq!(store.get("acme", "k3"), Some(json!(3)));
+    }
+
+    /// A soak test with unique keys shows bounded memory (SEC-205 acceptance
+    /// criterion): far more distinct keys than `max_entries` are inserted, and the
+    /// store never grows past that cap.
+    #[test]
+    fn soak_with_unique_keys_stays_within_the_entry_cap() {
+        let max_entries = 50;
+        let store = IdempotencyStore::new(Duration::from_secs(3600), max_entries);
+        for i in 0..(max_entries * 20) {
+            store.put("acme", &format!("k{i}"), json!(i));
+        }
+        let inner = store.inner.lock().unwrap();
+        assert!(inner.entries.len() <= max_entries);
+        assert!(inner.order.len() <= max_entries);
     }
 }

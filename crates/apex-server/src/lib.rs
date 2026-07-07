@@ -22,6 +22,7 @@ pub use auth::{ApiKeyStore, AuthMode, FileApiKeyStore, InMemoryApiKeyStore};
 mod marketplace;
 mod memory;
 mod plugins;
+mod rate_limit;
 mod secrets;
 mod tenancy;
 mod tools;
@@ -43,8 +44,9 @@ use apex_workflow::{
 use axum::{
     BoxError, Json, Router,
     error_handling::HandleErrorLayer,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::Next,
     response::{
         Html, IntoResponse, Response,
         sse::{Event, Sse},
@@ -179,6 +181,16 @@ pub struct AppState {
     /// Cross-cutting HTTP resource limits (timeout/body/concurrency, [SEC-201]),
     /// resolved once at construction — see [`HttpLimits::from_env`].
     pub(crate) http_limits: HttpLimits,
+    /// Per-key rate limiter for most routes ([SEC-203]).
+    pub(crate) rate_limiter_standard: Arc<rate_limit::RateLimiter>,
+    /// A tighter per-key rate limiter for expensive/sensitive routes — the direct
+    /// agent-run endpoints, KMS, and secrets ([SEC-203]).
+    pub(crate) rate_limiter_sensitive: Arc<rate_limit::RateLimiter>,
+    /// `APEX_CORS_ALLOWED_ORIGINS` (comma-separated) — an explicit cross-origin
+    /// allow-list ([SEC-204]). Empty (the default) means no `CorsLayer` at all: the
+    /// browser's own same-origin policy already blocks cross-origin reads with no
+    /// CORS headers present, so "no config" correctly means same-origin-only.
+    pub(crate) cors_allowed_origins: Vec<String>,
 }
 
 impl AppState {
@@ -241,7 +253,10 @@ impl AppState {
             webhook_sender: Arc::new(webhooks::ReqwestSender::default()),
             webhook_policy: BackoffPolicy::default(),
             event_counter: AtomicU64::new(1),
-            idempotency: hardening::IdempotencyStore::default(),
+            idempotency: hardening::IdempotencyStore::new(
+                Duration::from_secs(env_u64("APEX_IDEMPOTENCY_TTL_SECS", 24 * 60 * 60)),
+                env_u64("APEX_IDEMPOTENCY_MAX_ENTRIES", 10_000) as usize,
+            ),
             memory,
             memory_store,
             secrets,
@@ -251,6 +266,21 @@ impl AppState {
             anonymous_allowed: auth::resolve_anonymous_allowed(),
             auth_mode: auth::AuthMode::from_env(),
             http_limits: HttpLimits::from_env(),
+            rate_limiter_standard: Arc::new(rate_limit::RateLimiter::new(
+                env_u64("APEX_RATE_LIMIT_STANDARD_PER_MIN", 300) as u32,
+                env_u64("APEX_RATE_LIMIT_STANDARD_PER_MIN", 300) as u32,
+            )),
+            rate_limiter_sensitive: Arc::new(rate_limit::RateLimiter::new(
+                env_u64("APEX_RATE_LIMIT_SENSITIVE_PER_MIN", 30) as u32,
+                env_u64("APEX_RATE_LIMIT_SENSITIVE_PER_MIN", 30) as u32,
+            )),
+            cors_allowed_origins: std::env::var("APEX_CORS_ALLOWED_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
         }
     }
 
@@ -353,6 +383,22 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn with_http_limits(mut self, limits: HttpLimits) -> Self {
         self.http_limits = limits;
+        self
+    }
+
+    /// Override the standard-tier rate limiter (SEC-203) with a tighter one so tests
+    /// can drive it to its limit quickly, without waiting on the production defaults.
+    #[cfg(test)]
+    pub(crate) fn with_rate_limiter_standard(mut self, limiter: rate_limit::RateLimiter) -> Self {
+        self.rate_limiter_standard = Arc::new(limiter);
+        self
+    }
+
+    /// Override the CORS allow-list (SEC-204) without mutating the process-global
+    /// `APEX_CORS_ALLOWED_ORIGINS`.
+    #[cfg(test)]
+    pub(crate) fn with_cors_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.cors_allowed_origins = origins;
         self
     }
 
@@ -649,6 +695,45 @@ fn env_u64(var: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+/// A `CorsLayer` allowing exactly `origins` (SEC-204), or `None` if the list is empty
+/// — same-origin-only, the default posture, needs no layer at all: with no CORS
+/// headers present a browser's own same-origin policy already blocks cross-origin
+/// reads. Never combines a wildcard origin with credentialed requests (an explicit
+/// origin list, never `Any`, alongside `allow_credentials(true)`).
+fn cors_layer(origins: &[String]) -> Option<tower_http::cors::CorsLayer> {
+    if origins.is_empty() {
+        return None;
+    }
+    let allowed: Vec<header::HeaderValue> = origins
+        .iter()
+        .filter_map(|o| header::HeaderValue::from_str(o).ok())
+        .collect();
+    Some(
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(allowed)
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PATCH,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                header::CONTENT_TYPE,
+                header::AUTHORIZATION,
+                header::IF_MATCH,
+                header::HeaderName::from_static("x-apex-tenant"),
+                header::HeaderName::from_static("x-apex-principal"),
+                header::HeaderName::from_static("x-apex-project"),
+                header::HeaderName::from_static("idempotency-key"),
+            ])
+            .expose_headers([
+                header::HeaderName::from_static("x-request-id"),
+                header::ETAG,
+            ])
+            .allow_credentials(true),
+    )
+}
+
 /// Convert a boxed error from the timeout/load-shed layers into the standard error
 /// envelope (SEC-201): a request that ran past its timeout is `408`; a request that
 /// arrived while the server was already at `APEX_HTTP_MAX_CONCURRENCY` is `503` (the
@@ -687,22 +772,56 @@ async fn handle_overload_or_timeout(err: BoxError) -> Response {
 /// limits (SEC-201) wrap the whole router: a body-size cap, then a concurrency cap
 /// with load-shedding (`503` past the limit, rather than an unboundedly growing
 /// pending-request queue). The direct agent-run endpoints get a longer, dedicated
-/// timeout than the rest of the API.
+/// timeout than the rest of the API. Per-key rate limiting ([`rate_limit`], SEC-203)
+/// runs *after* auth (so it keys off the verified principal, not a spoofable raw
+/// header) with two tiers: a tighter one for the direct agent-run endpoints plus
+/// KMS/secrets, a looser one for everything else.
 pub fn router(state: Arc<AppState>) -> Router {
     let limits = state.http_limits;
+    let cors = cors_layer(&state.cors_allowed_origins);
     let auth = || axum::middleware::from_fn_with_state(state.clone(), auth::authenticate);
+    let rate_limit_sensitive = || {
+        let limiter = state.rate_limiter_sensitive.clone();
+        axum::middleware::from_fn(move |headers: HeaderMap, req: Request, next: Next| {
+            rate_limit::enforce(limiter.clone(), headers, req, next)
+        })
+    };
+    let rate_limit_standard = || {
+        let limiter = state.rate_limiter_standard.clone();
+        axum::middleware::from_fn(move |headers: HeaderMap, req: Request, next: Next| {
+            rate_limit::enforce(limiter.clone(), headers, req, next)
+        })
+    };
 
     // The direct agent-run endpoints call an LLM provider synchronously and can
-    // legitimately run far longer than the rest of the API.
+    // legitimately run far longer than the rest of the API. Expensive, so a tighter
+    // rate-limit tier too (SEC-203), shared with KMS/secrets below.
     let run_routes = Router::new()
         .route("/api/v1/agents:run", post(run_handler))
         .route("/api/v1/agents:stream", post(run_stream_handler))
         .route("/api/v1/agents/{id}/run", post(run_stored_handler))
+        // Auth first, so the rate limiter keys off the *verified* principal
+        // (auth overwrites `X-Apex-Principal`) — not a spoofable raw header.
+        .layer(rate_limit_sensitive())
         .layer(auth())
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(handle_overload_or_timeout))
                 .timeout(Duration::from_secs(limits.run_timeout_secs)),
+        );
+
+    // KMS + secrets: the default (not the run-routes') timeout, but the same tighter
+    // rate-limit tier as the agent-run endpoints (SEC-203) — sensitive, not merely
+    // slow.
+    let sensitive_routes = Router::new()
+        .merge(secrets::routes())
+        .merge(kms::routes())
+        .layer(rate_limit_sensitive())
+        .layer(auth())
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(handle_overload_or_timeout))
+                .timeout(Duration::from_secs(limits.timeout_secs)),
         );
 
     let other_protected = Router::new()
@@ -731,14 +850,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(plugins::routes())
         // Marketplace: publish, discover, download, rate, verify, install.
         .merge(marketplace::routes())
-        // Secret vault: create/list/get/rotate/delete (tenant-scoped, RBAC-gated).
-        .merge(secrets::routes())
-        // KMS: roll/crypto-shred a tenant's key material (tenant-scoped, RBAC-gated).
-        .merge(kms::routes())
         // Audit trail: read the tenant's tamper-evident security records.
         .merge(audit::routes())
         // Tool discovery: list registered tools (built-ins + enabled plugin tools).
         .merge(tools::routes())
+        .layer(rate_limit_standard())
         .layer(auth())
         .layer(
             ServiceBuilder::new()
@@ -755,8 +871,9 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .timeout(Duration::from_secs(limits.timeout_secs)),
         );
 
-    public
+    let app = public
         .merge(run_routes)
+        .merge(sensitive_routes)
         .merge(other_protected)
         .with_state(state)
         // Stamp every response (incl. errors) with a request id (API overview §14).
@@ -767,7 +884,15 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(HandleErrorLayer::new(handle_overload_or_timeout))
                 .load_shed()
                 .concurrency_limit(limits.max_concurrency),
-        )
+        );
+
+    // Outermost: a CORS preflight (`OPTIONS`) must never reach auth (which would
+    // otherwise reject it for lacking a credential) — tower_http's CorsLayer answers
+    // preflight requests directly.
+    match cors {
+        Some(cors) => app.layer(cors),
+        None => app,
+    }
 }
 
 /// Metrics endpoint ([metrics §2](../../docs/14-observability/metrics.md)). Serves
@@ -855,17 +980,22 @@ pub async fn serve(addr: SocketAddr) -> apex_common::Result<()> {
                 .await
                 .map_err(|e| Error::config(format!("failed to load TLS cert/key: {e}")))?;
             tracing::info!(%addr, "apex server listening (https)");
+            // `with_connect_info` so `rate_limit`'s client-IP fallback (SEC-203) sees
+            // the real peer address for callers with no verified principal.
             axum_server::bind_rustls(addr, config)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
                 .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
         }
         None => {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             tracing::info!(%addr, "apex server listening (http)");
-            axum::serve(listener, app)
-                .await
-                .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .map_err(|e| Error::Runtime(format!("server error: {e}")))?;
         }
     }
     Ok(())
@@ -3214,5 +3344,156 @@ mod tests {
 
         server.abort();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- RM-GA-P1 SEC-203: per-principal rate limiting -------------------------------
+
+    /// A caller past their bucket's budget gets `429` with `Retry-After` — and it's
+    /// genuinely per-principal: a different caller has an untouched bucket.
+    #[tokio::test]
+    async fn standard_tier_rate_limit_returns_429_with_retry_after_then_isolates_by_principal() {
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_rate_limiter_standard(rate_limit::RateLimiter::new(2, 2)),
+        );
+
+        for _ in 0..2 {
+            let resp = raw(
+                &state,
+                "GET",
+                "/api/v1/tools",
+                &[("x-apex-principal", "alice")],
+                Value::Null,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let resp = raw(
+            &state,
+            "GET",
+            "/api/v1/tools",
+            &[("x-apex-principal", "alice")],
+            Value::Null,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().get("retry-after").is_some());
+
+        // bob has his own bucket — untouched by alice being rate-limited.
+        let resp = raw(
+            &state,
+            "GET",
+            "/api/v1/tools",
+            &[("x-apex-principal", "bob")],
+            Value::Null,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Rate limiting must run *after* auth: the bucket key is the verified principal
+    /// (which auth overwrites `X-Apex-Principal` with), not a client-supplied header —
+    /// so presenting a fresh, spoofed principal on every request cannot evade the
+    /// limiter as long as the underlying credential is the same real caller.
+    #[tokio::test]
+    async fn rate_limit_keys_off_the_verified_principal_not_a_spoofed_header() {
+        use axum::body::Body;
+
+        let keys = InMemoryApiKeyStore::new();
+        keys.insert("alice-key", "alice");
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_api_keys(Arc::new(keys))
+                .with_auth_mode(AuthMode::ApiKey)
+                .with_rate_limiter_standard(rate_limit::RateLimiter::new(1, 1)),
+        );
+
+        let call = |spoofed_principal: &'static str| {
+            let state = state.clone();
+            async move {
+                router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri("/api/v1/tools")
+                            .header("authorization", "Bearer alice-key")
+                            .header("x-apex-principal", spoofed_principal)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        assert_eq!(call("attacker-1").await.status(), StatusCode::OK);
+        // A different spoofed header, same real credential — still rate-limited,
+        // since the bucket key came from the verified `alice`, not these headers.
+        assert_eq!(
+            call("attacker-2").await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    // --- RM-GA-P1 SEC-204: CORS allow-list -------------------------------------------
+
+    /// A configured origin's preflight is answered with that exact origin allowed; an
+    /// unlisted origin's preflight doesn't 4xx (tower_http just omits the allow
+    /// header), which is what tells the browser not to expose the response to script.
+    #[tokio::test]
+    async fn configured_origin_passes_preflight_but_unlisted_origin_gets_no_allow_header() {
+        use axum::body::Body;
+
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_cors_allowed_origins(vec!["https://dashboard.example.com".to_string()]),
+        );
+
+        let preflight = |origin: &'static str| {
+            let state = state.clone();
+            async move {
+                router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("OPTIONS")
+                            .uri("/api/v1/tools")
+                            .header("origin", origin)
+                            .header("access-control-request-method", "GET")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let resp = preflight("https://dashboard.example.com").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("access-control-allow-origin").unwrap(),
+            "https://dashboard.example.com"
+        );
+
+        let resp = preflight("https://evil.example.com").await;
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+    }
+
+    /// Default posture (`APEX_CORS_ALLOWED_ORIGINS` unset/empty): no `CorsLayer` at
+    /// all, so no CORS headers appear on any response — same-origin only.
+    #[tokio::test]
+    async fn no_configured_origins_means_no_cors_headers_at_all() {
+        let state = Arc::new(AppState::from_env().await.with_cors_allowed_origins(vec![]));
+        let resp = raw(
+            &state,
+            "GET",
+            "/healthz",
+            &[("origin", "https://dashboard.example.com")],
+            Value::Null,
+        )
+        .await;
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
     }
 }
