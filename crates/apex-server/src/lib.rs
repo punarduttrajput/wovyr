@@ -326,6 +326,15 @@ impl AppState {
         self
     }
 
+    /// Override the tool registry (tests exercise `APEX_ENABLE_SHELL_TOOL`'s effect
+    /// this way instead of mutating the process-global env var, which every other
+    /// test in this crate's default shell-disabled behavior depends on).
+    #[cfg(test)]
+    pub(crate) fn with_registry(mut self, registry: ToolRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
     /// Override the memory engine + store (tests inject an in-memory store so they don't
     /// touch the shared `~/.apex/memory`).
     #[cfg(test)]
@@ -2906,12 +2915,17 @@ mod tests {
     }
 
     /// `APEX_ENABLE_SHELL_TOOL=1` is the explicit operator opt-in (SEC-301) that
-    /// re-enables `shell` in the server's own registry.
+    /// re-enables `shell` in the server's own registry. Exercised via `with_registry`
+    /// (what `from_env()` would build with the flag set) rather than actually
+    /// mutating the process-global env var, which every other test in this crate's
+    /// default shell-disabled behavior depends on.
     #[tokio::test]
     async fn shell_tool_opt_in_env_var_re_enables_it() {
-        unsafe { std::env::set_var("APEX_ENABLE_SHELL_TOOL", "1") };
-        let state = Arc::new(AppState::from_env().await);
-        unsafe { std::env::remove_var("APEX_ENABLE_SHELL_TOOL") };
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_registry(ToolRegistry::with_privileged_builtins()),
+        );
         let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
         let ids: Vec<&str> = body["tools"]

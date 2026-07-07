@@ -69,6 +69,13 @@ pub struct ToolContext {
     /// `Some(set)` enforces that a tool's declared permissions are a subset of it
     /// ([spec §47](../../docs/04-agent-framework/tool-framework.md)).
     pub granted_permissions: Option<Vec<String>>,
+    /// Per-tenant egress allow-list for `http_get`
+    /// ([RM-GA-P1 SEC-304](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
+    /// `Some(hosts)` restricts outbound requests to exactly these hosts; `None` allows
+    /// any public host. Either way, a host resolving to a loopback/link-local/private/
+    /// metadata address is refused regardless — the allow-list narrows *public*
+    /// egress, it never legitimizes reaching an internal address.
+    pub egress_allowlist: Option<Vec<String>>,
 }
 
 /// Parameters passed to a tool, as a validated-at-the-boundary JSON value.

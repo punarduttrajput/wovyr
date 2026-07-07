@@ -144,20 +144,17 @@ const MAX_BODY_BYTES: usize = 16 * 1024;
 /// default is enough until there's a concrete need to override it.
 const DEFAULT_USER_AGENT: &str = "Apex-AI-Platform/0.1 (+https://github.com/apex-ai/apex)";
 
-/// Perform an HTTP GET request and return status, headers count, and a truncated body.
-pub struct HttpGetTool {
-    client: reqwest::Client,
-}
+/// Perform an HTTP GET request and return status, headers count, and a truncated
+/// body. A unit struct — unlike before SEC-304, there's no point holding a single
+/// pre-built `reqwest::Client`: each call needs its own, with DNS resolution pinned
+/// (`.resolve(host, addr)`) to the specific address [`resolve_and_guard`] already
+/// vetted for *this* call.
+pub struct HttpGetTool;
 
 impl HttpGetTool {
-    /// Construct with a default HTTP client.
+    /// Construct the tool.
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .user_agent(DEFAULT_USER_AGENT)
-                .build()
-                .unwrap_or_default(),
-        }
+        Self
     }
 }
 
@@ -165,6 +162,81 @@ impl Default for HttpGetTool {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether `ip` must never be reached by `http_get`, regardless of any egress
+/// allow-list ([RM-GA-P1 SEC-304](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
+/// loopback, link-local (which includes the cloud metadata address
+/// `169.254.169.254`), private/unique-local, and unspecified. An IPv4-mapped IPv6
+/// address (`::ffff:a.b.c.d`) is classified by its embedded IPv4 address.
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_private()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_blocked_ip(IpAddr::V4(mapped));
+            }
+            let octets = v6.octets();
+            let is_unique_local = (octets[0] & 0xfe) == 0xfc; // fc00::/7
+            let is_link_local = octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80; // fe80::/10
+            v6.is_loopback() || v6.is_unspecified() || is_unique_local || is_link_local
+        }
+    }
+}
+
+/// Resolve `host:port`, refusing (SEC-304) if *any* candidate address is internal
+/// (loopback/link-local/private/metadata) — conservative, so a host with mixed
+/// public/internal DNS answers can't be used to reach the internal one — or if an
+/// egress allow-list is configured and `host` isn't on it. Returns the first
+/// resolved address, to be **pinned** for the actual connection (a second DNS
+/// lookup at connect time could return a different address — DNS rebinding).
+async fn resolve_and_guard(
+    host: &str,
+    port: u16,
+    egress_allowlist: Option<&[String]>,
+) -> Result<std::net::SocketAddr, ToolError> {
+    if let Some(allowlist) = egress_allowlist
+        && !allowlist.iter().any(|h| h == host)
+    {
+        return Err(ToolError::PermissionDenied(format!(
+            "host `{host}` is not on the egress allow-list"
+        )));
+    }
+
+    let mut candidates = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| ToolError::Network(format!("DNS resolution for `{host}` failed: {e}")))?;
+    let first = candidates.next().ok_or_else(|| {
+        ToolError::Network(format!("DNS resolution for `{host}` returned no addresses"))
+    })?;
+
+    for addr in std::iter::once(first).chain(candidates) {
+        if is_blocked_ip(addr.ip()) {
+            return Err(ToolError::PermissionDenied(format!(
+                "host `{host}` resolves to a blocked internal/metadata address ({})",
+                addr.ip()
+            )));
+        }
+    }
+    Ok(first)
+}
+
+/// Build a client that resolves `host` to exactly `pinned` (the address
+/// [`resolve_and_guard`] already vetted), rather than re-resolving DNS at connect
+/// time — SEC-304's defeat of a DNS-rebinding attack — carrying the tool's default
+/// `User-Agent`.
+fn pinned_client(host: &str, pinned: std::net::SocketAddr) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(DEFAULT_USER_AGENT)
+        .resolve(host, pinned)
+        .build()
 }
 
 #[async_trait]
@@ -191,7 +263,7 @@ impl Tool for HttpGetTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
         request: ToolRequest,
     ) -> Result<ToolResponse, ToolError> {
         let url = request
@@ -205,9 +277,25 @@ impl Tool for HttpGetTool {
                 "url must start with http:// or https://".into(),
             ));
         }
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|e| ToolError::Validation(format!("invalid URL `{url}`: {e}")))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| ToolError::Validation(format!("URL `{url}` has no host")))?
+            .to_string();
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| ToolError::Validation(format!("URL `{url}` has no resolvable port")))?;
 
-        let resp = self
-            .client
+        let pinned = resolve_and_guard(&host, port, ctx.egress_allowlist.as_deref()).await?;
+
+        // Pin the DNS-resolved address for this request (defeats rebinding: a second
+        // lookup at connect time could answer with a different, unsafe address) —
+        // this needs a dedicated client, since `resolve` is a client-builder setting.
+        let client = pinned_client(&host, pinned)
+            .map_err(|e| ToolError::Internal(format!("could not build HTTP client: {e}")))?;
+
+        let resp = client
             .get(url)
             .send()
             .await
@@ -744,6 +832,117 @@ mod tests {
         assert!(matches!(err, ToolError::Validation(_)));
     }
 
+    // --- RM-GA-P1 SEC-304: SSRF guard -------------------------------------------------
+
+    #[test]
+    fn is_blocked_ip_classifies_internal_and_metadata_ranges() {
+        let blocked = [
+            "127.0.0.1",        // loopback
+            "169.254.169.254",  // cloud metadata (link-local)
+            "169.254.0.1",      // link-local
+            "10.0.0.1",         // private
+            "172.16.0.1",       // private
+            "192.168.1.1",      // private
+            "0.0.0.0",          // unspecified
+            "::1",              // loopback v6
+            "fe80::1",          // link-local v6
+            "fc00::1",          // unique-local v6 ("private" equivalent)
+            "::ffff:127.0.0.1", // IPv4-mapped loopback
+            "::ffff:10.0.0.1",  // IPv4-mapped private
+        ];
+        for ip in blocked {
+            assert!(is_blocked_ip(ip.parse().unwrap()), "{ip} should be blocked");
+        }
+
+        let allowed = [
+            "8.8.8.8",
+            "1.1.1.1",
+            "93.184.216.34",
+            "2606:4700:4700::1111",
+        ];
+        for ip in allowed {
+            assert!(
+                !is_blocked_ip(ip.parse().unwrap()),
+                "{ip} should not be blocked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn http_get_denies_a_loopback_url() {
+        let t = HttpGetTool::new();
+        let ctx = ToolContext::default();
+        let err = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"url": "http://127.0.0.1:1/"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn http_get_denies_the_cloud_metadata_address() {
+        let t = HttpGetTool::new();
+        let ctx = ToolContext::default();
+        let err = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"url": "http://169.254.169.254/latest/meta-data/"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn http_get_denies_a_private_range_url() {
+        let t = HttpGetTool::new();
+        let ctx = ToolContext::default();
+        let err = t
+            .execute(&ctx, ToolRequest::new(json!({"url": "http://10.1.2.3/"})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn http_get_egress_allowlist_narrows_to_listed_public_hosts() {
+        let t = HttpGetTool::new();
+        // A public IP that isn't on the allow-list is denied even though it isn't
+        // internal.
+        let ctx = ToolContext {
+            egress_allowlist: Some(vec!["allowed.example.com".to_string()]),
+            ..ToolContext::default()
+        };
+        let err = t
+            .execute(&ctx, ToolRequest::new(json!({"url": "http://8.8.8.8/"})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn http_get_egress_allowlist_does_not_override_the_internal_range_block() {
+        let t = HttpGetTool::new();
+        // Even an explicitly allow-listed host is still refused if it resolves to an
+        // internal address — the allow-list narrows public egress, it never
+        // legitimizes reaching an internal one ("regardless" — SEC-304).
+        let ctx = ToolContext {
+            egress_allowlist: Some(vec!["127.0.0.1".to_string()]),
+            ..ToolContext::default()
+        };
+        let err = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"url": "http://127.0.0.1:1/"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
     #[tokio::test]
     async fn image_generate_missing_prompt_is_validation_error() {
         let t = ImageGenTool::new();
@@ -757,6 +956,10 @@ mod tests {
 
     #[tokio::test]
     async fn http_get_sends_default_user_agent() {
+        // Exercises `pinned_client` (the client-construction logic `execute` uses)
+        // directly against a real loopback listener, rather than through
+        // `HttpGetTool::execute` — loopback is unconditionally refused there now
+        // (SEC-304), which this test deliberately isn't exercising.
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -773,16 +976,13 @@ mod tests {
             request
         });
 
-        let t = HttpGetTool::new();
-        let ctx = ToolContext::default();
-        let resp = t
-            .execute(
-                &ctx,
-                ToolRequest::new(json!({"url": format!("http://{addr}/")})),
-            )
+        let client = pinned_client("example.invalid", addr).unwrap();
+        let resp = client
+            .get(format!("http://example.invalid:{}/", addr.port()))
+            .send()
             .await
             .unwrap();
-        assert!(resp.success);
+        assert!(resp.status().is_success());
 
         let request = server.await.unwrap();
         let user_agent_line = request

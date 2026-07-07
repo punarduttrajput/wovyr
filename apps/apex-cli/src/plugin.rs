@@ -557,6 +557,7 @@ pub async fn run_cmd(capability: &str, input: &str) -> Result<()> {
         workdir: ".".to_string(),
         tenant: String::new(),
         granted_permissions: grants,
+        egress_allowlist: None,
     };
     let params: Value =
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));

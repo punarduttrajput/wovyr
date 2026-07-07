@@ -34,6 +34,11 @@ pub struct RunOptions {
     /// preserves the CLI's `agents run --local`/eval-harness/test ergonomics; the
     /// server's run endpoints opt in via [`Self::with_hosted`].
     pub hosted: bool,
+    /// Per-tenant egress allow-list threaded to each tool's [`ToolContext`]
+    /// (SEC-304) — `http_get` refuses any host not on this list when set. `None`
+    /// (the default) allows any public host (internal/loopback/link-local/private
+    /// ranges are refused regardless, allow-list or not).
+    pub egress_allowlist: Option<Vec<String>>,
 }
 
 impl RunOptions {
@@ -44,6 +49,7 @@ impl RunOptions {
             max_steps: DEFAULT_MAX_STEPS,
             tenant: String::new(),
             hosted: false,
+            egress_allowlist: None,
         }
     }
 
@@ -65,6 +71,13 @@ impl RunOptions {
     /// trusted first-party deployment that still wants the old behavior.
     pub fn with_hosted(mut self, hosted: bool) -> Self {
         self.hosted = hosted;
+        self
+    }
+
+    /// Set the per-tenant egress allow-list (SEC-304) threaded to each tool call's
+    /// [`ToolContext`].
+    pub fn with_egress_allowlist(mut self, hosts: Vec<String>) -> Self {
+        self.egress_allowlist = Some(hosts);
         self
     }
 }
@@ -327,6 +340,7 @@ async fn execute_tool_call(
         // The run's tenant — scopes plugin secret resolution to this tenant's namespace.
         tenant: opts.tenant.clone(),
         granted_permissions,
+        egress_allowlist: opts.egress_allowlist.clone(),
     };
 
     // Fail closed: a tool requiring a permission the agent wasn't granted is denied.

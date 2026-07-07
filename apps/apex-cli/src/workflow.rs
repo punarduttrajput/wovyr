@@ -59,6 +59,7 @@ impl ActivityExecutor for PlatformExecutor {
                     workdir: ".".to_string(),
                     tenant: String::new(),
                     granted_permissions: None,
+                    egress_allowlist: None,
                 };
                 let params = if inputs.is_null() {
                     Value::Object(Default::default())
