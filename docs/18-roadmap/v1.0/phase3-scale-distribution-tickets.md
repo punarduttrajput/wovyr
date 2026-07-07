@@ -7,9 +7,10 @@ Document ID: RM-GA-P3
 
 **Document ID:** RM-GA-P3
 **File Path:** `docs/18-roadmap/v1.0/phase3-scale-distribution-tickets.md`
-**Version:** 1.2.0
-**Status:** Track A (GA) in progress — DOC-A2 done, MIG-A1 remaining; Track B
-deferred to v1.1 (ADR-0010 Path A ratified 2026-07-06)
+**Version:** 1.3.0
+**Status:** Track A (GA) done — MIG-A1 and DOC-A2 both shipped, so Phase 3's
+entire Path-A GA scope is complete; Track B deferred to v1.1 (ADR-0010 Path A
+ratified 2026-07-06)
 **Owner:** Engineering (Platform / Workflow)
 **Last Updated:** 2026-07-07
 
@@ -103,6 +104,22 @@ PP-13, and the schema portion of PP-14.)
 `crates/apex-marketplace/src/postgres.rs`; migration files under each crate;
 `apps/apex-cli/src/admin.rs` (migrate command). **Size.** L. **Depends on:** Phase-2
 CI-901 (to actually exercise the migrated backends). **Blocks:** all Track-B tickets.
+
+**Status: Done (2026-07-07).** Adopted `refinery`. Each of the three
+backends' `connect()` was rewritten to only ever *read* the applied schema
+version (fail-closed `Error::Config` on a mismatch, too old or too new) —
+`run_migrations(database_url)` is the sole DDL path now, wired into a new
+`apex admin migrate --target <workflow|memory|marketplace> --database-url
+<url>` command. Each crate migrates into its own distinct tracking table
+(`apex_{workflow,memory,marketplace}_schema_history`) so all three can share
+one physical database without colliding — verified necessary since CI's
+service-container job points all three `APEX_*_POSTGRES_URL` env vars at the
+same Postgres instance. The version-skew acceptance criterion is proven by
+`connect_refuses_a_schema_newer_than_this_binary_understands`
+(`apex-workflow/tests/postgres_store.rs`), which inserts a fake
+future-version row directly into the tracking table and asserts `connect`
+refuses it; CI-901's service-container job now runs the migrate command for
+all three schemas before the capability-gated integration tests.
 
 ---
 
@@ -354,8 +371,8 @@ the design**, it does not chase throughput. (Bridges PP-08/PP-14 to
 
 | Ticket | Track | Title | Size | Priority | Depends on |
 |--------|-------|-------|------|----------|------------|
-| MIG-A1 | A (GA) | Postgres migration framework | L | P1 | Phase-2 CI-901 |
-| DOC-A2 | A (GA) | Docs/roadmap honesty correction | S | P1 | ADR-0010 |
+| MIG-A1 | A (GA) | Postgres migration framework — **Done** | L | P1 | Phase-2 CI-901 |
+| DOC-A2 | A (GA) | Docs/roadmap honesty correction — **Done** | S | P1 | ADR-0010 |
 | DIST-B1 | B (v1.1) | Env-select workflow Postgres store | M | P1 | MIG-A1 |
 | DIST-B2 | B (v1.1) | Queue/worker/lease execution path | L | P1 | DIST-B1 |
 | DIST-B3 | B (v1.1) | Control-plane shared backend | L | P1 | MIG-A1, DUR-404 |
@@ -371,10 +388,11 @@ for a Path-A GA.**
 parallelizable to ~5–6 calendar weeks (workflow track vs. control-plane track are
 independent until DIST-B6).
 
-**Phase-3 exit (GA / Path A)** = PRD-003 §11 item 4: no doc or roadmap claims a
-capability the shipping binary lacks, and any shipped Postgres surface has real
-migrations. **Phase-3 exit (v1.1 / Path B)** = two replicas share state and survive a
-replica crash mid-workflow with exactly-once effects.
+**Phase-3 exit (GA / Path A) — met (2026-07-07):** PRD-003 §11 item 4 — no doc or
+roadmap claims a capability the shipping binary lacks (DOC-A2), and every shipped
+Postgres surface has real, versioned migrations (MIG-A1). **Phase-3 exit (v1.1 /
+Path B)** = two replicas share state and survive a replica crash mid-workflow with
+exactly-once effects — Track B, not started, gated on the GA milestone shipping.
 
 ---
 
@@ -392,6 +410,7 @@ replica crash mid-workflow with exactly-once effects.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.3.0 | 2026-07-07 | MIG-A1 done: adopted `refinery` for all three Postgres backends (workflow/memory/marketplace) — versioned migration files, fail-closed schema-version checks on connect, a new `apex admin migrate` command, and a version-skew test. Phase 3's entire Path-A GA scope is now complete |
 | 1.2.0 | 2026-07-07 | DOC-A2 done: corrected `README.md` (a much larger, long-stale gap than anticipated), `docs/12-deployment/{index,docker,terraform}.md`, and `docs/03-workflow-engine/distributed-execution.md` to state plainly what's shipped vs. aspirational/library-only |
 | 1.1.0 | 2026-07-06 | ADR-0010 ratified **Path A**: Track A confirmed as the entire Phase-3 GA scope; Track B confirmed deferred to the v1.1 "Scale-Out" milestone (status/gate wording updated accordingly) |
 | 1.0.0 | 2026-07-06 | Initial Phase-3 (scale & distribution) ticket breakdown: 2 Track-A (GA, both paths) + 8 Track-B (v1.1 Scale-Out, Path B only) tickets, gated on the ADR-0010 decision, with the real-scale-capacity boundary handed off to PRD-002/GA-001 |
