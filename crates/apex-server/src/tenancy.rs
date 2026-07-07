@@ -665,11 +665,18 @@ mod tests {
     }
 
     async fn state() -> Arc<AppState> {
-        Arc::new(
-            AppState::from_env()
-                .await
-                .with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new())),
-        )
+        let mut st = AppState::from_env()
+            .await
+            .with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new()));
+        // `AppState::from_env()` otherwise points the idempotency cache at the real
+        // `~/.apex/server/idempotency.json` (DUR-404) shared by every process on this
+        // machine — including a previous `cargo test` run. A fixed key like this
+        // module's `idempotency_key_replays_...` test uses would then replay a
+        // *prior run's* cached response instead of exercising the fresh in-memory
+        // tenancy store this helper just built, exactly as `duplicate_org_is_conflict`
+        // and friends already assume a clean slate. Swap in a purely in-memory store.
+        st.idempotency = crate::hardening::IdempotencyStore::default();
+        Arc::new(st)
     }
 
     #[tokio::test]
@@ -913,6 +920,58 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::CONFLICT);
+    }
+
+    /// RM-GA-P4 API-703: `Idempotency-Key` replay now covers every mutating route, not
+    /// just `agents:run` — including this one, which has no per-handler idempotency
+    /// code of its own. A retry with the same key must replay the original response
+    /// rather than hit the store's real duplicate-name conflict; a different key is a
+    /// genuinely new request and still conflicts, proving this isn't just dedup the
+    /// store would have done anyway.
+    #[tokio::test]
+    async fn idempotency_key_replays_across_a_route_that_would_otherwise_conflict() {
+        unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
+        let st = state().await;
+
+        async fn create(st: &Arc<AppState>, key: &str) -> (StatusCode, Value) {
+            let resp = crate::router(st.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/organizations")
+                        .header("content-type", "application/json")
+                        .header("x-apex-tenant", "acme")
+                        .header("x-apex-principal", "root")
+                        .header("idempotency-key", key)
+                        .body(axum::body::Body::from(json!({"name":"Idem"}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        let (s1, b1) = create(&st, "k1").await;
+        assert_eq!(s1, StatusCode::CREATED);
+
+        let (s2, b2) = create(&st, "k1").await;
+        assert_eq!(s2, StatusCode::CREATED);
+        assert_eq!(
+            b2["id"], b1["id"],
+            "same key must replay the original response"
+        );
+
+        let (s3, _) = create(&st, "k2").await;
+        assert_eq!(
+            s3,
+            StatusCode::CONFLICT,
+            "a different key is a real new request and hits the genuine conflict"
+        );
     }
 
     #[tokio::test]

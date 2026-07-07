@@ -33,6 +33,16 @@ function base64Decode(b64: string): Uint8Array {
   return new Uint8Array(Buffer.from(b64, "base64"));
 }
 
+/** Every mutating resource method below takes this as its trailing `opts` (or a
+ * superset adding its own headers, e.g. `project`). RM-GA-P4 API-703: the server
+ * now honors `Idempotency-Key` on every mutating route, not just `agents:run` — a
+ * retry with the same key replays the original response instead of re-executing.
+ * Not offered on `workflows.validate` (parse-only, no side effects) or
+ * `memory.query` (a read), since neither is a mutation to protect. */
+interface IdempotentOpts {
+  idempotencyKey?: string;
+}
+
 /** A client for one Apex `apex-server` instance, scoped to one tenant/principal
  * (construct a new client per tenant to act as a different one). Mirrors the
  * server's actual routes (see `docs/09-api/openapi.yaml`) — not the aspirational
@@ -75,20 +85,25 @@ export class ApexClient {
   }
 }
 
+/** Build the `Idempotency-Key` header entry (or `{}`) from an {@link IdempotentOpts}. */
+function idemHeaders(opts?: IdempotentOpts): Record<string, string> {
+  return opts?.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : {};
+}
+
 class AgentsResource {
   constructor(private readonly http: HttpClient) {}
 
   /** `POST /api/v1/agents:run` — run an inline manifest, no persistence. */
-  async run(req: RunRequest, opts?: { idempotencyKey?: string; project?: string }): Promise<RunResult> {
-    const headers: Record<string, string> = {};
-    if (opts?.idempotencyKey) headers["Idempotency-Key"] = opts.idempotencyKey;
+  async run(req: RunRequest, opts?: IdempotentOpts & { project?: string }): Promise<RunResult> {
+    const headers: Record<string, string> = { ...idemHeaders(opts) };
     if (opts?.project) headers["X-Apex-Project"] = opts.project;
     return this.http.request("POST", "/api/v1/agents:run", req, { headers });
   }
 
   /** `POST /api/v1/agents:stream` — run an inline manifest, yielding progress
    * frames as they arrive. The final yielded event is always `result` or
-   * `error`. */
+   * `error`. Not idempotency-key eligible: the response is an SSE stream, not
+   * a value the server can buffer and replay. */
   async *stream(req: RunRequest, opts?: { project?: string }): AsyncGenerator<AgentStreamEvent> {
     const headers: Record<string, string> = {};
     if (opts?.project) headers["X-Apex-Project"] = opts.project;
@@ -114,8 +129,8 @@ class AgentsResource {
   }
 
   /** `POST /api/v1/agents` — store an agent manifest. */
-  async create(manifest: string): Promise<{ id: string; status: "created" }> {
-    return this.http.request("POST", "/api/v1/agents", { manifest });
+  async create(manifest: string, opts?: IdempotentOpts): Promise<{ id: string; status: "created" }> {
+    return this.http.request("POST", "/api/v1/agents", { manifest }, { headers: idemHeaders(opts) });
   }
 
   /** `GET /api/v1/agents/{id}`. */
@@ -124,17 +139,19 @@ class AgentsResource {
   }
 
   /** `DELETE /api/v1/agents/{id}`. */
-  async delete(id: string): Promise<void> {
-    return this.http.request("DELETE", `/api/v1/agents/${encodeURIComponent(id)}`);
+  async delete(id: string, opts?: IdempotentOpts): Promise<void> {
+    return this.http.request("DELETE", `/api/v1/agents/${encodeURIComponent(id)}`, undefined, {
+      headers: idemHeaders(opts),
+    });
   }
 
   /** `POST /api/v1/agents/{id}/run` — run a stored agent by id. */
   async runStored(
     id: string,
     req?: { input?: unknown; max_steps?: number },
-    opts?: { project?: string },
+    opts?: IdempotentOpts & { project?: string },
   ): Promise<RunResult> {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...idemHeaders(opts) };
     if (opts?.project) headers["X-Apex-Project"] = opts.project;
     return this.http.request("POST", `/api/v1/agents/${encodeURIComponent(id)}/run`, req ?? {}, { headers });
   }
@@ -143,7 +160,8 @@ class AgentsResource {
 class WorkflowsResource {
   constructor(private readonly http: HttpClient) {}
 
-  /** `POST /api/v1/workflows/validate` — parse-only, no side effects. */
+  /** `POST /api/v1/workflows/validate` — parse-only, no side effects. Not
+   * idempotency-key eligible (nothing to protect against double-execution). */
   async validate(manifest: string): Promise<WorkflowValidation> {
     return this.http.request("POST", "/api/v1/workflows/validate", { manifest });
   }
@@ -155,8 +173,11 @@ class WorkflowsResource {
 
   /** `POST /api/v1/workflows` — durably start + async-drive an execution.
    * Returns immediately; poll {@link get} for completion. */
-  async submit(req: SubmitWorkflowRequest): Promise<{ execution_id: string; status: "submitted" }> {
-    return this.http.request("POST", "/api/v1/workflows", req);
+  async submit(
+    req: SubmitWorkflowRequest,
+    opts?: IdempotentOpts,
+  ): Promise<{ execution_id: string; status: "submitted" }> {
+    return this.http.request("POST", "/api/v1/workflows", req, { headers: idemHeaders(opts) });
   }
 
   /** `GET /api/v1/workflows/{id}` — live status + event history. */
@@ -165,24 +186,32 @@ class WorkflowsResource {
   }
 
   /** `DELETE /api/v1/workflows/{id}` — advisory cancel. */
-  async cancel(id: string): Promise<void> {
-    return this.http.request("DELETE", `/api/v1/workflows/${encodeURIComponent(id)}`);
+  async cancel(id: string, opts?: IdempotentOpts): Promise<void> {
+    return this.http.request("DELETE", `/api/v1/workflows/${encodeURIComponent(id)}`, undefined, {
+      headers: idemHeaders(opts),
+    });
   }
 
   /** `POST /api/v1/workflows/{id}/signal`. */
   async signal(
     id: string,
     req: { manifest: string; event: string; payload?: unknown },
+    opts?: IdempotentOpts,
   ): Promise<{ execution_id: string; event: string; status: "signalled" }> {
-    return this.http.request("POST", `/api/v1/workflows/${encodeURIComponent(id)}/signal`, req);
+    return this.http.request("POST", `/api/v1/workflows/${encodeURIComponent(id)}/signal`, req, {
+      headers: idemHeaders(opts),
+    });
   }
 
   /** `POST /api/v1/workflows/{id}/approve`. */
   async approve(
     id: string,
     req: { manifest: string; activity_id: string; decision?: unknown },
+    opts?: IdempotentOpts,
   ): Promise<{ execution_id: string; activity_id: string; status: "approved" }> {
-    return this.http.request("POST", `/api/v1/workflows/${encodeURIComponent(id)}/approve`, req);
+    return this.http.request("POST", `/api/v1/workflows/${encodeURIComponent(id)}/approve`, req, {
+      headers: idemHeaders(opts),
+    });
   }
 }
 
@@ -200,14 +229,14 @@ class MemoryResource {
   }
 
   /** `POST /api/v1/memory/records` — store a memory record. */
-  async put(req: PutMemoryRequest): Promise<{ id: string; status: "stored" }> {
-    return this.http.request("POST", "/api/v1/memory/records", req);
+  async put(req: PutMemoryRequest, opts?: IdempotentOpts): Promise<{ id: string; status: "stored" }> {
+    return this.http.request("POST", "/api/v1/memory/records", req, { headers: idemHeaders(opts) });
   }
 
   /** `POST /api/v1/memory:query` — hybrid vector+keyword retrieval. Returns a
    * ranked result set, not a page — there is no cursor/`has_more`, since
    * retrieval is bounded by `limit`/relevance, not an offset into a stable
-   * ordering (RM-GA-P4 API-701). */
+   * ordering (RM-GA-P4 API-701). Not idempotency-key eligible (a read). */
   async query(req: QueryMemoryRequest): Promise<{ data: MemoryQueryResult[]; count: number }> {
     return this.http.request("POST", "/api/v1/memory:query", req);
   }
@@ -222,47 +251,55 @@ class PluginsResource {
   }
 
   /** `POST /api/v1/plugins:install` — `apexpkg` is the raw `.apexpkg` bytes. */
-  async install(apexpkg: Uint8Array, grants: string[] = []): Promise<unknown> {
-    return this.http.request("POST", "/api/v1/plugins:install", {
-      apexpkg: base64Encode(apexpkg),
-      grants,
-    });
+  async install(apexpkg: Uint8Array, grants: string[] = [], opts?: IdempotentOpts): Promise<unknown> {
+    return this.http.request(
+      "POST",
+      "/api/v1/plugins:install",
+      { apexpkg: base64Encode(apexpkg), grants },
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `POST /api/v1/plugins:enable`. */
-  async enable(id: string): Promise<unknown> {
-    return this.http.request("POST", "/api/v1/plugins:enable", { id });
+  async enable(id: string, opts?: IdempotentOpts): Promise<unknown> {
+    return this.http.request("POST", "/api/v1/plugins:enable", { id }, { headers: idemHeaders(opts) });
   }
 
   /** `POST /api/v1/plugins:disable`. */
-  async disable(id: string): Promise<unknown> {
-    return this.http.request("POST", "/api/v1/plugins:disable", { id });
+  async disable(id: string, opts?: IdempotentOpts): Promise<unknown> {
+    return this.http.request("POST", "/api/v1/plugins:disable", { id }, { headers: idemHeaders(opts) });
   }
 
   /** `POST /api/v1/plugins:upgrade`. */
-  async upgrade(apexpkg: Uint8Array, grants: string[] = []): Promise<unknown> {
-    return this.http.request("POST", "/api/v1/plugins:upgrade", {
-      apexpkg: base64Encode(apexpkg),
-      grants,
-    });
+  async upgrade(apexpkg: Uint8Array, grants: string[] = [], opts?: IdempotentOpts): Promise<unknown> {
+    return this.http.request(
+      "POST",
+      "/api/v1/plugins:upgrade",
+      { apexpkg: base64Encode(apexpkg), grants },
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `POST /api/v1/plugins:rollback`. */
-  async rollback(id: string): Promise<unknown> {
-    return this.http.request("POST", "/api/v1/plugins:rollback", { id });
+  async rollback(id: string, opts?: IdempotentOpts): Promise<unknown> {
+    return this.http.request("POST", "/api/v1/plugins:rollback", { id }, { headers: idemHeaders(opts) });
   }
 
   /** `POST /api/v1/plugins:trust`. */
-  async trust(publisher: string, publicKeyHex: string): Promise<unknown> {
-    return this.http.request("POST", "/api/v1/plugins:trust", {
-      publisher,
-      public_key_hex: publicKeyHex,
-    });
+  async trust(publisher: string, publicKeyHex: string, opts?: IdempotentOpts): Promise<unknown> {
+    return this.http.request(
+      "POST",
+      "/api/v1/plugins:trust",
+      { publisher, public_key_hex: publicKeyHex },
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `DELETE /api/v1/plugins/{id}` — `id` is `publisher/name`. */
-  async uninstall(id: string): Promise<unknown> {
-    return this.http.request("DELETE", `/api/v1/plugins/${encodeURIComponent(id)}`);
+  async uninstall(id: string, opts?: IdempotentOpts): Promise<unknown> {
+    return this.http.request("DELETE", `/api/v1/plugins/${encodeURIComponent(id)}`, undefined, {
+      headers: idemHeaders(opts),
+    });
   }
 }
 
@@ -277,13 +314,18 @@ class MarketplaceResource {
   /** `POST /api/v1/marketplace:publish`. */
   async publish(
     apexpkg: Uint8Array,
-    opts?: { categories?: string[]; channel?: string },
+    opts?: IdempotentOpts & { categories?: string[]; channel?: string },
   ): Promise<PublishResult> {
-    return this.http.request("POST", "/api/v1/marketplace:publish", {
-      apexpkg: base64Encode(apexpkg),
-      categories: opts?.categories ?? [],
-      channel: opts?.channel,
-    });
+    return this.http.request(
+      "POST",
+      "/api/v1/marketplace:publish",
+      {
+        apexpkg: base64Encode(apexpkg),
+        categories: opts?.categories ?? [],
+        channel: opts?.channel,
+      },
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `GET /api/v1/marketplace/listings/{id}` — `id` is `publisher/name`. */
@@ -314,31 +356,56 @@ class MarketplaceResource {
   }
 
   /** `POST /api/v1/marketplace/listings/{id}/reviews`. */
-  async review(id: string, req: { author: string; rating: number; body?: string }): Promise<unknown> {
-    return this.http.request("POST", `/api/v1/marketplace/listings/${encodeURIComponent(id)}/reviews`, req);
+  async review(
+    id: string,
+    req: { author: string; rating: number; body?: string },
+    opts?: IdempotentOpts,
+  ): Promise<unknown> {
+    return this.http.request(
+      "POST",
+      `/api/v1/marketplace/listings/${encodeURIComponent(id)}/reviews`,
+      req,
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `POST /api/v1/marketplace/listings/{id}/verify` — operator override,
    * bypasses the request/approve/reject workflow below. */
-  async setVerified(id: string, verified = true): Promise<{ id: string; verified: boolean }> {
-    return this.http.request("POST", `/api/v1/marketplace/listings/${encodeURIComponent(id)}/verify`, {
-      verified,
-    });
+  async setVerified(
+    id: string,
+    verified = true,
+    opts?: IdempotentOpts,
+  ): Promise<{ id: string; verified: boolean }> {
+    return this.http.request(
+      "POST",
+      `/api/v1/marketplace/listings/${encodeURIComponent(id)}/verify`,
+      { verified },
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `POST /api/v1/marketplace/listings/{id}/request-review`. */
-  async requestReview(id: string): Promise<{ id: string; status: "pending" }> {
-    return this.http.request("POST", `/api/v1/marketplace/listings/${encodeURIComponent(id)}/request-review`);
+  async requestReview(id: string, opts?: IdempotentOpts): Promise<{ id: string; status: "pending" }> {
+    return this.http.request(
+      "POST",
+      `/api/v1/marketplace/listings/${encodeURIComponent(id)}/request-review`,
+      undefined,
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `POST /api/v1/marketplace/listings/{id}/approve`. */
   async approveReview(
     id: string,
     reviewer?: string,
+    opts?: IdempotentOpts,
   ): Promise<{ id: string; verified: boolean; reviewer: string }> {
-    return this.http.request("POST", `/api/v1/marketplace/listings/${encodeURIComponent(id)}/approve`, {
-      reviewer,
-    });
+    return this.http.request(
+      "POST",
+      `/api/v1/marketplace/listings/${encodeURIComponent(id)}/approve`,
+      { reviewer },
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `POST /api/v1/marketplace/listings/{id}/reject`. */
@@ -346,19 +413,27 @@ class MarketplaceResource {
     id: string,
     reason: string,
     reviewer?: string,
+    opts?: IdempotentOpts,
   ): Promise<{ id: string; verified: boolean; reviewer: string; reason: string }> {
-    return this.http.request("POST", `/api/v1/marketplace/listings/${encodeURIComponent(id)}/reject`, {
-      reason,
-      reviewer,
-    });
+    return this.http.request(
+      "POST",
+      `/api/v1/marketplace/listings/${encodeURIComponent(id)}/reject`,
+      { reason, reviewer },
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `POST /api/v1/marketplace/listings/{id}/install`. */
-  async install(id: string, opts?: { version?: string; grants?: string[] }): Promise<unknown> {
-    return this.http.request("POST", `/api/v1/marketplace/listings/${encodeURIComponent(id)}/install`, {
-      version: opts?.version,
-      grants: opts?.grants ?? [],
-    });
+  async install(
+    id: string,
+    opts?: IdempotentOpts & { version?: string; grants?: string[] },
+  ): Promise<unknown> {
+    return this.http.request(
+      "POST",
+      `/api/v1/marketplace/listings/${encodeURIComponent(id)}/install`,
+      { version: opts?.version, grants: opts?.grants ?? [] },
+      { headers: idemHeaders(opts) },
+    );
   }
 }
 
@@ -371,8 +446,8 @@ class SecretsResource {
   }
 
   /** `POST /api/v1/secrets` — value is never returned. */
-  async create(name: string, value: string): Promise<SecretMetadata> {
-    return this.http.request("POST", "/api/v1/secrets", { name, value });
+  async create(name: string, value: string, opts?: IdempotentOpts): Promise<SecretMetadata> {
+    return this.http.request("POST", "/api/v1/secrets", { name, value }, { headers: idemHeaders(opts) });
   }
 
   /** `GET /api/v1/secrets/{name}`. */
@@ -381,13 +456,20 @@ class SecretsResource {
   }
 
   /** `DELETE /api/v1/secrets/{name}`. */
-  async delete(name: string): Promise<void> {
-    return this.http.request("DELETE", `/api/v1/secrets/${encodeURIComponent(name)}`);
+  async delete(name: string, opts?: IdempotentOpts): Promise<void> {
+    return this.http.request("DELETE", `/api/v1/secrets/${encodeURIComponent(name)}`, undefined, {
+      headers: idemHeaders(opts),
+    });
   }
 
   /** `POST /api/v1/secrets/{name}/rotate`. */
-  async rotate(name: string, value: string): Promise<SecretMetadata> {
-    return this.http.request("POST", `/api/v1/secrets/${encodeURIComponent(name)}/rotate`, { value });
+  async rotate(name: string, value: string, opts?: IdempotentOpts): Promise<SecretMetadata> {
+    return this.http.request(
+      "POST",
+      `/api/v1/secrets/${encodeURIComponent(name)}/rotate`,
+      { value },
+      { headers: idemHeaders(opts) },
+    );
   }
 }
 
@@ -400,8 +482,8 @@ class OrganizationsResource {
   }
 
   /** `POST /api/v1/organizations`. */
-  async create(name: string): Promise<Record<string, unknown>> {
-    return this.http.request("POST", "/api/v1/organizations", { name });
+  async create(name: string, opts?: IdempotentOpts): Promise<Record<string, unknown>> {
+    return this.http.request("POST", "/api/v1/organizations", { name }, { headers: idemHeaders(opts) });
   }
 }
 
@@ -415,11 +497,16 @@ class ProjectsResource {
 
   /** `POST /api/v1/projects`. Returns the project plus its `ETag` (current
    * `version`), for a subsequent {@link update}'s `ifMatch`. */
-  async create(name: string, organization: string): Promise<{ project: Record<string, unknown>; etag?: string }> {
+  async create(
+    name: string,
+    organization: string,
+    opts?: IdempotentOpts,
+  ): Promise<{ project: Record<string, unknown>; etag?: string }> {
     const { data, headers } = await this.http.requestWithHeaders<Record<string, unknown>>(
       "POST",
       "/api/v1/projects",
       { name, organization },
+      { headers: idemHeaders(opts) },
     );
     return { project: data, etag: headers.get("etag") ?? undefined };
   }
@@ -440,8 +527,9 @@ class ProjectsResource {
     id: string,
     patch: { settings?: Record<string, unknown>; status?: string },
     ifMatch?: string,
+    opts?: IdempotentOpts,
   ): Promise<{ project: Record<string, unknown>; etag?: string }> {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...idemHeaders(opts) };
     if (ifMatch) headers["If-Match"] = ifMatch;
     const { data, headers: responseHeaders } = await this.http.requestWithHeaders<Record<string, unknown>>(
       "PATCH",
@@ -453,8 +541,10 @@ class ProjectsResource {
   }
 
   /** `DELETE /api/v1/projects/{id}`. */
-  async delete(id: string): Promise<void> {
-    return this.http.request("DELETE", `/api/v1/projects/${encodeURIComponent(id)}`);
+  async delete(id: string, opts?: IdempotentOpts): Promise<void> {
+    return this.http.request("DELETE", `/api/v1/projects/${encodeURIComponent(id)}`, undefined, {
+      headers: idemHeaders(opts),
+    });
   }
 
   /** `GET /api/v1/projects/{id}/members`. */
@@ -463,15 +553,22 @@ class ProjectsResource {
   }
 
   /** `POST /api/v1/projects/{id}/members`. */
-  async addMember(id: string, user: string, role: Role): Promise<unknown> {
-    return this.http.request("POST", `/api/v1/projects/${encodeURIComponent(id)}/members`, { user, role });
+  async addMember(id: string, user: string, role: Role, opts?: IdempotentOpts): Promise<unknown> {
+    return this.http.request(
+      "POST",
+      `/api/v1/projects/${encodeURIComponent(id)}/members`,
+      { user, role },
+      { headers: idemHeaders(opts) },
+    );
   }
 
   /** `DELETE /api/v1/projects/{id}/members/{uid}`. */
-  async removeMember(id: string, userId: string): Promise<void> {
+  async removeMember(id: string, userId: string, opts?: IdempotentOpts): Promise<void> {
     return this.http.request(
       "DELETE",
       `/api/v1/projects/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+      undefined,
+      { headers: idemHeaders(opts) },
     );
   }
 
@@ -484,8 +581,11 @@ class ProjectsResource {
   async updateQuota(
     id: string,
     limits: { concurrent_agent_runs?: number; llm_cost_per_day_usd?: number },
+    opts?: IdempotentOpts,
   ): Promise<{ scope: "project"; limits: Record<string, unknown> }> {
-    return this.http.request("PATCH", `/api/v1/projects/${encodeURIComponent(id)}/quota`, limits);
+    return this.http.request("PATCH", `/api/v1/projects/${encodeURIComponent(id)}/quota`, limits, {
+      headers: idemHeaders(opts),
+    });
   }
 }
 
@@ -498,13 +598,18 @@ class WebhooksResource {
   }
 
   /** `POST /api/v1/webhooks`. */
-  async register(req: { url: string; events: string[]; secret: string }): Promise<unknown> {
-    return this.http.request("POST", "/api/v1/webhooks", req);
+  async register(
+    req: { url: string; events: string[]; secret: string },
+    opts?: IdempotentOpts,
+  ): Promise<unknown> {
+    return this.http.request("POST", "/api/v1/webhooks", req, { headers: idemHeaders(opts) });
   }
 
   /** `DELETE /api/v1/webhooks/{id}`. */
-  async remove(id: string): Promise<void> {
-    return this.http.request("DELETE", `/api/v1/webhooks/${encodeURIComponent(id)}`);
+  async remove(id: string, opts?: IdempotentOpts): Promise<void> {
+    return this.http.request("DELETE", `/api/v1/webhooks/${encodeURIComponent(id)}`, undefined, {
+      headers: idemHeaders(opts),
+    });
   }
 }
 

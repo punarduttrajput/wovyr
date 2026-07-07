@@ -7,7 +7,14 @@ OAuth2; resources are addressed by their natural key and auth is the
 
 Synchronous by design: built on `urllib` (see `http.py`), so every method
 blocks. An `asyncio` variant is a documented gap (see the package README),
-not an oversight."""
+not an oversight.
+
+Every mutating method below takes an `idempotency_key` keyword (RM-GA-P4
+API-703): the server honors `Idempotency-Key` on every mutating route, not
+just `agents:run` — a retry with the same key replays the original response
+instead of re-executing. Not offered on `workflows.validate` (parse-only, no
+side effects) or `memory.query` (a read), since neither is a mutation to
+protect."""
 
 from __future__ import annotations
 
@@ -44,6 +51,10 @@ def _b64decode(data: str) -> bytes:
 
 def _quote(value: str) -> str:
     return quote(value, safe="")
+
+
+def _idem_headers(idempotency_key: Optional[str]) -> dict[str, str]:
+    return {"Idempotency-Key": idempotency_key} if idempotency_key else {}
 
 
 class ApexClient:
@@ -86,9 +97,7 @@ class AgentsResource:
         project: Optional[str] = None,
     ) -> RunResult:
         """`POST /api/v1/agents:run` — run an inline manifest, no persistence."""
-        headers: dict[str, str] = {}
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
+        headers = _idem_headers(idempotency_key)
         if project:
             headers["X-Apex-Project"] = project
         return self._http.request("POST", "/api/v1/agents:run", req, headers=headers)
@@ -96,7 +105,8 @@ class AgentsResource:
     def stream(self, req: RunRequest, *, project: Optional[str] = None) -> Iterator[dict[str, Any]]:
         """`POST /api/v1/agents:stream` — run an inline manifest, yielding
         progress frames as they arrive. The final yielded event is always
-        `result` or `error`."""
+        `result` or `error`. Not idempotency-key eligible: the response is an
+        SSE stream, not a value the server can buffer and replay."""
         headers: dict[str, str] = {}
         if project:
             headers["X-Apex-Project"] = project
@@ -116,17 +126,21 @@ class AgentsResource:
         """`GET /api/v1/agents` — list stored agent ids for the caller's tenant."""
         return self._http.request("GET", "/api/v1/agents", query={"limit": limit, "cursor": cursor})
 
-    def create(self, manifest: str) -> dict[str, Any]:
+    def create(self, manifest: str, *, idempotency_key: Optional[str] = None) -> dict[str, Any]:
         """`POST /api/v1/agents` — store an agent manifest."""
-        return self._http.request("POST", "/api/v1/agents", {"manifest": manifest})
+        return self._http.request(
+            "POST", "/api/v1/agents", {"manifest": manifest}, headers=_idem_headers(idempotency_key)
+        )
 
     def get(self, agent_id: str) -> dict[str, Any]:
         """`GET /api/v1/agents/{id}`."""
         return self._http.request("GET", f"/api/v1/agents/{_quote(agent_id)}")
 
-    def delete(self, agent_id: str) -> None:
+    def delete(self, agent_id: str, *, idempotency_key: Optional[str] = None) -> None:
         """`DELETE /api/v1/agents/{id}`."""
-        return self._http.request("DELETE", f"/api/v1/agents/{_quote(agent_id)}")
+        return self._http.request(
+            "DELETE", f"/api/v1/agents/{_quote(agent_id)}", headers=_idem_headers(idempotency_key)
+        )
 
     def run_stored(
         self,
@@ -135,9 +149,10 @@ class AgentsResource:
         input: Any = None,
         max_steps: Optional[int] = None,
         project: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RunResult:
         """`POST /api/v1/agents/{id}/run` — run a stored agent by id."""
-        headers: dict[str, str] = {}
+        headers = _idem_headers(idempotency_key)
         if project:
             headers["X-Apex-Project"] = project
         body: dict[str, Any] = {}
@@ -153,7 +168,9 @@ class WorkflowsResource:
         self._http = http
 
     def validate(self, manifest: str) -> WorkflowValidation:
-        """`POST /api/v1/workflows/validate` — parse-only, no side effects."""
+        """`POST /api/v1/workflows/validate` — parse-only, no side effects.
+        Not idempotency-key eligible (nothing to protect against
+        double-execution)."""
         return self._http.request("POST", "/api/v1/workflows/validate", {"manifest": manifest})
 
     def list(self, **params: Any) -> Page:
@@ -161,34 +178,60 @@ class WorkflowsResource:
         tenant. Accepts `workflow`, `status`, `limit`, `cursor`."""
         return self._http.request("GET", "/api/v1/workflows", query=params)
 
-    def submit(self, req: SubmitWorkflowRequest) -> dict[str, Any]:
+    def submit(self, req: SubmitWorkflowRequest, *, idempotency_key: Optional[str] = None) -> dict[str, Any]:
         """`POST /api/v1/workflows` — durably start + async-drive an
         execution. Returns immediately; poll `get` for completion."""
-        return self._http.request("POST", "/api/v1/workflows", req)
+        return self._http.request("POST", "/api/v1/workflows", req, headers=_idem_headers(idempotency_key))
 
     def get(self, execution_id: str) -> dict[str, Any]:
         """`GET /api/v1/workflows/{id}` — live status + event history."""
         return self._http.request("GET", f"/api/v1/workflows/{_quote(execution_id)}")
 
-    def cancel(self, execution_id: str) -> None:
+    def cancel(self, execution_id: str, *, idempotency_key: Optional[str] = None) -> None:
         """`DELETE /api/v1/workflows/{id}` — advisory cancel."""
-        return self._http.request("DELETE", f"/api/v1/workflows/{_quote(execution_id)}")
+        return self._http.request(
+            "DELETE", f"/api/v1/workflows/{_quote(execution_id)}", headers=_idem_headers(idempotency_key)
+        )
 
-    def signal(self, execution_id: str, *, manifest: str, event: str, payload: Any = None) -> dict[str, Any]:
+    def signal(
+        self,
+        execution_id: str,
+        *,
+        manifest: str,
+        event: str,
+        payload: Any = None,
+        idempotency_key: Optional[str] = None,
+    ) -> dict[str, Any]:
         """`POST /api/v1/workflows/{id}/signal`."""
         body: dict[str, Any] = {"manifest": manifest, "event": event}
         if payload is not None:
             body["payload"] = payload
-        return self._http.request("POST", f"/api/v1/workflows/{_quote(execution_id)}/signal", body)
+        return self._http.request(
+            "POST",
+            f"/api/v1/workflows/{_quote(execution_id)}/signal",
+            body,
+            headers=_idem_headers(idempotency_key),
+        )
 
     def approve(
-        self, execution_id: str, *, manifest: str, activity_id: str, decision: Any = None
+        self,
+        execution_id: str,
+        *,
+        manifest: str,
+        activity_id: str,
+        decision: Any = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict[str, Any]:
         """`POST /api/v1/workflows/{id}/approve`."""
         body: dict[str, Any] = {"manifest": manifest, "activity_id": activity_id}
         if decision is not None:
             body["decision"] = decision
-        return self._http.request("POST", f"/api/v1/workflows/{_quote(execution_id)}/approve", body)
+        return self._http.request(
+            "POST",
+            f"/api/v1/workflows/{_quote(execution_id)}/approve",
+            body,
+            headers=_idem_headers(idempotency_key),
+        )
 
 
 class MemoryResource:
@@ -207,15 +250,18 @@ class MemoryResource:
             "GET", "/api/v1/memory/records", query={"namespace": namespace, "limit": limit, "cursor": cursor}
         )
 
-    def put(self, req: PutMemoryRequest) -> dict[str, Any]:
+    def put(self, req: PutMemoryRequest, *, idempotency_key: Optional[str] = None) -> dict[str, Any]:
         """`POST /api/v1/memory/records` — store a memory record."""
-        return self._http.request("POST", "/api/v1/memory/records", req)
+        return self._http.request(
+            "POST", "/api/v1/memory/records", req, headers=_idem_headers(idempotency_key)
+        )
 
     def query(self, req: QueryMemoryRequest) -> dict[str, Any]:
         """`POST /api/v1/memory:query` — hybrid vector+keyword retrieval.
         Returns `{"data": [...], "count": int}` — a ranked result set, not a
         page (no cursor/`has_more`; retrieval is bounded by `limit`/relevance,
-        not an offset into a stable ordering)."""
+        not an offset into a stable ordering). Not idempotency-key eligible
+        (a read)."""
         return self._http.request("POST", "/api/v1/memory:query", req)
 
 
@@ -227,39 +273,60 @@ class PluginsResource:
         """`GET /api/v1/plugins`."""
         return self._http.request("GET", "/api/v1/plugins", query={"limit": limit, "cursor": cursor})
 
-    def install(self, apexpkg: bytes, grants: Optional[List[str]] = None) -> Any:
+    def install(
+        self, apexpkg: bytes, grants: Optional[List[str]] = None, *, idempotency_key: Optional[str] = None
+    ) -> Any:
         """`POST /api/v1/plugins:install` — `apexpkg` is the raw `.apexpkg` bytes."""
         return self._http.request(
-            "POST", "/api/v1/plugins:install", {"apexpkg": _b64encode(apexpkg), "grants": grants or []}
+            "POST",
+            "/api/v1/plugins:install",
+            {"apexpkg": _b64encode(apexpkg), "grants": grants or []},
+            headers=_idem_headers(idempotency_key),
         )
 
-    def enable(self, plugin_id: str) -> Any:
+    def enable(self, plugin_id: str, *, idempotency_key: Optional[str] = None) -> Any:
         """`POST /api/v1/plugins:enable`."""
-        return self._http.request("POST", "/api/v1/plugins:enable", {"id": plugin_id})
+        return self._http.request(
+            "POST", "/api/v1/plugins:enable", {"id": plugin_id}, headers=_idem_headers(idempotency_key)
+        )
 
-    def disable(self, plugin_id: str) -> Any:
+    def disable(self, plugin_id: str, *, idempotency_key: Optional[str] = None) -> Any:
         """`POST /api/v1/plugins:disable`."""
-        return self._http.request("POST", "/api/v1/plugins:disable", {"id": plugin_id})
+        return self._http.request(
+            "POST", "/api/v1/plugins:disable", {"id": plugin_id}, headers=_idem_headers(idempotency_key)
+        )
 
-    def upgrade(self, apexpkg: bytes, grants: Optional[List[str]] = None) -> Any:
+    def upgrade(
+        self, apexpkg: bytes, grants: Optional[List[str]] = None, *, idempotency_key: Optional[str] = None
+    ) -> Any:
         """`POST /api/v1/plugins:upgrade`."""
         return self._http.request(
-            "POST", "/api/v1/plugins:upgrade", {"apexpkg": _b64encode(apexpkg), "grants": grants or []}
+            "POST",
+            "/api/v1/plugins:upgrade",
+            {"apexpkg": _b64encode(apexpkg), "grants": grants or []},
+            headers=_idem_headers(idempotency_key),
         )
 
-    def rollback(self, plugin_id: str) -> Any:
+    def rollback(self, plugin_id: str, *, idempotency_key: Optional[str] = None) -> Any:
         """`POST /api/v1/plugins:rollback`."""
-        return self._http.request("POST", "/api/v1/plugins:rollback", {"id": plugin_id})
+        return self._http.request(
+            "POST", "/api/v1/plugins:rollback", {"id": plugin_id}, headers=_idem_headers(idempotency_key)
+        )
 
-    def trust(self, publisher: str, public_key_hex: str) -> Any:
+    def trust(self, publisher: str, public_key_hex: str, *, idempotency_key: Optional[str] = None) -> Any:
         """`POST /api/v1/plugins:trust`."""
         return self._http.request(
-            "POST", "/api/v1/plugins:trust", {"publisher": publisher, "public_key_hex": public_key_hex}
+            "POST",
+            "/api/v1/plugins:trust",
+            {"publisher": publisher, "public_key_hex": public_key_hex},
+            headers=_idem_headers(idempotency_key),
         )
 
-    def uninstall(self, plugin_id: str) -> Any:
+    def uninstall(self, plugin_id: str, *, idempotency_key: Optional[str] = None) -> Any:
         """`DELETE /api/v1/plugins/{id}` — `id` is `publisher/name`."""
-        return self._http.request("DELETE", f"/api/v1/plugins/{_quote(plugin_id)}")
+        return self._http.request(
+            "DELETE", f"/api/v1/plugins/{_quote(plugin_id)}", headers=_idem_headers(idempotency_key)
+        )
 
 
 class MarketplaceResource:
@@ -280,13 +347,20 @@ class MarketplaceResource:
         return self._http.request("GET", "/api/v1/marketplace/listings", query=query)
 
     def publish(
-        self, apexpkg: bytes, *, categories: Optional[List[str]] = None, channel: Optional[str] = None
+        self,
+        apexpkg: bytes,
+        *,
+        categories: Optional[List[str]] = None,
+        channel: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> PublishResult:
         """`POST /api/v1/marketplace:publish`."""
         body: dict[str, Any] = {"apexpkg": _b64encode(apexpkg), "categories": categories or []}
         if channel is not None:
             body["channel"] = channel
-        return self._http.request("POST", "/api/v1/marketplace:publish", body)
+        return self._http.request(
+            "POST", "/api/v1/marketplace:publish", body, headers=_idem_headers(idempotency_key)
+        )
 
     def get(self, listing_id: str) -> Any:
         """`GET /api/v1/marketplace/listings/{id}` — `id` is `publisher/name`."""
@@ -310,50 +384,87 @@ class MarketplaceResource:
             query={"version": version},
         )
 
-    def review(self, listing_id: str, *, author: str, rating: int, body: Optional[str] = None) -> Any:
+    def review(
+        self,
+        listing_id: str,
+        *,
+        author: str,
+        rating: int,
+        body: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Any:
         """`POST /api/v1/marketplace/listings/{id}/reviews`."""
         payload: dict[str, Any] = {"author": author, "rating": rating}
         if body is not None:
             payload["body"] = body
         return self._http.request(
-            "POST", f"/api/v1/marketplace/listings/{_quote(listing_id)}/reviews", payload
+            "POST",
+            f"/api/v1/marketplace/listings/{_quote(listing_id)}/reviews",
+            payload,
+            headers=_idem_headers(idempotency_key),
         )
 
-    def set_verified(self, listing_id: str, verified: bool = True) -> dict[str, Any]:
+    def set_verified(
+        self, listing_id: str, verified: bool = True, *, idempotency_key: Optional[str] = None
+    ) -> dict[str, Any]:
         """`POST /api/v1/marketplace/listings/{id}/verify` — operator
         override, bypasses the request/approve/reject workflow below."""
         return self._http.request(
-            "POST", f"/api/v1/marketplace/listings/{_quote(listing_id)}/verify", {"verified": verified}
+            "POST",
+            f"/api/v1/marketplace/listings/{_quote(listing_id)}/verify",
+            {"verified": verified},
+            headers=_idem_headers(idempotency_key),
         )
 
-    def request_review(self, listing_id: str) -> dict[str, Any]:
+    def request_review(self, listing_id: str, *, idempotency_key: Optional[str] = None) -> dict[str, Any]:
         """`POST /api/v1/marketplace/listings/{id}/request-review`."""
         return self._http.request(
-            "POST", f"/api/v1/marketplace/listings/{_quote(listing_id)}/request-review"
+            "POST",
+            f"/api/v1/marketplace/listings/{_quote(listing_id)}/request-review",
+            headers=_idem_headers(idempotency_key),
         )
 
-    def approve_review(self, listing_id: str, *, reviewer: Optional[str] = None) -> dict[str, Any]:
+    def approve_review(
+        self, listing_id: str, *, reviewer: Optional[str] = None, idempotency_key: Optional[str] = None
+    ) -> dict[str, Any]:
         """`POST /api/v1/marketplace/listings/{id}/approve`."""
         return self._http.request(
-            "POST", f"/api/v1/marketplace/listings/{_quote(listing_id)}/approve", {"reviewer": reviewer}
+            "POST",
+            f"/api/v1/marketplace/listings/{_quote(listing_id)}/approve",
+            {"reviewer": reviewer},
+            headers=_idem_headers(idempotency_key),
         )
 
-    def reject_review(self, listing_id: str, *, reason: str, reviewer: Optional[str] = None) -> dict[str, Any]:
+    def reject_review(
+        self,
+        listing_id: str,
+        *,
+        reason: str,
+        reviewer: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> dict[str, Any]:
         """`POST /api/v1/marketplace/listings/{id}/reject`."""
         return self._http.request(
             "POST",
             f"/api/v1/marketplace/listings/{_quote(listing_id)}/reject",
             {"reason": reason, "reviewer": reviewer},
+            headers=_idem_headers(idempotency_key),
         )
 
     def install(
-        self, listing_id: str, *, version: Optional[str] = None, grants: Optional[List[str]] = None
+        self,
+        listing_id: str,
+        *,
+        version: Optional[str] = None,
+        grants: Optional[List[str]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Any:
         """`POST /api/v1/marketplace/listings/{id}/install`."""
         return self._http.request(
             "POST",
             f"/api/v1/marketplace/listings/{_quote(listing_id)}/install",
             {"version": version, "grants": grants or []},
+            headers=_idem_headers(idempotency_key),
         )
 
 
@@ -365,21 +476,30 @@ class SecretsResource:
         """`GET /api/v1/secrets`."""
         return self._http.request("GET", "/api/v1/secrets", query={"limit": limit, "cursor": cursor})
 
-    def create(self, name: str, value: str) -> SecretMetadata:
+    def create(self, name: str, value: str, *, idempotency_key: Optional[str] = None) -> SecretMetadata:
         """`POST /api/v1/secrets` — value is never returned."""
-        return self._http.request("POST", "/api/v1/secrets", {"name": name, "value": value})
+        return self._http.request(
+            "POST", "/api/v1/secrets", {"name": name, "value": value}, headers=_idem_headers(idempotency_key)
+        )
 
     def get(self, name: str) -> SecretMetadata:
         """`GET /api/v1/secrets/{name}`."""
         return self._http.request("GET", f"/api/v1/secrets/{_quote(name)}")
 
-    def delete(self, name: str) -> None:
+    def delete(self, name: str, *, idempotency_key: Optional[str] = None) -> None:
         """`DELETE /api/v1/secrets/{name}`."""
-        return self._http.request("DELETE", f"/api/v1/secrets/{_quote(name)}")
+        return self._http.request(
+            "DELETE", f"/api/v1/secrets/{_quote(name)}", headers=_idem_headers(idempotency_key)
+        )
 
-    def rotate(self, name: str, value: str) -> SecretMetadata:
+    def rotate(self, name: str, value: str, *, idempotency_key: Optional[str] = None) -> SecretMetadata:
         """`POST /api/v1/secrets/{name}/rotate`."""
-        return self._http.request("POST", f"/api/v1/secrets/{_quote(name)}/rotate", {"value": value})
+        return self._http.request(
+            "POST",
+            f"/api/v1/secrets/{_quote(name)}/rotate",
+            {"value": value},
+            headers=_idem_headers(idempotency_key),
+        )
 
 
 class OrganizationsResource:
@@ -390,9 +510,11 @@ class OrganizationsResource:
         """`GET /api/v1/organizations`."""
         return self._http.request("GET", "/api/v1/organizations", query={"limit": limit, "cursor": cursor})
 
-    def create(self, name: str) -> dict[str, Any]:
+    def create(self, name: str, *, idempotency_key: Optional[str] = None) -> dict[str, Any]:
         """`POST /api/v1/organizations`."""
-        return self._http.request("POST", "/api/v1/organizations", {"name": name})
+        return self._http.request(
+            "POST", "/api/v1/organizations", {"name": name}, headers=_idem_headers(idempotency_key)
+        )
 
 
 class ProjectsResource:
@@ -403,11 +525,16 @@ class ProjectsResource:
         """`GET /api/v1/projects`."""
         return self._http.request("GET", "/api/v1/projects", query={"limit": limit, "cursor": cursor})
 
-    def create(self, name: str, organization: str) -> tuple[dict[str, Any], Optional[str]]:
+    def create(
+        self, name: str, organization: str, *, idempotency_key: Optional[str] = None
+    ) -> tuple[dict[str, Any], Optional[str]]:
         """`POST /api/v1/projects`. Returns `(project, etag)` — `etag` is the
         current `version`, for a subsequent `update`'s `if_match`."""
         data, headers = self._http.request_with_headers(
-            "POST", "/api/v1/projects", {"name": name, "organization": organization}
+            "POST",
+            "/api/v1/projects",
+            {"name": name, "organization": organization},
+            headers=_idem_headers(idempotency_key),
         )
         return data, headers.get("etag")
 
@@ -423,6 +550,7 @@ class ProjectsResource:
         settings: Optional[dict[str, Any]] = None,
         status: Optional[str] = None,
         if_match: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> tuple[dict[str, Any], Optional[str]]:
         """`PATCH /api/v1/projects/{id}`. `if_match` (from a prior `get`/
         `create`'s `etag`) guards against a lost concurrent update — a stale
@@ -432,7 +560,7 @@ class ProjectsResource:
             patch["settings"] = settings
         if status is not None:
             patch["status"] = status
-        headers: dict[str, str] = {}
+        headers = _idem_headers(idempotency_key)
         if if_match:
             headers["If-Match"] = if_match
         data, response_headers = self._http.request_with_headers(
@@ -440,24 +568,33 @@ class ProjectsResource:
         )
         return data, response_headers.get("etag")
 
-    def delete(self, project_id: str) -> None:
+    def delete(self, project_id: str, *, idempotency_key: Optional[str] = None) -> None:
         """`DELETE /api/v1/projects/{id}`."""
-        return self._http.request("DELETE", f"/api/v1/projects/{_quote(project_id)}")
+        return self._http.request(
+            "DELETE", f"/api/v1/projects/{_quote(project_id)}", headers=_idem_headers(idempotency_key)
+        )
 
     def list_members(self, project_id: str) -> dict[str, Any]:
         """`GET /api/v1/projects/{id}/members`."""
         return self._http.request("GET", f"/api/v1/projects/{_quote(project_id)}/members")
 
-    def add_member(self, project_id: str, user: str, role: Role) -> Any:
+    def add_member(
+        self, project_id: str, user: str, role: Role, *, idempotency_key: Optional[str] = None
+    ) -> Any:
         """`POST /api/v1/projects/{id}/members`."""
         return self._http.request(
-            "POST", f"/api/v1/projects/{_quote(project_id)}/members", {"user": user, "role": role}
+            "POST",
+            f"/api/v1/projects/{_quote(project_id)}/members",
+            {"user": user, "role": role},
+            headers=_idem_headers(idempotency_key),
         )
 
-    def remove_member(self, project_id: str, user_id: str) -> None:
+    def remove_member(self, project_id: str, user_id: str, *, idempotency_key: Optional[str] = None) -> None:
         """`DELETE /api/v1/projects/{id}/members/{uid}`."""
         return self._http.request(
-            "DELETE", f"/api/v1/projects/{_quote(project_id)}/members/{_quote(user_id)}"
+            "DELETE",
+            f"/api/v1/projects/{_quote(project_id)}/members/{_quote(user_id)}",
+            headers=_idem_headers(idempotency_key),
         )
 
     def get_quota(self, project_id: str) -> dict[str, Any]:
@@ -470,6 +607,7 @@ class ProjectsResource:
         *,
         concurrent_agent_runs: Optional[int] = None,
         llm_cost_per_day_usd: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict[str, Any]:
         """`PATCH /api/v1/projects/{id}/quota` — org.admin only."""
         limits: dict[str, Any] = {}
@@ -477,7 +615,12 @@ class ProjectsResource:
             limits["concurrent_agent_runs"] = concurrent_agent_runs
         if llm_cost_per_day_usd is not None:
             limits["llm_cost_per_day_usd"] = llm_cost_per_day_usd
-        return self._http.request("PATCH", f"/api/v1/projects/{_quote(project_id)}/quota", limits)
+        return self._http.request(
+            "PATCH",
+            f"/api/v1/projects/{_quote(project_id)}/quota",
+            limits,
+            headers=_idem_headers(idempotency_key),
+        )
 
 
 class WebhooksResource:
@@ -488,13 +631,22 @@ class WebhooksResource:
         """`GET /api/v1/webhooks` — secrets redacted."""
         return self._http.request("GET", "/api/v1/webhooks", query={"limit": limit, "cursor": cursor})
 
-    def register(self, *, url: str, events: List[str], secret: str) -> Any:
+    def register(
+        self, *, url: str, events: List[str], secret: str, idempotency_key: Optional[str] = None
+    ) -> Any:
         """`POST /api/v1/webhooks`."""
-        return self._http.request("POST", "/api/v1/webhooks", {"url": url, "events": events, "secret": secret})
+        return self._http.request(
+            "POST",
+            "/api/v1/webhooks",
+            {"url": url, "events": events, "secret": secret},
+            headers=_idem_headers(idempotency_key),
+        )
 
-    def remove(self, webhook_id: str) -> None:
+    def remove(self, webhook_id: str, *, idempotency_key: Optional[str] = None) -> None:
         """`DELETE /api/v1/webhooks/{id}`."""
-        return self._http.request("DELETE", f"/api/v1/webhooks/{_quote(webhook_id)}")
+        return self._http.request(
+            "DELETE", f"/api/v1/webhooks/{_quote(webhook_id)}", headers=_idem_headers(idempotency_key)
+        )
 
 
 class AuditResource:
