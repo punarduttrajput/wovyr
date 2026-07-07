@@ -2326,7 +2326,7 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["data"][0]["execution_id"], "demo-1");
-        assert_eq!(v["data"][0]["status"], "Completed");
+        assert_eq!(v["data"][0]["status"], "completed");
         assert_eq!(v["has_more"], false);
 
         // Status filter that excludes it yields an empty list.
@@ -2358,7 +2358,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["execution"]["activities"]["a"], "Completed");
+        assert_eq!(v["execution"]["activities"]["a"], "completed");
         assert!(v["events"].as_array().unwrap().len() >= 4);
 
         // Unknown execution → 404.
@@ -2922,9 +2922,18 @@ mod tests {
     /// tenant is invisible and inaccessible (list/get/signal/cancel) to another tenant,
     /// and a spoofed `X-Apex-Tenant` is rejected. (v0.3 exit criterion: zero
     /// cross-tenant leakage — workflows surface.)
+    ///
+    /// Uses an isolated in-memory workflow engine rather than the shared
+    /// `~/.apex/workflows` `AppState::from_env()` default: the `GET
+    /// /api/v1/workflows` list route scans *every* checkpoint in that directory
+    /// (not just this test's own execution), and real accumulated checkpoints
+    /// written before API-702's `snake_case` `WorkflowState`/`ActivityState`
+    /// change no longer deserialize — the identical incompatibility a real
+    /// deployment would hit on upgrade, which a test has no reason to depend on.
     #[tokio::test]
     async fn workflows_are_isolated_per_tenant() {
         use apex_tenancy::{MemberScope, Membership, Organization, Role};
+        use apex_workflow::ClosureExecutor;
 
         let tenancy = Arc::new(InMemoryTenancyStore::new());
         let org_a = tenancy
@@ -2940,7 +2949,18 @@ mod tests {
         };
         tenancy.add_membership(member("alice", &org_a.id)).unwrap();
         tenancy.add_membership(member("bob", &org_b.id)).unwrap();
-        let state = Arc::new(AppState::from_env().await.with_tenancy(tenancy));
+
+        let store = InMemoryStore::new();
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+        let executor = ClosureExecutor::new().on("echo-step", |_| async { Ok(json!("ok")) });
+        let engine = Engine::new(events, checkpoints, Arc::new(executor));
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_tenancy(tenancy)
+                .with_workflows(engine),
+        );
 
         let manifest = "metadata:\n  name: iso-wf\nspec:\n  activities:\n    - id: echo-step\n      type: function\n      name: echo\n      inputs:\n        message: hi\n";
         let exec_id = "wf-iso-acme-1";
@@ -3145,7 +3165,7 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        let found: Vec<&str> = q["results"]
+        let found: Vec<&str> = q["data"]
             .as_array()
             .unwrap()
             .iter()
@@ -3190,7 +3210,7 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        let found: Vec<&str> = q["results"]
+        let found: Vec<&str> = q["data"]
             .as_array()
             .unwrap()
             .iter()
@@ -3281,7 +3301,7 @@ mod tests {
         let (st, list) =
             tenant_req(&state, "GET", "/api/v1/secrets", "beta", "bob", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(list["total"], 0, "beta has no secrets of its own");
+        assert_eq!(list["total_estimate"], 0, "beta has no secrets of its own");
         let (st, _) = tenant_req(
             &state,
             "GET",
@@ -3386,7 +3406,7 @@ mod tests {
         let (st, audit) =
             tenant_req(&state, "GET", "/api/v1/audit", "acme", "alice", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        let entries = audit["entries"].as_array().unwrap();
+        let entries = audit["data"].as_array().unwrap();
         let actions: Vec<&str> = entries
             .iter()
             .filter_map(|e| e["event"]["action"].as_str())
@@ -3408,7 +3428,7 @@ mod tests {
         let (st, beta) =
             tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(beta["total"], 0);
+        assert_eq!(beta["total_estimate"], 0);
     }
 
     /// A fresh in-memory-backed KMS for tests, isolated from the shared `~/.apex/kms`.
@@ -3568,7 +3588,7 @@ mod tests {
         let (st, audit) =
             tenant_req(&state, "GET", "/api/v1/audit", "acme", "alice", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        let entries = audit["entries"].as_array().unwrap();
+        let entries = audit["data"].as_array().unwrap();
         let actions: Vec<&str> = entries
             .iter()
             .filter_map(|e| e["event"]["action"].as_str())
@@ -3588,7 +3608,7 @@ mod tests {
         let (st, beta) =
             tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(beta["total"], 0);
+        assert_eq!(beta["total_estimate"], 0);
     }
 
     /// **SEC-102**: the anonymous default-tenant bypass (`tenant_authorize` skipping
@@ -3680,7 +3700,7 @@ mod tests {
         let state = Arc::new(AppState::from_env().await);
         let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        let tools = body["tools"].as_array().unwrap();
+        let tools = body["data"].as_array().unwrap();
         // The safe-by-default built-ins are always registered.
         let ids: Vec<&str> = tools.iter().filter_map(|t| t["id"].as_str()).collect();
         for id in ["echo", "fs_read", "http_get"] {
@@ -3707,7 +3727,7 @@ mod tests {
         );
         let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
         assert_eq!(st, StatusCode::OK);
-        let ids: Vec<&str> = body["tools"]
+        let ids: Vec<&str> = body["data"]
             .as_array()
             .unwrap()
             .iter()

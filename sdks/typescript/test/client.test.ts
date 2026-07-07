@@ -70,9 +70,9 @@ describe("ApexClient (integration)", () => {
 
   test("tools.list() includes the built-in echo tool", async (t) => {
     if (!serverAvailable) return t.skip("no server");
-    const { tools, total } = await client().tools.list();
-    assert.ok(total >= 4);
-    assert.ok(tools.some((tool) => tool.id === "echo"));
+    const { data, total_estimate } = await client().tools.list();
+    assert.ok(total_estimate >= 4);
+    assert.ok(data.some((tool) => tool.id === "echo"));
   });
 
   test("agents.run() runs an inline manifest end to end", async (t) => {
@@ -164,13 +164,13 @@ describe("ApexClient (integration)", () => {
       content: "The Apex TypeScript SDK integration test wrote this record.",
       tags: ["sdk-test"],
     });
-    const { results } = await client().memory.query({
+    const { data } = await client().memory.query({
       text: "Apex TypeScript SDK integration test",
       namespace,
       strategy: "keyword",
     });
-    assert.ok(results.length >= 1);
-    assert.match(results[0]!.content, /Apex TypeScript SDK/);
+    assert.ok(data.length >= 1);
+    assert.match(data[0]!.content, /Apex TypeScript SDK/);
   });
 
   test("secrets: create, get, rotate, delete round-trip (value never returned)", async (t) => {

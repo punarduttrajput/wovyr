@@ -213,7 +213,9 @@ class MemoryResource:
 
     def query(self, req: QueryMemoryRequest) -> dict[str, Any]:
         """`POST /api/v1/memory:query` — hybrid vector+keyword retrieval.
-        Returns `{"results": [...], "count": int}`."""
+        Returns `{"data": [...], "count": int}` — a ranked result set, not a
+        page (no cursor/`has_more`; retrieval is bounded by `limit`/relevance,
+        not an offset into a stable ordering)."""
         return self._http.request("POST", "/api/v1/memory:query", req)
 
 
@@ -221,9 +223,9 @@ class PluginsResource:
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
-    def list(self) -> dict[str, Any]:
+    def list(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> Page:
         """`GET /api/v1/plugins`."""
-        return self._http.request("GET", "/api/v1/plugins")
+        return self._http.request("GET", "/api/v1/plugins", query={"limit": limit, "cursor": cursor})
 
     def install(self, apexpkg: bytes, grants: Optional[List[str]] = None) -> Any:
         """`POST /api/v1/plugins:install` — `apexpkg` is the raw `.apexpkg` bytes."""
@@ -264,9 +266,18 @@ class MarketplaceResource:
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
-    def search(self, params: Optional[MarketplaceSearchParams] = None) -> dict[str, Any]:
+    def search(
+        self,
+        params: Optional[MarketplaceSearchParams] = None,
+        *,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page:
         """`GET /api/v1/marketplace/listings`."""
-        return self._http.request("GET", "/api/v1/marketplace/listings", query=params or {})
+        query: dict[str, Any] = dict(params or {})
+        query["limit"] = limit
+        query["cursor"] = cursor
+        return self._http.request("GET", "/api/v1/marketplace/listings", query=query)
 
     def publish(
         self, apexpkg: bytes, *, categories: Optional[List[str]] = None, channel: Optional[str] = None
@@ -350,9 +361,9 @@ class SecretsResource:
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
-    def list(self) -> dict[str, Any]:
+    def list(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> Page:
         """`GET /api/v1/secrets`."""
-        return self._http.request("GET", "/api/v1/secrets")
+        return self._http.request("GET", "/api/v1/secrets", query={"limit": limit, "cursor": cursor})
 
     def create(self, name: str, value: str) -> SecretMetadata:
         """`POST /api/v1/secrets` — value is never returned."""
@@ -491,11 +502,19 @@ class AuditResource:
         self._http = http
 
     def query(
-        self, *, principal: Optional[str] = None, action: Optional[str] = None, limit: Optional[int] = None
-    ) -> dict[str, Any]:
-        """`GET /api/v1/audit` — tenant-scoped, tamper-evident hash-chained log."""
+        self,
+        *,
+        principal: Optional[str] = None,
+        action: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page:
+        """`GET /api/v1/audit` — tenant-scoped, tamper-evident hash-chained
+        log, most-recent first, cursor-paginated."""
         return self._http.request(
-            "GET", "/api/v1/audit", query={"principal": principal, "action": action, "limit": limit}
+            "GET",
+            "/api/v1/audit",
+            query={"principal": principal, "action": action, "limit": limit, "cursor": cursor},
         )
 
 
@@ -503,6 +522,6 @@ class ToolsResource:
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
-    def list(self) -> dict[str, Any]:
+    def list(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> Page:
         """`GET /api/v1/tools` — built-ins + enabled plugin tools. Unauthenticated."""
-        return self._http.request("GET", "/api/v1/tools")
+        return self._http.request("GET", "/api/v1/tools", query={"limit": limit, "cursor": cursor})

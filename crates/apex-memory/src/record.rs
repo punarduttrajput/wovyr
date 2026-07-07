@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// The kind of memory, which governs recency decay
 /// ([ranking §4](../../docs/06-memory-engine/ranking.md)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryType {
     /// Short-lived conversational memory (fast decay).
     Conversation,
@@ -86,7 +86,7 @@ impl AccessContext {
 
 /// Which retrieval method to use ([retrieval §2](../../docs/06-memory-engine/retrieval.md)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum RetrievalStrategy {
     /// Embedding similarity only.
     Vector,
@@ -218,4 +218,32 @@ pub struct ScoredMemory {
     pub score: f32,
     /// Why it scored that way.
     pub breakdown: ScoreBreakdown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RM-GA-P4 API-702: every `MemoryType` variant round-trips through JSON as
+    /// `snake_case` — the platform-wide casing policy, even though it was
+    /// already `rename_all = "lowercase"` before this change (identical output
+    /// for these single-word variants; normalized for policy consistency with
+    /// every other wire enum). `apex-server`'s response serialization used to
+    /// re-derive this same string by hand via `{:?}` (Debug) + `to_lowercase()`
+    /// instead of relying on this derive at all.
+    #[test]
+    fn memory_type_round_trips_as_snake_case_json() {
+        let cases = [
+            (MemoryType::Conversation, "\"conversation\""),
+            (MemoryType::Workflow, "\"workflow\""),
+            (MemoryType::Episodic, "\"episodic\""),
+            (MemoryType::Semantic, "\"semantic\""),
+        ];
+        for (ty, wire) in cases {
+            let json = serde_json::to_string(&ty).unwrap();
+            assert_eq!(json, wire, "{ty:?} must serialize to {wire}");
+            let back: MemoryType = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, ty, "{wire} must deserialize back to {ty:?}");
+        }
+    }
 }

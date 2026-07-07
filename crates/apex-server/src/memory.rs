@@ -78,7 +78,11 @@ fn record_json(r: &MemoryRecord) -> Value {
         "id": r.id,
         "namespace": r.namespace,
         "content": r.content,
-        "type": format!("{:?}", r.memory_type).to_lowercase(),
+        // `MemoryType` derives its own `snake_case` Serialize (RM-GA-P4 API-702) —
+        // this used to re-derive the same string by hand via `{:?}` (Debug) +
+        // `to_lowercase()`, which only coincidentally matched serde's output and
+        // would have silently diverged for any future multi-word variant.
+        "type": r.memory_type,
         "importance": r.importance,
         "tags": r.tags,
         "required_scopes": r.required_scopes,
@@ -172,6 +176,10 @@ struct QueryRequest {
 }
 
 /// `POST /api/v1/memory:query` — hybrid retrieval with an explainable score breakdown.
+/// Returns a **ranked result set, not a page** of a larger collection — there is no
+/// cursor/`has_more`, since retrieval is bounded by `limit`/relevance, not an
+/// offset into a stable ordering. `data` matches the field name every other list
+/// route uses (RM-GA-P4 API-701) even though this route isn't cursor-paginated.
 async fn query(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -224,7 +232,9 @@ async fn query(
                 "id": s.record.id,
                 "namespace": s.record.namespace,
                 "content": s.record.content,
-                "type": format!("{:?}", s.record.memory_type).to_lowercase(),
+                // See `record_json`'s comment — `snake_case` via serde, not a
+                // hand-rolled Debug/lowercase hack (RM-GA-P4 API-702).
+                "type": s.record.memory_type,
                 "importance": s.record.importance,
                 "tags": s.record.tags,
                 "score": s.score,
@@ -237,7 +247,7 @@ async fn query(
             })
         })
         .collect();
-    Ok(Json(json!({ "results": data, "count": data.len() })))
+    Ok(Json(json!({ "data": data, "count": data.len() })))
 }
 
 #[derive(Deserialize)]

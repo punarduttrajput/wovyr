@@ -7,7 +7,7 @@
 
 use apex_plugin::{
     CapabilityKind, CapabilityRuntime, InstalledPlugin, NotLoadedRuntime, Package, PluginEngine,
-    PluginState, TrustStore,
+    TrustStore,
 };
 use apex_tools::ToolRegistry;
 use axum::{
@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use crate::ApiError;
 use crate::AppState;
-use axum::extract::State;
+use crate::hardening::{PageQuery, paginate};
+use axum::extract::{Query, State};
 
 fn plugins_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -294,7 +295,9 @@ fn plugin_json(p: &InstalledPlugin) -> Value {
         "version": p.manifest.metadata.version,
         "publisher": p.manifest.metadata.publisher,
         "description": p.manifest.metadata.description,
-        "state": match p.state { PluginState::Enabled => "enabled", PluginState::Disabled => "disabled" },
+        // `PluginState` already derives a `snake_case` Serialize — this used to
+        // re-derive the same two strings by hand (RM-GA-P4 API-702).
+        "state": p.state,
         "permissions": p.manifest.permissions,
         "granted": p.granted_permissions,
         "capabilities": caps,
@@ -302,11 +305,12 @@ fn plugin_json(p: &InstalledPlugin) -> Value {
     })
 }
 
-/// `GET /api/v1/plugins` — the installed plugin catalog.
-async fn list_plugins() -> Result<Json<Value>, ApiError> {
+/// `GET /api/v1/plugins` — the installed plugin catalog, cursor-paginated
+/// (overview §6, RM-GA-P4 API-701).
+async fn list_plugins(Query(page): Query<PageQuery>) -> Result<Json<Value>, ApiError> {
     let catalog = load_catalog()?;
     let items: Vec<Value> = catalog.iter().map(plugin_json).collect();
-    Ok(Json(json!({ "plugins": items, "total": items.len() })))
+    Ok(Json(paginate(items, &page.page())))
 }
 
 #[derive(Deserialize)]
@@ -494,7 +498,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_plugin::PluginManifest;
+    use apex_plugin::{PluginManifest, PluginState};
     use apex_secrets::{InMemorySecretStore, Vault};
 
     fn vault() -> Vault {

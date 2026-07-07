@@ -8,7 +8,14 @@ use serde::{Deserialize, Serialize};
 
 /// Lifecycle state of a workflow execution
 /// ([spec §5](../../docs/03-workflow-engine/state-machine.md)).
+///
+/// `snake_case` on the wire (RM-GA-P4 API-702): the `?status=` query filter
+/// (`parse_workflow_status`) already normalized its input to lowercase before
+/// this change, so the two now agree by construction instead of by
+/// coincidence — a client no longer sees `"Completed"` in a response body
+/// while filtering with `?status=completed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkflowState {
     /// Instance created.
     Created,
@@ -64,7 +71,12 @@ impl WorkflowState {
 
 /// Lifecycle state of a single activity
 /// ([spec §7](../../docs/03-workflow-engine/state-machine.md)).
+///
+/// `snake_case` on the wire (RM-GA-P4 API-702), matching [`WorkflowState`] —
+/// the two appear side by side in the same `GET /api/v1/workflows/{id}`
+/// response, so they must share one casing policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActivityState {
     /// Instantiated.
     Created,
@@ -138,5 +150,54 @@ mod tests {
         assert!(ActivityState::Failed.can_transition(ActivityState::Retrying));
         assert!(ActivityState::Retrying.can_transition(ActivityState::Scheduled));
         assert!(!ActivityState::Completed.can_transition(ActivityState::Running));
+    }
+
+    /// RM-GA-P4 API-702: every `WorkflowState` variant round-trips through JSON
+    /// as its `snake_case` wire form — a client filtering `?status=completed`
+    /// sees the exact same casing a response body's `status` field carries.
+    #[test]
+    fn workflow_state_round_trips_as_snake_case_json() {
+        let cases = [
+            (WorkflowState::Created, "\"created\""),
+            (WorkflowState::Validated, "\"validated\""),
+            (WorkflowState::Scheduled, "\"scheduled\""),
+            (WorkflowState::Running, "\"running\""),
+            (WorkflowState::Waiting, "\"waiting\""),
+            (WorkflowState::Resumed, "\"resumed\""),
+            (WorkflowState::Compensating, "\"compensating\""),
+            (WorkflowState::Completed, "\"completed\""),
+            (WorkflowState::Failed, "\"failed\""),
+            (WorkflowState::Cancelled, "\"cancelled\""),
+        ];
+        for (state, wire) in cases {
+            let json = serde_json::to_string(&state).unwrap();
+            assert_eq!(json, wire, "{state:?} must serialize to {wire}");
+            let back: WorkflowState = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, state, "{wire} must deserialize back to {state:?}");
+        }
+    }
+
+    /// RM-GA-P4 API-702: every `ActivityState` variant round-trips through JSON
+    /// as its `snake_case` wire form, matching [`WorkflowState`]'s policy since
+    /// both appear side by side in the same response.
+    #[test]
+    fn activity_state_round_trips_as_snake_case_json() {
+        let cases = [
+            (ActivityState::Created, "\"created\""),
+            (ActivityState::Ready, "\"ready\""),
+            (ActivityState::Scheduled, "\"scheduled\""),
+            (ActivityState::Running, "\"running\""),
+            (ActivityState::Completed, "\"completed\""),
+            (ActivityState::Failed, "\"failed\""),
+            (ActivityState::Retrying, "\"retrying\""),
+            (ActivityState::Waiting, "\"waiting\""),
+            (ActivityState::Skipped, "\"skipped\""),
+        ];
+        for (state, wire) in cases {
+            let json = serde_json::to_string(&state).unwrap();
+            assert_eq!(json, wire, "{state:?} must serialize to {wire}");
+            let back: ActivityState = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, state, "{wire} must deserialize back to {state:?}");
+        }
     }
 }
