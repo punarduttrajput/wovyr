@@ -51,7 +51,19 @@ semver = "1"
 base64 = "0.22"
 hex = "0.4"
 sha2 = "0.10"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+rand = "0.8"
+tower = { version = "0.5", features = ["util", "limit", "timeout", "load-shed"] }
+tower-http = { version = "0.6", features = ["timeout", "limit", "cors"] }
+# Explicitly no bundled crypto provider (tls-rustls-no-provider): reqwest elsewhere in
+# this dependency graph already selects rustls' `ring` provider, and rustls panics at
+# runtime if two providers (ring + aws-lc-rs, tls-rustls's default) are both linked in
+# with neither installed as the process-wide default. `serve()` installs `ring`
+# explicitly via the `rustls` dependency below before any TLS connection is accepted.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [dev-dependencies]
 tokio.workspace = true
 tower = { version = "0.5", features = ["util"] }
+rcgen = "0.13"

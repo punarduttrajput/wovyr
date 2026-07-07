@@ -537,15 +537,18 @@ pub(crate) fn tenant_context(state: &AppState, headers: &HeaderMap) -> TenantCon
 /// tenant or any authenticated principal must hold a tenant-scoped role granting `scope`
 /// (→ `403`), which requires real membership — so `X-Apex-Tenant` cannot be spoofed.
 ///
-/// **Back-compat:** the anonymous `default` tenant (no principal) retains full
-/// single-node access, preserving the pre-tenancy behavior for local/dev use.
+/// **Local/dev escape hatch** ([SEC-102](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
+/// the anonymous `default` tenant (no principal) retains full single-node access ONLY
+/// when `state.anonymous_allowed` — explicit opt-in (`APEX_ALLOW_ANONYMOUS=1`),
+/// refused by [`crate::serve`] on any non-loopback bind. Without it, an anonymous
+/// caller is authorized like anyone else: no roles, no access (`403`).
 pub(crate) fn tenant_authorize(
     state: &AppState,
     headers: &HeaderMap,
     scope: &str,
 ) -> std::result::Result<String, ApiError> {
     let ctx = tenant_context(state, headers);
-    if ctx.principal.is_empty() && ctx.tenant == DEFAULT_TENANT {
+    if ctx.principal.is_empty() && ctx.tenant == DEFAULT_TENANT && state.anonymous_allowed {
         return Ok(ctx.tenant);
     }
     ctx.authorize(scope)?;

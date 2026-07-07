@@ -557,6 +557,10 @@ pub async fn run_cmd(capability: &str, input: &str) -> Result<()> {
         workdir: ".".to_string(),
         tenant: String::new(),
         granted_permissions: grants,
+        egress_allowlist: None,
+        // `plugin run` is an operator-invoked capability, already installed +
+        // signature-verified — Verified, not the FirstParty default (SEC-305).
+        trust_class: apex_tools::TrustClass::Verified,
     };
     let params: Value =
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));

@@ -6,12 +6,17 @@
 # below adds the rest — dependency CVEs (SCA) and secret scanning — and
 # `container-scan` builds the single-binary Docker image and scans it for
 # vulnerabilities (also the image's first real CI build).
-# The `rust` job's final step is FUT-006's eval regression gate
-# (docs/18-roadmap/future/B6-trust-evaluation.md §8.3): apex-eval's
-# deterministic fixture-based regression suites, run and named explicitly
-# (they already run as part of `cargo test --workspace` above; this step's
-# value is a distinct, legible CI check plus --nocapture so pass rates are
-# visible in the log, not just a pass/fail buried in the full test count).
+# The `rust` job's later steps are named regression gates, run and reported
+# explicitly even though they already execute as part of `cargo test --workspace`
+# above — so a failure reads as a specific, legible finding rather than being buried
+# in the full test count:
+#   - RM-GA-P1 SEC-105's negative-authorization matrix (`crates/apex-server/tests/
+#     authz_matrix.rs`): every mutating/secret/KMS/plugin/marketplace/audit route
+#     must reject a missing or under-scoped credential. A route added without a
+#     matching table entry fails its own hand-maintained coverage tripwire.
+#   - FUT-006's eval regression gate (docs/18-roadmap/future/B6-trust-evaluation.md
+#     §8.3): apex-eval's deterministic fixture-based suites, run with --nocapture so
+#     pass rates are visible in the log.
 name: ci
 
 on:
@@ -48,6 +53,13 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # RM-GA-P1 SEC-105 negative-authorization gate: fails if any protected route
+      # accepts a missing/unknown credential (401 expected) or an authenticated-but-
+      # under-scoped principal (403 expected), or if the route table's hand-maintained
+      # coverage count has drifted from the server's actual route registrations.
+      - name: Negative-authorization gate (SEC-105)
+        run: cargo test -p apex-server --test authz_matrix -- --nocapture
 
       # FUT-006 eval regression gate: apex-eval's deterministic fixture-based
       # suites, named explicitly (not folded silently into the step above) so

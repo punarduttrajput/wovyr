@@ -185,6 +185,17 @@ registry operation via `tokio::task::spawn_blocking` (see
 moves the whole synchronous call onto a plain OS thread outside the async
 runtime, where the nested `block_on` is fine.
 
+**TLS (RM-GA-P1 SEC-202):** `apex dev`/`apex_server::serve()` refuses to bind
+a non-loopback address unless either TLS is configured in-process
+(`APEX_TLS_CERT`/`APEX_TLS_KEY`, PEM files — served via an in-process rustls
+acceptor, no separate proxy needed) or `APEX_TLS_TERMINATED_UPSTREAM=1`
+declares that a reverse proxy/load balancer in front of this container already
+terminates TLS. The compose file's `apex` service binds inside the Docker
+network (not literally loopback), so one of these two must be set — set the
+cert/key env vars (with the PEM files bind-mounted in) for a self-contained
+compose stack, or `APEX_TLS_TERMINATED_UPSTREAM=1` if fronting it with an
+ingress/load balancer that already speaks TLS to clients.
+
 ---
 
 # 11. Related Documents

@@ -13,7 +13,7 @@ use apex_tools::ToolRegistry;
 use axum::{
     Json, Router,
     extract::Path,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{delete, get},
 };
 use serde::Deserialize;
@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use crate::ApiError;
 use crate::AppState;
+use axum::extract::State;
 
 fn plugins_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -290,7 +291,16 @@ struct PluginRef {
 }
 
 /// `POST /api/v1/plugins:enable` — enable a plugin (routes its capabilities live).
-async fn enable_plugin(Json(req): Json<PluginRef>) -> Result<Json<Value>, ApiError> {
+///
+/// `plugins:admin`-gated ([RM-GA-P1 SEC-103](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
+/// an enabled tool runs inside *every* tenant's agent runs with tenant-scoped
+/// secrets injected, so this is a platform-admin-tier action, not a per-tenant one.
+async fn enable_plugin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<PluginRef>,
+) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.enable(&req.id, &mut scratch)?;
@@ -299,7 +309,13 @@ async fn enable_plugin(Json(req): Json<PluginRef>) -> Result<Json<Value>, ApiErr
 }
 
 /// `POST /api/v1/plugins:disable` — disable a plugin (withdraws its capabilities).
-async fn disable_plugin(Json(req): Json<PluginRef>) -> Result<Json<Value>, ApiError> {
+/// `plugins:admin`-gated (SEC-103).
+async fn disable_plugin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<PluginRef>,
+) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.disable(&req.id, &mut scratch)?;
@@ -319,8 +335,14 @@ struct InstallReq {
 ///
 /// The package must carry a valid ed25519 signature from a trusted publisher
 /// (`POST /api/v1/plugins:trust` registers publishers). On success the plugin is
-/// installed in the *disabled* state; call `:enable` to activate it.
-async fn install_plugin(Json(req): Json<InstallReq>) -> Result<Json<Value>, ApiError> {
+/// installed in the *disabled* state; call `:enable` to activate it. `plugins:admin`-
+/// gated (SEC-103).
+async fn install_plugin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<InstallReq>,
+) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let bytes = base64_decode(&req.apexpkg)?;
     let package = Package::from_apexpkg(&bytes)?;
     Ok(Json(install_package(&package, &req.grants)?))
@@ -339,8 +361,13 @@ pub(crate) fn install_package(package: &Package, grants: &[String]) -> Result<Va
 /// `POST /api/v1/plugins:upgrade` — upgrade an installed plugin to a new version.
 ///
 /// Retains the prior version for rollback. Any new permissions beyond what was
-/// previously granted must be listed in `grants`.
-async fn upgrade_plugin(Json(req): Json<InstallReq>) -> Result<Json<Value>, ApiError> {
+/// previously granted must be listed in `grants`. `plugins:admin`-gated (SEC-103).
+async fn upgrade_plugin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<InstallReq>,
+) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let bytes = base64_decode(&req.apexpkg)?;
     let package = Package::from_apexpkg(&bytes)?;
     let mut engine = engine()?;
@@ -357,7 +384,13 @@ struct RollbackReq {
 }
 
 /// `POST /api/v1/plugins:rollback` — revert a plugin to its retained prior version.
-async fn rollback_plugin(Json(req): Json<RollbackReq>) -> Result<Json<Value>, ApiError> {
+/// `plugins:admin`-gated (SEC-103).
+async fn rollback_plugin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<RollbackReq>,
+) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.rollback(&req.id, &mut scratch)?;
@@ -367,8 +400,14 @@ async fn rollback_plugin(Json(req): Json<RollbackReq>) -> Result<Json<Value>, Ap
 
 /// `DELETE /api/v1/plugins/{id}` — uninstall a plugin.
 ///
-/// `id` is URL-encoded `publisher/name` (e.g. `acme%2Fmy-plugin`).
-async fn uninstall_plugin(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+/// `id` is URL-encoded `publisher/name` (e.g. `acme%2Fmy-plugin`). `plugins:admin`-
+/// gated (SEC-103).
+async fn uninstall_plugin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.uninstall(&id, &mut scratch)?;
@@ -385,8 +424,14 @@ struct TrustReq {
 
 /// `POST /api/v1/plugins:trust` — register a publisher's ed25519 public key.
 ///
-/// After this, packages signed by that publisher can be installed.
-async fn trust_publisher(Json(req): Json<TrustReq>) -> Result<Json<Value>, ApiError> {
+/// After this, packages signed by that publisher can be installed. `plugins:admin`-
+/// gated (SEC-103): trusting a publisher is the root of the plugin supply chain.
+async fn trust_publisher(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<TrustReq>,
+) -> Result<Json<Value>, ApiError> {
+    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let key_bytes = hex::decode(&req.public_key_hex).map_err(|_| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -472,5 +517,105 @@ capabilities:
             &vault(),
         );
         assert!(!registry.contains("demo.run"));
+    }
+
+    // --- RM-GA-P1 SEC-103: plugin lifecycle routes are RBAC-gated -------------------
+
+    use axum::http::{Request, StatusCode as HttpStatus};
+    use tower::ServiceExt;
+
+    async fn call(
+        state: &Arc<AppState>,
+        method: &str,
+        uri: &str,
+        principal: &str,
+        body: Value,
+    ) -> HttpStatus {
+        let resp = crate::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("x-apex-principal", principal)
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    /// An anonymous caller can no longer trust their own key, install, or enable a
+    /// plugin (PP-03) — every mutating route requires `plugins:admin`, held here only
+    /// by an org-admin membership (deliberately not `APEX_PLATFORM_ADMINS`, a
+    /// process-global env var that would race against this crate's other tests).
+    #[tokio::test]
+    async fn plugin_lifecycle_routes_require_plugins_admin() {
+        use apex_tenancy::{
+            InMemoryTenancyStore, MemberScope, Membership, Organization, Role, TenancyStore,
+        };
+
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org = tenancy
+            .create_org(Organization::new("default", "Plugins Admin Co"))
+            .unwrap();
+        tenancy
+            .add_membership(Membership {
+                user: "admin".to_string(),
+                role: Role::OrgAdmin,
+                scope: MemberScope::Organization(org.id.clone()),
+            })
+            .unwrap();
+        let state = Arc::new(crate::AppState::from_env().await.with_tenancy(tenancy));
+
+        // A non-admin principal cannot trust a publisher key. (Deliberately not
+        // exercised for the org admin here too: unlike enable/disable/rollback on an
+        // unknown id, `:trust` writes unconditionally — this test must not touch the
+        // real `~/.apex/plugins/trust.json` on whatever machine runs it.)
+        let status = call(
+            &state,
+            "POST",
+            "/api/v1/plugins:trust",
+            "mallory",
+            json!({ "publisher": "acme", "public_key_hex": "00".repeat(32) }),
+        )
+        .await;
+        assert_eq!(status, HttpStatus::FORBIDDEN);
+
+        // Same gating for enable/disable/rollback: a non-admin is refused before
+        // authz even considers whether the (unknown) id exists — a 403, not a 404.
+        // Safe for the admin side too: the engine errors out on an unknown id via
+        // `?`, before ever reaching `save_catalog`, so nothing is persisted.
+        for (method, uri) in [
+            ("POST", "/api/v1/plugins:enable"),
+            ("POST", "/api/v1/plugins:disable"),
+            ("POST", "/api/v1/plugins:rollback"),
+        ] {
+            let status = call(&state, method, uri, "mallory", json!({ "id": "acme/demo" })).await;
+            assert_eq!(status, HttpStatus::FORBIDDEN, "{method} {uri}");
+            let status = call(&state, method, uri, "admin", json!({ "id": "acme/demo" })).await;
+            assert_ne!(status, HttpStatus::FORBIDDEN, "{method} {uri}");
+            assert_ne!(status, HttpStatus::UNAUTHORIZED, "{method} {uri}");
+        }
+        let status = call(
+            &state,
+            "DELETE",
+            "/api/v1/plugins/acme%2Fdemo",
+            "mallory",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, HttpStatus::FORBIDDEN);
+        let status = call(
+            &state,
+            "DELETE",
+            "/api/v1/plugins/acme%2Fdemo",
+            "admin",
+            Value::Null,
+        )
+        .await;
+        assert_ne!(status, HttpStatus::FORBIDDEN);
+        assert_ne!(status, HttpStatus::UNAUTHORIZED);
     }
 }

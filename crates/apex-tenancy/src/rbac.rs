@@ -192,6 +192,10 @@ mod tests {
         "projects:admin",
         "agents:admin",
         "kms:admin",
+        // RM-GA-P1 SEC-103/SEC-104: plugin lifecycle + marketplace moderation are
+        // admin-tier scopes, mirroring `kms:admin`'s placement on this ladder.
+        "plugins:admin",
+        "marketplace:moderate",
     ];
     const ORG_ADMIN_SCOPES: &[&str] = &["org.admin", "users:admin"];
     const PLATFORM_SCOPES: &[&str] = &["platform.admin"];
