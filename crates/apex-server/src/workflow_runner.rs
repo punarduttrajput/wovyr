@@ -12,6 +12,11 @@
 //! - `POST /api/v1/workflows/{id}/approve` — approve a suspended `human` activity
 //!   (maps to a signal whose key matches the activity id).
 //!
+//! `signal`/`approve` no longer require the client to re-upload the definition YAML
+//! on every call (RM-GA-P2 DUR-405): the server resolves the execution's own
+//! pinned workflow definition when `manifest` is omitted — see
+//! [`resolve_definition`].
+//!
 //! Execution uses [`ServerExecutor`], a type-dispatch executor that handles
 //! `function` activities via the tool registry, `ai` activities via the gateway,
 //! and `human` activities by suspending durably (returning `Interrupted`).
@@ -313,12 +318,65 @@ async fn submit_handler(
     })))
 }
 
+// ── definition resolution (RM-GA-P2 DUR-405) ────────────────────────────────────
+
+/// Resolve the `Definition` a signal/approve call needs to resume `execution_id`.
+///
+/// Prefers an explicitly supplied `manifest` (kept for back-compat and for a
+/// caller resuming an execution whose workflow was never `POST /api/v1/workflows`-
+/// submitted, e.g. one started only through the CLI's local runner) — a
+/// mismatched one is still rejected fail-closed by G7's pin check inside
+/// `Engine::resume`, so re-uploading the *wrong* definition can't silently replay
+/// a different DAG. Otherwise looks the execution's workflow name up via
+/// `Engine::query` and resolves it through the same persisted-by-name
+/// [`crate::definition_resolver`] EXE-601's background dispatchers already use —
+/// `submit_handler` persists every submitted manifest there, so the common case
+/// (signal/approve an execution this server itself started) needs only the
+/// execution id and event/decision payload, no manifest re-upload.
+async fn resolve_definition(
+    state: &AppState,
+    execution_id: &str,
+    manifest: Option<&str>,
+) -> Result<Definition, ApiError> {
+    if let Some(manifest) = manifest {
+        return Definition::from_yaml(manifest).map_err(|e| {
+            ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string())
+        });
+    }
+    let execution = state
+        .workflows
+        .query(execution_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("execution `{execution_id}` not found"),
+            )
+        })?;
+    crate::definition_resolver()(&execution.workflow_name).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "definition_not_found",
+            format!(
+                "no persisted definition found for workflow `{}`; supply `manifest` explicitly",
+                execution.workflow_name
+            ),
+        )
+    })
+}
+
 // ── signal ────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct SignalRequest {
-    /// The workflow definition YAML (needed to resume the execution).
-    manifest: String,
+    /// The workflow definition YAML. Optional (RM-GA-P2 DUR-405): when omitted,
+    /// the server resolves the execution's own workflow definition instead of
+    /// requiring the client to re-upload it on every call — see
+    /// [`resolve_definition`].
+    #[serde(default)]
+    manifest: Option<String>,
     /// The event name to deliver (matches `wait: {event: <name>}` in the definition).
     event: String,
     /// Payload injected into `event.<name>` in the workflow variables.
@@ -336,8 +394,7 @@ async fn signal_handler(
 ) -> Result<Json<Value>, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
     crate::require_workflow_visible(&state, &id, &tenant)?;
-    let def = Definition::from_yaml(&req.manifest)
-        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
+    let def = resolve_definition(&state, &id, req.manifest.as_deref()).await?;
     let payload = if req.payload.is_null() {
         json!({})
     } else {
@@ -361,8 +418,10 @@ async fn signal_handler(
 
 #[derive(Deserialize)]
 struct ApproveRequest {
-    /// The workflow definition YAML.
-    manifest: String,
+    /// The workflow definition YAML. Optional (RM-GA-P2 DUR-405) — see
+    /// [`resolve_definition`].
+    #[serde(default)]
+    manifest: Option<String>,
     /// The `human` activity id being approved.
     activity_id: String,
     /// Approval decision payload (e.g. `{"approved": true, "comment": "LGTM"}`).
@@ -381,8 +440,7 @@ async fn approve_handler(
 ) -> Result<Json<Value>, ApiError> {
     let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
     crate::require_workflow_visible(&state, &id, &tenant)?;
-    let def = Definition::from_yaml(&req.manifest)
-        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
+    let def = resolve_definition(&state, &id, req.manifest.as_deref()).await?;
     let decision = if req.decision.is_null() {
         json!({ "approved": true })
     } else {
@@ -790,6 +848,128 @@ metadata:\n  name: exe601-timer\nspec:\n  activities:\n    - {id: wait_a, type: 
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const DUR405_SIGNAL_YAML: &str = "\
+metadata:\n  name: dur405-signal-wait\nspec:\n  activities:\n    - {id: hold, type: wait, inputs: {event: go}}\n";
+
+    /// RM-GA-P2 DUR-405 acceptance: `POST …/signal` resolves the execution's own
+    /// pinned definition (persisted by `submit_handler`, EXE-601) instead of
+    /// requiring the client to re-upload the workflow YAML on every call — the
+    /// request body carries only the event name.
+    #[tokio::test]
+    async fn signal_succeeds_with_only_execution_id_and_event_when_manifest_is_omitted() {
+        let state = Arc::new(AppState::from_env().await);
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": DUR405_SIGNAL_YAML, "execution_id": "dur405-signal-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_for_activity_waiting(&state, "dur405-signal-test", "hold").await;
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows/dur405-signal-test/signal",
+            json!({ "event": "go" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "signalled");
+
+        let detail = wait_for_terminal(&state, "dur405-signal-test").await;
+        assert_eq!(detail["execution"]["status"], "Completed", "{detail}");
+    }
+
+    const DUR405_APPROVE_YAML: &str = "\
+metadata:\n  name: dur405-approve-wait\nspec:\n  activities:\n    - {id: review, type: wait, inputs: {event: review}}\n";
+
+    /// Same acceptance for `/approve`: internally a signal keyed by activity id
+    /// ([`approve_handler`]), so it resolves the definition the same way.
+    #[tokio::test]
+    async fn approve_succeeds_with_only_execution_id_when_manifest_is_omitted() {
+        let state = Arc::new(AppState::from_env().await);
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": DUR405_APPROVE_YAML, "execution_id": "dur405-approve-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_for_activity_waiting(&state, "dur405-approve-test", "review").await;
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows/dur405-approve-test/approve",
+            json!({ "activity_id": "review" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "approved");
+
+        let detail = wait_for_terminal(&state, "dur405-approve-test").await;
+        assert_eq!(detail["execution"]["status"], "Completed", "{detail}");
+    }
+
+    /// A re-uploaded manifest that has drifted from the pinned definition is still
+    /// rejected fail-closed (G7). DUR-405 makes `manifest` optional; it doesn't
+    /// weaken the drift guard for a caller that still supplies one.
+    #[tokio::test]
+    async fn signal_rejects_a_drifted_re_uploaded_manifest() {
+        let state = Arc::new(AppState::from_env().await);
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": DUR405_SIGNAL_YAML, "execution_id": "dur405-drift-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_for_activity_waiting(&state, "dur405-drift-test", "hold").await;
+
+        let drifted_yaml = "\
+metadata:\n  name: dur405-signal-wait\nspec:\n  activities:\n    - {id: hold, type: wait, inputs: {event: go}}\n    - {id: extra, type: function, name: echo}\n  transitions:\n    - {from: hold, to: extra}\n";
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows/dur405-drift-test/signal",
+            json!({ "manifest": drifted_yaml, "event": "go" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// When no manifest is supplied and the server has no persisted definition for
+    /// the execution's workflow name (an execution started without ever going
+    /// through `submit_handler`'s `save_definition` step), the fallback is a clear
+    /// error asking for the manifest — not a panic or a silent resume-with-nothing.
+    #[tokio::test]
+    async fn signal_without_manifest_and_without_a_persisted_definition_is_a_clear_error() {
+        let state = isolated_state().await;
+        let def = apex_workflow::Definition::from_yaml(
+            "metadata:\n  name: dur405-unpersisted\nspec:\n  activities:\n    - {id: hold, type: wait, inputs: {event: go}}\n",
+        )
+        .unwrap();
+        state
+            .workflows
+            .run(&def, "dur405-unpersisted-test", json!({}))
+            .await
+            .unwrap();
+        state.record_workflow_owner("dur405-unpersisted-test", "default");
+
+        let (st, body) = post_json(
+            crate::router(state.clone()),
+            "/api/v1/workflows/dur405-unpersisted-test/signal",
+            json!({ "event": "go" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "definition_not_found", "{body}");
     }
 
     const AGENT_YAML: &str = "\
