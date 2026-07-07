@@ -11,7 +11,7 @@ use crate::events::{RunEvent, RunEventSink};
 use crate::memory::{ContextRetriever, RetrievedContext};
 use apex_common::{Error, Result, Usage};
 use apex_provider::{ChatRequest, Gateway, Message, ToolSpec};
-use apex_tools::{ToolContext, ToolRegistry, ToolRequest};
+use apex_tools::{ToolContext, ToolRegistry, ToolRequest, TrustClass};
 use serde_json::Value;
 
 /// Default cap on model/tool iterations to prevent runaway loops.
@@ -39,6 +39,11 @@ pub struct RunOptions {
     /// (the default) allows any public host (internal/loopback/link-local/private
     /// ranges are refused regardless, allow-list or not).
     pub egress_allowlist: Option<Vec<String>>,
+    /// The run's trust classification (SEC-305), derived from provenance (first-
+    /// party manifest vs. installed plugin vs. untrusted/marketplace) — drives
+    /// sandbox backend selection for tools that run one (e.g. `shell`). Defaults to
+    /// [`TrustClass::FirstParty`] (today's behavior, back-compat).
+    pub trust_class: TrustClass,
 }
 
 impl RunOptions {
@@ -50,6 +55,7 @@ impl RunOptions {
             tenant: String::new(),
             hosted: false,
             egress_allowlist: None,
+            trust_class: TrustClass::FirstParty,
         }
     }
 
@@ -78,6 +84,13 @@ impl RunOptions {
     /// [`ToolContext`].
     pub fn with_egress_allowlist(mut self, hosts: Vec<String>) -> Self {
         self.egress_allowlist = Some(hosts);
+        self
+    }
+
+    /// Set the run's trust classification (SEC-305), threaded to each tool call's
+    /// [`ToolContext`] to drive sandbox backend selection.
+    pub fn with_trust_class(mut self, trust_class: TrustClass) -> Self {
+        self.trust_class = trust_class;
         self
     }
 }
@@ -341,6 +354,7 @@ async fn execute_tool_call(
         tenant: opts.tenant.clone(),
         granted_permissions,
         egress_allowlist: opts.egress_allowlist.clone(),
+        trust_class: opts.trust_class,
     };
 
     // Fail closed: a tool requiring a permission the agent wasn't granted is denied.

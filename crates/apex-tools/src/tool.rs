@@ -76,6 +76,14 @@ pub struct ToolContext {
     /// metadata address is refused regardless — the allow-list narrows *public*
     /// egress, it never legitimizes reaching an internal address.
     pub egress_allowlist: Option<Vec<String>>,
+    /// The calling agent/tool's trust classification, derived from provenance
+    /// (first-party manifest vs. installed plugin vs. untrusted/marketplace) —
+    /// drives sandbox backend selection for tools that run one
+    /// ([RM-GA-P1 SEC-305](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)).
+    /// Defaults to [`crate::sandbox::TrustClass::FirstParty`] (today's behavior,
+    /// back-compat) — a caller that actually knows the run's provenance sets it
+    /// explicitly.
+    pub trust_class: crate::sandbox::TrustClass,
 }
 
 /// Parameters passed to a tool, as a validated-at-the-boundary JSON value.

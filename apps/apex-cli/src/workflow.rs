@@ -60,6 +60,9 @@ impl ActivityExecutor for PlatformExecutor {
                     tenant: String::new(),
                     granted_permissions: None,
                     egress_allowlist: None,
+                    // `workflows run --local` is a trusted, first-party/local
+                    // context, same as `agents run --local` (SEC-305).
+                    trust_class: apex_tools::TrustClass::FirstParty,
                 };
                 let params = if inputs.is_null() {
                     Value::Object(Default::default())

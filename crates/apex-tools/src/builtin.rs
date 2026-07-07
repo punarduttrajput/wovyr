@@ -12,7 +12,7 @@
 //! unlike the always-free tools above — so a caller registers it explicitly (see its
 //! doc comment) rather than getting it for free in every agent.
 
-use crate::sandbox::{NativeSandbox, ResourceLimits, SandboxBackend, SandboxManager, TrustClass};
+use crate::sandbox::{NativeSandbox, ResourceLimits, SandboxBackend, SandboxManager};
 use crate::tool::{Tool, ToolContext, ToolError, ToolMetadata, ToolRequest, ToolResponse};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -509,10 +509,13 @@ fn extract_cwd_marker(stdout: &str) -> (String, Option<String>) {
 
 /// Run a shell command through the sandbox.
 ///
-/// `shell` is a first-party tool, so backend selection resolves to the native
-/// sandbox (process + timeout + output cap). Stronger confinement (CPU/memory/
-/// network/filesystem) requires the container/microVM backends, which are not yet
-/// available; the gate today is that an agent must list `shell` in its allowed tools.
+/// Backend selection is driven by the caller's real `ctx.trust_class`
+/// ([RM-GA-P1 SEC-305](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
+/// a first-party run resolves to the native sandbox (process + timeout + output
+/// cap); a `Verified`/`Untrusted` run is floored to `Container`/`Gvisor` and fails
+/// closed here (`SandboxManager::native_only()` advertises only `Native`), since
+/// this node's default capability set doesn't include those stronger backends —
+/// there is no silent downgrade to native for untrusted provenance.
 pub struct ShellTool;
 
 #[async_trait]
@@ -576,10 +579,13 @@ impl Tool for ShellTool {
 
         let shell = request.parameters.get("shell").and_then(Value::as_str);
 
-        // Resolve the isolation backend (first-party → native on this node).
+        // Resolve the isolation backend from the caller's real trust class
+        // (SEC-305) — an untrusted/verified-but-not-first-party run is floored to a
+        // stronger backend than this node's native-only capability set offers, so
+        // selection fails closed rather than silently running natively.
         SandboxManager::native_only()
-            .select(SandboxBackend::Native, TrustClass::FirstParty)
-            .map_err(|e| ToolError::Internal(e.to_string()))?;
+            .select(SandboxBackend::Native, ctx.trust_class)
+            .map_err(|e| ToolError::PermissionDenied(e.to_string()))?;
 
         let limits = ResourceLimits {
             timeout: Duration::from_secs(timeout_secs),
@@ -990,6 +996,54 @@ mod tests {
             .find(|line| line.to_ascii_lowercase().starts_with("user-agent:"))
             .expect("request must include a User-Agent header");
         assert!(user_agent_line.contains(DEFAULT_USER_AGENT));
+    }
+
+    // --- RM-GA-P1 SEC-305: sandbox selection driven by real TrustClass ---------------
+
+    #[tokio::test]
+    async fn shell_runs_natively_for_first_party_trust_class() {
+        let t = ShellTool;
+        let ctx = ToolContext {
+            trust_class: crate::sandbox::TrustClass::FirstParty,
+            ..ToolContext::default()
+        };
+        let resp = t
+            .execute(&ctx, ToolRequest::new(json!({"command": "echo ok"})))
+            .await
+            .unwrap();
+        assert!(resp.success);
+    }
+
+    #[tokio::test]
+    async fn shell_denies_untrusted_provenance_rather_than_running_natively() {
+        let t = ShellTool;
+        let ctx = ToolContext {
+            trust_class: crate::sandbox::TrustClass::Untrusted,
+            ..ToolContext::default()
+        };
+        let err = t
+            .execute(&ctx, ToolRequest::new(json!({"command": "echo ok"})))
+            .await
+            .unwrap_err();
+        // Floored to Gvisor, which this node's native-only capability set doesn't
+        // support — fails closed, never silently falls back to Native.
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn shell_denies_verified_but_not_first_party_provenance() {
+        let t = ShellTool;
+        let ctx = ToolContext {
+            trust_class: crate::sandbox::TrustClass::Verified,
+            ..ToolContext::default()
+        };
+        let err = t
+            .execute(&ctx, ToolRequest::new(json!({"command": "echo ok"})))
+            .await
+            .unwrap_err();
+        // Floored to Container, also unsupported by native_only() — same fail-closed
+        // behavior.
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
     }
 
     #[tokio::test]

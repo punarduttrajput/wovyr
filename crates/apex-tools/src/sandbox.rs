@@ -84,9 +84,10 @@ impl fmt::Display for SandboxBackend {
 
 /// A tool's trust classification, which sets the minimum isolation backend
 /// ([security §3](../../docs/07-tool-runtime/security-isolation.md)).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum TrustClass {
     /// Built by the platform team.
+    #[default]
     FirstParty,
     /// Third-party, reviewed and signed.
     Verified,
