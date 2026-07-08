@@ -7,10 +7,10 @@ Document ID: RM-GA-P4
 
 **Document ID:** RM-GA-P4
 **File Path:** `docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md`
-**Version:** 1.4.0
-**Status:** In progress — WS-7's breaking pass + CI lock-in complete
-(API-701/702/703/704 all done); API-705 is the only WS-7 item left, WS-8 and
-WS-9 remainder haven't started
+**Version:** 1.6.0
+**Status:** In progress — **WS-7 is fully done** (API-701/702/703/704/705 all
+shipped); **HLTH-902 (CLI panic fix) also done**; WS-8 (observability) and
+the rest of WS-9 (executor unification, config crate, cleanup) haven't started
 **Owner:** Engineering (API / Platform)
 **Last Updated:** 2026-07-08
 
@@ -40,13 +40,13 @@ Ticket format matches [RM-GA-P1](phase1-security-floor-tickets.md) through
 # Sequencing at a glance
 
 ```
-WS-7 (freeze first — every day of delay hardens SDK debt)
+WS-7 (freeze first — every day of delay hardens SDK debt) — ALL DONE
   API-701 (list envelopes) ─┐
   API-702 (casing policy)   ├─> API-704 (CI contract gate — locks the frozen shape) — Done
   API-703 (idempotency all) ─┘
-  API-705 (deprecation headers) ─ independent, last WS-7 item open
+  API-705 (deprecation headers) ─ independent — Done
 
-WS-8
+WS-8 (next up)
   OBS-801 (metrics middleware)  ─ independent
   OBS-802 (request-id correlation) ─ independent
   OBS-803 (alert rules + dashboards) ─ independent
@@ -55,13 +55,15 @@ WS-8
 
 WS-9 remainder
   HLTH-901 (unify executors) ─ independent (high value: silent behavioral divergence)
-  HLTH-902 (fix CLI panic)   ─ independent (benefits from CI-901 to detect)
+  HLTH-902 (fix CLI panic)   ─ independent (benefits from CI-901 to detect) — Done
   HLTH-903 (apex-config crate) ─ independent
   HLTH-904 (cleanup: gateway leak, deps, module splits) ─ independent
 ```
 
 **Order WS-7 first.** API-701/702/703 are the breaking pass; API-704 then locks it in
-CI so it can't silently re-diverge. WS-8 and WS-9 parallelize freely.
+CI so it can't silently re-diverge; API-705 makes the deprecation policy mechanically
+enforceable. All four are done — the freeze is fully in place. WS-8 and WS-9
+parallelize freely from here.
 
 ---
 
@@ -317,6 +319,27 @@ headers) is prose with nothing enforcing it; `hardening.rs` emits no such header
 **Files.** `crates/apex-server/src/hardening.rs`; a route-metadata module. **Size.** S.
 **Depends on:** none.
 
+**Status: Done (2026-07-08).** Added `hardening::DEPRECATIONS` (a `const`
+route-metadata table, `[Method, PathPattern, deprecated_since, sunset]` per
+entry — `PathPattern` is `Exact` or `Prefix`, since axum's `MatchedPath` isn't
+available to a `Router::layer`-based middleware before routing resolves it)
+and `hardening::deprecation_headers`, wired into `router()` alongside
+`request_id` so it applies broadly, not just to mutating routes. **The table
+is empty** — `docs/09-api/deprecation-policy.md` §7 already says nothing in
+`/api/v1` is deprecated, and that stays true; this ticket builds the
+mechanism, not a first deprecation. Dependency-free date math (Howard
+Hinnant's `days_from_civil`, mirroring `apex-workflow`'s `cron.rs` — the two
+crates don't share the handful of lines, not worth a cross-crate dependency
+for it) computes both the RFC 7231 `Sunset` date string and the window-length
+check. Proven at three levels: unit tests for the date math against known
+reference dates, `deprecation_for` matching (exact/prefix/wrong-method/
+no-match) against a synthetic table, and an end-to-end test wiring the real
+middleware into a throwaway router and asserting the headers appear on a
+matched route and not on an unmatched one. `deprecation_table_windows_are_valid`
+is the acceptance criterion's own regression guard — vacuously green today,
+fails CI the day someone adds a real entry with less than the policy's 90-day
+minimum.
+
 ---
 
 # WS-8 — Observability & Operability
@@ -494,6 +517,44 @@ portion.)
 **Files.** `apps/apex-cli/src/plugin.rs`, `main.rs`. **Size.** S. **Depends on:**
 Phase-2 CI-901 (to detect/guard).
 
+**Status: Done (2026-07-08).** All 7 marketplace command functions
+(`publish_cmd`, `search_cmd`, `market_install_cmd`, `report_abuse_cmd`,
+`list_abuse_reports_cmd`, `resolve_abuse_cmd`, `dismiss_abuse_cmd`) are now
+`async fn`, each running its entire synchronous body (registry construction
+through the final `println!`) inside one `tokio::task::spawn_blocking` via a
+new `blocking()` helper mirroring the server's `with_registry` shape — one
+thread hop per command rather than a `with_registry`-per-call approach, which
+matters for `market_install_cmd` specifically (it holds the registry across
+`download` → plugin-engine install → `record_install`, so re-connecting
+between those would be wasteful and, for the Postgres backend, pointless
+extra round trips). `main.rs`'s 7 call sites gained `.await`.
+
+**Proven, not just patched — the underlying panic mechanism itself was
+reproduced and confirmed fixed**, without needing a live CI run: a standalone
+scratch binary called `apex_marketplace::PostgresRegistryStore::connect`
+against a deliberately-unreachable address (`postgres://fake:fake@127.0.0.1:1/…`)
+both directly from an async context and via `spawn_blocking`. The direct call
+panicked with the exact message this ticket describes
+(`Cannot start a runtime from within a runtime`, thrown from inside the
+`postgres` crate's own `Client::connect`); the `spawn_blocking`-wrapped call
+returned a normal connection error instead — proof the panic fires on the
+*attempt* to connect, independent of whether a real database is reachable,
+and proof the fix genuinely prevents it. Separately, all 7 converted commands
+were exercised end to end against the file-based registry (publish → search →
+get/install with a permission grant → report → list reports → resolve-abuse →
+dismiss-abuse), confirming the refactor changed nothing about their behavior.
+
+**Also closed a real gap in the acceptance criterion itself**: the existing
+Phase-2 CI-901 `services-integration` job never actually invoked the CLI
+*binary* against Postgres — its "capability-gated integration tests" step
+only runs each crate's own `cargo test`, so this bug would have shipped
+undetected even after CI-901 landed. Added a new step, **"CLI marketplace
+command against Postgres — no panic (HLTH-902)"**, that runs
+`apex plugin search` (with `--features postgres`, against the job's already-
+migrated Postgres schema) and fails the job if `panicked` appears in its
+output — the first time CI exercises the CLI binary itself against a real
+Postgres-backed registry.
+
 ---
 
 ## HLTH-903 `[P2]` — Extract an `apex-config` crate for `~/.apex` layout and env selection
@@ -559,14 +620,14 @@ groups/backends have. (PRD-003 R-9.5; closes PP-20/PP-21.)
 | API-702 | 7 | One serde casing policy — **Done** | M | P1 | — |
 | API-703 | 7 | Idempotency on all mutations — **Done** | M | P1 | SEC-205, DUR-404 |
 | API-704 | 7 | CI contract gate (SDK + redocly) — **Done** | M | P1 | 701,702,703 |
-| API-705 | 7 | Deprecation/Sunset headers | S | P2 | — |
+| API-705 | 7 | Deprecation/Sunset headers — **Done** | S | P2 | — |
 | OBS-801 | 8 | RED metrics middleware (all routes) | M | P1 | — |
 | OBS-802 | 8 | Request-id correlation | S | P2 | — |
 | OBS-803 | 8 | Alert rules + Grafana dashboard | S | P2 | OBS-801 |
 | OBS-804 | 8 | Audit coverage (all mutations) | M | P2 | SEC-101 |
 | OBS-805 | 8 | Dashboard login/CORS/build | L | P2 | SEC-101, SEC-204 |
 | HLTH-901 | 9 | Unify ActivityExecutors | L | P1 | — |
-| HLTH-902 | 9 | Fix CLI spawn_blocking panic | S | P1 | CI-901 |
+| HLTH-902 | 9 | Fix CLI spawn_blocking panic — **Done** | S | P1 | CI-901 |
 | HLTH-903 | 9 | `apex-config` crate | M | P2 | — |
 | HLTH-904 | 9 | Cleanup: gateway leak, deps, splits | M–L | P2 | — |
 
@@ -594,6 +655,8 @@ genuinely last — they harden and clean up, but nothing depends on them.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.6.0 | 2026-07-08 | HLTH-902 done: all 7 CLI marketplace commands are now `async fn` running their body inside `tokio::task::spawn_blocking`, fixing the "Cannot start a runtime from within a runtime" panic. Reproduced and confirmed the exact panic + fix with a standalone repro (no live Postgres needed) and verified all 7 commands end to end against the file-based registry. Also added a CI-901 step that runs the CLI binary itself against Postgres — the existing job never had, despite the ticket's original acceptance criterion assuming it did |
+| 1.5.0 | 2026-07-08 | API-705 done: added `hardening::DEPRECATIONS` (a const route-metadata table) + `deprecation_headers` middleware, making the `Deprecation`/`Sunset` policy mechanically enforceable. Table is empty — no real deprecation exists — with a standing test guarding the 90-day window for whenever one is added. **WS-7 is now fully complete** |
 | 1.4.0 | 2026-07-08 | API-704 done: added a `contract-gate` CI job (redocly lint + both SDK integration suites against a real, freshly-booted server). Caught and fixed 3 real pre-existing bugs the suites' never having run in CI let slip through: both SDKs' workflow-status test still checked the pre-API-702 PascalCase `"Completed"`; both SDKs' tools-count assertion assumed leftover local plugin state; the Python suite still read two pre-API-701 field names (`tools`/`total`, `results`). WS-7 now has only API-705 left |
 | 1.3.0 | 2026-07-07 | API-703 done: `Idempotency-Key` replay extended from `agents:run` only to every mutating route via one shared `hardening::idempotency_middleware`, keyed by `(tenant, method, path, key)` (fixing a latent cross-route collision the old tenant+key-only scheme had). `openapi.yaml` and both SDKs updated in lockstep |
 | 1.2.0 | 2026-07-07 | API-702 done: `WorkflowState`/`ActivityState`/`WorkflowEvent` now `snake_case` on the wire, reconciling the workflow status filter and body casing; `MemoryType`/`PluginState` hand-written casing hacks in apex-server deleted in favor of the enums' own serde derive. Round-trip stability tests added for all four |

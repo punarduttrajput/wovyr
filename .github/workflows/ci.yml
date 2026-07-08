@@ -196,6 +196,26 @@ jobs:
           cargo run -p apex-cli --features postgres,tiered-memory -- admin migrate \
             --target marketplace --database-url "$APEX_MARKETPLACE_POSTGRES_URL"
 
+      # RM-GA-P4 HLTH-902: the CLI's marketplace commands (publish/search/get/report)
+      # call the sync `postgres` crate's `Client::connect` directly from this
+      # `#[tokio::main]` binary's async `run()` — which panics ("Cannot start a
+      # runtime from within a runtime") unless wrapped in `spawn_blocking`, the exact
+      # bug `apex-server`'s `with_registry` already fixed on the server side. Nothing
+      # above exercises the CLI binary itself against Postgres (only the underlying
+      # crates' own tests), so this bug shipped undetected even after CI-901 landed.
+      # A plain `plugin search` against the just-migrated marketplace schema is
+      # enough to prove it: it reaches `PostgresRegistryStore::connect` on every
+      # invocation regardless of whether the registry has any listings yet.
+      - name: CLI marketplace command against Postgres — no panic (HLTH-902)
+        run: |
+          set -euo pipefail
+          out=$(cargo run -p apex-cli --features postgres -- plugin search 2>&1)
+          echo "$out"
+          if echo "$out" | grep -qi "panicked"; then
+            echo "::error::apex plugin search panicked against a Postgres-backed registry" >&2
+            exit 1
+          fi
+
       # Each invocation is wrapped so a `skipping:` line (the tests' capability-gate
       # convention) fails the job: in this job the backends are guaranteed present,
       # so a skip means the wiring regressed, not that the environment is offline.

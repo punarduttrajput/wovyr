@@ -698,6 +698,29 @@ fn marketplace_registry() -> Result<Registry<Box<dyn RegistryStore>>> {
     Ok(reg)
 }
 
+/// Runs a synchronous closure on a dedicated blocking-pool thread (RM-GA-P4/PRD-003
+/// R-9.3, HLTH-902).
+///
+/// Every marketplace command below (`publish`/`search`/`get`/`report`/…) needs this:
+/// the sync `postgres` crate's `Client` (used by `PostgresRegistryStore` when
+/// `APEX_MARKETPLACE_POSTGRES_URL` is set) drives its own internal Tokio runtime for
+/// *every* call including `connect`, which panics ("Cannot start a runtime from
+/// within a runtime") if invoked directly — this binary's `main` is `#[tokio::main]`,
+/// so a plain synchronous call from within `run()`'s async body still executes on a
+/// runtime worker thread. This is the exact bug `apex-server`'s `marketplace.rs`
+/// found and fixed with its own identically-shaped `with_registry` helper; this CLI
+/// path never got the fix (undetectable locally — only Phase-2 CI-901's
+/// `--features postgres` job exercises this code path at all).
+async fn blocking<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| Err(Error::Runtime(format!("blocking task panicked: {e}"))))
+}
+
 fn parse_capability_kind(s: &str) -> Option<CapabilityKind> {
     match s {
         "tool" => Some(CapabilityKind::Tool),
@@ -712,137 +735,174 @@ fn parse_capability_kind(s: &str) -> Option<CapabilityKind> {
 /// `apex plugin publish <source> [--channel <c>] [--category <cat>]` — publish a signed
 /// package (directory or `.apexpkg`) to the local marketplace registry. The signature
 /// must verify against a trusted publisher.
-pub fn publish_cmd(source: &str, channel: Option<String>, categories: Vec<String>) -> Result<()> {
-    let (package, _manifest) = load_package(source)?;
-    let bytes = package.to_apexpkg()?;
-    let out = marketplace_registry()?.publish(&bytes, &categories, channel.as_deref())?;
-    println!("Published {} to channel `{}`.", out.reference, out.channel);
-    if !out.scan.findings.is_empty() {
-        println!("Security scan ({} finding(s)):", out.scan.findings.len());
-        for f in &out.scan.findings {
-            println!("  [{:?}] {}: {}", f.severity, f.code, f.message);
+pub async fn publish_cmd(
+    source: &str,
+    channel: Option<String>,
+    categories: Vec<String>,
+) -> Result<()> {
+    let source = source.to_string();
+    blocking(move || {
+        let (package, _manifest) = load_package(&source)?;
+        let bytes = package.to_apexpkg()?;
+        let out = marketplace_registry()?.publish(&bytes, &categories, channel.as_deref())?;
+        println!("Published {} to channel `{}`.", out.reference, out.channel);
+        if !out.scan.findings.is_empty() {
+            println!("Security scan ({} finding(s)):", out.scan.findings.len());
+            for f in &out.scan.findings {
+                println!("  [{:?}] {}: {}", f.severity, f.code, f.message);
+            }
         }
-    }
-    println!("Find it with `apex plugin search {}`.", out.listing_id);
-    Ok(())
+        println!("Find it with `apex plugin search {}`.", out.listing_id);
+        Ok(())
+    })
+    .await
 }
 
 /// `apex plugin search [<query>] [--category <cat>] [--capability <kind>]` — discover
 /// published listings in the marketplace registry.
-pub fn search_cmd(
+pub async fn search_cmd(
     query: Option<String>,
     category: Option<String>,
     capability: Option<String>,
 ) -> Result<()> {
-    let listings = marketplace_registry()?.search(&SearchQuery {
-        text: query.unwrap_or_default(),
-        category,
-        capability: capability.as_deref().and_then(parse_capability_kind),
-    })?;
-    if listings.is_empty() {
-        println!("No matching listings.");
-        return Ok(());
-    }
-    for l in &listings {
-        let rating = l
-            .rating
-            .map(|r| format!("{r:.1}*"))
-            .unwrap_or_else(|| "unrated".to_string());
-        let verified = if l.verified { " (verified)" } else { "" };
-        let latest = l.versions.first().map(String::as_str).unwrap_or("?");
-        println!(
-            "{}  v{latest}  [{rating}, {} installs]{verified}",
-            l.id, l.installs
-        );
-        if !l.description.is_empty() {
-            println!("    {}", l.description);
+    blocking(move || {
+        let listings = marketplace_registry()?.search(&SearchQuery {
+            text: query.unwrap_or_default(),
+            category,
+            capability: capability.as_deref().and_then(parse_capability_kind),
+        })?;
+        if listings.is_empty() {
+            println!("No matching listings.");
+            return Ok(());
         }
-        if !l.categories.is_empty() {
-            println!("    categories: {}", l.categories.join(", "));
+        for l in &listings {
+            let rating = l
+                .rating
+                .map(|r| format!("{r:.1}*"))
+                .unwrap_or_else(|| "unrated".to_string());
+            let verified = if l.verified { " (verified)" } else { "" };
+            let latest = l.versions.first().map(String::as_str).unwrap_or("?");
+            println!(
+                "{}  v{latest}  [{rating}, {} installs]{verified}",
+                l.id, l.installs
+            );
+            if !l.description.is_empty() {
+                println!("    {}", l.description);
+            }
+            if !l.categories.is_empty() {
+                println!("    categories: {}", l.categories.join(", "));
+            }
+            if !l.permissions.is_empty() {
+                println!("    permissions: {}", l.permissions.join(", "));
+            }
         }
-        if !l.permissions.is_empty() {
-            println!("    permissions: {}", l.permissions.join(", "));
-        }
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// `apex plugin get <id> [--version <v>] [--grant <perm>]` — download a listed package
 /// from the marketplace and install it locally (disabled). `id` is `publisher/name`.
-pub fn market_install_cmd(id: &str, version: Option<String>, grants: Vec<String>) -> Result<()> {
-    let reg = marketplace_registry()?;
-    let bytes = reg.download(id, version.as_deref())?;
-    let package = Package::from_apexpkg(&bytes)?;
-    let _lock = acquire_lock()?;
-    let mut engine = engine()?;
-    let installed = engine.install(&package, &grants)?;
-    let reference = installed.manifest.reference();
-    save_catalog(&engine.catalog())?;
-    reg.record_install(id)?;
-    println!("Installed {reference} from the marketplace (disabled).");
-    println!("Enable it with `apex plugin enable {id}`.");
-    Ok(())
+pub async fn market_install_cmd(
+    id: &str,
+    version: Option<String>,
+    grants: Vec<String>,
+) -> Result<()> {
+    let id = id.to_string();
+    blocking(move || {
+        let reg = marketplace_registry()?;
+        let bytes = reg.download(&id, version.as_deref())?;
+        let package = Package::from_apexpkg(&bytes)?;
+        let _lock = acquire_lock()?;
+        let mut engine = engine()?;
+        let installed = engine.install(&package, &grants)?;
+        let reference = installed.manifest.reference();
+        save_catalog(&engine.catalog())?;
+        reg.record_install(&id)?;
+        println!("Installed {reference} from the marketplace (disabled).");
+        println!("Enable it with `apex plugin enable {id}`.");
+        Ok(())
+    })
+    .await
 }
 
 /// `apex plugin report <id> <reason> [--reporter <name>]` — file an abuse report
 /// against a marketplace listing (malware, IP infringement, deceptive metadata,
 /// etc.). Feeds moderation and can trigger delisting via `resolve-abuse`.
-pub fn report_abuse_cmd(id: &str, reason: &str, reporter: Option<String>) -> Result<()> {
-    let reporter = reporter.unwrap_or_else(|| "anonymous".to_string());
-    let report_id = marketplace_registry()?.report_abuse(id, &reporter, reason)?;
-    println!("Filed report #{report_id} against {id}.");
-    println!("List open reports with `apex plugin reports {id}`.");
-    Ok(())
+pub async fn report_abuse_cmd(id: &str, reason: &str, reporter: Option<String>) -> Result<()> {
+    let id = id.to_string();
+    let reason = reason.to_string();
+    blocking(move || {
+        let reporter = reporter.unwrap_or_else(|| "anonymous".to_string());
+        let report_id = marketplace_registry()?.report_abuse(&id, &reporter, &reason)?;
+        println!("Filed report #{report_id} against {id}.");
+        println!("List open reports with `apex plugin reports {id}`.");
+        Ok(())
+    })
+    .await
 }
 
 /// `apex plugin reports <id>` — list the abuse reports filed against a marketplace
 /// listing, for moderator review.
-pub fn list_abuse_reports_cmd(id: &str) -> Result<()> {
-    let reports = marketplace_registry()?.abuse_reports(id)?;
-    if reports.is_empty() {
-        println!("No abuse reports against {id}.");
-        return Ok(());
-    }
-    for r in &reports {
-        println!(
-            "#{}  reporter: {}  reason: {}  status: {:?}",
-            r.id, r.reporter, r.reason, r.status
-        );
-    }
-    Ok(())
+pub async fn list_abuse_reports_cmd(id: &str) -> Result<()> {
+    let id = id.to_string();
+    blocking(move || {
+        let reports = marketplace_registry()?.abuse_reports(&id)?;
+        if reports.is_empty() {
+            println!("No abuse reports against {id}.");
+            return Ok(());
+        }
+        for r in &reports {
+            println!(
+                "#{}  reporter: {}  reason: {}  status: {:?}",
+                r.id, r.reporter, r.reason, r.status
+            );
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// `apex plugin resolve-abuse <id> <report-id> [--delist] [--moderator <name>]` — a
 /// moderator resolves an open abuse report as valid, optionally delisting the
 /// listing (removing it from discovery/download).
-pub fn resolve_abuse_cmd(
+pub async fn resolve_abuse_cmd(
     id: &str,
     report_id: u64,
     delist: bool,
     moderator: Option<String>,
 ) -> Result<()> {
-    let moderator = moderator.unwrap_or_else(|| "operator".to_string());
-    marketplace_registry()?.resolve_abuse_report(id, report_id, &moderator, delist)?;
-    if delist {
-        println!("Resolved report #{report_id} against {id}: listing delisted.");
-    } else {
-        println!("Resolved report #{report_id} against {id} (not delisted).");
-    }
-    Ok(())
+    let id = id.to_string();
+    blocking(move || {
+        let moderator = moderator.unwrap_or_else(|| "operator".to_string());
+        marketplace_registry()?.resolve_abuse_report(&id, report_id, &moderator, delist)?;
+        if delist {
+            println!("Resolved report #{report_id} against {id}: listing delisted.");
+        } else {
+            println!("Resolved report #{report_id} against {id} (not delisted).");
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// `apex plugin dismiss-abuse <id> <report-id> <reason> [--moderator <name>]` — a
 /// moderator dismisses an open abuse report as not actionable.
-pub fn dismiss_abuse_cmd(
+pub async fn dismiss_abuse_cmd(
     id: &str,
     report_id: u64,
     reason: &str,
     moderator: Option<String>,
 ) -> Result<()> {
-    let moderator = moderator.unwrap_or_else(|| "operator".to_string());
-    marketplace_registry()?.dismiss_abuse_report(id, report_id, &moderator, reason)?;
-    println!("Dismissed report #{report_id} against {id}.");
-    Ok(())
+    let id = id.to_string();
+    let reason = reason.to_string();
+    blocking(move || {
+        let moderator = moderator.unwrap_or_else(|| "operator".to_string());
+        marketplace_registry()?.dismiss_abuse_report(&id, report_id, &moderator, &reason)?;
+        println!("Dismissed report #{report_id} against {id}.");
+        Ok(())
+    })
+    .await
 }
 
 /// Restrict a private-key file to owner-only access where supported.

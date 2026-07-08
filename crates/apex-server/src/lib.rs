@@ -1374,6 +1374,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
         // Stamp every response (incl. errors) with a request id (API overview §14).
         .layer(axum::middleware::from_fn(hardening::request_id))
+        // Deprecation/Sunset headers (deprecation-policy.md §4, RM-GA-P4 API-705) —
+        // a no-op today since hardening::DEPRECATIONS is empty; applies broadly since
+        // any route, not just a mutating one, could be deprecated.
+        .layer(axum::middleware::from_fn_with_state(
+            hardening::DEPRECATIONS,
+            hardening::deprecation_headers,
+        ))
         .layer(DefaultBodyLimit::max(limits.max_body_bytes))
         .layer(
             ServiceBuilder::new()

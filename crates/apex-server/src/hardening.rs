@@ -7,7 +7,7 @@ use axum::{
     Json,
     body::Body,
     extract::{Request, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -445,6 +445,130 @@ fn set_request_id(headers: &mut HeaderMap, id: &str) {
     }
 }
 
+// --- deprecation headers (docs/09-api/deprecation-policy.md §4, RM-GA-P4 API-705) -
+
+/// How a [`Deprecation`] entry matches a request path. `Prefix` covers a
+/// path-templated route (e.g. `/api/v1/agents/`, matching `/api/v1/agents/{id}`
+/// and any sub-resource under it) without wiring up axum's `MatchedPath` —
+/// unavailable here since this middleware is applied via `Router::layer`,
+/// which runs *before* route matching resolves it. Simple and sufficient for
+/// every route this API actually has; a future deprecation needing finer
+/// matching can extend this enum then. Both variants are currently only
+/// constructed by tests — `DEPRECATIONS` (below) is empty in production until
+/// a real deprecation is announced, which is the intended, dormant-until-needed
+/// state, not dead code to delete.
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) enum PathPattern {
+    Exact(&'static str),
+    Prefix(&'static str),
+}
+
+impl PathPattern {
+    fn matches(&self, path: &str) -> bool {
+        match self {
+            PathPattern::Exact(p) => path == *p,
+            PathPattern::Prefix(p) => path.starts_with(p),
+        }
+    }
+}
+
+/// One documented deprecation (deprecation-policy.md §4): the route it
+/// applies to, when it was announced, and the date after which the old
+/// behavior may be removed. `sunset` must be at least 90 days after
+/// `deprecated_since` — checked by `deprecation_table_windows_are_valid`
+/// below on every test run, not enforced at request time (the table is a
+/// fixed `const`, so a too-short window is a review-time logic error, not
+/// something to fail closed on per-request).
+pub(crate) struct Deprecation {
+    pub(crate) method: Method,
+    pub(crate) path: PathPattern,
+    /// `(year, month, day)` the deprecation was announced. Read only by
+    /// `deprecation_table_windows_are_valid` (a test) — never at request
+    /// time, since the response only ever needs `sunset`.
+    #[allow(dead_code)]
+    pub(crate) deprecated_since: (i64, u32, u32),
+    /// `(year, month, day)` after which the old behavior may be removed.
+    pub(crate) sunset: (i64, u32, u32),
+}
+
+/// The live deprecation table. **Empty today** — per
+/// `docs/09-api/deprecation-policy.md` §7, nothing in `/api/v1` has been
+/// deprecated yet. Add an entry here (and update that doc's "Current State"
+/// section) the day a real deprecation is announced; `deprecation_headers`
+/// picks it up automatically, with no other code change needed.
+pub(crate) const DEPRECATIONS: &[Deprecation] = &[];
+
+/// The `(Deprecation: true, Sunset: <date>)` header values for the first table
+/// entry matching `method`/`path`, if any. Pulled out of the middleware below
+/// so it's unit-testable against a synthetic table without a live request.
+fn deprecation_for(table: &[Deprecation], method: &Method, path: &str) -> Option<String> {
+    table
+        .iter()
+        .find(|d| d.method == *method && d.path.matches(path))
+        .map(|d| http_date(d.sunset))
+}
+
+/// Emits `Deprecation: true` and `Sunset: <RFC 7231 date>` ([RFC
+/// 8594](https://www.rfc-editor.org/rfc/rfc8594)) on any response whose
+/// request matches an entry in `table` — the mechanical enforcement
+/// `deprecation-policy.md` §4 describes. A no-op today: `DEPRECATIONS` is
+/// empty, so this never fires until a real deprecation is added to it.
+pub(crate) async fn deprecation_headers(
+    State(table): State<&'static [Deprecation]>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let sunset = deprecation_for(table, &method, &path);
+    let response = next.run(request).await;
+    match sunset {
+        Some(sunset_http_date) => stamp_deprecation(response, &sunset_http_date),
+        None => response,
+    }
+}
+
+fn stamp_deprecation(mut response: Response, sunset_http_date: &str) -> Response {
+    let headers = response.headers_mut();
+    headers.insert("deprecation", HeaderValue::from_static("true"));
+    if let Ok(value) = HeaderValue::from_str(sunset_http_date) {
+        headers.insert("sunset", value);
+    }
+    response
+}
+
+/// Days since 1970-01-01 for a civil (proleptic Gregorian) date — Howard
+/// Hinnant's `days_from_civil` algorithm, the encode-direction mirror of
+/// `apex-workflow`'s `cron.rs::civil_from_days` (same no-dependency
+/// house style; the two crates don't share code since this is a handful of
+/// lines and pulling in a cross-crate dependency for it isn't worth it).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m as i64) + if m > 2 { -3 } else { 9 }; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+const DAY_NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_NAMES: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// An RFC 7231 `IMF-fixdate` for `(y, m, d)` at midnight UTC — the format
+/// RFC 8594's `Sunset` header requires (e.g. `"Wed, 07 Oct 2026 00:00:00 GMT"`).
+fn http_date((y, m, d): (i64, u32, u32)) -> String {
+    let days = days_from_civil(y, m, d);
+    // 1970-01-01 (day 0) was a Thursday; `rem_euclid` keeps this correct for
+    // any pre-1970 date too, even though every real table entry postdates it.
+    let weekday = DAY_NAMES[(days + 4).rem_euclid(7) as usize];
+    let month = MONTH_NAMES[(m - 1) as usize];
+    format!("{weekday}, {d:02} {month} {y:04} 00:00:00 GMT")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,5 +741,123 @@ mod tests {
         let inner = store.inner.lock().unwrap();
         assert!(inner.entries.len() <= max_entries);
         assert!(inner.order.len() <= max_entries);
+    }
+
+    // --- RM-GA-P4 API-705: deprecation headers ---------------------------------------
+
+    #[test]
+    fn days_from_civil_matches_known_reference_dates() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1970, 1, 2), 1);
+        assert_eq!(days_from_civil(2000, 1, 1), 10_957);
+        // A 90-day gap should be exactly 90 days apart, incl. crossing a
+        // month/quarter boundary (2026-07-08 -> 2026-10-06).
+        assert_eq!(
+            days_from_civil(2026, 10, 6) - days_from_civil(2026, 7, 8),
+            90
+        );
+    }
+
+    #[test]
+    fn http_date_formats_known_dates_per_rfc_7231() {
+        // 1970-01-01 was a Thursday.
+        assert_eq!(http_date((1970, 1, 1)), "Thu, 01 Jan 1970 00:00:00 GMT");
+        // 2026-10-06 is a Tuesday.
+        assert_eq!(http_date((2026, 10, 6)), "Tue, 06 Oct 2026 00:00:00 GMT");
+    }
+
+    /// Standing regression guard (API-705's own acceptance criterion): every
+    /// real table entry — whenever one exists — must give clients at least
+    /// the 90-day window `deprecation-policy.md` §4 promises. Vacuously true
+    /// today since `DEPRECATIONS` is empty.
+    #[test]
+    fn deprecation_table_windows_are_valid() {
+        for d in DEPRECATIONS {
+            let since = days_from_civil(
+                d.deprecated_since.0,
+                d.deprecated_since.1,
+                d.deprecated_since.2,
+            );
+            let sunset = days_from_civil(d.sunset.0, d.sunset.1, d.sunset.2);
+            assert!(
+                sunset - since >= 90,
+                "deprecation window for a route is shorter than the 90-day policy minimum"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecation_for_matches_exact_and_prefix_but_not_other_routes() {
+        const TABLE: &[Deprecation] = &[
+            Deprecation {
+                method: Method::GET,
+                path: PathPattern::Exact("/api/v1/old-thing"),
+                deprecated_since: (2026, 1, 1),
+                sunset: (2026, 4, 1),
+            },
+            Deprecation {
+                method: Method::DELETE,
+                path: PathPattern::Prefix("/api/v1/legacy/"),
+                deprecated_since: (2026, 1, 1),
+                sunset: (2026, 4, 1),
+            },
+        ];
+
+        assert!(deprecation_for(TABLE, &Method::GET, "/api/v1/old-thing").is_some());
+        // Wrong method on an otherwise-matching exact path: no match.
+        assert!(deprecation_for(TABLE, &Method::POST, "/api/v1/old-thing").is_none());
+        // Prefix covers any concrete path under it (e.g. a path-templated route).
+        assert!(deprecation_for(TABLE, &Method::DELETE, "/api/v1/legacy/123").is_some());
+        // An unrelated route never matches.
+        assert!(deprecation_for(TABLE, &Method::GET, "/api/v1/unrelated").is_none());
+    }
+
+    #[tokio::test]
+    async fn deprecated_route_carries_headers_end_to_end() {
+        use axum::{Router, body::Body, routing::get};
+        use tower::ServiceExt;
+
+        const TABLE: &[Deprecation] = &[Deprecation {
+            method: Method::GET,
+            path: PathPattern::Exact("/api/v1/example"),
+            deprecated_since: (2026, 1, 1),
+            sunset: (2026, 4, 1),
+        }];
+
+        let app = Router::new()
+            .route("/api/v1/example", get(|| async { "ok" }))
+            .route("/api/v1/other", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                TABLE,
+                deprecation_headers,
+            ));
+
+        let deprecated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deprecated.headers().get("deprecation").unwrap(), "true");
+        assert_eq!(
+            deprecated.headers().get("sunset").unwrap(),
+            "Wed, 01 Apr 2026 00:00:00 GMT"
+        );
+
+        let unaffected = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/other")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(unaffected.headers().get("deprecation").is_none());
+        assert!(unaffected.headers().get("sunset").is_none());
     }
 }

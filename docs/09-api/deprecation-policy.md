@@ -7,14 +7,16 @@ Document ID: API-002
 
 **Document ID:** API-002
 **File Path:** `docs/09-api/deprecation-policy.md`
-**Version:** 1.0.0
-**Status:** Active policy — nothing in `/api/v1` has been deprecated yet, so no
-endpoint currently carries the headers this document defines. This is the
-policy new deprecations must follow from this point forward; it's a process
-commitment, not something `apex-server` enforces in code (there's nothing to
-enforce until a first deprecation happens).
+**Version:** 1.1.0
+**Status:** Active policy, **now mechanically enforceable** (RM-GA-P4
+API-705): `crates/apex-server/src/hardening.rs`'s `DEPRECATIONS` table +
+`deprecation_headers` middleware emit the `Deprecation`/`Sunset` headers §4
+describes for any route added to the table. Still nothing in `/api/v1` has
+been deprecated, so the table is empty and no endpoint carries the headers
+today — this closes the "policy exists in prose only" gap, it doesn't create
+a first deprecation.
 **Owner:** AI Platform Team
-**Last Updated:** 2026-07-04
+**Last Updated:** 2026-07-08
 
 ---
 
@@ -108,10 +110,18 @@ does for API clients.
 
 # 7. Current State
 
-No `/api/v1` endpoint has been deprecated. The TypeScript SDK
-([`sdks/typescript`](../../sdks/typescript)) does not yet inspect `Deprecation`/
-`Sunset` response headers or surface them to callers — that's the first piece
-of tooling due when this policy is exercised for real, not before.
+No `/api/v1` endpoint has been deprecated. **The enforcement mechanism now
+exists (RM-GA-P4 API-705)**: `hardening::DEPRECATIONS` is a `const` table of
+`(method, path, deprecated_since, sunset)` entries — empty today — and
+`hardening::deprecation_headers` (wired into every route in `router()`)
+stamps `Deprecation: true` and an RFC 7231 `Sunset` date on any response
+matching a table entry. Adding a real deprecation is a one-line table entry,
+no other code change. A test (`deprecation_table_windows_are_valid`) fails
+CI if a future entry's window is under the §4 90-day minimum. The TypeScript
+SDK ([`sdks/typescript`](../../sdks/typescript)) still does not inspect
+`Deprecation`/`Sunset` response headers or surface them to callers — that
+remains the first piece of *client-side* tooling due when this policy is
+exercised for real.
 
 ---
 
@@ -127,4 +137,5 @@ of tooling due when this policy is exercised for real, not before.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-08 | API-705 done: added the `hardening::DEPRECATIONS` table + `deprecation_headers` middleware, making this policy mechanically enforceable rather than prose-only. Table is empty (no real deprecation exists); a test enforces the 90-day window on any future entry |
 | 1.0.0 | 2026-07-04 | Initial deprecation-window policy: 90-day minimum, `Deprecation`/`Sunset` headers, breaking-change definition, `/v2` parallel-run rule |
