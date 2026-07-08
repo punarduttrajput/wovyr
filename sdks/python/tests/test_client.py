@@ -72,8 +72,11 @@ class ApexClientIntegrationTests(unittest.TestCase):
 
     def test_tools_list_includes_the_built_in_echo_tool(self) -> None:
         res = _client().tools.list()
-        self.assertGreaterEqual(res["total"], 4)
-        self.assertTrue(any(tool["id"] == "echo" for tool in res["tools"]))
+        # Default hosted registry (SEC-301): echo, fs_read, http_get — shell,
+        # image_generate, and any plugin tools are each conditional opt-ins a
+        # clean environment won't have, so 3 is the true floor, not 4.
+        self.assertGreaterEqual(res["total_estimate"], 3)
+        self.assertTrue(any(tool["id"] == "echo" for tool in res["data"]))
 
     def test_agents_run_runs_an_inline_manifest_end_to_end(self) -> None:
         result = _client().agents.run({"manifest": HELLO_MANIFEST, "input": {"message": "Hi"}})
@@ -128,10 +131,11 @@ class ApexClientIntegrationTests(unittest.TestCase):
         completed = False
         for _ in range(20):
             got = _client().workflows.get(execution_id)
-            # The engine's WorkflowState serializes PascalCase ("Completed",
-            # "Failed") — distinct from the lowercase `?status=` filter values
-            # the list endpoint accepts.
-            if got["execution"].get("status") == "Completed":
+            # RM-GA-P4 API-702: WorkflowState now serializes snake_case
+            # ("completed", "failed"), matching the `?status=` filter's
+            # casing (previously PascalCase — a wart API-702 fixed by
+            # construction).
+            if got["execution"].get("status") == "completed":
                 completed = True
                 break
             time.sleep(0.1)
@@ -150,8 +154,8 @@ class ApexClientIntegrationTests(unittest.TestCase):
         res = client.memory.query(
             {"text": "Apex Python SDK integration test", "namespace": namespace, "strategy": "keyword"}
         )
-        self.assertGreaterEqual(len(res["results"]), 1)
-        self.assertIn("Apex Python SDK", res["results"][0]["content"])
+        self.assertGreaterEqual(len(res["data"]), 1)
+        self.assertIn("Apex Python SDK", res["data"][0]["content"])
 
     def test_secrets_create_get_rotate_delete_round_trip(self) -> None:
         name = f"sdk-test-secret-{int(time.time() * 1000)}"

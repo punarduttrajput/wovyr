@@ -23,6 +23,13 @@
 # clippy-checks each feature in isolation via cargo-hack, and
 # `services-integration` runs the Postgres/Qdrant/Redis-gated tests against real
 # service containers — failing if any of them *skips* instead of running.
+# RM-GA-P4 API-704 adds `contract-gate`: `openapi.yaml` was hand-synced with no CI
+# enforcement, and the TypeScript/Python SDK integration suites (which exercise a
+# real server, not mocks) only ever ran manually — nothing stopped a handler's
+# response shape from silently diverging from the contract the already-published
+# PyPI SDK was written against. Both suites skip cleanly (not fail) when no server
+# answers, so the job boots a real `apex dev` and waits for `/healthz` before
+# running them, rather than relying on that offline fallback ever exercising them.
 name: ci
 
 on:
@@ -209,6 +216,84 @@ jobs:
           run_gated cargo test -p apex-memory --features tiered --test tiered_backend
           run_gated cargo test -p apex-provider --features qdrant --test semantic_cache_qdrant
           run_gated cargo test -p apex-provider --features redis --test redis_breaker
+
+  # RM-GA-P4 API-704: the API contract gate (PRD-003 R-7.4). Boots a real `apex
+  # dev` server from this PR's code, then runs `redocly lint` and both SDKs'
+  # integration suites against it — a required gate, not an informational one:
+  # `APEX_ALLOW_ANONYMOUS=1` (loopback-only, so this is safe) and
+  # `APEX_PLATFORM_ADMINS=sdk-test-admin` are exactly what both suites'
+  # docstrings say they need to exercise every route, including the org/project
+  # ones that have no anonymous-default-tenant bypass — without them the suites
+  # would silently skip instead of actually gating anything.
+  contract-gate:
+    name: API contract gate (redocly lint + TS/Python SDK suites)
+    runs-on: ubuntu-latest
+    env:
+      APEX_ALLOW_ANONYMOUS: "1"
+      APEX_PLATFORM_ADMINS: sdk-test-admin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      # Backgrounded: this step returns immediately, the server keeps running
+      # for the rest of the job (same runner VM, not a separate container) until
+      # the cleanup step below kills it. `$!` must be captured in this same
+      # `run:` block — it only refers to the immediately-preceding background job.
+      - name: Start apex dev server
+        run: |
+          cargo run -p apex-cli -- dev > apex-dev.log 2>&1 &
+          echo $! > apex-dev.pid
+
+      # A cold cache compiles apex-cli's full dependency tree on first boot, same
+      # as services-integration's migration step below it — a generous window
+      # avoids flaking on that, not on the server itself being slow to start.
+      - name: Wait for the server to be ready
+        run: |
+          for i in $(seq 1 90); do
+            curl -fsS http://127.0.0.1:8080/healthz > /dev/null 2>&1 && exit 0
+            sleep 3
+          done
+          echo "::error::apex dev server never became ready" >&2
+          cat apex-dev.log
+          exit 1
+
+      # `npm test` = lint:openapi (redocly) + build + the integration suite
+      # (dist/test/client.test.js) — one command covers both halves of this
+      # ticket's TypeScript side.
+      - name: TypeScript SDK — redocly lint + integration suite
+        working-directory: sdks/typescript
+        run: |
+          npm ci
+          npm test
+
+      # Stdlib-only (no requests/httpx) — no install step needed beyond the
+      # interpreter itself.
+      - name: Python SDK — integration suite
+        working-directory: sdks/python
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Server log
+        if: always()
+        run: cat apex-dev.log || true
+
+      - name: Stop apex dev server
+        if: always()
+        run: kill "$(cat apex-dev.pid)" 2>/dev/null || true
 
   security:
     name: dependency + secret scanning

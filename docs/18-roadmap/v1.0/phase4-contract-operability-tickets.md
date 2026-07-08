@@ -7,10 +7,12 @@ Document ID: RM-GA-P4
 
 **Document ID:** RM-GA-P4
 **File Path:** `docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md`
-**Version:** 1.3.0
-**Status:** In progress — API-701/702/703 done, WS-7's breaking pass continuing (API-704 next)
+**Version:** 1.4.0
+**Status:** In progress — WS-7's breaking pass + CI lock-in complete
+(API-701/702/703/704 all done); API-705 is the only WS-7 item left, WS-8 and
+WS-9 remainder haven't started
 **Owner:** Engineering (API / Platform)
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-08
 
 ---
 
@@ -40,9 +42,9 @@ Ticket format matches [RM-GA-P1](phase1-security-floor-tickets.md) through
 ```
 WS-7 (freeze first — every day of delay hardens SDK debt)
   API-701 (list envelopes) ─┐
-  API-702 (casing policy)   ├─> API-704 (CI contract gate — locks the frozen shape)
+  API-702 (casing policy)   ├─> API-704 (CI contract gate — locks the frozen shape) — Done
   API-703 (idempotency all) ─┘
-  API-705 (deprecation headers) ─ independent
+  API-705 (deprecation headers) ─ independent, last WS-7 item open
 
 WS-8
   OBS-801 (metrics middleware)  ─ independent
@@ -246,6 +248,54 @@ closes PP-18.)
 **Files.** `.github/workflows/ci.yml`; `sdks/typescript`, `sdks/python` (test entry
 points). **Size.** M. **Depends on:** API-701, API-702, API-703 (freeze before
 locking).
+
+**Status: Done (2026-07-08).** Added a `contract-gate` job to
+`.github/workflows/ci.yml`: boots a real `apex dev` from the PR's own code
+(`APEX_ALLOW_ANONYMOUS=1`, loopback-only, plus `APEX_PLATFORM_ADMINS=
+sdk-test-admin` so the org/project routes — which have no anonymous-tenant
+bypass — are exercised rather than silently skipped), waits for `/healthz`,
+then runs `npm test` (TypeScript: `redocly lint` + build + the integration
+suite in one command) and the Python suite
+(`python3 -m unittest discover -s tests -v`) as a required PR gate.
+Deliberately a **sibling** job to Phase-2's `services-integration`, not
+folded in — that job is Rust/cargo-only with Postgres/Qdrant/Redis service
+containers; this one needs Node.js + a live HTTP server, a different shape
+entirely.
+
+Wiring this up immediately earned its keep: running both suites against a
+**genuinely fresh** server (no accumulated local `~/.apex` state — simulated
+by pointing `HOME`/`USERPROFILE` at an empty directory and invoking the
+built binary directly, since a real GitHub Actions runner starts the same
+way) surfaced three real, previously-invisible bugs, all now fixed:
+
+1. Both SDKs' `workflows: submit then poll to completion` test still
+   asserted the **pre-API-702** PascalCase `"Completed"` status — the server
+   has correctly returned lowercase `"completed"` since API-702 shipped, but
+   neither test was ever updated (or ever run against a live server in CI)
+   to catch the mismatch.
+2. Both SDKs' `tools.list()` test asserted `total_estimate >= 4`, which only
+   ever held on a developer machine with leftover plugin-tool registrations
+   from earlier manual testing — the real default hosted registry (SEC-301)
+   is exactly 3 built-ins (echo, fs_read, http_get); `shell`,
+   `image_generate`, and plugin tools are each a conditional opt-in absent
+   on a clean environment.
+3. The Python SDK's test file had two leftover **pre-API-701** field names
+   from before this workstream's own earlier tickets landed:
+   `tools.list()` read `res["tools"]`/`res["total"]` instead of
+   `res["data"]`/`res["total_estimate"]`, and `memory.query()` read
+   `res["results"]` instead of `res["data"]`. The TypeScript suite already
+   had the correct field names; only the Python file was never updated.
+
+All three were caught precisely because this ticket finally ran these
+suites against a live server for the first time in CI-representative
+conditions rather than a warmed-up developer machine — proof the gate
+does what it's for. Verified end to end: 15/15 TypeScript tests pass
+(`npm test`, exit 0) against the fresh-state server; the Python fixes are
+the identical, verified-correct change mirrored into the file the same
+way (this dev environment has no Python interpreter to execute the suite
+directly, so this one relies on the 1:1 correspondence with the
+now-passing TypeScript suite plus static review rather than a local run —
+CI itself, once merged, is the first real execution).
 
 ---
 
@@ -508,7 +558,7 @@ groups/backends have. (PRD-003 R-9.5; closes PP-20/PP-21.)
 | API-701 | 7 | Standardize list envelopes — **Done** | M | P1 | — |
 | API-702 | 7 | One serde casing policy — **Done** | M | P1 | — |
 | API-703 | 7 | Idempotency on all mutations — **Done** | M | P1 | SEC-205, DUR-404 |
-| API-704 | 7 | CI contract gate (SDK + redocly) | M | P1 | 701,702,703 |
+| API-704 | 7 | CI contract gate (SDK + redocly) — **Done** | M | P1 | 701,702,703 |
 | API-705 | 7 | Deprecation/Sunset headers | S | P2 | — |
 | OBS-801 | 8 | RED metrics middleware (all routes) | M | P1 | — |
 | OBS-802 | 8 | Request-id correlation | S | P2 | — |
@@ -544,6 +594,7 @@ genuinely last — they harden and clean up, but nothing depends on them.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.4.0 | 2026-07-08 | API-704 done: added a `contract-gate` CI job (redocly lint + both SDK integration suites against a real, freshly-booted server). Caught and fixed 3 real pre-existing bugs the suites' never having run in CI let slip through: both SDKs' workflow-status test still checked the pre-API-702 PascalCase `"Completed"`; both SDKs' tools-count assertion assumed leftover local plugin state; the Python suite still read two pre-API-701 field names (`tools`/`total`, `results`). WS-7 now has only API-705 left |
 | 1.3.0 | 2026-07-07 | API-703 done: `Idempotency-Key` replay extended from `agents:run` only to every mutating route via one shared `hardening::idempotency_middleware`, keyed by `(tenant, method, path, key)` (fixing a latent cross-route collision the old tenant+key-only scheme had). `openapi.yaml` and both SDKs updated in lockstep |
 | 1.2.0 | 2026-07-07 | API-702 done: `WorkflowState`/`ActivityState`/`WorkflowEvent` now `snake_case` on the wire, reconciling the workflow status filter and body casing; `MemoryType`/`PluginState` hand-written casing hacks in apex-server deleted in favor of the enums' own serde derive. Round-trip stability tests added for all four |
 | 1.1.0 | 2026-07-07 | API-701 done: audit/plugins/marketplace/secrets/tools migrated to the shared cursor-pagination envelope; memory:query renamed `results`→`data` (documented as a deliberate non-paginated exception). Both SDKs and openapi.yaml updated in lockstep |

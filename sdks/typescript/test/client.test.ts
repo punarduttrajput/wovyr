@@ -71,7 +71,10 @@ describe("ApexClient (integration)", () => {
   test("tools.list() includes the built-in echo tool", async (t) => {
     if (!serverAvailable) return t.skip("no server");
     const { data, total_estimate } = await client().tools.list();
-    assert.ok(total_estimate >= 4);
+    // Default hosted registry (SEC-301): echo, fs_read, http_get — shell,
+    // image_generate, and any plugin tools are each conditional opt-ins a
+    // clean environment won't have, so 3 is the true floor, not 4.
+    assert.ok(total_estimate >= 3);
     assert.ok(data.some((tool) => tool.id === "echo"));
   });
 
@@ -144,10 +147,10 @@ describe("ApexClient (integration)", () => {
     let completed = false;
     for (let i = 0; i < 20; i++) {
       const { execution } = await client().workflows.get(execution_id);
-      // The engine's WorkflowState serializes PascalCase ("Completed",
-      // "Failed") — distinct from the lowercase `?status=` filter values the
-      // list endpoint accepts.
-      if ((execution as { status?: string }).status === "Completed") {
+      // RM-GA-P4 API-702: WorkflowState now serializes snake_case ("completed",
+      // "failed"), matching the `?status=` filter's casing (previously
+      // PascalCase — a wart API-702 fixed by construction).
+      if ((execution as { status?: string }).status === "completed") {
         completed = true;
         break;
       }
