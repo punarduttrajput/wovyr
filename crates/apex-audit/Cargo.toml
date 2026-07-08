@@ -12,4 +12,4 @@ apex-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Hash-chaining for tamper-evidence (each entry commits to the prior entry's hash).
-sha2 = "0.10"
+sha2.workspace = true

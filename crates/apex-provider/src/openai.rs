@@ -8,6 +8,7 @@
 //! code ([coding standards §9](../../docs/19-implementation-guide/coding-standards.md)).
 
 use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
+use crate::image::{ImageGenRequest, ImageGenResponse};
 use crate::provider::{AIProvider, ChatStream, ChatStreamEvent};
 use crate::types::{ChatRequest, ChatResponse, Message, Role, ToolCall};
 use apex_common::{Error, Result, Usage};
@@ -240,6 +241,39 @@ impl AIProvider for OpenAiProvider {
         }
 
         parse_embeddings(&payload, &request.model)
+    }
+
+    async fn generate_image(&self, request: ImageGenRequest) -> Result<ImageGenResponse> {
+        let url = format!("{}/images/generations", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&json!({ "prompt": request.prompt, "size": request.size, "n": request.n }))
+            .send()
+            .await
+            .map_err(|e| Error::provider(format!("request to {url} failed: {e}")))?;
+
+        let status = resp.status();
+        let payload: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::provider(format!("decoding response failed: {e}")))?;
+
+        if !status.is_success() {
+            let msg = payload
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(classify_http_error(status.as_u16(), msg));
+        }
+
+        let images = payload
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(ImageGenResponse { images })
     }
 }
 

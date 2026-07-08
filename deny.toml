@@ -1,0 +1,66 @@
+# cargo-deny configuration (RM-GA-P4 HLTH-904).
+#
+# Runs in CI via the `EmbarkStudios/cargo-deny-action` step in the `security` job
+# (`.github/workflows/ci.yml`), alongside the existing RustSec advisory check
+# (`rustsec/audit-check@v2`) and secret scan (gitleaks). This config focuses on
+# what those two don't cover: license policy and duplicate-version drift.
+
+[graph]
+all-features = false
+
+[advisories]
+# RustSec advisory scanning is already covered by the `rustsec/audit-check@v2`
+# step in the same CI job — don't duplicate it here.
+ignore = []
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    # webpki-roots' own license (verified against the real dependency tree,
+    # not assumed) — a permissive Mozilla-published data-license, not a
+    # copyleft/viral one.
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "deny"
+# `wildcards` (flags an external dependency with no version constraint, e.g.
+# `foo = "*"`) is left at its default rather than "deny": every one of this
+# workspace's ~19 internal crates references its siblings via `path = "..."`
+# workspace dependencies with no `version` field by design (Cargo resolves
+# them by workspace membership, not semver) — cargo-deny's `allow-wildcard-paths`
+# escape hatch doesn't apply here since it exempts path deps only for crates
+# already marked `publish = false`, which none of these are. Turning the lint
+# on would mean ~150 permanent false positives with zero real wildcard risk
+# (there are no loose-versioned *external* deps in this workspace) rather
+# than a signal worth acting on.
+skip = [
+    # `reqwest` depends on `webpki-roots` 1.x directly while `hyper-rustls`
+    # (itself a `reqwest` dependency) still pins 0.26 — an upstream version
+    # skew between two crates in the same dependency graph, not something
+    # this workspace's own Cargo.toml files influence.
+    { name = "webpki-roots", version = "0.26.11" },
+    # `ring` (via rustls) pins an older `windows-sys` than the `clap`/`anstream`
+    # terminal-styling chain does — another upstream-owned split, same
+    # reasoning as above.
+    { name = "windows-sys", version = "0.52.0" },
+]
+# Note: `cargo tree --duplicates` also shows a `rand`/`rand_core`/`rand_chacha`/
+# `getrandom` 0.8-vs-0.9-generation split (production JWT/crypto stack vs.
+# `proptest`, a dev-dependency of apex-plugin/apex-workflow's fuzz tests) —
+# cargo-deny's own graph resolution doesn't surface it as a `bans` violation
+# (confirmed: adding skip entries for it produces "unmatched-skip" warnings,
+# meaning cargo-deny doesn't count it as a duplicate in the first place), so
+# no skip entry is needed for it here. See
+# docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md (HLTH-904) for
+# the full accounting of this cluster.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

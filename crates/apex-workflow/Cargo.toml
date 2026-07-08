@@ -18,7 +18,10 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 async-trait.workspace = true
-tokio.workspace = true
+# `rt` for the intra-workflow parallel-activity `JoinSet`; `time` for retry-backoff
+# sleeps; `fs`/`io-util` for the file-backed event log/checkpoint/timer/schedule
+# stores; `sync` for their in-process locks (RM-GA-P4 HLTH-904).
+tokio = { workspace = true, features = ["rt", "time", "fs", "io-util", "sync"] }
 tracing.workspace = true
 tokio-postgres = { version = "0.7", optional = true }
 # Versioned schema migrations (RM-GA-P3 MIG-A1): `apex admin migrate` applies
@@ -27,7 +30,7 @@ tokio-postgres = { version = "0.7", optional = true }
 refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros"] }
 # Property/fuzz testing for the workflow DSL and cron-expression parsers
 # (security-testing.md §8): arbitrary input must never panic.
 proptest = "1"

@@ -14,8 +14,10 @@
 
 use crate::sandbox::{NativeSandbox, ResourceLimits, SandboxBackend, SandboxManager};
 use crate::tool::{Tool, ToolContext, ToolError, ToolMetadata, ToolRequest, ToolResponse};
+use apex_provider::{Gateway, ImageGenRequest};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Read the `parameters` of the request and return them unchanged. Useful for
@@ -323,37 +325,23 @@ impl Tool for HttpGetTool {
     }
 }
 
-/// Default OpenAI-compatible base URL for image generation. Mirrors
-/// `apex-provider`'s `OpenAiProvider` env-var contract (`OPENAI_API_KEY` +
-/// `APEX_OPENAI_BASE_URL`) without apex-tools taking a dependency on
-/// apex-provider — apex-tools sits below apex-provider in the dependency
-/// spine, so this reads the same two env vars independently.
-const DEFAULT_IMAGE_BASE_URL: &str = "https://api.openai.com/v1";
-
-/// Generate an image from a text prompt via an OpenAI-compatible
-/// `/images/generations` endpoint. Not registered by [`crate::ToolRegistry::with_builtins`]
-/// by default — an agent opts in by listing `image_generate` in its manifest
-/// `tools:` and the registry that constructs it, since (unlike `http_get`) it
-/// needs a real API key and incurs real cost per call.
+/// Generate an image from a text prompt via the shared [`Gateway`]
+/// (RM-GA-P4 HLTH-904) — retry/failover/circuit-breaking and cost metering
+/// apply the same as any other gateway call, instead of this tool holding its
+/// own bare HTTP client and reading `OPENAI_API_KEY`/`APEX_OPENAI_BASE_URL`
+/// independently of `apex-provider`'s identical env-var contract. Not
+/// registered by [`crate::ToolRegistry::with_builtins`] by default — an agent
+/// opts in by listing `image_generate` in its manifest `tools:` and the
+/// registry that constructs it, since (unlike `http_get`) it incurs real cost
+/// per call.
 pub struct ImageGenTool {
-    client: reqwest::Client,
+    gateway: Arc<Gateway>,
 }
 
 impl ImageGenTool {
-    /// Construct with a default HTTP client. Reads `OPENAI_API_KEY`/
-    /// `APEX_OPENAI_BASE_URL` per call (in [`Tool::execute`]), not at
-    /// construction, so a missing key fails a single tool call rather than
-    /// registry setup.
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
-    }
-}
-
-impl Default for ImageGenTool {
-    fn default() -> Self {
-        Self::new()
+    /// Construct over the run's shared gateway.
+    pub fn new(gateway: Arc<Gateway>) -> Self {
+        Self { gateway }
     }
 }
 
@@ -404,46 +392,21 @@ impl Tool for ImageGenTool {
             .and_then(Value::as_u64)
             .unwrap_or(1);
 
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            ToolError::Validation(
-                "OPENAI_API_KEY is not set; image_generate needs an OpenAI-compatible API key"
-                    .into(),
-            )
-        })?;
-        let base_url = std::env::var("APEX_OPENAI_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_IMAGE_BASE_URL.to_string());
-        let base_url = base_url.trim_end_matches('/');
-
-        let resp = self
-            .client
-            .post(format!("{base_url}/images/generations"))
-            .bearer_auth(&api_key)
-            .json(&json!({ "prompt": prompt, "size": size, "n": n }))
-            .send()
+        let request = ImageGenRequest::new(prompt).with_size(size).with_n(n);
+        let response = self
+            .gateway
+            .generate_image(request)
             .await
-            .map_err(|e| ToolError::Network(format!("image generation request failed: {e}")))?;
-
-        let status = resp.status();
-        let body: Value = resp.json().await.map_err(|e| {
-            ToolError::Network(format!("reading image generation response failed: {e}"))
-        })?;
-
-        if !status.is_success() {
-            let message = body
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            return Err(ToolError::Network(format!(
-                "image generation failed ({status}): {message}"
-            )));
-        }
-
-        let images = body.get("data").cloned().unwrap_or(Value::Array(vec![]));
+            .map_err(|e| match e {
+                apex_common::Error::Invalid(m) | apex_common::Error::Config(m) => {
+                    ToolError::Validation(m)
+                }
+                other => ToolError::Network(other.to_string()),
+            })?;
 
         Ok(ToolResponse::success(json!({
             "prompt": prompt,
-            "images": images,
+            "images": response.images,
         })))
     }
 }
@@ -951,7 +914,8 @@ mod tests {
 
     #[tokio::test]
     async fn image_generate_missing_prompt_is_validation_error() {
-        let t = ImageGenTool::new();
+        let gateway = Arc::new(Gateway::new(Box::new(apex_provider::MockProvider::new())));
+        let t = ImageGenTool::new(gateway);
         let ctx = ToolContext::default();
         let err = t
             .execute(&ctx, ToolRequest::new(json!({})))

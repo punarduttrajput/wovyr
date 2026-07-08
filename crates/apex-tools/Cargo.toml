@@ -14,11 +14,16 @@ wasi = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasi-common"]
 
 [dependencies]
 apex-common.workspace = true
+apex-provider.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
-tokio.workspace = true
+# `net`/`io-util` for the egress proxy and DNS-pinned HTTP client; `fs` for sandbox
+# workspace files; `process` for spawning sandboxed commands; `sync` for the sandbox
+# pool's semaphore; `rt`/`time` for spawning the egress proxy task and command
+# timeouts (RM-GA-P4 HLTH-904).
+tokio = { workspace = true, features = ["net", "io-util", "fs", "process", "sync", "rt", "time"] }
 tracing.workspace = true
 # Pinned to 14.x to reuse the warm offline cache (wasmtime 14.0.4 is already vendored).
 wasmtime = { version = "14", optional = true }
@@ -29,7 +34,7 @@ wasi-common = { version = "14", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros"] }
 # Assembles tiny WASI test modules from WAT in-process, so the WASI tests need no
 # external wasm toolchain (cached: wat 1.252).
 wat = "1"

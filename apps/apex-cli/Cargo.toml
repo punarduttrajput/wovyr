@@ -20,7 +20,7 @@ otlp = ["apex-telemetry/otlp"]
 # The WASM plugin capability loader, so enabled plugin tools actually execute on
 # `agents run --local`. Off by default (pulls Wasmtime via apex-plugin/wasi). Pulls
 # the secret vault so a tenant-scoped run injects the plugin's secrets into the sandbox.
-plugin-wasi = ["apex-plugin/wasi", "dep:apex-secrets"]
+plugin-wasi = ["apex-plugin/wasi"]
 # Rekor client for `plugin keyless-sign --rekor <url>` (witness signings in a
 # transparency log, ADR-0009). Off by default (pulls reqwest's blocking client).
 keyless-rekor = ["apex-plugin/rekor"]
@@ -45,15 +45,21 @@ apex-agent.workspace = true
 apex-workflow.workspace = true
 apex-runtime.workspace = true
 apex-kms.workspace = true
+apex-config.workspace = true
 apex-memory.workspace = true
 apex-telemetry.workspace = true
 apex-plugin.workspace = true
 apex-marketplace.workspace = true
 apex-server.workspace = true
 # Secret vault — used (under `plugin-wasi`) to inject a run's tenant-scoped secrets into
-# plugin tool sandboxes; optional so the default CLI build stays lean.
-apex-secrets = { workspace = true, optional = true }
-tokio.workspace = true
+# plugin tool sandboxes. Unconditional (RM-GA-P4 HLTH-903): `apex-config`'s shared
+# secrets-vault construction depends on it unconditionally too, and apex-secrets is a
+# small crate already pulled in transitively via apex-kms's dependents.
+apex-secrets.workspace = true
+# `rt-multi-thread` + `macros` for the binary's own `#[tokio::main]` (also covers
+# `plugin.rs`'s `spawn_blocking` and `workflow.rs`'s local `#[tokio::test]`s — RM-GA-P4
+# HLTH-904).
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
@@ -61,10 +67,10 @@ reqwest.workspace = true
 async-trait.workspace = true
 # ed25519 keygen + signing for `apex plugin keygen|sign` (CLI tooling: signing lives
 # outside the determinism-constrained library core).
-ring = "0.17"
+ring.workspace = true
 # The running platform-API version the engine checks plugin compatibility against.
-semver = "1"
+semver.workspace = true
 # Backup-manifest content digests for `apex admin backup|restore` (RM-GA-P2 DR-1001) —
 # same versions already used by apex-plugin/apex-kms elsewhere in the workspace.
-sha2 = "0.10"
+sha2.workspace = true
 hex = "0.4"

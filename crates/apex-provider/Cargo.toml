@@ -12,13 +12,17 @@ description = "Provider SDK and LLM gateway: a vendor-neutral chat interface for
 # provider consistently. Off by default (pulls the redis client).
 redis = ["dep:redis"]
 # Qdrant-backed distributed semantic cache (shared across a gateway fleet). Uses the
-# reqwest client already in deps; off by default to keep the surface opt-in.
-qdrant = []
+# reqwest client already in deps; off by default to keep the surface opt-in. Needs
+# tokio's `sync` feature for its internal `Mutex` — wired here rather than the base
+# `[dependencies]` tokio entry so a non-qdrant build doesn't pay for it (RM-GA-P4
+# HLTH-904).
+qdrant = ["tokio/sync"]
 # A real, local, offline LLM (mistral.rs) as an AIProvider backend. Off by default —
 # pulls a large inference-engine dependency and, at runtime, downloads model weights.
 # Deliberately not chained into Gateway::from_env()'s default resolution; a caller
-# opts in explicitly via MistralRsProvider::from_env().
-mistralrs = ["dep:mistralrs"]
+# opts in explicitly via MistralRsProvider::from_env(). Needs tokio's multi-threaded
+# scheduler for the `mistralrs_research` example's own `#[tokio::main]`.
+mistralrs = ["dep:mistralrs", "tokio/rt-multi-thread"]
 
 [dependencies]
 apex-common.workspace = true
@@ -29,7 +33,10 @@ async-trait.workspace = true
 futures = "0.3"
 async-stream = "0.3"
 reqwest.workspace = true
-tokio.workspace = true
+# `macros` for the hedged-dispatch `tokio::select!`; `time` for retry-backoff sleeps
+# (RM-GA-P4 HLTH-904 — the caller's runtime supplies `rt`, so this crate's library
+# code doesn't need it itself).
+tokio = { workspace = true, features = ["macros", "time"] }
 tracing.workspace = true
 redis = { version = "0.24", default-features = false, features = ["tokio-comp"], optional = true }
 # Pure-Rust default features (no CUDA/Metal/MKL, no C compiler needed) — chosen
@@ -41,7 +48,9 @@ name = "mistralrs_research"
 required-features = ["mistralrs"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+# `rt` to actually execute `#[tokio::test]`s; `test-util` for the paused-clock hedging
+# tests (`start_paused = true`).
+tokio = { workspace = true, features = ["rt", "test-util"] }
 # For the mistralrs_research example only (a dev-dependency cycle back to
 # apex-provider is fine — Cargo excludes dev-deps from the graph it resolves
 # for downstream consumers).

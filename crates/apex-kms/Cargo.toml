@@ -14,6 +14,6 @@ serde_json.workspace = true
 tracing.workspace = true
 # AEAD (AES-256-GCM) + secure randomness — already in the dep graph via apex-plugin's
 # ed25519 signing, so this adds no new supply-chain surface.
-ring = "0.17"
+ring.workspace = true
 # Hex-encode wrapped key material for JSON persistence.
 hex = { version = "0.4", features = ["serde"] }

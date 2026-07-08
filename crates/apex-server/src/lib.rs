@@ -420,7 +420,9 @@ impl AppState {
         // is configured — same signal default_gateway() uses to pick a real vs. mock
         // provider.
         if std::env::var_os("OPENAI_API_KEY").is_some() {
-            registry.register(std::sync::Arc::new(apex_tools::ImageGenTool::new()));
+            registry.register(std::sync::Arc::new(apex_tools::ImageGenTool::new(
+                gateway.clone(),
+            )));
         }
         // Register enabled plugin tools from the durable catalog into the run registry,
         // routed through a secret-aware runtime (when built with `plugin-wasi`), so agent
@@ -738,10 +740,7 @@ async fn default_gateway() -> Gateway {
 /// A durable [`FileTenancyStore`] at `~/.apex/tenancy` (shared with the CLI), falling
 /// back to an in-memory store if that directory is unavailable.
 fn default_tenancy_store() -> Arc<dyn TenancyStore> {
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| std::path::PathBuf::from(home).join(".apex").join("tenancy"));
-    if let Some(dir) = dir
+    if let Ok(dir) = apex_config::paths::tenancy_dir()
         && let Ok(store) = FileTenancyStore::new(dir)
     {
         return Arc::new(store);
@@ -749,70 +748,24 @@ fn default_tenancy_store() -> Arc<dyn TenancyStore> {
     Arc::new(InMemoryTenancyStore::new())
 }
 
-/// The platform KMS ([Encryption §5](../../docs/13-security/encryption.md#5-key-management)):
-/// sources a root key from `APEX_KMS_ROOT_KEY` (hex) or, failing that,
-/// generates-and-persists one at `~/.apex/kms/root.key` (shared with the CLI,
-/// so either process can decrypt the other's sealed data), backing tenant
-/// keys with a `FileKmsStore` in the same directory. Falls back to a fully
-/// ephemeral in-process key if neither is available — anything sealed under
-/// it will not survive a restart, so this is logged loudly rather than
-/// silently accepted like the other `~/.apex/*` in-memory fallbacks.
+/// The platform KMS ([Encryption §5](../../docs/13-security/encryption.md#5-key-management)),
+/// shared with the CLI via `apex-config` (RM-GA-P4 HLTH-903) so both processes
+/// agree on the root key + tenant-key catalog instead of each maintaining its
+/// own copy of this construction logic.
 fn default_kms() -> Arc<dyn apex_kms::Kms> {
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| std::path::PathBuf::from(home).join(".apex").join("kms"));
-    let root_key = apex_kms::root::from_env("APEX_KMS_ROOT_KEY")
-        .ok()
-        .or_else(|| {
-            dir.as_ref()
-                .and_then(|d| apex_kms::root::from_file(d.join("root.key")).ok())
-        });
-    match (root_key, dir) {
-        (Some(key), Some(dir)) => {
-            let store: Arc<dyn apex_kms::KmsStore> = match apex_kms::FileKmsStore::new(dir) {
-                Ok(s) => Arc::new(s),
-                Err(_) => Arc::new(apex_kms::InMemoryKmsStore::new()),
-            };
-            Arc::new(apex_kms::LocalKms::new(key, store))
-        }
-        _ => {
-            tracing::warn!(
-                "no persistent KMS root key available (set APEX_KMS_ROOT_KEY or ensure HOME is set); \
-                 using an ephemeral in-process key — anything sealed under it will not survive a restart"
-            );
-            let key = apex_kms::generate_key().expect("secure RNG available");
-            Arc::new(apex_kms::LocalKms::new(
-                key,
-                Arc::new(apex_kms::InMemoryKmsStore::new()),
-            ))
-        }
-    }
+    apex_config::kms::build_kms()
 }
 
 /// A secret [`Vault`](apex_secrets::Vault) over a durable store at
-/// `~/.apex/secrets` (shared with the CLI). Seals values through `kms` before
-/// they reach disk (a distinct `secrets.enc.json`, never mixed with the
-/// plaintext `secrets.json`) when `APEX_SECRETS_ENCRYPT_AT_REST` is set —
-/// **opt-in**, unlike the always-on memory encryption below: switching the
-/// default here would abandon any secrets already sitting in the plaintext
-/// file rather than transparently coexisting with them.
+/// `~/.apex/secrets` (shared with the CLI via `apex-config`, RM-GA-P4
+/// HLTH-903). Seals values through `kms` before they reach disk (a distinct
+/// `secrets.enc.json`, never mixed with the plaintext `secrets.json`) when
+/// `APEX_SECRETS_ENCRYPT_AT_REST` is set — **opt-in**, unlike the always-on
+/// memory encryption below: switching the default here would abandon any
+/// secrets already sitting in the plaintext file rather than transparently
+/// coexisting with them.
 fn default_secrets_vault(kms: Arc<dyn apex_kms::Kms>) -> apex_secrets::Vault {
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| std::path::PathBuf::from(home).join(".apex").join("secrets"));
-    let encrypt_at_rest = std::env::var("APEX_SECRETS_ENCRYPT_AT_REST").is_ok();
-    let store: Arc<dyn apex_secrets::SecretStore> = match dir {
-        Some(d) if encrypt_at_rest => match apex_secrets::EncryptedFileSecretStore::new(d, kms) {
-            Ok(s) => Arc::new(s),
-            Err(_) => Arc::new(apex_secrets::InMemorySecretStore::new()),
-        },
-        Some(d) => match apex_secrets::FileSecretStore::new(d) {
-            Ok(s) => Arc::new(s),
-            Err(_) => Arc::new(apex_secrets::InMemorySecretStore::new()),
-        },
-        None => Arc::new(apex_secrets::InMemorySecretStore::new()),
-    };
-    apex_secrets::Vault::new(store)
+    apex_config::secrets::build_secrets_vault(kms)
 }
 
 /// A tamper-evident [`AuditLog`](apex_audit::AuditLog) over a durable [`FileAuditSink`]
@@ -821,9 +774,7 @@ fn default_secrets_vault(kms: Arc<dyn apex_kms::Kms>) -> apex_secrets::Vault {
 /// identical `audit.jsonl` (e.g. via `apex plugin` commands, once wired), so a
 /// second writer must extend the chain, not fork it.
 fn default_audit_log() -> apex_audit::AuditLog {
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| std::path::PathBuf::from(home).join(".apex").join("audit"));
+    let dir = apex_config::paths::audit_dir().ok();
     let sink = dir
         .clone()
         .and_then(|dir| apex_audit::FileAuditSink::new(dir).ok());
@@ -842,13 +793,7 @@ fn default_audit_log() -> apex_audit::AuditLog {
 /// already-plaintext subscriptions invisible via this store rather than
 /// transparently migrating them.
 fn default_webhook_store(kms: Arc<dyn apex_kms::Kms>) -> Arc<dyn WebhookStore> {
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| {
-            std::path::PathBuf::from(home)
-                .join(".apex")
-                .join("webhooks")
-        });
+    let dir = apex_config::paths::webhooks_dir().ok();
     let encrypt_at_rest = std::env::var("APEX_WEBHOOKS_ENCRYPT_AT_REST").is_ok();
     if let Some(dir) = dir {
         if encrypt_at_rest {
@@ -1084,9 +1029,7 @@ async fn resume_in_flight_executions(state: &Arc<AppState>) {
 /// (RM-GA-P2 DUR-404): both are execution-adjacent state, so they live beside the
 /// workflow checkpoints they describe rather than in a separate directory.
 fn workflows_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| PathBuf::from(home).join(".apex").join("workflows"))
+    apex_config::paths::workflows_dir().ok()
 }
 
 /// `~/.apex/server` — durable state that is server-process-local, never shared with
@@ -1094,9 +1037,7 @@ fn workflows_dir() -> Option<PathBuf> {
 /// accumulator). Kept in its own directory rather than `workflows_dir()` precisely
 /// *because* it isn't shared — mixing the two would blur that boundary.
 fn server_state_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| PathBuf::from(home).join(".apex").join("server"))
+    apex_config::paths::server_state_dir().ok()
 }
 
 /// Load the persisted workflow-owners index from `path` (best-effort: a missing or

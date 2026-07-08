@@ -17,4 +17,4 @@ serde.workspace = true
 serde_json.workspace = true
 # Webhook payload signing (HMAC-SHA256). Both cached and already in the dep graph.
 hmac = "0.12"
-sha2 = "0.10"
+sha2.workspace = true

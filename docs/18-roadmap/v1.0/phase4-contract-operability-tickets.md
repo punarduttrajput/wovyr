@@ -7,11 +7,13 @@ Document ID: RM-GA-P4
 
 **Document ID:** RM-GA-P4
 **File Path:** `docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md`
-**Version:** 1.7.0
+**Version:** 1.8.0
 **Status:** In progress — **WS-7 is fully done** (API-701/702/703/704/705 all
-shipped); **HLTH-901 (executor unification) and HLTH-902 (CLI panic fix) also
-done**; WS-8 (observability) and the rest of WS-9 (config crate, cleanup)
-haven't started
+shipped); **HLTH-901 (executor unification), HLTH-902 (CLI panic fix), and
+HLTH-903 (`apex-config` crate) are done**; **HLTH-904 is 4/5 done** (gateway
+wiring, dependency dedup, tokio feature fix, cargo-deny gate — the two
+god-module splits are deferred, not started); WS-8 (observability) hasn't
+started
 **Owner:** Engineering (API / Platform)
 **Last Updated:** 2026-07-08
 
@@ -57,8 +59,8 @@ WS-8 (next up)
 WS-9 remainder
   HLTH-901 (unify executors) ─ independent (high value: silent behavioral divergence) — Done
   HLTH-902 (fix CLI panic)   ─ independent (benefits from CI-901 to detect) — Done
-  HLTH-903 (apex-config crate) ─ independent
-  HLTH-904 (cleanup: gateway leak, deps, module splits) ─ independent
+  HLTH-903 (apex-config crate) ─ independent — Done
+  HLTH-904 (cleanup: gateway leak, deps, module splits) ─ independent — 4/5 done, splits deferred
 ```
 
 **Order WS-7 first.** API-701/702/703 are the breaking pass; API-704 then locks it in
@@ -637,6 +639,43 @@ sites, no central config module. (PRD-003 R-9.4; closes PP-20 config portion.)
 (consume it). **Size.** M. **Depends on:** none. *(Reduces risk for Phase-2 DUR-403's
 shared-state work — ideally sequenced before or with it.)*
 
+**Status: Done (2026-07-08).** New crate `crates/apex-config` (`apex_dir()` — the
+one `HOME`/`USERPROFILE` resolution both binaries now share; `paths` — one
+function per resource directory; `env` — typed readers for the two genuinely
+cross-binary env vars, `APEX_SECRETS_ENCRYPT_AT_REST` and
+`APEX_MARKETPLACE_POSTGRES_URL`; `kms::build_kms()`/
+`secrets::build_secrets_vault()` — the previously byte-for-byte-duplicated
+construction logic, now one implementation). `apex-server`'s `default_kms`/
+`default_secrets_vault` and every inline `HOME`/`USERPROFILE` resolution
+(tenancy/audit/webhooks/workflows_dir/server_state_dir/auth's
+`default_api_key_store`/plugins.rs/marketplace.rs/memory.rs) now call into it;
+`apex-cli`'s `config::config_dir()`/`config::kms()`/`plugin.rs`'s
+`secrets_vault()`/`plugins_dir()`/`staging_dir()`/marketplace `open_store()`
+do the same — `apex-secrets` is now an **unconditional** dependency of
+`apex-cli` (previously gated behind `plugin-wasi`) since `apex-config`'s
+shared secrets-vault construction needs it regardless of that feature.
+**Deliberately not centralized** (would be new feature work, not
+duplication-removal — the survey that scoped this ticket found real drift,
+not just duplication): the CLI's tiered Postgres/Qdrant memory backend has no
+server equivalent; the server's marketplace `policy.json` curation has no CLI
+equivalent; both are documented as known, pre-existing, out-of-scope gaps
+rather than silently left unmentioned. Proven by
+`crates/apex-config/tests/agreement.rs` (3 tests, the acceptance criterion):
+resource paths match the `apex_dir()` join for every resource; a
+`build_kms()`-constructed "CLI instance" and a separately-constructed "server
+instance" over the same directory can decrypt each other's sealed data (the
+same independently-constructed-pairs pattern `apex-kms`'s own concurrent-writer
+tests use as a stand-in for "a separate process"); the same cross-instance
+check for `build_secrets_vault()`. One real bug found and fixed while writing
+these tests: the first version raced on the process-global `HOME`/
+`USERPROFILE` env var when Rust's test harness ran the three tests
+concurrently on different threads within the same binary — fixed with a
+`static ENV_LOCK: Mutex<()>` serializing them, confirmed stable across 5
+repeated runs and clean in the full `cargo test --workspace` run. Full
+workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean (`apex-server`
+104/104, `apex-cli` 9/9, `apex-config` 3/3, plus the pre-existing unrelated
+Windows `cmd.exe`-quoting flake in `apex-tools`).
+
 ---
 
 ## HLTH-904 `[P2]` — Cleanup: gateway boundary leak, workspace deps, module splits
@@ -667,6 +706,114 @@ groups/backends have. (PRD-003 R-9.5; closes PP-20/PP-21.)
 `crates/apex-tools/src/sandbox.rs`. **Size.** M–L (splits are mechanical but broad).
 **Depends on:** none.
 
+**Status: 4 of 5 sub-items done (2026-07-08); the two god-module splits
+deferred, not started.**
+
+1. **Gateway wiring — done.** Added `AIProvider::generate_image` (default
+   "unsupported", mirroring `embed`) + a real `OpenAiProvider` impl (moved the
+   existing `POST /images/generations` call verbatim from the tool into
+   `openai.rs`) + `Gateway::generate_image` (a plain primary-provider
+   pass-through, deliberately as simple as `embed` — no
+   retry/failover/cache/cost-metering pipeline, since `CostEvent` is
+   token-shaped and doesn't fit an image call and `embed` already sets this
+   precedent). `apex-tools` gained a normal (not dev-only) dependency on
+   `apex-provider` — confirmed no cycle: `apex-provider`'s only reference back
+   to `apex-tools` is a `[dev-dependencies]` entry for one example, which
+   doesn't participate in cycle resolution. `ImageGenTool` now takes an
+   `Arc<Gateway>` via constructor (mirroring `MemoryEngine::new(gateway,
+   store)`) instead of its own `reqwest::Client` + raw `OPENAI_API_KEY`/
+   `APEX_OPENAI_BASE_URL` reads. Both real construction call sites
+   (`apex-server/src/lib.rs`, `apex-cli/src/main.rs`) now thread the
+   already-constructed `Gateway` through instead of building a
+   dependency-free tool.
+2. **Workspace dependency dedup — done.** `sha2`/`semver`/`ring` added to
+   `[workspace.dependencies]` (the actual count was 6/4/4 sites, not the
+   originally-cited 5/4/3 — `apex-plugin` had all three and was missed in the
+   initial scoping pass); every direct-declaring crate switched to
+   `.workspace = true`. `cargo tree --duplicates` before/after confirms zero
+   version-resolution change (every site already pinned the identical
+   version — pure textual dedup). Also added the pre-existing gap the
+   scoping survey surfaced: `apex-eval` was a workspace member with no
+   `[workspace.dependencies]` entry, unlike every other internal crate.
+3. **`tokio` feature inheritance — done, and it was a real bug, not just
+   "untrimmed."** Cargo workspace-dependency feature overrides are
+   *additive*, so the root's `features = ["full"]` meant every crate's own
+   `features = [...]` override (e.g. `apex-plugin`/`apex-marketplace`'s
+   `["macros", "rt"]`) was silently unioned back up to the full feature set —
+   the per-crate trimming already in the codebase was a complete no-op.
+   Fixed by dropping the root's `features` entirely (`tokio = { version =
+   "1" }` — tokio's own defaults are empty) and giving every crate an
+   explicit, audited feature list. A dedicated research pass grepped every
+   `tokio::` call site across all 19 workspace crates (`src/`, `tests/`,
+   `examples/`) to build the exact per-crate requirement table rather than
+   guessing — e.g. confirmed `apex-server`'s library code needs only
+   `rt`+`time`+`net` (no `macros`/`select!`/`#[tokio::main]` anywhere in its
+   production code — `serve()` really is caller-driven), while `apex-cli`
+   needs `rt-multi-thread`+`macros` for its own `#[tokio::main]`; feature-gated
+   code paths (`apex-provider`'s `qdrant`, `apex-memory`'s `tiered`,
+   `apex-workflow`'s `postgres`) got their extra tokio features wired into
+   *that* Cargo feature's edge list rather than the base dependency, so a
+   non-tiered/non-qdrant build doesn't pay for them. Verified by compiling,
+   per the ticket's own acceptance note that this is the one sub-item where
+   inspection can't substitute for a real build: `cargo build --workspace
+   --all-targets` clean with zero warnings, `cargo test --workspace`
+   unaffected (only the pre-existing `apex-tools` flake), plus explicit
+   feature-combination builds (`apex-tools --features wasi`, `apex-provider
+   --features qdrant`, `apex-memory --features tiered`, `apex-workflow
+   --features postgres`, `apex-cli --features plugin-wasi`) all clean.
+4. **`cargo-deny` CI gate — done, validated locally, not just authored blind.**
+   Added `deny.toml` (bans/licenses/sources) and an `EmbarkStudios/cargo-deny-action@v2`
+   step in the `security` CI job (a prebuilt binary, no cargo-deny compile in
+   CI — same reasoning as using the `rustsec/audit-check@v2` action instead of
+   invoking `cargo audit` directly). **Locally installed cargo-deny
+   (`cargo install cargo-deny --config net.offline=false`) and iterated
+   against the real dependency graph rather than shipping an unverified
+   config**, which caught three real issues the initial draft got wrong: (a)
+   `wildcards = "deny"` flags every one of this workspace's ~19 internal
+   `path = "..."` workspace dependencies as an unpinned wildcard (cargo-deny's
+   `allow-wildcard-paths` escape hatch only exempts crates already marked
+   `publish = false`, which none of these are) — left at its default rather
+   than adding `publish = false` to 19 manifests just for a lint; (b)
+   `webpki-roots`' actual license is `CDLA-Permissive-2.0` (verified against
+   the real crate, not assumed) — added to the allow-list; (c) a
+   previously-unknown `windows-sys` 0.52.0-vs-0.61.2 duplicate (`ring` pins
+   the older one, the `clap`/`anstream` terminal-styling chain the newer) —
+   added to the documented skip list alongside the already-known
+   `webpki-roots` 0.26-vs-1.0 split. The known `rand`/`rand_core`/
+   `rand_chacha`/`getrandom` 0.8-vs-0.9-generation split (production JWT/crypto
+   stack vs. `proptest`'s dev-only chain) turned out to need **no** skip entry
+   at all — cargo-deny's own graph resolution doesn't count it as a `bans`
+   violation in the first place (confirmed: adding skip entries for it
+   produced "unmatched-skip" warnings). `cargo deny check bans licenses
+   sources` is clean locally with zero warnings.
+5. **God-module splits — deferred, not started.** `crates/apex-server/src/lib.rs`
+   (4,335 LOC, ~2,100 of it inline tests) and `crates/apex-tools/src/sandbox.rs`
+   (1,891 LOC) are unchanged. Two background agents were dispatched in
+   parallel with the full target layout from this ticket (`lib.rs` →
+   `state.rs`/`config.rs`/`agents.rs`/trimmed `lib.rs`; `sandbox.rs` → a
+   `sandbox/` module with one file per backend) but both were killed mid-task
+   by an account-level session limit before either produced a
+   compiling result. The `apex-server` split never wrote any file (`lib.rs`
+   untouched — safe, nothing to clean up). The `apex-tools` split had
+   partially extracted `sandbox/types.rs` (438 lines) and `sandbox/native.rs`
+   (233 lines) as new files but had **not** deleted or trimmed the original
+   `sandbox.rs` and had not created `mod.rs`/`container.rs`/`firecracker.rs`/
+   `wasi.rs` — since no `sandbox/mod.rs` existed, the `sandbox/` directory was
+   never wired into the module tree (Rust still resolved `mod sandbox;` to
+   the untouched `sandbox.rs`), so nothing was actually broken, but the two
+   orphaned files were deleted to avoid confusing a future session with
+   half-finished, unbuilt code sitting next to the real module. Redoing this
+   is well-scoped for a future session (the exact target file layout and
+   line-range breakdown is documented above in this ticket) — it's the one
+   sub-item where "verify by compiling" couldn't happen at all, rather than
+   where it happened and passed.
+
+Full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean for
+everything actually shipped (sub-items 1-4) — see each sub-item's own
+verification notes above. The acceptance criterion's "no source file over
+~1,000 LOC" is **not yet met** for `apex-server`/`apex-tools` pending
+sub-item 5.
+
 ---
 
 # Rollup
@@ -685,8 +832,8 @@ groups/backends have. (PRD-003 R-9.5; closes PP-20/PP-21.)
 | OBS-805 | 8 | Dashboard login/CORS/build | L | P2 | SEC-101, SEC-204 |
 | HLTH-901 | 9 | Unify ActivityExecutors — **Done** | L | P1 | — |
 | HLTH-902 | 9 | Fix CLI spawn_blocking panic — **Done** | S | P1 | CI-901 |
-| HLTH-903 | 9 | `apex-config` crate | M | P2 | — |
-| HLTH-904 | 9 | Cleanup: gateway leak, deps, splits | M–L | P2 | — |
+| HLTH-903 | 9 | `apex-config` crate — **Done** | M | P2 | — |
+| HLTH-904 | 9 | Cleanup: gateway leak, deps, splits — **4/5 done, splits deferred** | M–L | P2 | — |
 
 **Rough total:** 3 L + 7 M + 4 S ≈ 9–12 engineer-weeks, parallelizable to ~4–5 calendar
 weeks across 2–3 engineers. **Phase-4 exit** = PRD-003 §11 items 5 (API consistent +
@@ -712,6 +859,7 @@ genuinely last — they harden and clean up, but nothing depends on them.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.8.0 | 2026-07-08 | HLTH-903 done: new `apex-config` crate centralizes `~/.apex` layout, the two genuinely cross-binary env vars, and the previously byte-for-byte-duplicated KMS/secrets-vault construction logic between `apex-server` and `apex-cli`. Proven by a cross-instance agreement test suite (found and fixed a real env-var test race in the process). HLTH-904 4/5 done: `image_generate` now routes through `Gateway::generate_image` (new gateway/provider API); `sha2`/`semver`/`ring` deduped into `[workspace.dependencies]`; the `tokio` feature-inheritance bug fixed (root `full` was silently defeating every crate's own trimmed feature list) with a per-crate audit of real `tokio::` API usage; `cargo-deny` CI gate added and validated locally against the real dependency graph (caught 3 real config issues a blind config would have shipped wrong). The two god-module splits (`apex-server/src/lib.rs`, `apex-tools/src/sandbox.rs`) are deferred — two delegated sub-agents hit an account session limit mid-task; the `apex-server` side never started (safe), the `apex-tools` side left two orphaned, never-wired-in files that were deleted to restore a clean state. Full workspace build/clippy/fmt/test clean for everything shipped |
 | 1.7.0 | 2026-07-08 | HLTH-901 done: new `apex-runtime` crate holds the one `ActivityExecutor` dispatch body (`PlatformActivityExecutor`) the CLI, server, and eval harness all now call, parameterized over an `AgentResolver` trait for the one genuinely platform-specific piece (agent lookup + tenant/hosted/quota context). Fixed the real semantic drift the ticket named: tool-error retry classification, `function`-vs-`tool` dispatch, `ai`'s system-prompt source and model resolution, and `human`'s decision-variable-key convention all now behave identically everywhere. Full workspace build/clippy/fmt/test clean |
 | 1.6.0 | 2026-07-08 | HLTH-902 done: all 7 CLI marketplace commands are now `async fn` running their body inside `tokio::task::spawn_blocking`, fixing the "Cannot start a runtime from within a runtime" panic. Reproduced and confirmed the exact panic + fix with a standalone repro (no live Postgres needed) and verified all 7 commands end to end against the file-based registry. Also added a CI-901 step that runs the CLI binary itself against Postgres — the existing job never had, despite the ticket's original acceptance criterion assuming it did |
 | 1.5.0 | 2026-07-08 | API-705 done: added `hardening::DEPRECATIONS` (a const route-metadata table) + `deprecation_headers` middleware, making the `Deprecation`/`Sunset` policy mechanically enforceable. Table is empty — no real deprecation exists — with a standing test guarding the 90-day window for whenever one is added. **WS-7 is now fully complete** |

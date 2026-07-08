@@ -17,6 +17,7 @@
 //! (`new`/`from_env`) is just a candidate list of length one.
 
 use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
+use crate::image::{ImageGenRequest, ImageGenResponse};
 use crate::mock::MockProvider;
 use crate::openai::OpenAiProvider;
 use crate::provider::AIProvider;
@@ -490,6 +491,21 @@ impl Gateway {
             .first()
             .ok_or_else(|| Error::provider("no providers configured"))?;
         provider.embed(request).await
+    }
+
+    /// Generate one or more images via the primary provider.
+    ///
+    /// Deliberately as simple as [`embed`](Self::embed) — no retry/failover/
+    /// cache/cost-metering pipeline — since [`CostEvent`] is token-shaped and
+    /// doesn't fit an image call, and `embed` (the other non-chat capability)
+    /// sets the precedent of a plain pass-through rather than forcing image
+    /// generation through machinery built for token-priced chat completions.
+    pub async fn generate_image(&self, request: ImageGenRequest) -> Result<ImageGenResponse> {
+        let provider = self
+            .providers
+            .first()
+            .ok_or_else(|| Error::provider("no providers configured"))?;
+        provider.generate_image(request).await
     }
 
     // --- cache helpers -----------------------------------------------------

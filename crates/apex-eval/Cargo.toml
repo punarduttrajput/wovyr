@@ -26,4 +26,4 @@ serde_yaml.workspace = true
 async-trait.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

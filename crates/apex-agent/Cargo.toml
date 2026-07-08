@@ -19,4 +19,4 @@ tracing.workspace = true
 futures = "0.3"
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }

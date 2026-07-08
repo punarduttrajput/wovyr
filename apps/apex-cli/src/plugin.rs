@@ -14,6 +14,7 @@
 //! wired into `apex agents run --local` (the loader executes them when the CLI is built
 //! with `--features plugin-wasi`).
 
+#[cfg(feature = "plugin-wasi")]
 use crate::config;
 use apex_common::{Error, Result};
 use apex_marketplace::{FileRegistryStore, Registry, RegistryStore, SearchQuery};
@@ -31,12 +32,12 @@ fn platform_api() -> semver::Version {
 
 /// The durable plugin directory, `~/.apex/plugins`.
 fn plugins_dir() -> Result<PathBuf> {
-    Ok(config::config_dir()?.join("plugins"))
+    apex_config::paths::plugins_dir()
 }
 
 /// Where verified artifacts are staged, `~/.apex/plugins/staging`.
 fn staging_dir() -> Result<PathBuf> {
-    Ok(plugins_dir()?.join("staging"))
+    apex_config::paths::staging_dir()
 }
 
 /// Acquire the cross-process advisory lock over `~/.apex/plugins` (RM-GA-P2
@@ -151,22 +152,7 @@ fn with_runtime(engine: PluginEngine) -> PluginEngine {
 /// API created (or vice versa).
 #[cfg(feature = "plugin-wasi")]
 fn secrets_vault() -> apex_secrets::Vault {
-    let dir = config::config_dir().ok().map(|d| d.join("secrets"));
-    let encrypt_at_rest = std::env::var("APEX_SECRETS_ENCRYPT_AT_REST").is_ok();
-    let store: std::sync::Arc<dyn apex_secrets::SecretStore> = match dir {
-        Some(d) if encrypt_at_rest => {
-            match apex_secrets::EncryptedFileSecretStore::new(d, config::kms()) {
-                Ok(s) => std::sync::Arc::new(s),
-                Err(_) => std::sync::Arc::new(apex_secrets::InMemorySecretStore::new()),
-            }
-        }
-        Some(d) => match apex_secrets::FileSecretStore::new(d) {
-            Ok(s) => std::sync::Arc::new(s),
-            Err(_) => std::sync::Arc::new(apex_secrets::InMemorySecretStore::new()),
-        },
-        None => std::sync::Arc::new(apex_secrets::InMemorySecretStore::new()),
-    };
-    apex_secrets::Vault::new(store)
+    apex_config::secrets::build_secrets_vault(config::kms())
 }
 
 #[cfg(not(feature = "plugin-wasi"))]
@@ -676,14 +662,12 @@ pub fn uninstall_cmd(id: &str) -> Result<()> {
 /// single-node `FileRegistryStore` at `~/.apex/marketplace/registry.json`.
 fn open_store() -> Result<Box<dyn RegistryStore>> {
     #[cfg(feature = "postgres")]
-    if let Ok(url) = std::env::var("APEX_MARKETPLACE_POSTGRES_URL") {
+    if let Some(url) = apex_config::env::marketplace_postgres_url() {
         let store = apex_marketplace::PostgresRegistryStore::connect(&url)?;
         return Ok(Box::new(store));
     }
     Ok(Box::new(FileRegistryStore::new(
-        config::config_dir()?
-            .join("marketplace")
-            .join("registry.json"),
+        apex_config::paths::marketplace_dir()?.join("registry.json"),
     )))
 }
 

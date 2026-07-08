@@ -1,6 +1,7 @@
 //! The core provider trait.
 
 use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
+use crate::image::{ImageGenRequest, ImageGenResponse};
 use crate::types::{ChatRequest, ChatResponse};
 use apex_common::{Error, Result};
 use async_trait::async_trait;
@@ -51,6 +52,17 @@ pub trait AIProvider: Send + Sync {
     async fn embed(&self, _request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         Err(Error::provider(format!(
             "provider `{}` does not support embeddings",
+            self.name()
+        )))
+    }
+
+    /// Generate one or more images from a text prompt.
+    ///
+    /// Defaults to an "unsupported" error so chat-only providers need not
+    /// implement it; image-capable providers override this.
+    async fn generate_image(&self, _request: ImageGenRequest) -> Result<ImageGenResponse> {
+        Err(Error::provider(format!(
+            "provider `{}` does not support image generation",
             self.name()
         )))
     }

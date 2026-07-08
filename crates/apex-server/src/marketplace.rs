@@ -35,16 +35,13 @@ use std::sync::Arc;
 use crate::{ApiError, AppState, plugins};
 
 fn marketplace_dir() -> Result<PathBuf, ApiError> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| PathBuf::from(home).join(".apex").join("marketplace"))
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "no home directory for the marketplace registry",
-            )
-        })
+    apex_config::paths::marketplace_dir().map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "no home directory for the marketplace registry",
+        )
+    })
 }
 
 /// Operator curation policy from `~/.apex/marketplace/policy.json`, or the default.
@@ -73,7 +70,7 @@ fn load_policy() -> Result<RegistryPolicy, ApiError> {
 /// `FileRegistryStore` at `~/.apex/marketplace/registry.json`.
 fn open_store() -> Result<Box<dyn RegistryStore>, ApiError> {
     #[cfg(feature = "postgres")]
-    if let Ok(url) = std::env::var("APEX_MARKETPLACE_POSTGRES_URL") {
+    if let Some(url) = apex_config::env::marketplace_postgres_url() {
         let store = apex_marketplace::PostgresRegistryStore::connect(&url)?;
         return Ok(Box::new(store));
     }

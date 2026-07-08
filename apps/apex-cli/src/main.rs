@@ -972,7 +972,7 @@ async fn run_local(
     provider: &str,
 ) -> apex_common::Result<()> {
     let def = AgentDefinition::from_file(file)?;
-    let gateway = build_local_gateway(provider).await?;
+    let gateway = std::sync::Arc::new(build_local_gateway(provider).await?);
     // `agents run --local` is a trusted, first-party/local context (SEC-301's
     // documented escape hatch) — shell stays available here, unlike the server's
     // default registry.
@@ -981,7 +981,9 @@ async fn run_local(
     // configured — same signal build_local_gateway/Gateway::from_env use to pick a real
     // vs. mock provider.
     if std::env::var_os("OPENAI_API_KEY").is_some() {
-        registry.register(std::sync::Arc::new(apex_tools::ImageGenTool::new()));
+        registry.register(std::sync::Arc::new(apex_tools::ImageGenTool::new(
+            gateway.clone(),
+        )));
     }
     // Make enabled plugins' tool capabilities callable by the agent.
     plugin::engine()?.register_enabled(&mut registry);

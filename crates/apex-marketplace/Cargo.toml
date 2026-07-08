@@ -26,9 +26,9 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 # Package content-addressing (sha256 of the published `.apexpkg`).
-sha2 = "0.10"
+sha2.workspace = true
 # Version sorting / channel resolution.
-semver = "1"
+semver.workspace = true
 # Synchronous Postgres client for the optional `postgres` feature.
 postgres = { version = "0.19", optional = true }
 # Versioned schema migrations (RM-GA-P3 MIG-A1): `apex admin migrate` applies
@@ -39,7 +39,7 @@ refinery = { version = "0.8", features = ["postgres"], optional = true }
 
 [dev-dependencies]
 # Produces signed test packages (ed25519) without an external toolchain.
-ring = "0.17"
+ring.workspace = true
 # Drive the engine's async capability runtime in the E2E test's execute step.
 tokio = { workspace = true, features = ["macros", "rt"] }
 # Names the tool registry/context/request types the engine's enable+execute path uses

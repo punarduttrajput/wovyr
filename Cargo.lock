@@ -194,6 +194,7 @@ version = "0.1.0"
 dependencies = [
  "apex-agent",
  "apex-common",
+ "apex-config",
  "apex-kms",
  "apex-marketplace",
  "apex-memory",
@@ -225,6 +226,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "apex-config"
+version = "0.1.0"
+dependencies = [
+ "apex-common",
+ "apex-kms",
+ "apex-secrets",
+ "tracing",
 ]
 
 [[package]]
@@ -375,6 +386,7 @@ dependencies = [
  "apex-agent",
  "apex-audit",
  "apex-common",
+ "apex-config",
  "apex-events",
  "apex-kms",
  "apex-marketplace",
@@ -435,6 +447,7 @@ name = "apex-tools"
 version = "0.1.0"
 dependencies = [
  "apex-common",
+ "apex-provider",
  "async-trait",
  "libc",
  "reqwest 0.12.28",

@@ -321,10 +321,7 @@ impl ApiKeyStore for FileApiKeyStore {
 /// The server's API-key store: durable at `~/.apex/auth` (shared with the CLI's own
 /// key-minting command), falling back to an empty in-memory store.
 pub(crate) fn default_api_key_store() -> Arc<dyn ApiKeyStore> {
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| PathBuf::from(home).join(".apex").join("auth"));
-    if let Some(dir) = dir
+    if let Ok(dir) = apex_config::paths::auth_dir()
         && let Ok(store) = FileApiKeyStore::new(dir)
     {
         return Arc::new(store);

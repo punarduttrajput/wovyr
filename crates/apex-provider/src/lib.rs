@@ -11,6 +11,7 @@
 
 mod embeddings;
 mod gateway;
+mod image;
 #[cfg(feature = "mistralrs")]
 mod mistralrs_provider;
 mod mock;
@@ -25,6 +26,7 @@ mod types;
 
 pub use embeddings::{EmbeddingRequest, EmbeddingResponse, cosine_similarity};
 pub use gateway::{Gateway, ModelSelector};
+pub use image::{ImageGenRequest, ImageGenResponse};
 #[cfg(feature = "mistralrs")]
 pub use mistralrs_provider::MistralRsProvider;
 pub use mock::MockProvider;

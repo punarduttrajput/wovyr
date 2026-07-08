@@ -16,6 +16,7 @@ members = [
     "crates/apex-secrets",
     "crates/apex-audit",
     "crates/apex-kms",
+    "crates/apex-config",
     "crates/apex-eval",
     "crates/apex-server",
     "apps/apex-cli",
@@ -45,13 +46,19 @@ apex-events = { path = "crates/apex-events" }
 apex-secrets = { path = "crates/apex-secrets" }
 apex-audit = { path = "crates/apex-audit" }
 apex-kms = { path = "crates/apex-kms" }
+apex-config = { path = "crates/apex-config" }
+apex-eval = { path = "crates/apex-eval" }
 apex-server = { path = "crates/apex-server" }
 
 # External
 # Cross-process advisory file locking (RM-GA-P2 DUR-403) — flock/LockFileEx via a
 # tiny, dependency-light crate rather than hand-rolled platform FFI.
 fs2 = "0.4"
-tokio = { version = "1", features = ["full"] }
+# RM-GA-P4 HLTH-904: no default features here — every consumer's `tokio.workspace =
+# true` declares exactly the features its own code needs (workspace-dependency
+# feature overrides are additive/unioned, not replacements, so leaving `full` here
+# would silently defeat every crate's own trimmed feature list).
+tokio = { version = "1" }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -62,6 +69,16 @@ clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# AEAD/signing randomness (apex-kms's envelope encryption, apex-plugin's ed25519
+# signing, apex-marketplace's signature verification, the CLI's `plugin keygen`/`sign`).
+ring = "0.17"
+# Content digests (apex-audit's hash chain, apex-events' HMAC signing prerequisite,
+# apex-marketplace's package digests, apex-plugin's artifact verification, the
+# server's plugin-catalog digests, the CLI's backup-manifest digests).
+sha2 = "0.10"
+# Platform-API / plugin-manifest compatibility ranges (apex-plugin, apex-marketplace,
+# apex-server, the CLI).
+semver = "1"
 
 [profile.release]
 opt-level = 3

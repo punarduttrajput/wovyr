@@ -333,6 +333,15 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # License policy + duplicate-version bans (RM-GA-P4 HLTH-904), via the
+      # upstream action's prebuilt binary (no cargo-deny compile in CI). Config
+      # in `deny.toml`; RustSec advisories are already covered by the step above,
+      # so this only runs the `bans`/`licenses`/`sources` checks.
+      - name: License / duplicate-version policy (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources
+
       # Secret scanning: the standalone gitleaks binary (not the wrapper Action,
       # which gates organizational use behind a license) against the checked-out
       # working tree only — `--no-git` scans files as they are at this commit

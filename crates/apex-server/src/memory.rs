@@ -53,9 +53,7 @@ fn visible_to(required_scopes: &[String], tenant: &str) -> bool {
 /// (this engine, plus namespace/record enumeration below) sees plaintext regardless.
 /// Returns the engine plus a clone of the (wrapped) store for that enumeration.
 pub(crate) fn default_engine(kms: Arc<dyn apex_kms::Kms>) -> (MemoryEngine, Arc<dyn MemoryStore>) {
-    let dir = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| std::path::PathBuf::from(home).join(".apex").join("memory"));
+    let dir = apex_config::paths::memory_dir().ok();
     let inner: Arc<dyn MemoryStore> = match dir.and_then(|d| FileStore::new(d).ok()) {
         Some(s) => Arc::new(s),
         None => Arc::new(InMemoryStore::new()),

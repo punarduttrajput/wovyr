@@ -27,13 +27,11 @@ use crate::hardening::{PageQuery, paginate};
 use axum::extract::{Query, State};
 
 fn plugins_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| PathBuf::from(home).join(".apex").join("plugins"))
+    apex_config::paths::plugins_dir().ok()
 }
 
 fn staging_dir() -> Option<PathBuf> {
-    plugins_dir().map(|d| d.join("staging"))
+    apex_config::paths::staging_dir().ok()
 }
 
 /// Acquire the cross-process advisory lock over `~/.apex/plugins` (RM-GA-P2

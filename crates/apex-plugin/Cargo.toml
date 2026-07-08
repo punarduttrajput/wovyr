@@ -25,11 +25,11 @@ serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 # ed25519 signature verification (already in the dep graph via rustls/ring).
-ring = "0.17"
+ring.workspace = true
 # Artifact content digests (sha256:...).
-sha2 = "0.10"
+sha2.workspace = true
 # Platform-API compatibility ranges.
-semver = "1"
+semver.workspace = true
 # Rekor REST client (behind the `rekor` feature).
 reqwest = { workspace = true, features = ["blocking"], optional = true }
 
