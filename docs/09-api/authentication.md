@@ -7,10 +7,23 @@ Document ID: API-002
 
 **Document ID:** API-002  
 **File Path:** `docs/09-api/authentication.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — this document describes the **target-state** design (full
+OAuth2/OIDC flows, refresh tokens, per-key IP allowlists, mTLS, org-custom
+roles). **What `apex-server` actually implements today** (RM-GA-P1 SEC-101,
+added 2026-07-07): a bearer credential verified by an `auth::authenticate`
+middleware before any handler runs, selected via `APEX_AUTH_MODE` —
+`jwt` (HS256 via `APEX_JWT_HS_SECRET` or RS256 via `APEX_JWT_RS_PUBLIC_KEY`,
+with optional issuer/audience checks; the verified `sub` claim becomes the
+principal) or `apikey` (a bearer token SHA-256-hashed and looked up in a
+file-backed store, minted via `apex auth create-key`). No OAuth2 authorization
+flow, no refresh tokens, no mTLS, no per-key IP allowlist, and no token
+revocation blocklist exist yet — a verified credential simply overwrites the
+request's `X-Apex-Principal` header before RBAC runs. See
+`crates/apex-server/src/auth.rs` and
+[`phase1-security-floor-tickets.md`](../18-roadmap/v1.0/phase1-security-floor-tickets.md).  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -222,4 +235,5 @@ These use the standard [error envelope](overview.md#8-error-model).
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-07 | Added a top note distinguishing this doc's target-state design from what's actually implemented (RM-GA-P1 SEC-101: JWT/API-key bearer auth, no OAuth2 flow/mTLS/refresh tokens yet). Found during a project-wide status review; no design content changed |
 | 1.0.0 | 2026-06-27 | Initial API Authentication & Authorization specification |

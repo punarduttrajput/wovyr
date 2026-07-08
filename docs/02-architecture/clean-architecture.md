@@ -1,10 +1,18 @@
 # Clean Architecture
 
 **Document ID:** ARCH-006
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.0.1
+**Status:** Draft — the layering *pattern* here (Domain → Application →
+Interface → Infrastructure) genuinely describes how the real crates are
+organized. **Corrected 2026-07-07:** the specific technology names used as
+illustrations — gRPC services, a `NATSAdapter`, a `grpc/` module — do not
+exist; the real infrastructure layer's adapters are HTTP/SSE (Axum) and
+file-based/optional-Postgres/Redis/Qdrant stores, consistent with
+[ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)'s Path A decision.
+Treat this document's *structure* as accurate and its *named examples* as
+illustrative, not current.
 **Owner:** Architecture Team
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -424,4 +432,5 @@ Applying this architecture provides:
 
 | Version | Date       | Description                         |
 | ------- | ---------- | ----------------------------------- |
+| 1.0.1   | 2026-07-07 | Added a header note: the layering pattern is real, but its gRPC/NATS-named examples are illustrative, not implemented. Found during a project-wide doc review; no content changed |
 | 1.0.0   | 2026-06-26 | Initial Clean Architecture document |

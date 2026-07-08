@@ -1,10 +1,16 @@
 # Domain-Driven Design (DDD)
 
 **Document ID:** ARCH-005
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.0.1
+**Status:** Draft — the bounded-context model genuinely matches the real
+crate boundaries (workflow/runtime/memory/tenancy/plugins map cleanly onto
+`apex-workflow`/`apex-agent`/`apex-memory`/`apex-tenancy`/`apex-plugin`).
+**Corrected 2026-07-07:** its one `NATS Adapter` example does not exist — no
+message broker is wired anywhere (consistent with
+[ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)'s Path A decision;
+see [ADR-0005](../17-adr/ADR-0005-nats.md)'s current-status note).
 **Owner:** Architecture Team
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -488,4 +494,5 @@ Avoid expanding existing contexts beyond their core responsibilities.
 
 | Version | Date       | Description                           |
 | ------- | ---------- | ------------------------------------- |
+| 1.0.1   | 2026-07-07 | Added a header note: the bounded-context model matches real crate boundaries; its one NATS Adapter example doesn't exist. Found during a project-wide doc review; no content changed |
 | 1.0.0   | 2026-06-26 | Initial Domain-Driven Design document |

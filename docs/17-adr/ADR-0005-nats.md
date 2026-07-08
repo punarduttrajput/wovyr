@@ -5,10 +5,30 @@ Document ID: ADR-0005
 
 # ADR-0005: NATS JetStream for the Event Bus
 
-**Status:** Accepted  
+**Status:** Accepted (decision), **not implemented** — see Current Status  
 **Date:** 2026-06-27  
 **Deciders:** Architecture Team  
 **Supersedes:** —
+
+---
+
+# Current Status (added 2026-07-07)
+
+This decision was never executed. The shipped `apex-events` crate is a
+**custom in-process event/webhook/audit system** (domain events, HMAC-signed
+webhook deliveries with retry/backoff, a tamper-evident audit chain) — no
+NATS, no JetStream, no message broker of any kind exists anywhere in the
+codebase. This is not a defect: [ADR-0010](ADR-0010-ga-deployment-topology.md)
+(2026-07-06) ratified a single-node appliance for GA, and a single process
+has no cross-replica event-distribution problem for an in-process bus to
+solve. A real message bus becomes relevant only once multiple replicas need
+to coordinate — the v1.1 "Scale-Out" milestone. That future need is now
+tracked explicitly as ticket **DIST-B9** in
+[phase3-scale-distribution-tickets.md](../18-roadmap/v1.0/phase3-scale-distribution-tickets.md)
+Track B, rather than left as a dangling, unexecuted "Accepted" decision with
+no owner. This ADR's original rationale below still stands as the candidate
+design *if and when* that ticket graduates — it is not superseded, just
+deferred.
 
 ---
 
@@ -67,3 +87,14 @@ Rationale:
 
 - [`02-architecture/event-driven-architecture.md`](../02-architecture/event-driven-architecture.md)
 - [`03-workflow-engine/event-bus.md`](../03-workflow-engine/event-bus.md)
+- [ADR-0010](ADR-0010-ga-deployment-topology.md) — Path A decision this ADR's deferral follows from
+- [phase3-scale-distribution-tickets.md](../18-roadmap/v1.0/phase3-scale-distribution-tickets.md) — DIST-B9, the tracked future ticket
+
+---
+
+# Revision History
+
+| Version | Date | Description |
+|---------|------|-------------|
+| 1.1.0 | 2026-07-07 | Added a Current Status section: this decision was never implemented (`apex-events` is a custom in-process system, no NATS/JetStream anywhere); deferred, not superseded, and now tracked as ticket DIST-B9 for the v1.1 Scale-Out milestone. Found during a project-wide doc review |
+| 1.0.0 | 2026-06-27 | Initial decision: NATS with JetStream as the event bus |

@@ -7,10 +7,10 @@ Document ID: SEC-INDEX-001
 
 **Document ID:** SEC-INDEX-001  
 **File Path:** `docs/13-security/index.md`  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Active  
 **Owner:** Security Team  
-**Last Updated:** 2026-07-05
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -75,7 +75,7 @@ Security is implemented across the platform; this section ties it together:
 
 | Document | Responsibility |
 |----------|----------------|
-| [authentication.md](authentication.md) | Identity and credential verification |
+| [authentication.md](authentication.md) | Identity and credential verification — target-state design; the real, shipped implementation (RM-GA-P1 SEC-101/102: JWT/API-key bearer auth, fail-closed by default) is noted at the top of that doc and detailed in [phase1-security-floor-tickets.md](../18-roadmap/v1.0/phase1-security-floor-tickets.md) |
 | [authorization.md](authorization.md) | Access-decision model and enforcement |
 | [rbac.md](rbac.md) | Roles, scopes, and attribute-based rules |
 | [encryption.md](encryption.md) | Data protection in transit and at rest |
@@ -124,5 +124,6 @@ adversarial tests, not yet a full-platform mapping or a third-party attestation.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-07 | §5 Document Map: noted that [authentication.md](authentication.md)'s real, shipped implementation (RM-GA-P1 SEC-101/102) is now flagged at the top of that doc, matching how §7 already flags [compliance-mapping.md](compliance-mapping.md)'s evidence-vs-design distinction. Found during a project-wide status review |
 | 1.1.0 | 2026-07-05 | Added [`compliance-mapping.md`](compliance-mapping.md) to the Document Map (§5) and linked it from §7's Compliance Posture paragraph — the first control-by-control evidence slice (encryption/key management) behind that paragraph's claim |
 | 1.0.0 | 2026-06-27 | Initial Security Index |

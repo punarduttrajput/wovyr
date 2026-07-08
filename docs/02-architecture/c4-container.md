@@ -1,10 +1,33 @@
 # C4 Model – Level 2: Container Diagram
 
 **Document ID:** ARCH-003
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.0.1
+**Status:** Draft — Day-1 target-state container diagram, unrevised since
+project inception; not reconciled with
+[ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md) (Path A, 2026-07-06).
+**Corrected 2026-07-07 — none of §3's independently-deployable/-scalable
+containers exist as separate processes.** The real topology is one Rust
+binary (`apex-server`) containing Agent Runtime, Workflow Engine, Memory
+Engine, LLM Gateway, Tool Runtime, and Plugin Engine as in-process crates —
+none is horizontally scaled independently (§8's per-container scaling
+strategy is aspirational). Specific corrections to §4/§5/§6/§11: **API
+Gateway** interface is REST + SSE only, no gRPC/WebSocket. **Dashboard
+Backend is NestJS in name only — it was never built**; the Angular SPA
+talks directly to `apex-server`
+([dashboard overview](../10-dashboard/overview.md)). **Event Bus is not
+NATS JetStream — no message broker exists**; `apex-events` is a custom
+in-process event/webhook system (current-status note on
+[ADR-0005](../17-adr/ADR-0005-nats.md)). **PostgreSQL, Redis, and Qdrant are
+real but optional**, feature-gated backends, not always-on shared
+infrastructure — the default is file-based storage under `~/.apex`. **Object
+Storage does not exist at all** — plugin packages are local
+content-addressed files. **mTLS between containers** is moot since there are
+no separate containers; the real security floor is `apex-server`'s own
+JWT/API-key auth (RM-GA-P1). Gaps with no implementation and no tracked
+future work (NATS, gRPC, object storage) are now tracked — see
+[`prd.md` §25](../01-product/prd.md#25-technology-gaps-tracked-for-future-versions).
 **Owner:** Architecture Team
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -462,4 +485,5 @@ The architecture allows additional containers without disrupting existing deploy
 
 | Version | Date       | Description                            |
 | ------- | ---------- | -------------------------------------- |
+| 1.0.1   | 2026-07-07 | Added a header note correcting the container/technology mapping against reality: no separate containers, no NestJS BFF, no NATS event bus, no gRPC, no object storage; Postgres/Redis/Qdrant are optional feature-gated backends. Found during a project-wide doc review; no content changed |
 | 1.0.0   | 2026-06-26 | Initial C4 Level 2 – Container Diagram |

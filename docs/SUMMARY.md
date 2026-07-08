@@ -338,7 +338,7 @@ The *why* behind major architectural choices, in standard ADR format.
 | [ADR-0002 — Rust](17-adr/ADR-0002-rust.md) | Accepted |
 | [ADR-0003 — PostgreSQL](17-adr/ADR-0003-postgresql.md) | Accepted |
 | [ADR-0004 — Qdrant](17-adr/ADR-0004-qdrant.md) | Accepted |
-| [ADR-0005 — NATS](17-adr/ADR-0005-nats.md) | Accepted |
+| [ADR-0005 — NATS](17-adr/ADR-0005-nats.md) | Accepted, not implemented |
 | [ADR-0006 — Clean Architecture + DDD](17-adr/ADR-0006-clean-architecture.md) | Accepted |
 | [ADR-0007 — Plugin system](17-adr/ADR-0007-plugin-system.md) | Accepted |
 

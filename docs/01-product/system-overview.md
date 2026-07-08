@@ -1,8 +1,23 @@
 **Document ID:** ARCH-001
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.0.1
+**Status:** Draft — Day-1 target-state architecture, unrevised since project
+inception; not reconciled with [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)
+(Path A, 2026-07-06: GA ships as a single-node appliance). **Corrected
+2026-07-07** — what actually ships today: one Rust binary (`apex-server`)
+containing every domain in §6 (Agent Runtime, Workflow Engine, Memory Engine,
+LLM Gateway, Tool Runtime, Plugin Framework, Platform Services) as in-process
+crates, not independently deployable/scalable services; a REST/JSON + SSE
+API (no gRPC, no WebSocket transport); an Angular SPA talking to it directly
+(no NestJS Gateway/BFF layer — [dashboard overview](../10-dashboard/overview.md));
+no message broker (no NATS — `apex-events` is a custom in-process event
+system); and file-based storage under `~/.apex` by default, with PostgreSQL/
+Redis/Qdrant as optional, feature-gated backends rather than the "primary
+storage" §10 implies. See [`CLAUDE.md`](../../CLAUDE.md) for the
+kept-current architecture. Technologies named below with no implementation
+and no tracked future work are now tracked — see
+[`prd.md` §25](prd.md#25-technology-gaps-tracked-for-future-versions).
 **Owner:** Architecture Team
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -442,4 +457,5 @@ These documents provide progressively deeper technical detail.
 
 | Version | Date       | Description             |
 | ------- | ---------- | ----------------------- |
+| 1.0.1   | 2026-07-07 | Added a header divergence note: this doc's six-layer, multi-service, NATS/gRPC/NestJS topology was never built and diverges from ADR-0010's Path A decision. Found during a project-wide doc review; no content changed |
 | 1.0.0   | 2026-06-26 | Initial system overview |

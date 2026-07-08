@@ -1,10 +1,19 @@
 # Event-Driven Architecture
 
 **Document ID:** ARCH-007
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.0.1
+**Status:** Draft — the event *model* (immutable, append-only, versioned
+domain events) genuinely describes the real `apex-events`/`apex-audit`
+implementation. **Corrected 2026-07-07:** §5's "Preferred implementation:
+NATS JetStream" was never built — there is no message broker at all;
+`apex-events` is a custom in-process event/webhook/audit system, sufficient
+for the single-node appliance [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)
+ratified for GA. A real distributed event bus only becomes necessary once
+multiple replicas exist (v1.1 "Scale-Out") — see
+[ADR-0005](../17-adr/ADR-0005-nats.md)'s current-status note and the new
+tracked ticket it links to.
 **Owner:** Architecture Team
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -470,4 +479,5 @@ Mandatory rules:
 
 | Version | Date       | Description                                |
 | ------- | ---------- | ------------------------------------------ |
+| 1.0.1   | 2026-07-07 | Added a header note: the event model is real; NATS JetStream was never built — `apex-events` is a custom in-process system. Found during a project-wide doc review; no content changed |
 | 1.0.0   | 2026-06-26 | Initial Event-Driven Architecture document |

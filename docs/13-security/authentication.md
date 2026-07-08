@@ -7,10 +7,19 @@ Document ID: SEC-001
 
 **Document ID:** SEC-001  
 **File Path:** `docs/13-security/authentication.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft — target-state security model. **Current implementation**
+(RM-GA-P1 SEC-101/SEC-102, added 2026-07-07): `crates/apex-server/src/auth.rs`
+verifies a JWT (HS256/RS256) or hashed API-key bearer credential before any
+handler runs, fail-closed by default — the `disabled-loopback` mode (no
+verification, today's back-compat behavior) requires an explicit
+`APEX_ALLOW_ANONYMOUS=1` opt-in that a startup check
+(`auth::refuse_anonymous_on_non_loopback`) refuses to honor on any
+non-loopback bind. Not yet implemented: OAuth2/OIDC SSO, mTLS, MFA/step-up,
+browser session cookies, token revocation blocklists, and key rotation
+schedules — the rest of this document's design.  
 **Owner:** Security Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -121,4 +130,5 @@ per [audit.md](audit.md) with principal, method, and source.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-07 | Added a top note distinguishing this doc's target-state design from the real, fail-closed-by-default implementation (RM-GA-P1 SEC-101/SEC-102). Found during a project-wide status review; no design content changed |
 | 1.0.0 | 2026-06-27 | Initial Security Authentication specification |

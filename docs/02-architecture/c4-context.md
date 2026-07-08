@@ -1,10 +1,19 @@
 # C4 Model – Level 1: System Context
 
 **Document ID:** ARCH-002
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.0.1
+**Status:** Draft — Day-1 target-state context diagram, unrevised since
+project inception. **Corrected 2026-07-07:** the "Databases"/"Messaging
+Systems" lists below are illustrative *categories* of external system this
+architecture could integrate with, not a description of what's wired today.
+The shipping single-node binary (`apex-server`, [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)
+Path A) uses file-based storage by default; PostgreSQL/Redis/Qdrant are real
+but optional, feature-gated backends; there is no messaging system of any
+kind (NATS/Kafka/RabbitMQ) — see
+[`prd.md` §25](../01-product/prd.md#25-technology-gaps-tracked-for-future-versions)
+for where the NATS gap is now tracked.
 **Owner:** Architecture Team
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -444,4 +453,5 @@ The platform must:
 
 | Version | Date       | Description                                  |
 | ------- | ---------- | -------------------------------------------- |
+| 1.0.1   | 2026-07-07 | Added a header note clarifying the "Databases"/"Messaging Systems" lists are illustrative categories, not current integrations; ADR-0010's Path A reality has no messaging system at all. Found during a project-wide doc review; no content changed |
 | 1.0.0   | 2026-06-26 | Initial C4 Level 1 – System Context document |

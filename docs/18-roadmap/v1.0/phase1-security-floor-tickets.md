@@ -7,10 +7,16 @@ Document ID: RM-GA-P1
 
 **Document ID:** RM-GA-P1
 **File Path:** `docs/18-roadmap/v1.0/phase1-security-floor-tickets.md`
-**Version:** 1.0.0
-**Status:** Ready for grooming
+**Version:** 1.1.0
+**Status:** Done — all 15 tickets shipped (SEC-101–105, SEC-201–205,
+SEC-301–305). This doc was never updated when the work landed (commits
+`8a9e4cb`, `64ab69d`, `8a48eb0`, `da5f0dd`, `8f3cb0e`, `9ca9228`) — a real
+documentation-drift gap, caught and corrected 2026-07-07. See `CLAUDE.md`'s
+`apex-server`/`apex-tools` bullets for the implemented behavior and
+`crates/apex-server/src/{auth,rate_limit}.rs`/`crates/apex-tools/src/
+{registry,builtin}.rs` for the code.
 **Owner:** Engineering (Security)
-**Last Updated:** 2026-07-06
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -94,6 +100,21 @@ admin. (PRD-003 R-1.1; closes PP-01.)
 **Size.** L. **Depends on:** none (foundational). **Blocks:** SEC-102, SEC-103,
 SEC-104, SEC-105, SEC-203.
 
+**Status: Done.** `crates/apex-server/src/auth.rs`'s `authenticate` middleware
+mounts over every route except `/healthz`/`/metrics` and verifies before any
+handler runs: `AuthMode::Jwt` (HS256 via `APEX_JWT_HS_SECRET` or RS256 via
+`APEX_JWT_RS_PUBLIC_KEY`, with optional issuer/audience checks) and
+`AuthMode::ApiKey` (SHA-256-hashed lookup in a `FileApiKeyStore` at
+`~/.apex/auth`) both overwrite `X-Apex-Principal` with the verified `sub`/
+principal before the request reaches `tenancy::context`, so a forged header
+can no longer win. `AuthMode::DisabledLoopback` (the default) is SEC-102's
+concern. Proven by `jwt_hs256_accepts_a_valid_token_and_extracts_the_principal`,
+`jwt_rejects_wrong_signature`, `jwt_rejects_expired_token`,
+`jwt_rejects_wrong_issuer_and_audience`, `apikey_mode_end_to_end_over_the_router`,
+and `rate_limit_keys_off_the_verified_principal_not_a_spoofed_header` (proving
+a downstream consumer — SEC-203 — actually sees the verified identity, not the
+raw header).
+
 ---
 
 ## SEC-102 `[P0]` — Remove the anonymous-default-tenant authorization bypass
@@ -126,6 +147,20 @@ material. (PRD-003 R-1.2; closes PP-02.)
 **Files.** `crates/apex-server/src/tenancy.rs`, `lib.rs` (`serve` bind check).
 **Size.** M. **Depends on:** SEC-101. **Blocks:** SEC-105.
 
+**Status: Done.** The bypass in `tenant_authorize` is now conditional on
+`AppState.anonymous_allowed` (`auth::resolve_anonymous_allowed`,
+real-deployment default `false`, opt-in via `APEX_ALLOW_ANONYMOUS=1`), and
+`serve()`'s `check_insecure_bind` refuses to bind a non-loopback address when
+that flag is set — an explicit config error, not a silent downgrade. With the
+flag off (the production default), an unauthenticated request to any
+tenant-scoped route is denied. `compliance-mapping.md` §7 item 1 documents
+this precisely: the bypass is "now gated, not open by default," an
+inherent (and intentional) consequence of the dev-only escape hatch when
+someone does opt into it, not an unfixed hole in this ticket's scope. Proven
+by `anonymous_default_tenant_bypass_is_gated_by_the_allow_anonymous_flag`,
+`anonymous_default_tenant_caller_is_denied_when_the_flag_is_off`, and
+`refuses_anonymous_on_non_loopback_bind_only_when_flag_is_set`.
+
 ---
 
 ## SEC-103 `[P0]` — Gate plugin lifecycle routes with platform-admin RBAC
@@ -153,6 +188,10 @@ tenant-scoped secrets injected. (PRD-003 R-1.3; closes PP-03.)
 definition + ladder test). **Size.** M. **Depends on:** SEC-101. **Blocks:**
 SEC-105.
 
+**Status: Done.** Every plugin-mutation handler now takes `HeaderMap` and calls
+`tenant_authorize(&state, &headers, "plugins:admin")` before acting. Proven by
+`plugin_lifecycle_routes_require_plugins_admin`.
+
 ---
 
 ## SEC-104 `[P0]` — Gate marketplace moderation & publish routes with RBAC
@@ -179,6 +218,11 @@ R-1.3; closes PP-03.)
 **Files.** `crates/apex-server/src/marketplace.rs`; `apex-tenancy` (scope). **Size.**
 M. **Depends on:** SEC-101. **Blocks:** SEC-105.
 
+**Status: Done.** Moderation routes now gate on `marketplace:moderate`;
+`publish` requires an authenticated principal; `actor_identity` derives from
+the verified principal. Proven by `moderation_routes_require_marketplace_moderate`
+and `publish_requires_an_authenticated_principal`.
+
 ---
 
 ## SEC-105 `[P0]` — Negative-authorization test suite as a CI gate
@@ -200,6 +244,9 @@ route table. (PRD-003 R-1.4; closes PP-01/02/03 verification.)
 
 **Files.** `crates/apex-server/tests/authz_matrix.rs` (new); `.github/workflows/ci.yml`.
 **Size.** M. **Depends on:** SEC-101, SEC-102, SEC-103, SEC-104.
+
+**Status: Done.** `crates/apex-server/tests/authz_matrix.rs` exists and is
+wired into `.github/workflows/ci.yml`, running on every PR.
 
 ---
 
@@ -230,6 +277,14 @@ route table. (PRD-003 R-1.4; closes PP-01/02/03 verification.)
 **Files.** `Cargo.toml` (workspace dep `tower-http`), `crates/apex-server/src/lib.rs`.
 **Size.** S. **Depends on:** none. *(Land early — cheap, high value.)*
 
+**Status: Done.** `HttpLimits` (env-configurable) drives a `TimeoutLayer`,
+`DefaultBodyLimit`, and a `ConcurrencyLimitLayer` in `router()`; the agent-run
+routes get their own longer timeout tier. Proven by
+`oversized_body_is_rejected_with_413`, `timeout_layer_converts_elapsed_into_408`,
+`concurrency_limit_sheds_load_past_the_cap_then_recovers`, and
+`timeout_drops_the_inner_future_releasing_raii_guards_held_across_it` (the run
+permit is released when the timeout fires).
+
 ---
 
 ## SEC-202 `[P0]` — TLS termination or refuse insecure non-loopback bind
@@ -255,6 +310,13 @@ SEC-101) and secret responses, is plaintext. (PRD-003 R-2.1; closes PP-05 in par
 **Files.** `crates/apex-server/src/lib.rs`; `Cargo.toml` (TLS server dep);
 `deployment/*` docs note. **Size.** M. **Depends on:** none.
 
+**Status: Done.** `serve()` installs an in-process rustls acceptor
+(`axum_server::bind_rustls`) when `APEX_TLS_CERT`/`APEX_TLS_KEY` are set;
+`check_insecure_bind` refuses a non-loopback bind without TLS unless
+`APEX_TLS_TERMINATED_UPSTREAM` declares a fronting proxy. Proven by
+`tls_config_serves_https_end_to_end` and
+`insecure_bind_is_refused_only_without_tls_and_without_upstream_termination_on_non_loopback`.
+
 ---
 
 ## SEC-203 `[P1]` — Per-principal and per-IP rate limiting
@@ -275,6 +337,15 @@ PP-05 in part.)
 **Files.** `crates/apex-server/src/` (layer); `Cargo.toml`. **Size.** M.
 **Depends on:** SEC-101 (principal keying).
 
+**Status: Done.** `rate_limit.rs`'s dependency-free per-key token bucket backs
+two tiers `router()` wires — `standard` and a tighter `sensitive` tier for
+agent-run/KMS/secrets — keyed by the *verified* principal (client IP
+fallback for anonymous callers), sitting after the auth layer so it can't be
+bypassed by spoofing the header. Proven by
+`standard_tier_rate_limit_returns_429_with_retry_after_then_isolates_by_principal`,
+`rate_limit_keys_off_the_verified_principal_not_a_spoofed_header`, plus unit
+tests for admission/refill/sweep/independent-keys.
+
 ---
 
 ## SEC-204 `[P1]` — CORS allow-list layer
@@ -294,6 +365,14 @@ R-2.4; supports the WS-8 dashboard work.)
 
 **Files.** `crates/apex-server/src/lib.rs`; `Cargo.toml`. **Size.** S. **Depends
 on:** none. *(Coordinate with WS-8/R-8.5 dashboard login.)*
+
+**Status: Done.** `cors_layer(&state.cors_allowed_origins)` (from
+`APEX_CORS_ALLOWED_ORIGINS`) builds a `tower_http::cors::CorsLayer`
+allow-list; no configured origins means no CORS headers at all (same-origin
+only), not a wildcard. Proven by
+`configured_origin_passes_preflight_but_unlisted_origin_gets_no_allow_header`
+and `no_configured_origins_means_no_cors_headers_at_all`. WS-8/R-8.5's
+dashboard login work (not yet done) is what will actually *use* this.
 
 ---
 
@@ -316,6 +395,13 @@ idempotency portion of PP-07.)
 - A soak test with unique keys shows bounded memory.
 
 **Files.** `crates/apex-server/src/hardening.rs`. **Size.** S. **Depends on:** none.
+
+**Status: Done.** `IdempotencyStore` evicts by TTL and caps total entries
+(FIFO eviction of the oldest when at capacity), both configurable. Later
+extended from `agents:run` only to every mutating route (RM-GA-P4 API-703).
+Proven by `entries_expire_after_the_configured_ttl`,
+`total_entries_are_capped_evicting_the_oldest_first`, and
+`soak_with_unique_keys_stays_within_the_entry_cap`.
 
 ---
 
@@ -344,6 +430,11 @@ the server user, contradicting the builtin doc comment claiming shell is "deferr
 **Files.** `crates/apex-tools/src/registry.rs`; server registry construction in
 `crates/apex-server/src/lib.rs`. **Size.** S. **Depends on:** none.
 
+**Status: Done.** `with_builtins()` registers only echo/fs_read/http_get;
+`shell` requires the separate, explicit `with_shell()`/
+`with_privileged_builtins()`. The server only adds it when an operator sets
+`APEX_ENABLE_SHELL_TOOL=1`. Proven by `shell_tool_opt_in_env_var_re_enables_it`.
+
 ---
 
 ## SEC-302 `[P0]` — Confine `fs_read` to an allow-listed workspace root
@@ -369,6 +460,14 @@ closes PP-04 — the highest-impact item in this workstream.)
 **Files.** `crates/apex-tools/src/builtin.rs`, `crates/apex-tools/src/tool.rs`
 (`ToolContext` workspace-root field if not present). **Size.** M. **Depends on:**
 none.
+
+**Status: Done.** `fs_read` resolves the requested path against the run's
+workspace root, canonicalizes, and rejects any escape (symlink-aware).
+Proven by `fs_read_allows_a_path_inside_the_workspace_root`,
+`fs_read_denies_dot_dot_traversal_out_of_the_root`,
+`fs_read_denies_an_absolute_path_outside_the_root`,
+`fs_read_denies_a_symlink_that_escapes_the_root`, and the explicit regression
+test `fs_read_cannot_reach_the_kms_root_key`.
 
 ---
 
@@ -397,6 +496,12 @@ PP-04 in part.)
 **Files.** `crates/apex-agent/src/runtime.rs`, `crates/apex-tools/src/tool.rs`/`registry.rs`.
 **Size.** M. **Depends on:** none. **Blocks:** SEC-305 (shares run-context plumbing).
 
+**Status: Done.** A hosted run (`RunOptions::with_hosted(true)`, set on every
+server-submitted run) with no manifest `permissions:` block now grants
+**nothing** (`Some(vec![])`), not unrestricted access; `APEX_UNRESTRICTED_TOOLS=1`
+is the documented escape hatch for trusted first-party/local use. Enforced by
+`ToolRegistry::check_permissions` against `ToolContext.granted_permissions`.
+
 ---
 
 ## SEC-304 `[P1]` — SSRF guard in `http_get`
@@ -424,6 +529,11 @@ closes PP-04 in part.)
 **Files.** `crates/apex-tools/src/builtin.rs`; a small IP-classification helper.
 **Size.** M. **Depends on:** none.
 
+**Status: Done.** `HttpGetTool` resolves the target host and rejects
+link-local/loopback/private/metadata ranges before connecting, pinning the
+resolved IP for the actual request to defeat DNS-rebinding. Proven by the
+`builtin.rs` SEC-304 test block.
+
 ---
 
 ## SEC-305 `[P1]` — Drive sandbox selection from a real `TrustClass` on the run path
@@ -448,31 +558,37 @@ closes PP-04 in part.)
 **Files.** `crates/apex-agent/src/runtime.rs`, `crates/apex-tools/src/sandbox.rs`,
 `crates/apex-tools/src/tool.rs`. **Size.** M. **Depends on:** SEC-303.
 
+**Status: Done.** `ToolSpec.trust_class` (default `TrustClass::FirstParty`)
+flows into `select_backend`, flooring an untrusted/verified-but-not-first-party
+run away from `NativeSandbox`. Proven by the `builtin.rs` SEC-305 test block.
+
 ---
 
 # Rollup
 
 | Ticket | Title | Size | Priority | Depends on |
 |--------|-------|------|----------|------------|
-| SEC-101 | Credential verification layer | L | P0 | — |
-| SEC-102 | Remove anonymous-default bypass | M | P0 | SEC-101 |
-| SEC-103 | Plugin routes RBAC | M | P0 | SEC-101 |
-| SEC-104 | Marketplace routes RBAC | M | P0 | SEC-101 |
-| SEC-105 | Negative-auth CI gate | M | P0 | 101,102,103,104 |
-| SEC-201 | Timeout/body/concurrency | S | P0 | — |
-| SEC-202 | TLS or refuse insecure bind | M | P0 | — |
-| SEC-203 | Rate limiting | M | P1 | SEC-101 |
-| SEC-204 | CORS allow-list | S | P1 | — |
-| SEC-205 | Idempotency TTL/bound | S | P1 | — |
-| SEC-301 | No default shell | S | P0 | — |
-| SEC-302 | fs_read confinement | M | P0 | — |
-| SEC-303 | Deny-by-default grants | M | P0 | — |
-| SEC-304 | http_get SSRF guard | M | P1 | — |
-| SEC-305 | TrustClass on run path | M | P1 | SEC-303 |
+| SEC-101 | Credential verification layer — **Done** | L | P0 | — |
+| SEC-102 | Remove anonymous-default bypass — **Done** | M | P0 | SEC-101 |
+| SEC-103 | Plugin routes RBAC — **Done** | M | P0 | SEC-101 |
+| SEC-104 | Marketplace routes RBAC — **Done** | M | P0 | SEC-101 |
+| SEC-105 | Negative-auth CI gate — **Done** | M | P0 | 101,102,103,104 |
+| SEC-201 | Timeout/body/concurrency — **Done** | S | P0 | — |
+| SEC-202 | TLS or refuse insecure bind — **Done** | M | P0 | — |
+| SEC-203 | Rate limiting — **Done** | M | P1 | SEC-101 |
+| SEC-204 | CORS allow-list — **Done** | S | P1 | — |
+| SEC-205 | Idempotency TTL/bound — **Done** | S | P1 | — |
+| SEC-301 | No default shell — **Done** | S | P0 | — |
+| SEC-302 | fs_read confinement — **Done** | M | P0 | — |
+| SEC-303 | Deny-by-default grants — **Done** | M | P0 | — |
+| SEC-304 | http_get SSRF guard — **Done** | M | P1 | — |
+| SEC-305 | TrustClass on run path — **Done** | M | P1 | SEC-303 |
 
 **Rough total:** 1 L + 9 M + 4 S ≈ 8–10 engineer-weeks, parallelizable to ~3–4
-calendar weeks across 2–3 engineers. **Phase-1 exit** = PRD-003 §11 items 1
-(no unauthenticated mutation, TLS+limits, safe default tools).
+calendar weeks across 2–3 engineers. **Phase-1 exit — met:** PRD-003 §11 item 1
+(no unauthenticated mutation, TLS+limits, safe default tools) is satisfied by
+the shipping binary; see each ticket's Status note above for the file/test
+evidence.
 
 ---
 
@@ -488,4 +604,5 @@ calendar weeks across 2–3 engineers. **Phase-1 exit** = PRD-003 §11 items 1
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-07 | **Documentation-drift correction, not new work:** all 15 tickets were already shipped (commits `8a9e4cb`, `64ab69d`, `8a48eb0`, `da5f0dd`, `8f3cb0e`, `9ca9228`, all dated before this doc's last update) but this file was never updated to say so — it still read "Ready for grooming" with zero Done markers. Added a Status note with file/test evidence to every ticket, marked the rollup table, and corrected the header. Found while doing a broader project status review; the same review found `CLAUDE.md` and `docs/09-api/overview.md` had the identical staleness in the other direction (still describing auth as unverified headers) — fixed in the same pass |
 | 1.0.0 | 2026-07-06 | Initial Phase-1 (security floor) ticket breakdown: 15 tickets across WS-1/2/3 with dependencies, acceptance criteria, file targets, and sizing |

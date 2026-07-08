@@ -1,16 +1,16 @@
 <!--
 File: docs/01-product/user-stories.md
-Document ID: PRD-003
+Document ID: PRD-008
 -->
 
 # User Stories
 
-**Document ID:** PRD-003  
+**Document ID:** PRD-008  
 **File Path:** `docs/01-product/user-stories.md`  
-**Version:** 1.0.0  
+**Version:** 1.0.1  
 **Status:** Draft  
 **Owner:** Product Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -137,4 +137,5 @@ Each story links to [functional requirements](functional-requirements.md) and
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.0.1 | 2026-07-07 | Renumbered from PRD-003 to PRD-008 — that ID collided with [`prd-ga-hardening.md`](prd-ga-hardening.md), which was independently assigned PRD-003 later without checking the sequence. Found during a project-wide doc review; no content changed |
 | 1.0.0 | 2026-06-27 | Initial User Stories |

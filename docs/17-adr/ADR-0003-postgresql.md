@@ -5,10 +5,29 @@ Document ID: ADR-0003
 
 # ADR-0003: PostgreSQL as the System of Record
 
-**Status:** Accepted  
+**Status:** Accepted, **narrowed for GA** — see Current Status  
 **Date:** 2026-06-27  
 **Deciders:** Architecture Team  
 **Supersedes:** —
+
+---
+
+# Current Status (added 2026-07-07)
+
+This decision is real but was never universal. [ADR-0010](ADR-0010-ga-deployment-topology.md)
+(2026-07-06) found that every control-plane catalog (tenancy, secrets, KMS,
+plugins, webhooks, audit, agents) is **file-only under `~/.apex` by
+default** — PostgreSQL is not the system of record for any of them today.
+The only Postgres backend genuinely wired into a shipping binary is the
+marketplace registry (`PostgresRegistryStore`, selected via
+`APEX_MARKETPLACE_POSTGRES_URL`); the workflow store and tiered memory can
+also opt into Postgres/Qdrant behind cargo features
+(`postgres`/`tiered-memory`), but the GA default (Path A, single-node
+appliance) is file-based. Promoting the remaining control-plane catalogs to
+a shared Postgres backend is v1.1 "Scale-Out" scope (ticket **DIST-B3**,
+[phase3-scale-distribution-tickets.md](../18-roadmap/v1.0/phase3-scale-distribution-tickets.md)
+Track B) — this ADR's rationale still holds for that future work, it just
+wasn't the GA default it originally implied.
 
 ---
 
@@ -65,3 +84,13 @@ Rationale:
 
 - [`06-memory-engine/storage-architecture.md`](../06-memory-engine/storage-architecture.md)
 - [ADR-0004](ADR-0004-qdrant.md)
+- [ADR-0010](ADR-0010-ga-deployment-topology.md) — Path A: file-based storage is the GA default
+
+---
+
+# Revision History
+
+| Version | Date | Description |
+|---------|------|-------------|
+| 1.1.0 | 2026-07-07 | Added a Current Status section: Postgres is real but opt-in per store, not the universal system of record this ADR implied — the GA (Path A) default is file-based; full control-plane promotion is tracked as v1.1 ticket DIST-B3. Found during a project-wide doc review |
+| 1.0.0 | 2026-06-27 | Initial decision: PostgreSQL as the system of record |

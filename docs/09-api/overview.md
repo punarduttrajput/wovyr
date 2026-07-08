@@ -7,15 +7,25 @@ Document ID: API-001
 
 **Document ID:** API-001  
 **File Path:** `docs/09-api/overview.md`  
-**Version:** 1.2.0  
+**Version:** 1.3.0  
 **Status:** Draft — this document describes the **target-state** convention;
 the machine-readable, ground-truth contract for what `apex-server` actually
 implements today is [`openapi.yaml`](openapi.yaml) (hand-authored from the
 Axum routes, v1.0 "Stability" deliverable). Notable gaps between the two: the
 real API has no opaque `agt_01H...`-style ids (resources use their natural
-key — agent name, workflow `execution_id`, `publisher/name`, …), no OAuth2/
-JWT/mTLS (plain `X-Apex-Tenant`/`X-Apex-Principal` headers), and no generic
-`/operations/{id}` polling resource. Pagination, the `Idempotency-Key` header,
+key — agent name, workflow `execution_id`, `publisher/name`, …), no OAuth2
+authorization-code flow and no mTLS, and no generic `/operations/{id}`
+polling resource. **Authentication is real, not a placeholder** (corrected
+2026-07-07 — this line previously said "no OAuth2/JWT," which stopped being
+true once RM-GA-P1 SEC-101 landed): `APEX_AUTH_MODE=jwt` (HS256/RS256 bearer)
+or `apikey` (a hashed bearer token) verify the caller before any handler
+runs, overwriting whatever `X-Apex-Principal` the client sent; the
+`disabled-loopback` default (plain, unverified `X-Apex-Tenant`/
+`X-Apex-Principal` headers) is a local-dev fallback, not the production
+posture, and its anonymous escape hatch refuses to bind non-loopback. See
+[`13-security/authentication.md`](../13-security/authentication.md) and
+`crates/apex-server/src/auth.rs`. Pagination, the `Idempotency-Key` header
+(now on every mutating route, not just `agents:run` — RM-GA-P4 API-703),
 `If-Match`/`ETag` concurrency, and the error envelope below *are* implemented
 as documented. A TypeScript client generated against `openapi.yaml` lives
 at [`sdks/typescript`](../../sdks/typescript), with retry/backoff on `GET`
@@ -23,7 +33,7 @@ requests and a `paginateAll()` auto-iteration helper. The deprecation window
 this section's `/v2` sentence promises is spelled out concretely in
 [deprecation-policy.md](deprecation-policy.md).  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-07-04
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -255,6 +265,7 @@ signed, retried with backoff, and mirror Event Bus topics.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.3.0 | 2026-07-07 | Corrected the top divergence note: it said "no OAuth2/JWT" for the real API, which stopped being true once RM-GA-P1 SEC-101 shipped real JWT/API-key bearer verification (`APEX_AUTH_MODE`). Also noted `Idempotency-Key`'s RM-GA-P4 API-703 broadening to every mutating route. No API behavior changed — this was a stale-documentation fix found during a project-wide status review |
 | 1.2.0 | 2026-07-04 | Linked the new [deprecation-policy.md](deprecation-policy.md) from §3; noted the TypeScript SDK's new retry/backoff and `paginateAll()` helper |
 | 1.1.0 | 2026-07-03 | Added `openapi.yaml` as the hand-authored, ground-truth machine-readable contract (v1.0 "Stability" workstream), noting where this convention doc describes target-state behavior the real API doesn't implement (opaque ids, OAuth2/JWT, `/operations/{id}`). First TypeScript client (`sdks/typescript`) landed against the spec, integration-tested against a live `apex dev` server |
 | 1.0.0 | 2026-06-27 | Initial Platform API Overview & Conventions |

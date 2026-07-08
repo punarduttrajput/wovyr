@@ -7,13 +7,14 @@ Document ID: GA-002
 
 **Document ID:** GA-002
 **File Path:** `docs/18-roadmap/v1.0/A2-reliability-ha-dr.md`
-**Version:** 1.2.0
+**Version:** 1.3.0
 **Status:** In progress — a first slice (single-node compose) has landed, plus
 a first Kubernetes artifact (a Helm chart for that same single-node topology,
 §2), and backup/restore + DR targets are now real for the single-node
 appliance (§2, RM-GA-P2 DR-1001/DR-1002/DR-1003). Neither the Kubernetes
 chart nor the DR targets have been validated against a real multi-replica
-cluster — still gated per §7's own risk note.
+cluster — still gated per §7's own risk note. §4.1 gained a remote
+(S3-compatible) backup-destination item on 2026-07-07.
 **Owner:** Reliability / Deployment Team
 **Last Updated:** 2026-07-07
 
@@ -104,6 +105,14 @@ backup/restore, and no DR runbook.
   (`~/.apex/workflows`), memory, tenancy, secrets, the KMS tenant-key catalog
   (`~/.apex/kms`), and the marketplace registry (file or `PostgresRegistryStore`).
 - A **DR runbook** with explicit RPO/RTO targets and a documented restore drill.
+- **A remote (S3-compatible) backup destination, not just a local filesystem
+  path** — `apex admin backup <dest>` (RM-GA-P2 DR-1001) only ever writes to a
+  local `dest`. Object storage was named as platform infrastructure in the
+  Day-1 architecture docs (`docs/01-product/prd.md`,
+  `docs/02-architecture/c4-container.md`) but nothing in the codebase uses it
+  today; a backup command is the first concrete, scoped need for it — added
+  2026-07-07, found while reconciling those docs against reality, not part of
+  the original review.
 
 ## 4.2 Non-functional
 - The artifacts deploy the *actual* built binary/features, not the aspirational
@@ -166,6 +175,7 @@ Feeds the v1.0 exit criterion of meeting published SLOs in production
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.3.0 | 2026-07-07 | Added a §4.1 deliverable: a remote (S3-compatible) `apex admin backup` destination — object storage was named as platform infrastructure in the Day-1 architecture docs but nothing uses it; this is the first concrete need. Found during a project-wide doc review, not part of the original review |
 | 1.2.0 | 2026-07-07 | Recorded the single-node slice of §4.1's backup/restore + DR-runbook deliverables as done (RM-GA-P2 DR-1001/DR-1002/DR-1003): `apex admin backup`/`restore`, mandatory KMS root-key escrow, and RPO/RTO targets validated by a real timed drill — see [backup-and-restore.md](../../12-deployment/backup-and-restore.md). Updated §2 to record it; §5's exit criterion remains unmet for the multi-replica/real-cluster case, which this doesn't address |
 | 1.1.0 | 2026-07-05 | Recorded the first real Kubernetes artifact: `deployment/helm/apex/` (single-replica Helm chart for the existing single-binary topology), offline-validated with downloaded `helm`/`kubectl`/`kubeconform` (caught a real duplicate-label bug). Updated §2/§4.1/§6/§7 to state plainly this is not HA and not validated against a real cluster — the exit criterion in §5 is unchanged and unmet |
 | 1.0.0 | 2026-07-05 | Initial GA-completion delivery doc for reliability (HA/DR/deployment artifacts); records the shipped single-node compose slice and scopes the HA remainder |

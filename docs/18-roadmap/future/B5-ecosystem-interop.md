@@ -7,10 +7,10 @@ Document ID: FUT-005
 
 **Document ID:** FUT-005
 **File Path:** `docs/18-roadmap/future/B5-ecosystem-interop.md`
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Status:** Exploratory — research bet, not committed
 **Owner:** Ecosystem Team
-**Last Updated:** 2026-07-05
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -39,7 +39,12 @@ the `ToolRegistry`) but does not yet **interoperate outward** with the broader
 agent/tool ecosystem, nor **federate** across organizations:
 
 - **MCP gateway / protocol interop** — speak the Model Context Protocol (and
-  peers) so external tools/agents interoperate with Apex.
+  peers) so external tools/agents interoperate with Apex. Also covers **gRPC**,
+  named as a supported protocol in the Day-1 architecture docs
+  (`docs/01-product/prd.md`, `docs/02-architecture/c4-container.md`) but never
+  built — the shipping API is REST/JSON + SSE only. If a client segment genuinely
+  needs gRPC (e.g. high-throughput internal service callers), it's a protocol
+  adapter at this same interop boundary, not a rewrite of the REST surface.
 - **Prompt/model registries** — versioned, shareable prompt and model catalogues.
 - **Federated sharing** — cross-organization plugin and memory sharing.
 
@@ -139,4 +144,5 @@ Per-slice; federation specifically becomes an ADR + roadmap slot only with:
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-07 | Added gRPC explicitly under the MCP/protocol-interop direction — named in the Day-1 architecture docs but never built; this is now where that gap is tracked. Found during a project-wide doc review |
 | 1.0.0 | 2026-07-05 | Initial exploration doc for the ecosystem/interop research bet |

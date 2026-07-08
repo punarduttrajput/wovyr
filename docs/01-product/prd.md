@@ -1,8 +1,32 @@
 **Document ID:** PRD-001
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.0.1
+**Status:** Draft — this document is the **Day-1 product vision**, unrevised
+since project inception. It has not been reconciled with
+[ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md) (2026-07-06), which
+ratified **Path A**: GA ships as a single-node appliance, not the
+multi-service, horizontally-scaled platform implied below. **Current reality
+vs. §2 "Primary Technologies"** (corrected 2026-07-07; see
+[`CLAUDE.md`](../../CLAUDE.md) for the authoritative, kept-current
+architecture description): Rust and Angular are real. **NestJS is not
+built** — the dashboard SPA talks directly to `apex-server`; the NestJS BFF
+is explicitly deferred until production auth needs it
+([dashboard overview](../10-dashboard/overview.md)). **NATS is not
+built** — there is no message broker; `apex-events` is a custom in-process
+event/webhook system (see [ADR-0005](../17-adr/ADR-0005-nats.md)'s
+current-status note). **PostgreSQL, Redis, and Qdrant are all real but
+optional**, feature-gated backends (`postgres`/`redis`/`tiered-memory` cargo
+features) — the shipping single-node binary's default is file-based storage
+under `~/.apex`, not a hard dependency on any of the three. **Kubernetes**:
+a real, offline-validated Helm chart exists for the single-binary topology
+(`deployment/helm/apex/`, `replicas: 1` by product decision), not the
+multi-replica HA cluster this vision implies, and it has never been applied
+to a live cluster. **Docker** is real (`deployment/docker-compose.yml`).
+Anything described here that isn't built and isn't yet tracked in
+[`18-roadmap/v1.0/`](../18-roadmap/v1.0/index.md) (GA) or
+[`18-roadmap/future/`](../18-roadmap/future/index.md) (post-GA) has been
+added to the latter as of this revision — see §25 below.
 **Owner:** Apex AI Platform Team
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -450,8 +474,35 @@ Approval indicates alignment on product direction prior to implementation.
 
 ---
 
-# 25. Revision History
+# 25. Technology Gaps Tracked for Future Versions
+
+Added 2026-07-07, alongside the header's divergence note. Three technologies
+named in §2 have no implementation and, until now, no tracked future work
+item either — captured here so they are deferred deliberately, not silently
+dropped:
+
+* **NATS-backed distributed event bus** — a real cross-replica message bus is
+  only meaningful once the platform runs more than one replica (v1.1
+  "Scale-Out," [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)).
+  Tracked as ticket **DIST-B9** in
+  [phase3-scale-distribution-tickets.md](../18-roadmap/v1.0/phase3-scale-distribution-tickets.md)
+  Track B.
+* **gRPC / broader protocol interop** — the shipping API is REST/JSON + SSE
+  only. Tracked under **FUT-005** ("Ecosystem & Interoperability"),
+  [`18-roadmap/future/B5-ecosystem-interop.md`](../18-roadmap/future/B5-ecosystem-interop.md),
+  alongside the existing MCP-gateway direction.
+* **S3-compatible object storage** — nothing in the codebase uses object
+  storage; plugin packages are local content-addressed files and
+  `apex admin backup` writes to a local path. Tracked as a remote-destination
+  option under **GA-002**,
+  [`18-roadmap/v1.0/A2-reliability-ha-dr.md`](../18-roadmap/v1.0/A2-reliability-ha-dr.md)
+  §4.1.
+
+---
+
+# 26. Revision History
 
 | Version | Date       | Description        |
 | ------- | ---------- | ------------------ |
+| 1.0.1   | 2026-07-07 | Added a header divergence note correcting §2's tech-stack claims against ADR-0010/reality (NestJS and NATS were never built; Postgres/Redis/Qdrant are optional feature-gated backends, not primary dependencies), plus new §25 tracking the three technologies (NATS distributed event bus, gRPC, S3 object storage) that had no implementation *and* no tracked future work item until now. Found during a project-wide doc review; no product scope changed |
 | 1.0.0   | 2026-06-26 | Initial master PRD |

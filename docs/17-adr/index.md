@@ -7,10 +7,10 @@ Document ID: ADR-INDEX-001
 
 **Document ID:** ADR-INDEX-001  
 **File Path:** `docs/17-adr/index.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Active  
 **Owner:** Architecture Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -44,9 +44,9 @@ Status is one of: `Proposed`, `Accepted`, `Superseded by ADR-XXXX`, `Deprecated`
 |-----|----------|--------|
 | [ADR-0001](ADR-0001-project-structure.md) | Monorepo + crate/service structure | Accepted |
 | [ADR-0002](ADR-0002-rust.md) | Rust as the implementation language | Accepted |
-| [ADR-0003](ADR-0003-postgresql.md) | PostgreSQL as system of record | Accepted |
-| [ADR-0004](ADR-0004-qdrant.md) | Qdrant for vector search | Accepted |
-| [ADR-0005](ADR-0005-nats.md) | NATS JetStream for the event bus | Accepted |
+| [ADR-0003](ADR-0003-postgresql.md) | PostgreSQL as system of record | Accepted, narrowed for GA — opt-in, not universal (see ADR's Current Status) |
+| [ADR-0004](ADR-0004-qdrant.md) | Qdrant for vector search | Accepted, opt-in for GA (see ADR's Current Status) |
+| [ADR-0005](ADR-0005-nats.md) | NATS JetStream for the event bus | Accepted, **not implemented** — deferred to v1.1 (see ADR's Current Status) |
 | [ADR-0006](ADR-0006-clean-architecture.md) | Clean Architecture + DDD | Accepted |
 | [ADR-0007](ADR-0007-plugin-system.md) | Plugin-first extensibility | Accepted |
 | [ADR-0008](ADR-0008-subworkflows.md) | Child workflows as activities (not inline expansion) | Accepted |
@@ -67,4 +67,5 @@ and the design docs should be updated.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-07 | Annotated ADR-0003/0004/0005's Status column: none of the three were fully executed as originally decided (Postgres/Qdrant are opt-in not universal; NATS was never implemented at all). Each ADR now has its own Current Status section with detail. Found during a project-wide doc review |
 | 1.0.0 | 2026-06-27 | Initial ADR register |

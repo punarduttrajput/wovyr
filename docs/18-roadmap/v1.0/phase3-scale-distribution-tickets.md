@@ -7,10 +7,10 @@ Document ID: RM-GA-P3
 
 **Document ID:** RM-GA-P3
 **File Path:** `docs/18-roadmap/v1.0/phase3-scale-distribution-tickets.md`
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Status:** Track A (GA) done — MIG-A1 and DOC-A2 both shipped, so Phase 3's
 entire Path-A GA scope is complete; Track B deferred to v1.1 (ADR-0010 Path A
-ratified 2026-07-06)
+ratified 2026-07-06). Track B gained a ninth ticket (DIST-B9) on 2026-07-07.
 **Owner:** Engineering (Platform / Workflow)
 **Last Updated:** 2026-07-07
 
@@ -338,6 +338,46 @@ deployment; closes PP-08 deployment.)
 
 ---
 
+## DIST-B9 `[P2]` — Cross-replica distributed event bus
+
+**Problem.** `apex-events` is a custom in-process event/webhook/audit system —
+correct and sufficient for the single-node appliance
+([ADR-0010](../../17-adr/ADR-0010-ga-deployment-topology.md) Path A), but it has no
+way to fan an event out to *other* replicas. [ADR-0005](../../17-adr/ADR-0005-nats.md)
+decided NATS JetStream for this back on 2026-06-27, but the decision was never
+executed and nothing else in this Track-B list picks it up: DIST-B3 shares
+control-plane *catalogs* (config/state) via Postgres, not real-time event
+*distribution*. Once ≥2 replicas exist, a workflow event emitted on replica A that a
+subscriber on replica B needs to react to (or a webhook delivery that must not be
+double-fired by both replicas) has no cross-process path today. Found while
+reconciling the Day-1 architecture docs against ADR-0010's Path A reality
+(2026-07-07); not a PP-numbered finding from the original 2026-07-06 review, since
+that review scoped WS-5 to the workflow-execution and gateway-resilience backends
+specifically, not general async messaging.
+
+**Change.**
+- Stand up a NATS JetStream backend behind a new port trait alongside
+  `apex-events`'s existing `WebhookStore`/dispatch abstractions (mirroring how
+  `apex-provider`'s `with_redis_breakers` sits behind the `Gateway` rather than
+  replacing it): `default_event_bus` selects NATS when `APEX_NATS_URL` (+ a
+  `nats` cargo feature) is set, else the existing in-process dispatch.
+  Deduplicate on the consumer side by `request_id`/event id — JetStream is
+  at-least-once, not exactly-once, exactly as ADR-0005's original consequences
+  section anticipated.
+
+**Acceptance criteria.**
+- With `APEX_NATS_URL` configured, an event emitted by one server process is
+  observed by a subscriber on a second, independent process; without it, behavior
+  is unchanged from today's in-process dispatch.
+
+**Files.** `crates/apex-events/src/` (new NATS backend + port trait);
+`crates/apex-server/src/lib.rs` (selection); workspace `Cargo.toml` (`nats` feature).
+**Size.** L. **Depends on:** DIST-B3 (shared control-plane state is the more
+foundational Track-B prerequisite; this is independent but more valuable once it
+exists).
+
+---
+
 ## SCALE-B8 `[P2]` — Design: preserve retrieval pushdown under memory encryption
 
 **Problem.** The server always wraps memory in `EncryptingMemoryStore`, which
@@ -380,13 +420,17 @@ the design**, it does not chase throughput. (Bridges PP-08/PP-14 to
 | DIST-B5 | B (v1.1) | Redis breakers + Qdrant cache wiring | M | P2 | — |
 | DIST-B6 | B (v1.1) | Multi-replica correctness tests | L | P1 | B2, B3, B4 |
 | DIST-B7 | B (v1.1) | Helm multi-replica topology | M | P2 | B3, B6 |
+| DIST-B9 | B (v1.1) | Cross-replica distributed event bus (NATS) | L | P2 | DIST-B3 |
 | SCALE-B8 | B (bridge) | Encryption-vs-pushdown design ADR | M | P2 | — |
 
 **Track A total (GA):** 1 L + 1 S ≈ 1.5–2 engineer-weeks. **This is all Phase 3 needs
 for a Path-A GA.**
-**Track B total (v1.1):** 4 L + 2 M + 1 S + SCALE-B8 ≈ 10–13 engineer-weeks,
-parallelizable to ~5–6 calendar weeks (workflow track vs. control-plane track are
-independent until DIST-B6).
+**Track B total (v1.1):** 5 L + 2 M + 1 S + SCALE-B8 ≈ 12–16 engineer-weeks,
+parallelizable to ~6–7 calendar weeks (workflow track vs. control-plane track are
+independent until DIST-B6; DIST-B9 is independent of both but more valuable once
+DIST-B3 lands). DIST-B9 added 2026-07-07, discovered while reconciling
+[ADR-0005](../../17-adr/ADR-0005-nats.md) against ADR-0010's Path A reality — not
+part of the original 21-finding review.
 
 **Phase-3 exit (GA / Path A) — met (2026-07-07):** PRD-003 §11 item 4 — no doc or
 roadmap claims a capability the shipping binary lacks (DOC-A2), and every shipped
@@ -410,6 +454,7 @@ exactly-once effects — Track B, not started, gated on the GA milestone shippin
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.4.0 | 2026-07-07 | Added Track-B ticket **DIST-B9** (cross-replica distributed event bus / NATS) — found while reconciling the Day-1 architecture docs (`docs/02-architecture/`) against ADR-0010's Path A reality: [ADR-0005](../../17-adr/ADR-0005-nats.md) decided NATS in 2026-06-27 but it was never implemented and nothing else in Track B picks it up. Not part of the original 21-finding review; added so the gap is deferred deliberately, not silently dropped |
 | 1.3.0 | 2026-07-07 | MIG-A1 done: adopted `refinery` for all three Postgres backends (workflow/memory/marketplace) — versioned migration files, fail-closed schema-version checks on connect, a new `apex admin migrate` command, and a version-skew test. Phase 3's entire Path-A GA scope is now complete |
 | 1.2.0 | 2026-07-07 | DOC-A2 done: corrected `README.md` (a much larger, long-stale gap than anticipated), `docs/12-deployment/{index,docker,terraform}.md`, and `docs/03-workflow-engine/distributed-execution.md` to state plainly what's shipped vs. aspirational/library-only |
 | 1.1.0 | 2026-07-06 | ADR-0010 ratified **Path A**: Track A confirmed as the entire Phase-3 GA scope; Track B confirmed deferred to the v1.1 "Scale-Out" milestone (status/gate wording updated accordingly) |

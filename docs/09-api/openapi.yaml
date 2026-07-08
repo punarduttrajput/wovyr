@@ -20,11 +20,20 @@ info:
     - Identifies resources by their natural key (agent name, workflow
       `execution_id`, secret `name`, `publisher/name` for plugins/listings) —
       not a generated opaque id.
-    - Authenticates via plain request headers (`X-Apex-Tenant`,
-      `X-Apex-Principal`), not OAuth2/JWT/mTLS. There is no token issuance or
-      validation endpoint. Anyone who can reach the server can assert any
-      tenant/principal header; RBAC only starts to matter once real
-      memberships are registered for that tenant.
+    - Authenticates via a verified `Authorization: Bearer <credential>`
+      (RM-GA-P1 SEC-101, `crates/apex-server/src/auth.rs`): `APEX_AUTH_MODE=jwt`
+      checks a JWT's signature (HS256/RS256) plus expiry/issuer/audience, or
+      `apikey` looks up a SHA-256-hashed bearer token — either way the
+      verified principal overwrites `X-Apex-Principal` before RBAC runs, so a
+      client-asserted header alone can no longer win. No OAuth2 authorization
+      flow or mTLS exists, and there is still no token-issuance endpoint (JWTs
+      are minted by an external IdP; API keys are minted via
+      `apex auth create-key`). The default `disabled-loopback` mode (no
+      verification — a caller asserts any tenant/principal header) is a
+      local-dev fallback, gated by an explicit `APEX_ALLOW_ANONYMOUS=1` that
+      refuses to bind a non-loopback address; it is not the production
+      posture. RBAC still only starts to matter once real memberships are
+      registered for a tenant.
     - Has no generic long-running-operation resource; each async action
       (workflow submit, agent run) has its own polling/streaming shape.
     - Does implement: cursor pagination (`limit`/`cursor` → `{data, has_more,
@@ -70,9 +79,24 @@ components:
       in: header
       name: X-Apex-Principal
       description: |
-        The acting principal id. Falls back to the `Authorization: Bearer
-        <token>` value verbatim (as an opaque principal string, not a
-        validated token) if absent.
+        The acting principal id, used verbatim only in the default
+        `disabled-loopback` auth mode. When `bearerAuth` is configured
+        (`APEX_AUTH_MODE=jwt|apikey`), the server overwrites this with the
+        verified principal before any handler runs — a client-supplied value
+        is then ignored, not merged.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        RM-GA-P1 SEC-101. Present only when the server is configured with
+        `APEX_AUTH_MODE=jwt` (a signed JWT — HS256 via `APEX_JWT_HS_SECRET` or
+        RS256 via `APEX_JWT_RS_PUBLIC_KEY`, `sub` claim becomes the principal)
+        or `APEX_AUTH_MODE=apikey` (a bearer token minted via
+        `apex auth create-key`, SHA-256-hashed server-side). The default
+        `disabled-loopback` mode carries no bearer credential at all and
+        instead trusts `X-Apex-Principal`/`X-Apex-Tenant` verbatim — a
+        local-dev fallback the server refuses to expose on a non-loopback
+        bind unless `APEX_ALLOW_ANONYMOUS=1` is set.
 
   parameters:
     limit:
@@ -1554,5 +1578,11 @@ paths:
                             permissions: { type: array, items: { type: string }, nullable: true }
 
 security:
+  # Alternatives (a client uses whichever the server is actually configured
+  # for — `APEX_AUTH_MODE`): the local-dev default (raw, unverified headers),
+  # or a verified bearer credential (RM-GA-P1 SEC-101) alongside the tenant
+  # header (still asserted, but authorized against real memberships).
   - tenantHeader: []
     principalHeader: []
+  - tenantHeader: []
+    bearerAuth: []

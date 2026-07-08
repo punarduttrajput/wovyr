@@ -5,10 +5,22 @@ Document ID: ADR-0004
 
 # ADR-0004: Qdrant for Vector Search
 
-**Status:** Accepted  
+**Status:** Accepted, **opt-in for GA** — see Current Status  
 **Date:** 2026-06-27  
 **Deciders:** Architecture Team  
 **Supersedes:** —
+
+---
+
+# Current Status (added 2026-07-07)
+
+This decision is real and shipped, but opt-in rather than mandatory: Qdrant
+backs `apex-memory`'s tiered store only when built with the `tiered-memory`
+cargo feature and `APEX_MEMORY_QDRANT_URL` is set. The default (GA, Path A —
+[ADR-0010](ADR-0010-ga-deployment-topology.md)) single-node memory backend is
+file-based/in-process hybrid retrieval, with no vector database at all. This
+is a correct, honest default for a single-node appliance; nothing here
+changes for real-scale deployments once tiered mode is enabled.
 
 ---
 
@@ -67,3 +79,13 @@ Rationale:
 - [`06-memory-engine/storage-architecture.md`](../06-memory-engine/storage-architecture.md)
 - [`06-memory-engine/semantic-memory.md`](../06-memory-engine/semantic-memory.md)
 - [ADR-0003](ADR-0003-postgresql.md)
+- [ADR-0010](ADR-0010-ga-deployment-topology.md) — Path A: file-based memory retrieval is the GA default
+
+---
+
+# Revision History
+
+| Version | Date | Description |
+|---------|------|-------------|
+| 1.1.0 | 2026-07-07 | Added a Current Status section: Qdrant is real but opt-in (`tiered-memory` feature + `APEX_MEMORY_QDRANT_URL`), not a mandatory dependency — the GA default is file-based hybrid retrieval. Found during a project-wide doc review |
+| 1.0.0 | 2026-06-27 | Initial decision: Qdrant for vector search |

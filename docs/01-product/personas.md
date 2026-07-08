@@ -1,16 +1,16 @@
 <!--
 File: docs/01-product/personas.md
-Document ID: PRD-002
+Document ID: PRD-007
 -->
 
 # User Personas
 
-**Document ID:** PRD-002  
+**Document ID:** PRD-007  
 **File Path:** `docs/01-product/personas.md`  
-**Version:** 1.0.0  
+**Version:** 1.0.1  
 **Status:** Draft  
 **Owner:** Product Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-07
 
 ---
 
@@ -128,4 +128,5 @@ target.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.0.1 | 2026-07-07 | Renumbered from PRD-002 to PRD-007 — that ID collided with [`prd-future.md`](prd-future.md), which was independently assigned PRD-002 later without checking the sequence. Found during a project-wide doc review; no content changed |
 | 1.0.0 | 2026-06-27 | Initial User Personas |
