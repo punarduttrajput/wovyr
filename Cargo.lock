@@ -199,6 +199,7 @@ dependencies = [
  "apex-memory",
  "apex-plugin",
  "apex-provider",
+ "apex-runtime",
  "apex-secrets",
  "apex-server",
  "apex-telemetry",
@@ -233,6 +234,7 @@ dependencies = [
  "apex-agent",
  "apex-common",
  "apex-provider",
+ "apex-runtime",
  "apex-tools",
  "apex-workflow",
  "async-trait",
@@ -343,6 +345,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-runtime"
+version = "0.1.0"
+dependencies = [
+ "apex-agent",
+ "apex-common",
+ "apex-provider",
+ "apex-tools",
+ "apex-workflow",
+ "async-trait",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "apex-secrets"
 version = "0.1.0"
 dependencies = [
@@ -365,6 +381,7 @@ dependencies = [
  "apex-memory",
  "apex-plugin",
  "apex-provider",
+ "apex-runtime",
  "apex-secrets",
  "apex-telemetry",
  "apex-tenancy",

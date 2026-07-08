@@ -17,11 +17,10 @@
 //! open gap (`apex-provider`'s `mistralrs` feature exists but isn't pointed at
 //! this harness).
 //!
-//! The workflow side is driven by a minimal, eval-local [`ActivityExecutor`]
-//! (a third instance of the "resolve `${...}` via
-//! [`apex_workflow::resolve_template`], dispatch `agent` activities through
-//! [`run_agent`]" pattern already used by the CLI's `PlatformExecutor` and the
-//! server's `ServerExecutor`) that resolves an activity's `name` against an
+//! The workflow side is driven by the shared
+//! [`apex_runtime::PlatformActivityExecutor`] (RM-GA-P4 HLTH-901 — the same
+//! dispatch body the CLI's local runner and the server use), parameterized here
+//! by [`MapAgentResolver`], which resolves an activity's `name` against an
 //! in-memory map of [`AgentDefinition`]s, since this harness has neither a
 //! local file convention nor a server-side agent store.
 
@@ -29,13 +28,12 @@ use crate::fixture::{EvalSuite, Expectation, Fixture};
 use crate::report::{CaseResult, EvalReport};
 use crate::runner::run_suite;
 use crate::score::{CaseOutcome, score};
-use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent};
+use apex_agent::AgentDefinition;
 use apex_common::{Error, Result, Usage};
 use apex_provider::Gateway;
+use apex_runtime::{AgentResolver, PlatformActivityExecutor};
 use apex_tools::ToolRegistry;
-use apex_workflow::{
-    ActivityContext, ActivityError, ActivityExecutor, Definition, Engine, InMemoryStore, RunOutcome,
-};
+use apex_workflow::{ActivityContext, Definition, Engine, InMemoryStore, RunOutcome};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -120,54 +118,34 @@ impl ComparisonReport {
     }
 }
 
-/// A minimal [`ActivityExecutor`] for driving a workflow inside this crate's
-/// comparison harness: only `agent` activities are supported (this harness has
-/// no need for `tool`/`ai`/`human`), resolved against an in-memory map instead
-/// of a file path (the CLI) or a stored-agent id (the server) — eval has
-/// neither.
-struct EvalWorkflowExecutor {
+/// Resolves `agent`-typed activities against an in-memory map instead of a file
+/// path (the CLI) or a stored-agent id (the server) — eval has neither. No
+/// tenant, unhosted, no admission gate (the [`AgentResolver`] trait's default
+/// methods already model exactly this, so this impl only needs `resolve`).
+struct MapAgentResolver {
     agents: BTreeMap<String, AgentDefinition>,
-    gateway: Arc<Gateway>,
-    registry: ToolRegistry,
 }
 
 #[async_trait]
-impl ActivityExecutor for EvalWorkflowExecutor {
-    async fn execute(&self, ctx: &ActivityContext) -> std::result::Result<Value, ActivityError> {
-        let inputs = apex_workflow::resolve_template(&ctx.inputs, ctx);
-        match ctx.activity_type.as_str() {
-            "agent" => {
-                let agent_id = ctx.name.as_deref().ok_or_else(|| {
-                    ActivityError::Permanent(format!(
-                        "activity `{}`: `name` required for agent type",
-                        ctx.id
-                    ))
-                })?;
-                let def = self.agents.get(agent_id).ok_or_else(|| {
-                    ActivityError::Permanent(format!(
-                        "activity `{}`: no agent `{agent_id}` in the comparison's agent map",
-                        ctx.id
-                    ))
-                })?;
-                let input = if inputs.is_null() { json!({}) } else { inputs };
-                let opts = RunOptions::new(input);
-                let mut sink = NullSink;
-                let output = run_agent(def, &self.gateway, &self.registry, opts, &mut sink)
-                    .await
-                    .map_err(|e| ActivityError::Retryable(e.to_string()))?;
-                Ok(json!({ "message": output.text, "steps": output.steps }))
-            }
-            other => Err(ActivityError::Permanent(format!(
-                "the comparison harness only supports `agent` activities, got `{other}`"
-            ))),
-        }
+impl AgentResolver for MapAgentResolver {
+    async fn resolve(
+        &self,
+        ctx: &ActivityContext,
+        agent_id: &str,
+    ) -> std::result::Result<AgentDefinition, String> {
+        self.agents.get(agent_id).cloned().ok_or_else(|| {
+            format!(
+                "activity `{}`: no agent `{agent_id}` in the comparison's agent map",
+                ctx.id
+            )
+        })
     }
 }
 
 /// Run every case in `suite` both as `single_agent_def` (via [`run_suite`], no
 /// duplicated logic) and as `workflow_def` (a fresh in-memory
-/// [`Engine`]/[`EvalWorkflowExecutor`] per case, so cases can't leak state into
-/// each other), scoring both paths' final answers with the same
+/// [`Engine`]/[`PlatformActivityExecutor`] per case, so cases can't leak state
+/// into each other), scoring both paths' final answers with the same
 /// [`Expectation`]. Known gap: the workflow side's [`EvalReport::usage`] is
 /// always zero — a workflow activity's output is a bare `{message, steps}`
 /// JSON value, not a [`Usage`]-carrying struct, so per-case cost isn't
@@ -196,11 +174,13 @@ pub async fn run_comparison(
 
     let mut cases = Vec::with_capacity(suite.cases.len());
     for case in &suite.cases {
-        let executor = Arc::new(EvalWorkflowExecutor {
-            agents: workflow_agents.clone(),
-            gateway: gateway.clone(),
-            registry: registry.clone(),
-        });
+        let executor = Arc::new(PlatformActivityExecutor::new(
+            registry.clone(),
+            gateway.clone(),
+            Arc::new(MapAgentResolver {
+                agents: workflow_agents.clone(),
+            }),
+        ));
         let engine = Engine::new(
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryStore::new()),

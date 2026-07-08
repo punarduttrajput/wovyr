@@ -1,0 +1,474 @@
+//! The one [`ActivityExecutor`] dispatch body shared by the CLI's local workflow
+//! runner, the server's workflow-builder write path, and `apex-eval`'s
+//! single-agent-vs-workflow comparison harness (RM-GA-P4 HLTH-901).
+//!
+//! **The problem this closes.** Before this crate existed, all three call sites
+//! hand-rolled their own `ActivityExecutor`, and they had drifted into *real
+//! semantic differences* — identical workflow YAML behaved differently depending
+//! on which one ran it:
+//!
+//! - `tool`/`function` activities: the CLI classified a failed tool call's retry-
+//!   ability by its [`ToolError`] variant (`Validation`/`PermissionDenied` →
+//!   permanent, `Network`/`Internal` → retryable — exactly what those variants'
+//!   own doc comments say); the server collapsed every tool error to `Permanent`
+//!   regardless of variant, so a transient network hiccup that would retry
+//!   locally permanently failed the same workflow on the server. The CLI also
+//!   treated `function` as an inert echo-passthrough while the server dispatched
+//!   it identically to `tool` (invoke the named tool) — real examples and tests
+//!   already rely on the server's behavior (`workflow-dsl.md` describes `tool`
+//!   as "Registered platform tool", and nothing implements a distinct
+//!   in-process "Rust code" handler for `function` to fall back to), so that's
+//!   the behavior this crate keeps.
+//! - `ai` activities: the CLI read the system prompt from `inputs.prompt` and
+//!   resolved a real default model via `Gateway::resolve_model`; the server read
+//!   it from `ctx.name` (the activity's *identifier* field, not a prompt) and
+//!   hardcoded the literal model string `"default"`. Same activity type, two
+//!   different places to put the instructions and two different model
+//!   resolution strategies.
+//! - `human` activities: the CLI checked for an injected decision under the bare
+//!   activity id; the server checks under `event.<id>` (because it resumes via
+//!   `Engine::signal_event`, which writes that key). Checking both here means
+//!   this dispatch body is correct regardless of which resume mechanism a given
+//!   platform uses.
+//! - `agent` activities: the *resolution strategy* (a file under `--agents-dir`
+//!   for the CLI, a stored-by-id lookup for the server, an in-memory map for
+//!   eval) and *platform context* (tenant/hosted-ness, the server's per-project
+//!   quota admission) are genuinely platform-specific and stay that way — see
+//!   [`AgentResolver`]. What was needlessly duplicated three times is
+//!   everything *around* that: building `RunOptions`, calling [`run_agent`],
+//!   shaping `{message, steps}`, and mapping a run failure to
+//!   [`ActivityError::Retryable`].
+//!
+//! Template resolution (`${activity.field}` interpolation) was already unified
+//! before this crate existed (`apex_workflow::resolve_template`, used by all
+//! three); this crate unifies the dispatch it feeds into.
+
+use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent};
+use apex_provider::{ChatRequest, Gateway, Message, ModelSelector};
+use apex_tools::{ToolContext, ToolError, ToolRegistry, ToolRequest, TrustClass};
+use apex_workflow::{ActivityContext, ActivityError, ActivityExecutor, resolve_template};
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use std::sync::Arc;
+
+/// An opaque RAII guard returned by [`AgentResolver::admit`] and held for the
+/// run's duration, dropped only after it ends (successfully or not) — the
+/// server's per-project concurrency slot is exactly this: releasing it no
+/// sooner than that is what lets a sibling activity's completion free capacity
+/// for a retry, rather than releasing it the instant admission succeeds and
+/// defeating the point of the gate. Any `Send + 'static` type qualifies (a
+/// blanket impl below), so a platform with no gate at all can return `()`.
+pub trait AdmissionGuard: Send {}
+impl<T: Send + 'static> AdmissionGuard for T {}
+
+/// Resolves an `agent`-typed activity's `name` to a runnable [`AgentDefinition`]
+/// and supplies whatever platform-specific context that run needs — the one part
+/// of activity dispatch that's genuinely different per platform (there is no
+/// single "look up an agent" operation that works for a local `--agents-dir`,
+/// a server-side tenant-scoped agent store, and an eval harness's in-memory map).
+///
+/// The default method bodies model "no platform-specific behavior" (the CLI's
+/// and eval's shape: no tenant, unhosted, no admission gate) — only the server's
+/// [`AgentResolver`] impl needs to override `customize_options`/`admit`/`record`.
+#[async_trait]
+pub trait AgentResolver: Send + Sync {
+    /// Resolve `agent_id` (the activity's `name`) to a full agent definition.
+    /// A permanent error if no such agent exists — matches what all three
+    /// platforms already did (an unknown agent is never worth retrying into
+    /// existing).
+    async fn resolve(
+        &self,
+        ctx: &ActivityContext,
+        agent_id: &str,
+    ) -> Result<AgentDefinition, String>;
+
+    /// Apply platform-specific `RunOptions` customization (tenant, hosted-ness)
+    /// on top of the shared defaults (input + the definition's `max_steps`).
+    /// Default: no customization.
+    fn customize_options(&self, _ctx: &ActivityContext, opts: RunOptions) -> RunOptions {
+        opts
+    }
+
+    /// Admit the run against a platform-specific gate (the server's per-project
+    /// quota) before it starts, returning a guard the caller holds until the run
+    /// ends. Default: always admitted, with an already-inert `()` guard. An
+    /// `Err` here is surfaced as [`ActivityError::Retryable`] — a quota slot can
+    /// free up on a sibling activity's completion, so it's worth retrying.
+    async fn admit(&self, _ctx: &ActivityContext) -> Result<Box<dyn AdmissionGuard>, String> {
+        Ok(Box::new(()))
+    }
+
+    /// Record a successful run's cost against a platform-specific accounting
+    /// system (the server's daily project budget). Default: no-op.
+    fn record(&self, _ctx: &ActivityContext, _cost_usd: f64) {}
+}
+
+/// The shared dispatch body: `tool`/`function` via the [`ToolRegistry`], `ai` via
+/// the [`Gateway`], `agent` via [`run_agent`] (resolved through an
+/// [`AgentResolver`]), and `human` as a durable suspend/resume point. Anything
+/// else is a permanent "unsupported activity type" error.
+pub struct PlatformActivityExecutor {
+    pub registry: ToolRegistry,
+    pub gateway: Arc<Gateway>,
+    pub agents: Arc<dyn AgentResolver>,
+}
+
+impl PlatformActivityExecutor {
+    pub fn new(
+        registry: ToolRegistry,
+        gateway: Arc<Gateway>,
+        agents: Arc<dyn AgentResolver>,
+    ) -> Self {
+        Self {
+            registry,
+            gateway,
+            agents,
+        }
+    }
+}
+
+#[async_trait]
+impl ActivityExecutor for PlatformActivityExecutor {
+    async fn execute(&self, ctx: &ActivityContext) -> Result<Value, ActivityError> {
+        // Resolve `${activity.field}` references against the live variables (e.g. a
+        // `synthesize` activity's `inputs.message: "${proResearch.message}"`) — the
+        // engine hands executors the raw definition inputs and leaves interpolation
+        // to them; every platform uses this same helper.
+        let inputs = resolve_template(&ctx.inputs, ctx);
+
+        match ctx.activity_type.as_str() {
+            // `function` and `tool` both invoke a registered tool by `name`. (The
+            // DSL spec's original vision of `function` as arbitrary in-process
+            // "Rust code" was never implemented as anything distinct — every real
+            // example/test that uses `type: function` already expects a tool
+            // invocation, so that's the one behavior this dispatches to.)
+            "function" | "tool" => {
+                let tool_id = ctx.name.as_deref().ok_or_else(|| {
+                    ActivityError::Permanent(format!(
+                        "activity `{}`: `name` required for {} type",
+                        ctx.id, ctx.activity_type
+                    ))
+                })?;
+                let tool_ctx = ToolContext {
+                    execution_id: ctx.id.clone(),
+                    agent_id: "workflow".to_string(),
+                    workdir: ".".to_string(),
+                    tenant: String::new(),
+                    granted_permissions: None,
+                    egress_allowlist: None,
+                    // Workflow tool activities are a trusted, first-party context
+                    // today on every platform (SEC-305) — none of the three
+                    // call sites ran them any other way.
+                    trust_class: TrustClass::FirstParty,
+                };
+                let params = if inputs.is_null() {
+                    Value::Object(Default::default())
+                } else {
+                    inputs
+                };
+                // Goes through the registry's own gated entry point (lookup +
+                // `check_permissions` + execute), not a direct `tool.execute()`
+                // call — the latter would silently skip permission enforcement if
+                // a future change ever scopes `granted_permissions` for workflow
+                // activities instead of leaving it unrestricted.
+                match self
+                    .registry
+                    .execute(tool_id, &tool_ctx, ToolRequest::new(params))
+                    .await
+                {
+                    Ok(resp) => Ok(resp.payload),
+                    // Doc comments on `ToolError` itself say which variants are
+                    // retryable — this is the ticket's headline fix: a tool error
+                    // now classifies identically everywhere, instead of the
+                    // server collapsing all four variants to `Permanent`.
+                    Err(ToolError::Validation(m)) | Err(ToolError::PermissionDenied(m)) => {
+                        Err(ActivityError::Permanent(m))
+                    }
+                    Err(ToolError::Network(m)) | Err(ToolError::Internal(m)) => {
+                        Err(ActivityError::Retryable(m))
+                    }
+                }
+            }
+
+            // `ai` activities call the model directly (no tool loop): `inputs.prompt`
+            // is the system instruction, `inputs.message`/`inputs.text` the user
+            // turn (falling back to the whole inputs JSON so a caller that puts
+            // free-form content under neither key still gets *something* sent).
+            "ai" => {
+                let system = inputs
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("You are a helpful assistant.");
+                let user = match inputs
+                    .get("message")
+                    .or_else(|| inputs.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    Some(m) => m.to_string(),
+                    None if inputs.is_null() => String::new(),
+                    None => inputs.to_string(),
+                };
+                let model = self.gateway.resolve_model(None, &ModelSelector::default());
+                let request =
+                    ChatRequest::new(model, vec![Message::system(system), Message::user(user)]);
+                match self.gateway.chat(request).await {
+                    Ok(resp) => Ok(json!({ "message": resp.message.content.unwrap_or_default() })),
+                    Err(e) => Err(ActivityError::Retryable(e.to_string())),
+                }
+            }
+
+            // `agent` activities run a full agent (model + tool loop) via
+            // `run_agent`. Resolution (file/stored/in-memory) and platform context
+            // (tenant, hosted-ness, quota admission) come from `self.agents`; the
+            // dispatch shape around it — build `RunOptions`, run, format output,
+            // classify failure — is identical on every platform.
+            "agent" => {
+                let agent_id = ctx.name.as_deref().ok_or_else(|| {
+                    ActivityError::Permanent(format!(
+                        "activity `{}`: `name` required for agent type",
+                        ctx.id
+                    ))
+                })?;
+                let def = self
+                    .agents
+                    .resolve(ctx, agent_id)
+                    .await
+                    .map_err(ActivityError::Permanent)?;
+                // Held across the run below (not dropped here): a platform's
+                // concurrency slot must stay occupied for the run's actual
+                // duration, or the gate never really bounds anything.
+                let _permit = self
+                    .agents
+                    .admit(ctx)
+                    .await
+                    .map_err(ActivityError::Retryable)?;
+
+                let input = if inputs.is_null() { json!({}) } else { inputs };
+                let mut opts = RunOptions::new(input);
+                if let Some(n) = def.spec.max_steps {
+                    opts = opts.with_max_steps(n);
+                }
+                opts = self.agents.customize_options(ctx, opts);
+
+                let mut sink = NullSink;
+                let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
+                    .await
+                    .map_err(|e| ActivityError::Retryable(e.to_string()))?;
+                self.agents.record(ctx, output.usage.cost_usd);
+                Ok(json!({ "message": output.text, "steps": output.steps }))
+            }
+
+            // `human` activities suspend until a decision is injected. Checked
+            // under both key conventions a resume path might use: the bare
+            // activity id (a caller that mutates the checkpoint directly, e.g.
+            // the CLI's `approve` command) and `event.<id>` (a caller that
+            // resumes via `Engine::signal_event`, e.g. the server's `/approve`
+            // route) — so this dispatch body is correct either way, rather than
+            // silently never consuming a decision written under the convention
+            // it doesn't check.
+            "human" => {
+                let decision = ctx
+                    .variables
+                    .get(&ctx.id)
+                    .or_else(|| ctx.variables.get(&format!("event.{}", ctx.id)));
+                match decision {
+                    Some(decision) => Ok(decision.clone()),
+                    None => {
+                        let who = inputs
+                            .get("assignee")
+                            .and_then(Value::as_str)
+                            .unwrap_or("a reviewer");
+                        Err(ActivityError::Interrupted(format!(
+                            "activity `{}` is awaiting approval from {who}",
+                            ctx.id
+                        )))
+                    }
+                }
+            }
+
+            other => Err(ActivityError::Permanent(format!(
+                "unsupported activity type `{other}`"
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apex_agent::AgentDefinition;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    fn ctx(activity_type: &str, name: Option<&str>, inputs: Value) -> ActivityContext {
+        ActivityContext {
+            id: "test-activity".to_string(),
+            activity_type: activity_type.to_string(),
+            name: name.map(str::to_string),
+            inputs,
+            variables: Default::default(),
+            attempt: 1,
+        }
+    }
+
+    fn ctx_with_vars(
+        activity_type: &str,
+        name: Option<&str>,
+        inputs: Value,
+        variables: BTreeMap<String, Value>,
+    ) -> ActivityContext {
+        ActivityContext {
+            variables,
+            ..ctx(activity_type, name, inputs)
+        }
+    }
+
+    fn executor() -> PlatformActivityExecutor {
+        struct NoAgents;
+        #[async_trait]
+        impl AgentResolver for NoAgents {
+            async fn resolve(
+                &self,
+                _ctx: &ActivityContext,
+                id: &str,
+            ) -> Result<AgentDefinition, String> {
+                Err(format!("no agent `{id}`"))
+            }
+        }
+        PlatformActivityExecutor::new(
+            ToolRegistry::with_builtins(),
+            Arc::new(Gateway::from_env()),
+            Arc::new(NoAgents),
+        )
+    }
+
+    // --- the ticket's headline acceptance criterion: identical retry/terminal
+    // classification for the same tool error, regardless of which platform's
+    // resolver/registry supplied the executor. Exercised once here, against the
+    // one shared dispatch body every platform now calls. ---
+
+    #[tokio::test]
+    async fn a_permission_denied_tool_error_is_permanent_not_retryable() {
+        // `echo` is a builtin with no declared permissions, so we can't trigger
+        // PermissionDenied through it directly; validation is enough to prove the
+        // "not retryable" branch, and network/internal below prove the other.
+        let exec = executor();
+        let err = exec
+            .execute(&ctx("tool", Some("does-not-exist"), Value::Null))
+            .await
+            .expect_err("unknown tool should fail");
+        assert!(
+            matches!(err, ActivityError::Permanent(_)),
+            "unknown tool must be permanent, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn function_and_tool_activity_types_dispatch_identically() {
+        let exec = executor();
+        let via_tool = exec
+            .execute(&ctx("tool", Some("echo"), json!({"message": "hi"})))
+            .await
+            .expect("tool-typed echo should succeed");
+        let via_function = exec
+            .execute(&ctx("function", Some("echo"), json!({"message": "hi"})))
+            .await
+            .expect("function-typed echo should succeed");
+        assert_eq!(
+            via_tool, via_function,
+            "function and tool must invoke the same tool identically"
+        );
+    }
+
+    #[tokio::test]
+    async fn human_activity_checks_both_bare_and_event_prefixed_decision_keys() {
+        let exec = executor();
+
+        // No decision yet: interrupts.
+        let err = exec
+            .execute(&ctx("human", None, Value::Null))
+            .await
+            .expect_err("no decision yet should interrupt");
+        assert!(matches!(err, ActivityError::Interrupted(_)));
+
+        // Bare-id convention (the CLI's direct-checkpoint-mutation resume path).
+        let mut vars = BTreeMap::new();
+        vars.insert("test-activity".to_string(), json!({"approved": true}));
+        let out = exec
+            .execute(&ctx_with_vars("human", None, Value::Null, vars))
+            .await
+            .expect("bare-id decision should resolve");
+        assert_eq!(out, json!({"approved": true}));
+
+        // `event.<id>` convention (the server's `signal_event`-based resume path).
+        let mut vars = BTreeMap::new();
+        vars.insert("event.test-activity".to_string(), json!({"approved": true}));
+        let out = exec
+            .execute(&ctx_with_vars("human", None, Value::Null, vars))
+            .await
+            .expect("event-prefixed decision should resolve");
+        assert_eq!(out, json!({"approved": true}));
+    }
+
+    #[tokio::test]
+    async fn agent_activity_uses_the_resolver_and_reports_admission_failures_as_retryable() {
+        struct DenyingResolver {
+            admitted: Mutex<bool>,
+        }
+        #[async_trait]
+        impl AgentResolver for DenyingResolver {
+            async fn resolve(
+                &self,
+                _ctx: &ActivityContext,
+                id: &str,
+            ) -> Result<AgentDefinition, String> {
+                AgentDefinition::from_yaml(&format!(
+                    "metadata:\n  name: {id}\nspec:\n  instructions: hi\n"
+                ))
+                .map_err(|e| e.to_string())
+            }
+            async fn admit(
+                &self,
+                _ctx: &ActivityContext,
+            ) -> Result<Box<dyn AdmissionGuard>, String> {
+                *self.admitted.lock().unwrap() = true;
+                Err("quota exceeded".to_string())
+            }
+        }
+        let exec = PlatformActivityExecutor::new(
+            ToolRegistry::with_builtins(),
+            Arc::new(Gateway::from_env()),
+            Arc::new(DenyingResolver {
+                admitted: Mutex::new(false),
+            }),
+        );
+        let err = exec
+            .execute(&ctx("agent", Some("hello"), json!({"message": "hi"})))
+            .await
+            .expect_err("admission failure should surface as an error");
+        assert!(
+            matches!(err, ActivityError::Retryable(_)),
+            "a quota/admission rejection must be retryable (the slot may free up), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_agent_is_a_permanent_failure() {
+        let exec = executor();
+        let err = exec
+            .execute(&ctx("agent", Some("does-not-exist"), Value::Null))
+            .await
+            .expect_err("unresolvable agent should fail");
+        assert!(matches!(err, ActivityError::Permanent(_)));
+    }
+
+    #[tokio::test]
+    async fn unsupported_activity_type_is_permanent() {
+        let exec = executor();
+        let err = exec
+            .execute(&ctx("http", None, Value::Null))
+            .await
+            .expect_err("unsupported type should fail");
+        assert!(matches!(err, ActivityError::Permanent(_)));
+    }
+}

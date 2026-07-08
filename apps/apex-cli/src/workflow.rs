@@ -1,158 +1,52 @@
 //! `apex workflows` commands: validate, run, and approve workflows locally.
 //!
-//! Bridges the [workflow engine](apex_workflow) to the platform via a
-//! [`PlatformExecutor`] that maps activities onto the [tool runtime](apex_tools)
-//! (`tool`), the [LLM gateway](apex_provider) (`ai`), pass-throughs (`function`),
-//! a full agent run ([`apex_agent::run_agent`], `agent`), and a human-in-the-loop
-//! suspend (`human`). Executions persist to a [`FileStore`](apex_workflow::FileStore)
-//! under `~/.apex/workflows`, so a `human` task can suspend durably and be resumed
-//! by `approve` — the customer-support example
-//! ([docs](../../docs/16-examples/customer-support.md)).
+//! Bridges the [workflow engine](apex_workflow) to the platform via the shared
+//! [`apex_runtime::PlatformActivityExecutor`] (RM-GA-P4 HLTH-901) — the same
+//! dispatch body the server uses — parameterized here by [`FileAgentResolver`],
+//! which resolves `agent`-typed activities from `<agents_dir>/<name>.yaml` (the
+//! CLI's file-based stand-in for the server's stored-agent-by-id lookup, since
+//! there's no local agent store). Executions persist to a
+//! [`FileStore`](apex_workflow::FileStore) under `~/.apex/workflows`, so a
+//! `human` task can suspend durably and be resumed by `approve` — the
+//! customer-support example ([docs](../../docs/16-examples/customer-support.md)).
 
 use crate::config;
-use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent};
-use apex_provider::{ChatRequest, Gateway, Message, ModelSelector};
-use apex_tools::{ToolContext, ToolError, ToolRegistry, ToolRequest};
+use apex_agent::AgentDefinition;
+use apex_provider::Gateway;
+use apex_runtime::{AgentResolver, PlatformActivityExecutor};
+use apex_tools::ToolRegistry;
 use apex_workflow::{
-    ActivityContext, ActivityError, ActivityExecutor, ActivityState, CheckpointStore, Clock,
-    Definition, DefinitionResolver, Engine, EventLog, ExecutionFilter, FileScheduleStore,
-    FileStore, FileTimerStore, RunOutcome, Schedule, ScheduleDispatcher, ScheduleStore,
-    SystemClock, TimerDispatcher, TimerStore, WorkflowState, resolve_template,
+    ActivityContext, ActivityState, CheckpointStore, Clock, Definition, DefinitionResolver, Engine,
+    EventLog, ExecutionFilter, FileScheduleStore, FileStore, FileTimerStore, RunOutcome, Schedule,
+    ScheduleDispatcher, ScheduleStore, SystemClock, TimerDispatcher, TimerStore, WorkflowState,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// Executes workflow activities against the platform's tool runtime and gateway.
-struct PlatformExecutor {
-    registry: ToolRegistry,
-    gateway: Gateway,
-    /// Directory `agent`-typed activities resolve `name` against, as
-    /// `<agents_dir>/<name>.yaml` — the CLI's file-based stand-in for the server's
-    /// stored-agent-by-id lookup (there's no local agent store to look up).
+/// Resolves `agent`-typed activities from `<agents_dir>/<name>.yaml` — no tenant,
+/// unhosted, no admission gate, matching `agents run --local`'s trust level
+/// (the [`AgentResolver`] trait's default methods already model exactly this, so
+/// this impl only needs `resolve`).
+struct FileAgentResolver {
     agents_dir: String,
 }
 
 #[async_trait]
-impl ActivityExecutor for PlatformExecutor {
-    async fn execute(&self, ctx: &ActivityContext) -> Result<Value, ActivityError> {
-        // Resolve `${path}` references in the inputs against the live variables.
-        let inputs = resolve_template(&ctx.inputs, ctx);
-
-        match ctx.activity_type.as_str() {
-            // `function` activities are pass-throughs: echo their (resolved) inputs.
-            "function" => Ok(inputs),
-
-            // `tool` activities invoke a registered tool by name.
-            "tool" => {
-                let tool_id = ctx.name.as_deref().ok_or_else(|| {
-                    ActivityError::Permanent("tool activity requires a `name` (tool id)".into())
-                })?;
-                let tool = self
-                    .registry
-                    .get(tool_id)
-                    .ok_or_else(|| ActivityError::Permanent(format!("unknown tool `{tool_id}`")))?;
-
-                let tool_ctx = ToolContext {
-                    execution_id: ctx.id.clone(),
-                    agent_id: "workflow".to_string(),
-                    workdir: ".".to_string(),
-                    tenant: String::new(),
-                    granted_permissions: None,
-                    egress_allowlist: None,
-                    // `workflows run --local` is a trusted, first-party/local
-                    // context, same as `agents run --local` (SEC-305).
-                    trust_class: apex_tools::TrustClass::FirstParty,
-                };
-                let params = if inputs.is_null() {
-                    Value::Object(Default::default())
-                } else {
-                    inputs
-                };
-
-                match tool.execute(&tool_ctx, ToolRequest::new(params)).await {
-                    Ok(resp) => Ok(resp.payload),
-                    Err(ToolError::Validation(m)) | Err(ToolError::PermissionDenied(m)) => {
-                        Err(ActivityError::Permanent(m))
-                    }
-                    Err(ToolError::Network(m)) | Err(ToolError::Internal(m)) => {
-                        Err(ActivityError::Retryable(m))
-                    }
-                }
-            }
-
-            // `ai` activities call the model: `prompt` is the system instruction and
-            // `text`/`message` the user turn.
-            "ai" => {
-                let system = inputs
-                    .get("prompt")
-                    .and_then(Value::as_str)
-                    .unwrap_or("You are a helpful support assistant. Draft a concise reply.");
-                let user = inputs
-                    .get("text")
-                    .or_else(|| inputs.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-
-                let model = self.gateway.resolve_model(None, &ModelSelector::default());
-                let request =
-                    ChatRequest::new(model, vec![Message::system(system), Message::user(user)]);
-                match self.gateway.chat(request).await {
-                    Ok(resp) => Ok(json!({ "reply": resp.message.content.unwrap_or_default() })),
-                    Err(e) => Err(ActivityError::Retryable(e.to_string())),
-                }
-            }
-
-            // `agent` activities run a full agent (model + tool loop) via
-            // `run_agent`, mirroring the server's `ServerExecutor` — but resolved
-            // from `<agents_dir>/<name>.yaml` on disk instead of a stored agent id,
-            // since the CLI has no server-side agent store to look up.
-            "agent" => {
-                let agent_id = ctx.name.as_deref().ok_or_else(|| {
-                    ActivityError::Permanent(format!(
-                        "activity `{}`: `name` required for agent type (the agent's file stem \
-                         under --agents-dir)",
-                        ctx.id
-                    ))
-                })?;
-                let path = std::path::Path::new(&self.agents_dir).join(format!("{agent_id}.yaml"));
-                let def = AgentDefinition::from_file(&path.to_string_lossy()).map_err(|e| {
-                    ActivityError::Permanent(format!(
-                        "activity `{}`: could not load agent `{agent_id}` from `{}`: {e}",
-                        ctx.id,
-                        path.display()
-                    ))
-                })?;
-                let input = if inputs.is_null() { json!({}) } else { inputs };
-                let mut opts = RunOptions::new(input);
-                if let Some(n) = def.spec.max_steps {
-                    opts = opts.with_max_steps(n);
-                }
-                let mut sink = NullSink;
-                let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
-                    .await
-                    .map_err(|e| ActivityError::Retryable(e.to_string()))?;
-                Ok(json!({ "message": output.text, "steps": output.steps }))
-            }
-
-            // `human` activities suspend until a decision is injected (see `approve`).
-            "human" => match ctx.variables.get(&ctx.id) {
-                Some(decision) => Ok(decision.clone()),
-                None => {
-                    let who = inputs
-                        .get("assignee")
-                        .and_then(Value::as_str)
-                        .unwrap_or("a reviewer");
-                    Err(ActivityError::Interrupted(format!(
-                        "awaiting approval from {who}"
-                    )))
-                }
-            },
-
-            other => Err(ActivityError::Permanent(format!(
-                "unsupported activity type `{other}` in the local runner"
-            ))),
-        }
+impl AgentResolver for FileAgentResolver {
+    async fn resolve(
+        &self,
+        ctx: &ActivityContext,
+        agent_id: &str,
+    ) -> Result<AgentDefinition, String> {
+        let path = std::path::Path::new(&self.agents_dir).join(format!("{agent_id}.yaml"));
+        AgentDefinition::from_file(&path.to_string_lossy()).map_err(|e| {
+            format!(
+                "activity `{}`: could not load agent `{agent_id}` from `{}`: {e}",
+                ctx.id,
+                path.display()
+            )
+        })
     }
 }
 
@@ -171,14 +65,16 @@ fn engine(agents_dir: &str) -> apex_common::Result<Engine> {
     let events: Arc<dyn EventLog> = Arc::new(store.clone());
     let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
     let timers: Arc<dyn TimerStore> = Arc::new(FileTimerStore::new(dir)?);
-    let executor = Arc::new(PlatformExecutor {
+    let executor = Arc::new(PlatformActivityExecutor::new(
         // `workflows run --local` is a trusted, first-party/local context (SEC-301's
         // documented escape hatch) — shell stays available here, unlike the server's
         // default registry.
-        registry: ToolRegistry::with_privileged_builtins(),
-        gateway: Gateway::from_env(),
-        agents_dir: agents_dir.to_string(),
-    });
+        ToolRegistry::with_privileged_builtins(),
+        Arc::new(Gateway::from_env()),
+        Arc::new(FileAgentResolver {
+            agents_dir: agents_dir.to_string(),
+        }),
+    ));
     Ok(Engine::new(events, checkpoints, executor).with_timer_store(timers))
 }
 
@@ -561,7 +457,7 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_workflow::InMemoryStore;
+    use apex_workflow::{ActivityExecutor, InMemoryStore};
 
     /// `examples/agents/` relative to the workspace root (this crate's manifest dir
     /// is `apps/apex-cli`, two levels down from the workspace root).
@@ -580,16 +476,21 @@ mod tests {
         }
     }
 
-    fn executor(agents_dir: &str) -> PlatformExecutor {
-        PlatformExecutor {
-            registry: ToolRegistry::with_builtins(),
-            gateway: Gateway::from_env(),
-            agents_dir: agents_dir.to_string(),
-        }
+    fn executor(agents_dir: &str) -> PlatformActivityExecutor {
+        PlatformActivityExecutor::new(
+            ToolRegistry::with_builtins(),
+            Arc::new(Gateway::from_env()),
+            Arc::new(FileAgentResolver {
+                agents_dir: agents_dir.to_string(),
+            }),
+        )
     }
 
     /// A local `agent` activity resolves `<agents_dir>/<name>.yaml` and runs it
-    /// through the real `run_agent` loop, mirroring the server's `ServerExecutor`.
+    /// through the real `run_agent` loop, mirroring the server's
+    /// `StoredAgentResolver` (both now go through the shared
+    /// `apex_runtime::PlatformActivityExecutor` — only agent *resolution*
+    /// differs, via `FileAgentResolver`).
     #[tokio::test]
     async fn agent_activity_runs_from_agents_dir() {
         let exec = executor(&examples_agents_dir());
@@ -611,15 +512,16 @@ mod tests {
             .execute(&ctx("agent", Some("does-not-exist"), Value::Null))
             .await
             .expect_err("missing agent file should fail");
-        assert!(matches!(err, ActivityError::Permanent(_)));
+        assert!(matches!(err, apex_workflow::ActivityError::Permanent(_)));
     }
 
     /// The full `research-team.yaml` fan-out/join pattern (FUT-001(b)) works through
     /// the local runner too, not just the server: two `agent` activities with no
     /// edge between them run (the engine's existing type-agnostic concurrent-batch
     /// execution), and `synthesize` joins both via `${proResearch.message}`/
-    /// `${conResearch.message}` — proving `PlatformExecutor` resolves `${...}`
-    /// templates for `agent` activities exactly like `ServerExecutor` does.
+    /// `${conResearch.message}` — proving the shared executor resolves `${...}`
+    /// templates for `agent` activities identically for the CLI's `FileAgentResolver`
+    /// and the server's stored-agent resolver.
     #[tokio::test]
     async fn research_team_runs_locally_and_joins_two_agents() {
         let def = Definition::from_file(&format!(
@@ -645,9 +547,8 @@ mod tests {
             .expect("workflow should run");
         assert_eq!(outcome, RunOutcome::Completed, "state: {state:?}");
 
-        // Placeholder-free synthesis output (see the crate-level doc comment on
-        // `PlatformExecutor::execute`'s `${...}` resolution) is the discriminator: an
-        // unresolved reference would still contain the literal `${proResearch.message}`.
+        // Placeholder-free synthesis output is the discriminator: an unresolved
+        // reference would still contain the literal `${proResearch.message}`.
         let synth = &state.activities["synthesize"];
         let output = synth
             .output

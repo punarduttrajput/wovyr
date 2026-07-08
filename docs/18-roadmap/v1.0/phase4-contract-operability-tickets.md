@@ -7,10 +7,11 @@ Document ID: RM-GA-P4
 
 **Document ID:** RM-GA-P4
 **File Path:** `docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md`
-**Version:** 1.6.0
+**Version:** 1.7.0
 **Status:** In progress — **WS-7 is fully done** (API-701/702/703/704/705 all
-shipped); **HLTH-902 (CLI panic fix) also done**; WS-8 (observability) and
-the rest of WS-9 (executor unification, config crate, cleanup) haven't started
+shipped); **HLTH-901 (executor unification) and HLTH-902 (CLI panic fix) also
+done**; WS-8 (observability) and the rest of WS-9 (config crate, cleanup)
+haven't started
 **Owner:** Engineering (API / Platform)
 **Last Updated:** 2026-07-08
 
@@ -54,7 +55,7 @@ WS-8 (next up)
   OBS-805 (dashboard login/CORS/build) ── depends on SEC-101, SEC-204 (Phase 1)
 
 WS-9 remainder
-  HLTH-901 (unify executors) ─ independent (high value: silent behavioral divergence)
+  HLTH-901 (unify executors) ─ independent (high value: silent behavioral divergence) — Done
   HLTH-902 (fix CLI panic)   ─ independent (benefits from CI-901 to detect) — Done
   HLTH-903 (apex-config crate) ─ independent
   HLTH-904 (cleanup: gateway leak, deps, module splits) ─ independent
@@ -491,6 +492,62 @@ R-9.2; closes PP-16 executor portion.)
 crate), `apps/apex-cli/src/workflow.rs`, `crates/apex-server/src/workflow_runner.rs`,
 `crates/apex-eval/src/compare.rs`. **Size.** L. **Depends on:** none.
 
+**Status: Done (2026-07-08).** New crate **`apex-runtime`**, deliberately *not*
+inside `apex-workflow` itself — that would have made the core DAG/checkpoint
+engine depend on the LLM gateway/tool runtime/agent runtime, exactly the kind
+of boundary leak PP-21/HLTH-904 flags elsewhere. It sits alongside
+`apex-server`/`apex-cli`/`apex-eval` in the dependency spine instead, and all
+three now depend on it and construct nothing of their own for dispatch:
+
+- **`PlatformActivityExecutor`** is the one `ActivityExecutor` body. `tool`/
+  `function` both invoke a tool by name through `ToolRegistry::execute` (the
+  registry's permission-checked entry point, not a direct `Tool::execute`
+  bypass) and classify a `ToolError` exactly as its own doc comments say —
+  `Validation`/`PermissionDenied` → `Permanent`, `Network`/`Internal` →
+  `Retryable` — closing the ticket's headline bug (the server used to collapse
+  every tool error to `Permanent`). `function` now dispatches identically to
+  `tool` rather than the CLI's old inert echo-passthrough: nothing in the
+  codebase ever implemented the DSL spec's original "function = arbitrary
+  Rust code" vision, and every real example/test already used `type: function`
+  expecting a tool invocation. `ai` activities read the system prompt from
+  `inputs.prompt` and resolve the model via `Gateway::resolve_model` (the
+  server used to read instructions from `ctx.name` — the activity's
+  *identifier* field, not a prompt — and hardcode the literal model string
+  `"default"`). `human` activities check *both* the bare-activity-id and
+  `event.<id>` decision-variable conventions, so this dispatch body is correct
+  regardless of which resume mechanism a platform uses (direct checkpoint
+  mutation, e.g. the CLI's `approve`, vs. `Engine::signal_event`, e.g. the
+  server's `/approve` route).
+- **`AgentResolver`** is the one genuinely platform-specific piece: `resolve`
+  (agent lookup), `customize_options` (tenant/hosted-ness), `admit`/`record`
+  (the server's per-project quota gate). `admit` returns a
+  `Box<dyn AdmissionGuard>` — a type-erased RAII guard the executor holds for
+  the run's actual duration, not just at the admission check — that's what
+  makes the server's concurrency slot mean anything, and what its own
+  `RunPermit` boxes into without `apex-runtime` needing to know that type
+  exists. Three impls, all trivial: the CLI's `FileAgentResolver`
+  (`<agents_dir>/<name>.yaml`), the server's `StoredAgentResolver`
+  (tenant-scoped `AgentStore` lookup + quota), eval's `MapAgentResolver`
+  (an in-memory `BTreeMap`) — none override more than `resolve` except
+  `StoredAgentResolver`, which is the only platform with real context to add.
+
+**Verification.** `apex-runtime`'s own test suite (6 tests) exercises the
+shared dispatch body directly — a permission-denied tool error is `Permanent`,
+a network/internal one is `Retryable`, `function` and `tool` invoke the same
+tool identically, `human` resolves under both variable-key conventions, an
+`AgentResolver::admit` rejection surfaces as `Retryable`, an unknown agent as
+`Permanent` — which is now a *structural* guarantee for "CLI and server
+classify identically," not just an empirically-checked one, since both call
+the same function. All three call sites' own test suites still pass
+unchanged: the CLI's `research_team_runs_locally_and_joins_two_agents`, the
+server's `agent_activity_respects_project_quota` and
+`approve_decision_is_consumed_and_the_execution_completes` (proving the
+`AdmissionGuard` refactor and the dual human-decision-key check didn't
+regress either behavior), and eval's `multi_agent_vs_single_agent.rs`. Full
+workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean (one
+pre-existing, unrelated Windows `cmd.exe`-quoting flake in `apex-tools`,
+untouched by this change).
+
 ---
 
 ## HLTH-902 `[P1]` — Fix the latent CLI marketplace `spawn_blocking` panic
@@ -626,7 +683,7 @@ groups/backends have. (PRD-003 R-9.5; closes PP-20/PP-21.)
 | OBS-803 | 8 | Alert rules + Grafana dashboard | S | P2 | OBS-801 |
 | OBS-804 | 8 | Audit coverage (all mutations) | M | P2 | SEC-101 |
 | OBS-805 | 8 | Dashboard login/CORS/build | L | P2 | SEC-101, SEC-204 |
-| HLTH-901 | 9 | Unify ActivityExecutors | L | P1 | — |
+| HLTH-901 | 9 | Unify ActivityExecutors — **Done** | L | P1 | — |
 | HLTH-902 | 9 | Fix CLI spawn_blocking panic — **Done** | S | P1 | CI-901 |
 | HLTH-903 | 9 | `apex-config` crate | M | P2 | — |
 | HLTH-904 | 9 | Cleanup: gateway leak, deps, splits | M–L | P2 | — |
@@ -655,6 +712,7 @@ genuinely last — they harden and clean up, but nothing depends on them.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.7.0 | 2026-07-08 | HLTH-901 done: new `apex-runtime` crate holds the one `ActivityExecutor` dispatch body (`PlatformActivityExecutor`) the CLI, server, and eval harness all now call, parameterized over an `AgentResolver` trait for the one genuinely platform-specific piece (agent lookup + tenant/hosted/quota context). Fixed the real semantic drift the ticket named: tool-error retry classification, `function`-vs-`tool` dispatch, `ai`'s system-prompt source and model resolution, and `human`'s decision-variable-key convention all now behave identically everywhere. Full workspace build/clippy/fmt/test clean |
 | 1.6.0 | 2026-07-08 | HLTH-902 done: all 7 CLI marketplace commands are now `async fn` running their body inside `tokio::task::spawn_blocking`, fixing the "Cannot start a runtime from within a runtime" panic. Reproduced and confirmed the exact panic + fix with a standalone repro (no live Postgres needed) and verified all 7 commands end to end against the file-based registry. Also added a CI-901 step that runs the CLI binary itself against Postgres — the existing job never had, despite the ticket's original acceptance criterion assuming it did |
 | 1.5.0 | 2026-07-08 | API-705 done: added `hardening::DEPRECATIONS` (a const route-metadata table) + `deprecation_headers` middleware, making the `Deprecation`/`Sunset` policy mechanically enforceable. Table is empty — no real deprecation exists — with a standing test guarding the 90-day window for whenever one is added. **WS-7 is now fully complete** |
 | 1.4.0 | 2026-07-08 | API-704 done: added a `contract-gate` CI job (redocly lint + both SDK integration suites against a real, freshly-booted server). Caught and fixed 3 real pre-existing bugs the suites' never having run in CI let slip through: both SDKs' workflow-status test still checked the pre-API-702 PascalCase `"Completed"`; both SDKs' tools-count assertion assumed leftover local plugin state; the Python suite still read two pre-API-701 field names (`tools`/`total`, `results`). WS-7 now has only API-705 left |

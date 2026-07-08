@@ -30,6 +30,7 @@ apex-provider.workspace = true
 apex-tools.workspace = true
 apex-agent.workspace = true
 apex-workflow.workspace = true
+apex-runtime.workspace = true
 apex-telemetry.workspace = true
 apex-tenancy.workspace = true
 apex-events.workspace = true

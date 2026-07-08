@@ -334,8 +334,8 @@ pub struct AppState {
     pub(crate) tenancy: Arc<dyn TenancyStore>,
     /// Per-project run-path quota usage (concurrent runs + daily LLM spend). An `Arc`
     /// (not embedded directly) so it can be shared into the workflow engine's
-    /// [`ServerExecutor`](workflow_runner::ServerExecutor), which is constructed before
-    /// this struct exists.
+    /// [`StoredAgentResolver`](workflow_runner::StoredAgentResolver), which is
+    /// constructed before this struct exists.
     pub(crate) quota: Arc<tenancy::QuotaTracker>,
     /// Webhook subscriptions; events emitted on mutations are delivered to matches.
     pub(crate) webhooks: Arc<dyn WebhookStore>,
@@ -441,7 +441,7 @@ impl AppState {
         let timers = default_timer_store();
         let schedules = default_schedule_store();
         // Thread gateway + registry + the agent store + tenancy/quota into the workflow
-        // engine so the ServerExecutor can actually drive function/ai/agent activities
+        // engine so the shared executor can actually drive function/ai/agent activities
         // when the submit route runs a workflow (an `agent` activity looks up a stored
         // agent by id here, and enforces the same project quota a direct run would).
         let workflows = default_workflows_engine(
@@ -864,8 +864,9 @@ fn default_webhook_store(kms: Arc<dyn apex_kms::Kms>) -> Arc<dyn WebhookStore> {
 
 /// An [`Engine`] over the durable workflow store at `~/.apex/workflows` (the same
 /// directory the CLI writes to), falling back to an empty in-memory store if that
-/// directory is unavailable.  The executor is a [`ServerExecutor`] that handles
-/// `function`/`ai`/`agent`/`human` activities so the write-path submit route can
+/// directory is unavailable. The executor is the shared
+/// [`apex_runtime::PlatformActivityExecutor`] (RM-GA-P4 HLTH-901), parameterized by
+/// [`workflow_runner::StoredAgentResolver`], so the write-path submit route can
 /// actually drive workflow runs — including enforcing the submitting project's quota
 /// on `agent` activities, the same gate a direct `agents:run` call goes through.  The
 /// read paths (`list`/`status`/`history`) are unaffected. Attaches `timers` (RM-GA-P2
@@ -880,7 +881,7 @@ fn default_workflows_engine(
     quota: Arc<tenancy::QuotaTracker>,
     timers: Arc<dyn TimerStore>,
 ) -> Engine {
-    let executor = Arc::new(workflow_runner::ServerExecutor::new(
+    let executor = Arc::new(workflow_runner::server_executor(
         gateway, registry, agents, tenancy, quota,
     ));
     if let Some(dir) = workflows_dir()

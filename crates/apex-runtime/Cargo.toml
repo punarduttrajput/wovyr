@@ -1,0 +1,20 @@
+[package]
+name = "apex-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The one ActivityExecutor dispatch body shared by the CLI, server, and eval harness (RM-GA-P4 HLTH-902/HLTH-901) — tool/ai/human dispatch and retry classification live here once; only agent resolution (file, stored-by-id, in-memory map) is parameterized per platform."
+
+[dependencies]
+apex-common.workspace = true
+apex-agent.workspace = true
+apex-provider.workspace = true
+apex-tools.workspace = true
+apex-workflow.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

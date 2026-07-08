@@ -448,7 +448,8 @@ fn current_day() -> u64 {
 /// Releases a project's concurrency slot when dropped (after the run completes, succeeds
 /// or fails). A no-op when the run was unmetered (no project / no quota). Depends only on
 /// the [`QuotaTracker`] itself (not the full [`AppState`]), so it can be shared with
-/// callers — like the workflow engine's [`ServerExecutor`](crate::workflow_runner::ServerExecutor)
+/// callers — like the workflow engine's
+/// [`StoredAgentResolver`](crate::workflow_runner::StoredAgentResolver)
 /// — that are constructed before an `AppState` exists.
 pub(crate) struct RunPermit {
     quota: Arc<QuotaTracker>,

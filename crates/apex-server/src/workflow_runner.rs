@@ -17,17 +17,15 @@
 //! pinned workflow definition when `manifest` is omitted — see
 //! [`resolve_definition`].
 //!
-//! Execution uses [`ServerExecutor`], a type-dispatch executor that handles
-//! `function` activities via the tool registry, `ai` activities via the gateway,
-//! and `human` activities by suspending durably (returning `Interrupted`) until
-//! `/approve`'s decision has been injected, at which point it resolves instead of
-//! interrupting again.
+//! Execution uses the shared [`apex_runtime::PlatformActivityExecutor`]
+//! (RM-GA-P4 HLTH-901 — the same dispatch body the CLI's local runner and
+//! `apex-eval`'s comparison harness use), parameterized here by
+//! [`StoredAgentResolver`] for `agent`-typed activities.
 
-use apex_agent::{NullSink, RunOptions, run_agent};
-use apex_provider::Gateway;
+use apex_runtime::{AdmissionGuard, AgentResolver, PlatformActivityExecutor};
 use apex_tenancy::TenancyStore;
-use apex_tools::{ToolContext, ToolRegistry, ToolRequest};
-use apex_workflow::{ActivityContext, ActivityError, ActivityExecutor, Definition};
+use apex_tools::ToolRegistry;
+use apex_workflow::{ActivityContext, Definition};
 use async_trait::async_trait;
 use axum::{
     Json, Router,
@@ -41,170 +39,105 @@ use std::sync::Arc;
 
 use crate::{AgentStore, ApiError, AppState, tenancy};
 
-// ── ServerExecutor ────────────────────────────────────────────────────────────
+// ── StoredAgentResolver ───────────────────────────────────────────────────────
 
-/// An [`ActivityExecutor`] for the server that dispatches by `activity_type`:
+/// Resolves `agent`-typed activities against a *stored* agent (created via
+/// `POST /api/v1/agents`), and supplies the server's platform context around
+/// that run:
 ///
-/// - `function` / `tool` — executes the named tool via the [`ToolRegistry`].
-/// - `ai`                — calls the gateway with the activity's `name` as the
-///   system prompt and its `inputs.message` (or the whole inputs JSON) as the
-///   user message.
-/// - `agent`             — runs a *stored* agent (created via `POST /api/v1/agents`)
-///   end to end through [`run_agent`] — the real model/tool loop, not a bare chat
-///   call. The activity's `name` is the agent id; `inputs` is the run input (an
-///   `inputs.message` field becomes the user turn, same convention as `ai`). The
-///   agent is looked up in the *submitting tenant's* store (via the `__tenant`
-///   marker `submit_handler` stamps into the run input), so a workflow can never
-///   reach another tenant's agent. When the submission also carried an in-scope
-///   project (`__project`, from `X-Apex-Project`), the run is admitted through the
-///   same [`tenancy::admit_run`]/[`tenancy::record_run_cost`] gate a direct
-///   `agents:run` call goes through — so a workflow that fans out to N sub-agents
-///   draws from one shared project budget (concurrent runs + daily LLM spend)
-///   instead of N independent, unmetered ones. A quota-exceeded rejection is
-///   [`ActivityError::Retryable`]: the blocking slot is held only for a sibling
-///   activity's duration, so a retry can succeed once it frees.
-/// - `human`             — checks `ctx.variables` for a decision already injected
-///   under the `event.<id>` key (the convention `POST …/{id}/approve` writes
-///   through `Engine::signal_event`) and resolves with it if present; otherwise
-///   returns [`ActivityError::Interrupted`] so the engine durably suspends until
-///   that approval arrives.
-/// - anything else       — permanent failure (activity type unknown to server).
-pub struct ServerExecutor {
-    gateway: Arc<Gateway>,
-    registry: ToolRegistry,
+/// - **Tenant scoping** — the agent is looked up in the *submitting tenant's*
+///   store (via the `__tenant` marker `submit_handler` stamps into the run
+///   input), so a workflow can never reach another tenant's agent. The run
+///   itself is `with_tenant(..).with_hosted(true)` (SEC-303: a manifest with no
+///   `permissions:` block gets no tool grants, not an unrestricted one — the
+///   network-facing default).
+/// - **Quota admission** — when the submission also carried an in-scope project
+///   (`__project`, from `X-Apex-Project`), the run is admitted through the same
+///   [`tenancy::admit_run`]/[`tenancy::record_run_cost`] gate a direct
+///   `agents:run` call goes through, so a workflow that fans out to N
+///   sub-agents draws from one shared project budget (concurrent runs + daily
+///   LLM spend) instead of N independent, unmetered ones. The returned
+///   [`RunPermit`](tenancy::RunPermit) is boxed as an [`AdmissionGuard`] and
+///   held by the shared executor for the run's duration — releasing it only
+///   then is what makes the concurrency slot mean anything.
+pub struct StoredAgentResolver {
     agents: Arc<AgentStore>,
     tenancy: Arc<dyn TenancyStore>,
     quota: Arc<tenancy::QuotaTracker>,
 }
 
-impl ServerExecutor {
+impl StoredAgentResolver {
     pub fn new(
-        gateway: Arc<Gateway>,
-        registry: ToolRegistry,
         agents: Arc<AgentStore>,
         tenancy: Arc<dyn TenancyStore>,
         quota: Arc<tenancy::QuotaTracker>,
     ) -> Self {
         Self {
-            gateway,
-            registry,
             agents,
             tenancy,
             quota,
         }
     }
+
+    fn tenant(ctx: &ActivityContext) -> &str {
+        ctx.variables
+            .get("__tenant")
+            .and_then(Value::as_str)
+            .unwrap_or(crate::tenancy::DEFAULT_TENANT)
+    }
+
+    fn project(ctx: &ActivityContext) -> Option<&str> {
+        ctx.variables.get("__project").and_then(Value::as_str)
+    }
 }
 
 #[async_trait]
-impl ActivityExecutor for ServerExecutor {
-    async fn execute(&self, ctx: &ActivityContext) -> Result<Value, ActivityError> {
-        // Resolve `${activity.field}` references against the live variables (e.g. a
-        // `synthesize` activity's `inputs.message: "${proResearch.message}"`) — the
-        // engine hands executors the raw definition inputs and leaves interpolation to
-        // them (apex_workflow::resolve_template), the same helper the CLI's local
-        // runner uses, so both executors interpolate identically.
-        let inputs = apex_workflow::resolve_template(&ctx.inputs, ctx);
-
-        match ctx.activity_type.as_str() {
-            "function" | "tool" => {
-                let tool_id = ctx.name.as_deref().ok_or_else(|| {
-                    ActivityError::Permanent(format!(
-                        "activity `{}`: `name` required for function/tool type",
-                        ctx.id
-                    ))
-                })?;
-                let tool_ctx = ToolContext::default();
-                let req = ToolRequest::new(inputs);
-                self.registry
-                    .execute(tool_id, &tool_ctx, req)
-                    .await
-                    .map(|r| r.payload)
-                    .map_err(|e| ActivityError::Permanent(e.to_string()))
-            }
-            "ai" => {
-                let instructions = ctx
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| "You are a helpful assistant.".to_string());
-                let user_msg = match inputs.get("message").and_then(|v| v.as_str()) {
-                    Some(m) => m.to_string(),
-                    None => inputs.to_string(),
-                };
-                use apex_provider::{ChatRequest, Message};
-                let req = ChatRequest::new(
-                    "default",
-                    vec![Message::system(instructions), Message::user(user_msg)],
-                );
-                let resp = self
-                    .gateway
-                    .chat(req)
-                    .await
-                    .map_err(|e| ActivityError::Retryable(e.to_string()))?;
-                let text = resp.message.content.unwrap_or_default();
-                Ok(json!({ "message": text }))
-            }
-            "agent" => {
-                let agent_id = ctx.name.as_deref().ok_or_else(|| {
-                    ActivityError::Permanent(format!(
-                        "activity `{}`: `name` required for agent type (the stored agent id)",
-                        ctx.id
-                    ))
-                })?;
-                let tenant = ctx
-                    .variables
-                    .get("__tenant")
-                    .and_then(Value::as_str)
-                    .unwrap_or(crate::tenancy::DEFAULT_TENANT);
-                let def = self.agents.definition(tenant, agent_id).ok_or_else(|| {
-                    ActivityError::Permanent(format!(
-                        "activity `{}`: no agent `{agent_id}` found",
-                        ctx.id
-                    ))
-                })?;
-                let input = if inputs.is_null() { json!({}) } else { inputs };
-                let mut opts = RunOptions::new(input).with_tenant(tenant).with_hosted(true);
-                if let Some(n) = def.spec.max_steps {
-                    opts = opts.with_max_steps(n);
-                }
-                let project = ctx.variables.get("__project").and_then(Value::as_str);
-                // Admit through the same project quota gate a direct `agents:run` call
-                // uses, so a workflow's fan-out to N sub-agents shares one budget rather
-                // than each activity running unmetered. A rejection is retryable: the
-                // slot frees once a sibling activity's run ends.
-                let _permit = tenancy::admit_run(&self.tenancy, &self.quota, project)
-                    .map_err(|e| ActivityError::Retryable(e.message))?;
-                let mut sink = NullSink;
-                let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
-                    .await
-                    .map_err(|e| ActivityError::Retryable(e.to_string()))?;
-                tenancy::record_run_cost(&self.quota, project, output.usage.cost_usd);
-                Ok(json!({ "message": output.text, "steps": output.steps }))
-            }
-            "human" => {
-                // `approve_handler` resumes via `Engine::signal_event(def, id,
-                // activity_id, decision)`, which (via `deliver`) injects the
-                // decision under the `event.<activity_id>` variable key — the same
-                // convention the engine-native `wait: {event: <name>}` activity
-                // type checks. A plain, unqualified `ctx.id` key (as the CLI's
-                // local `PlatformExecutor` checks) is never written by this path,
-                // since the CLI resumes by mutating the checkpoint directly rather
-                // than through `signal_event`. Without this check every resume
-                // re-interrupted unconditionally, so an approval decision was
-                // accepted by the HTTP route but silently never consumed — the
-                // execution suspended forever instead of completing.
-                match ctx.variables.get(&format!("event.{}", ctx.id)) {
-                    Some(decision) => Ok(decision.clone()),
-                    None => Err(ActivityError::Interrupted(format!(
-                        "human activity `{}` is awaiting approval",
-                        ctx.id
-                    ))),
-                }
-            }
-            other => Err(ActivityError::Permanent(format!(
-                "activity type `{other}` is not handled by the server executor"
-            ))),
-        }
+impl AgentResolver for StoredAgentResolver {
+    async fn resolve(
+        &self,
+        _ctx: &ActivityContext,
+        agent_id: &str,
+    ) -> Result<apex_agent::AgentDefinition, String> {
+        let tenant = Self::tenant(_ctx);
+        self.agents
+            .definition(tenant, agent_id)
+            .ok_or_else(|| format!("no agent `{agent_id}` found"))
     }
+
+    fn customize_options(
+        &self,
+        ctx: &ActivityContext,
+        opts: apex_agent::RunOptions,
+    ) -> apex_agent::RunOptions {
+        opts.with_tenant(Self::tenant(ctx)).with_hosted(true)
+    }
+
+    async fn admit(&self, ctx: &ActivityContext) -> Result<Box<dyn AdmissionGuard>, String> {
+        tenancy::admit_run(&self.tenancy, &self.quota, Self::project(ctx))
+            .map(|permit| Box::new(permit) as Box<dyn AdmissionGuard>)
+            .map_err(|e| e.message)
+    }
+
+    fn record(&self, ctx: &ActivityContext, cost_usd: f64) {
+        tenancy::record_run_cost(&self.quota, Self::project(ctx), cost_usd);
+    }
+}
+
+/// Build the shared executor for the server: `StoredAgentResolver` for `agent`
+/// activities; `tool`/`function`/`ai`/`human` dispatch is identical to the CLI's
+/// and eval's — see [`apex_runtime::PlatformActivityExecutor`].
+pub(crate) fn server_executor(
+    gateway: Arc<apex_provider::Gateway>,
+    registry: ToolRegistry,
+    agents: Arc<AgentStore>,
+    tenancy: Arc<dyn TenancyStore>,
+    quota: Arc<tenancy::QuotaTracker>,
+) -> PlatformActivityExecutor {
+    PlatformActivityExecutor::new(
+        registry,
+        gateway,
+        Arc::new(StoredAgentResolver::new(agents, tenancy, quota)),
+    )
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -512,7 +445,8 @@ mod tests {
     use super::*;
     use crate::AppState;
     use apex_workflow::{
-        CheckpointStore, ClosureExecutor, Engine, EventLog, FileStore, InMemoryStore, RunOutcome,
+        ActivityError, CheckpointStore, ClosureExecutor, Engine, EventLog, FileStore,
+        InMemoryStore, RunOutcome,
     };
     use axum::body::to_bytes;
     use axum::http::Request;
@@ -531,7 +465,7 @@ mod tests {
     async fn isolated_state() -> Arc<AppState> {
         let state = AppState::from_env().await;
         let agents = Arc::new(AgentStore::new(None));
-        let executor = Arc::new(ServerExecutor::new(
+        let executor = Arc::new(server_executor(
             state.gateway.clone(),
             state.registry.clone(),
             agents.clone(),

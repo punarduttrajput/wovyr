@@ -19,6 +19,7 @@ apex-agent.workspace = true
 apex-provider.workspace = true
 apex-tools.workspace = true
 apex-workflow.workspace = true
+apex-runtime.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
