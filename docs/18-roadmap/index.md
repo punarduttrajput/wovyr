@@ -30,7 +30,16 @@ The platform is currently in the **Planning / Documentation** phase (v0.1.0).
 | v0.2 | Memory, tools, and the gateway hardened | [v0.2.md](v0.2.md) |
 | v0.3 | Plugins, dashboard, and multi-tenancy | [v0.3.md](v0.3.md) |
 | v1.0 | Production-ready, GA, enterprise | [v1.0.md](v1.0.md) |
+| v1.1 | AI Platform Maturity: capable, operable, extensible (post-GA) | [v1.1/index.md](v1.1/index.md) |
 | Future | Beyond 1.0 — research bets | [future.md](future.md) |
+
+**v1.1 (AI Platform Maturity)** is scoped by [PRD-004](../01-product/prd-ai-platform-maturity.md)
+from a 2026-07-09 five-front engineering audit — real cost accounting, context/token
+management, activated sandboxing, native Anthropic, a real RAG middle, an evaluation
+gate, MCP/plugin-SDK ecosystem work, and UI/DX/operability maturity. Three phased
+ticket docs: [P1](v1.1/phase1-production-truth-tickets.md) ·
+[P2](v1.1/phase2-credible-ai-product-tickets.md) ·
+[P3](v1.1/phase3-ecosystem-scale-tickets.md).
 
 ---
 

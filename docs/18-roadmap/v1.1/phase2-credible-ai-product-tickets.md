@@ -1,0 +1,462 @@
+<!--
+File: docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md
+Document ID: RM-AIM-P2
+-->
+
+# Phase 2 — Credible AI Product: Implementation Tickets
+
+**Document ID:** RM-AIM-P2
+**File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
+**Version:** 1.0.0
+**Status:** Planned — not started
+**Owner:** Engineering (AI / Platform)
+**Last Updated:** 2026-07-09
+
+---
+
+# Purpose
+
+Phase 2 of [PRD-004 §8](../../01-product/prd-ai-platform-maturity.md) — the
+capabilities that make Apex a *credible* AI product rather than a thin loop: native
+Anthropic support, structured output, a real RAG middle (chunking + reranking), a
+correct semantic cache, guardrails, an evaluation *gate*, and correct multi-node
+quotas.
+
+Covers **WS-A** (AI-core recovery/streaming), **WS-B** (providers), **WS-C**
+(RAG), **WS-D** (eval), **WS-G/R-G.5..7** (quotas), **WS-I** (guardrails/prompts),
+**WS-L/R-L.1** (per-tenant metrics), and the shared-executor `ai`-activity fixes.
+
+Format matches [RM-GA-P2](../v1.0/phase2-durability-execution-tickets.md).
+Depends on Phase 1 — especially PRV-101 (real cost) and AIC-101 (token counting).
+
+---
+
+# Sequencing at a glance
+
+```
+PRV-201 (Anthropic) ─┬─ provider work (parallel)
+PRV-202 (structured out) │
+PRV-203 (schema norm)     │
+PRV-204 (multimodal)      │
+PRV-205 (retry jitter)   ┘
+RAG-201 (chunking) ── RAG-202 (rerank) ── RAG-205 (metadata/time)
+RAG-203 (semantic-cache fix) ─ independent
+RAG-204 (BM25) ─ independent
+EVL-201 (LLM-judge) ── EVL-202 (regression gate) ── EVL-203 (RAG/max_steps eval)
+SAF-201 (guardrails) ─ SAF-202 (prompt registry)
+SRV-201 (distributed rate limit) ─ SRV-202 (token quotas) ─ SRV-203 (tz window)
+AIC-201 (step recovery) ─ AIC-202 (rich streaming) ─ RUN-201/202 (ai activity)
+OBS-201 (per-tenant metrics)
+```
+
+---
+
+# WS-B — Providers
+
+## PRV-201 `[P1]` — First-class `AnthropicProvider`
+
+**Problem.** Only mock, OpenAI-compatible, and local mistralrs providers exist
+(`crates/apex-provider/src/lib.rs:12-33`); Claude is reachable only via an
+OpenAI-compatible shim, losing native tool-use, system-prompt handling, prompt
+caching, and extended thinking. (PRD-004 R-B.2; audit High.)
+
+**Change.** Add an `AnthropicProvider` implementing `AIProvider` against the Messages
+API: native `tools`/`tool_choice`, `system`, prompt caching, and (optional) extended
+thinking; translate `ChatRequest`/`ToolSpec` to/from Anthropic shapes; emit real
+streaming deltas via `chat_stream`.
+
+**Acceptance criteria.** A gated integration test (or a recorded-fixture test) drives
+a tool round-trip through the Anthropic provider; `cost_usd` uses PRV-101's price
+table for Claude models.
+
+**Files.** `crates/apex-provider/src/` (new `anthropic.rs`), `gateway.rs` resolution.
+**Size.** L. **Depends on:** PRV-101.
+
+## PRV-202 `[P1]` — Structured output / forced tool
+
+**Problem.** `ChatRequest` has no `response_format`/`tool_choice`/`json_schema`
+(`crates/apex-provider/src/types.rs:107-123`); mistralrs hardcodes `ToolChoice::Auto`
+(`mistralrs_provider.rs:166`). JSON mode and "must call tool X" can't be requested.
+(PRD-004 R-B.3; audit Med.)
+
+**Change.** Add `response_format` and `tool_choice` to `ChatRequest`; translate per
+provider (OpenAI JSON/structured-output, Anthropic tool_choice, mistralrs where
+supported).
+
+**Acceptance criteria.** A test asserts a JSON-schema-constrained request returns
+schema-valid output (against a provider that supports it) and that forced-tool
+selects the named tool.
+
+**Files.** `crates/apex-provider/src/{types.rs,openai.rs,anthropic.rs,mistralrs_provider.rs}`.
+**Size.** M. **Depends on:** none.
+
+## PRV-203 `[P2]` — Tool-schema normalization + surfaced arg-parse errors
+
+**Problem.** Tool `parameters` JSON is forwarded verbatim to providers
+(`openai.rs:62-79`); no normalization/`strict` mode. Malformed tool arguments are
+swallowed to `Value::Null` (`crates/apex-agent/src/runtime.rs:335`), so a tool
+silently receives null. (PRD-004 R-B.4; audit Med.)
+
+**Change.** Validate/normalize tool JSON-schema (strip unsupported keywords, optional
+`strict`); on an arg-parse failure, feed the error back to the model instead of
+passing `null`.
+
+**Acceptance criteria.** A test asserts a malformed tool-arg produces a
+model-visible error turn (not a null-arg tool invocation).
+
+**Files.** `crates/apex-provider/src/openai.rs`, `crates/apex-agent/src/runtime.rs`.
+**Size.** M. **Depends on:** none.
+
+## PRV-204 `[P2]` — Multimodal content parts
+
+**Problem.** `Message.content` is `Option<String>` (`types.rs:31`); no image/audio
+parts. (PRD-004 R-B.5; audit Med.)
+
+**Change.** Model content as a list of typed parts (text/image/audio) with backward-
+compatible string coercion; translate per provider.
+
+**Acceptance criteria.** A test round-trips an image content part through a
+multimodal-capable provider path.
+
+**Files.** `crates/apex-provider/src/types.rs` + provider translators. **Size.** M.
+**Depends on:** none.
+
+## PRV-205 `[P3]` — Retry jitter + `Retry-After`
+
+**Problem.** Backoff is pure exponential, no jitter
+(`crates/apex-provider/src/resilience.rs:46-49`); `is_transient` keys only on the
+`Error::Provider` variant (`gateway.rs:607-609`), not distinguishing 429 vs 5xx nor
+honoring server backoff. (PRD-004 R-B.6; audit Low.)
+
+**Change.** Add jitter; parse and honor `Retry-After`; classify 429 vs 5xx.
+
+**Acceptance criteria.** A test asserts jittered delays and that a `Retry-After` hint
+is respected.
+
+**Files.** `crates/apex-provider/src/{resilience.rs,gateway.rs}`. **Size.** S.
+**Depends on:** none.
+
+---
+
+# WS-C — Memory & RAG
+
+## RAG-201 `[P1]` — Document chunking with parent-document linkage
+
+**Problem.** `remember_full` embeds the entire `content` as one vector
+(`crates/apex-memory/src/engine.rs:91-105`); long docs get one diluted embedding, no
+splitter, no parent linkage. (PRD-004 R-C.1; audit High.)
+
+**Change.** Add a configurable splitter (token/char windows + overlap) that stores
+chunk records linked to a parent document; retrieval returns chunks and can expand to
+the parent.
+
+**Acceptance criteria.** A test asserts a long document is split into linked chunks and
+that retrieval scores a relevant chunk above an irrelevant one from the same document.
+
+**Files.** `crates/apex-memory/src/engine.rs` + record model. **Size.** L.
+**Depends on:** none.
+
+## RAG-202 `[P1]` — Re-ranking stage
+
+**Problem.** Hybrid retrieval is RRF + a linear weighted score
+(`engine.rs:234-243,331-407`); no cross-encoder/LLM reranker; `RRF_K` hardcoded 60
+(`engine.rs:16`). (PRD-004 R-C.2; audit High.)
+
+**Change.** Add an optional reranking stage after fusion (a `Reranker` trait: LLM- or
+cross-encoder-backed) applied to the top-N candidates; make `RRF_K` configurable.
+
+**Acceptance criteria.** A test asserts the reranker reorders a fused candidate list
+and that it's off by default (opt-in), preserving current behavior.
+
+**Files.** `crates/apex-memory/src/engine.rs` + new `rerank.rs`. **Size.** L.
+**Depends on:** none.
+
+## RAG-203 `[P1]` — Semantic-cache key + embedding-model id
+
+**Problem.** The canonical text embedded for lookup is only the User turns
+(`crates/apex-provider/src/gateway.rs:589-597`); system prompt + tools are excluded and
+`param_key` guards only model+temperature (`:601-603`), so same user text + different
+system/tools → wrong-context hit. Entries record no embedding-model id
+(`resilience.rs:444-449`); a changed/mixed embedding model yields silently wrong
+similarities (mismatched dims → cosine 0.0, `embeddings.rs:45`). (PRD-004 R-C.3; audit
+High.)
+
+**Change.** Include system prompt + tool specs in the canonical key; stamp the
+embedding-model id on every `SemanticEntry` and skip/evict entries whose model id
+doesn't match the current one.
+
+**Acceptance criteria.** Tests: same user text + different system prompt does **not**
+hit; an entry from a different embedding model is not served.
+
+**Files.** `crates/apex-provider/src/{gateway.rs,resilience.rs}`. **Size.** M.
+**Depends on:** none.
+
+## RAG-204 `[P2]` — BM25/TF-IDF keyword parity
+
+**Problem.** In-process keyword relevance is unnormalized set-overlap of alphanumeric
+tokens (`engine.rs:302-317,468-474`) — no BM25/TF-IDF/stemming — while the Postgres
+pushdown path uses real FTS, so quality differs by backend. (PRD-004 R-C.4; audit Med.)
+
+**Change.** Implement BM25 (or TF-IDF) + light stemming for the in-process keyword
+branch to match the FTS backend's ranking character.
+
+**Acceptance criteria.** A test asserts BM25 ranks a term-frequency-relevant doc above
+a single-mention doc; parity smoke vs the FTS path on a shared fixture.
+
+**Files.** `crates/apex-memory/src/engine.rs`. **Size.** M. **Depends on:** none.
+
+## RAG-205 `[P2]` — Real timestamps + range/time metadata filters
+
+**Problem.** `seq` is an insertion counter, not a timestamp
+(`crates/apex-memory/src/record.rs:66-68`), so "recency" (`engine.rs:459-465`) shifts
+as records are added and is incomparable across namespaces; filters are tag-any +
+min-importance + ABAC only (`engine.rs:349-353`). (PRD-004 R-C.5; audit Low.)
+
+**Change.** Store a real creation timestamp (supplied at the boundary per the
+clock-free-core rule); add time-range and numeric-range metadata filters.
+
+**Acceptance criteria.** A test asserts recency uses wall-clock age and a time-range
+filter excludes out-of-window records.
+
+**Files.** `crates/apex-memory/src/{record.rs,engine.rs}`. **Size.** M.
+**Depends on:** none.
+
+---
+
+# WS-D — Evaluation
+
+## EVL-201 `[P1]` — LLM-as-judge + semantic scoring
+
+**Problem.** `score` supports only `contains`/`contains_all`/`equals`
+(`crates/apex-eval/src/score.rs:24-72`); no LLM-as-judge, semantic similarity, or
+rubric scoring. (PRD-004 R-D.1; audit High.)
+
+**Change.** Add a judge/`Scorer` abstraction: an LLM-as-judge scorer (rubric prompt →
+graded score) and a semantic-similarity scorer, alongside the existing exact
+matchers.
+
+**Acceptance criteria.** A test asserts the LLM-judge scorer grades a
+semantically-correct-but-non-substring answer as passing where `contains` would fail
+(against a scripted judge provider for determinism).
+
+**Files.** `crates/apex-eval/src/score.rs` + new `judge.rs`. **Size.** M.
+**Depends on:** none.
+
+## EVL-202 `[P1]` — Turn `apex-eval` into a regression gate
+
+**Problem.** No baselines, thresholds, variance measurement, telemetry, or trend
+comparison — explicitly a prototype (`crates/apex-eval/src/lib.rs:19-26`). (PRD-004
+R-D.2; audit High.)
+
+**Change.** Add golden-baseline reports, pass-rate thresholds, repeat-N variance, and
+a CI step that persists eval scores as an artifact and fails on regression vs a
+committed baseline (extending the existing CI eval step).
+
+**Acceptance criteria.** A CI-runnable command fails when the pass rate drops below the
+baseline threshold and passes when it meets it; variance-over-N is reported.
+
+**Files.** `crates/apex-eval/src/*`, `.github/workflows/ci.yml`. **Size.** L.
+**Depends on:** PRV-101 (cost in reports), EVL-201.
+
+## EVL-203 `[P2]` — Evaluate the RAG path + `max_steps` + retrieval metrics
+
+**Problem.** `run_suite` calls `run_agent` with a bare `RunOptions::new`, ignoring
+memory grounding and `spec.max_steps` (`crates/apex-eval/src/runner.rs:27-29`); no
+recall@k/nDCG/MRR retriever harness. (PRD-004 R-D.3; audit High/Med.)
+
+**Change.** Add a `run_agent_with_memory` eval path and honor manifest `max_steps`
+(via AIC-103); add a retrieval-metrics harness (recall@k/nDCG/MRR) over labeled
+fixtures.
+
+**Acceptance criteria.** A test grades a RAG fixture and computes recall@k against a
+labeled relevant set.
+
+**Files.** `crates/apex-eval/src/runner.rs` + new retrieval-eval module. **Size.** M.
+**Depends on:** AIC-103, RAG-201.
+
+---
+
+# WS-G — Multi-Node Quotas
+
+## SRV-201 `[P1]` — Distributed rate limiting
+
+**Problem.** Token buckets live in a `Mutex<HashMap>` in `AppState`
+(`crates/apex-server/src/rate_limit.rs:29-34,57-81`); N nodes each grant the full
+budget. (PRD-004 R-G.5; audit High.)
+
+**Change.** Back the limiter with a shared store (Redis, reusing the existing
+`redis` feature pattern) so a fleet enforces one budget; fall back to in-process for
+single-node.
+
+**Acceptance criteria.** A gated test asserts two limiter instances over a shared
+store enforce a combined budget, not 2×.
+
+**Files.** `crates/apex-server/src/rate_limit.rs`. **Size.** M. **Depends on:** none.
+
+## SRV-202 `[P1]` — Per-tenant token quotas; enforce/remove dead dimensions
+
+**Problem.** `QuotaLimits` declares `tool_executions_per_minute` and `memory_records`
+but `admit_run` enforces only concurrent runs + daily USD cost
+(`crates/apex-tenancy/src/model.rs:125-138`, `apex-server/src/tenancy.rs:553,560`);
+cost is USD-only with no token budget, and the rate limiter is per-principal not
+per-tenant. (PRD-004 R-G.6; audit Med.)
+
+**Change.** Add a per-tenant token budget; enforce (or remove) the two dead quota
+dimensions; add a per-tenant rate tier.
+
+**Acceptance criteria.** Tests assert a token budget blocks at threshold and that the
+previously-dead dimensions are either enforced or gone.
+
+**Files.** `crates/apex-tenancy/src/{model.rs,quota.rs}`, `apex-server/src/tenancy.rs`.
+**Size.** M. **Depends on:** PRV-101 (real token accounting).
+
+## SRV-203 `[P2]` — Tenant-configurable daily-cost reset boundary
+
+**Problem.** `current_day()` = epoch-seconds/86400, so budgets reset at 00:00 UTC for
+everyone (`crates/apex-server/src/tenancy.rs:497-502`). (PRD-004 R-G.7; audit Med.)
+
+**Change.** Make the reset boundary tenant-configurable (timezone/offset), read only
+at the server boundary per the clock-free-core rule.
+
+**Acceptance criteria.** A test asserts a tenant with a non-UTC offset resets at its
+local midnight.
+
+**Files.** `crates/apex-server/src/tenancy.rs`, tenancy model. **Size.** S.
+**Depends on:** none.
+
+---
+
+# WS-A / WS-runtime — Loop recovery, streaming, `ai` activity
+
+## AIC-201 `[P1]` — Step-error recovery + forced final answer
+
+**Problem.** A provider/stream error aborts the whole run via `?`
+(`crates/apex-agent/src/runtime.rs:247`); on budget exhaustion with pending tool
+calls the loop hard-errors with no answer (`:273-278`). (PRD-004 R-A.4; audit Med.)
+
+**Change.** Retry a recoverable model-step error; on the last step, re-call the model
+with tools disabled to force a final answer instead of erroring.
+
+**Acceptance criteria.** Tests: a transient step error retries and completes; a run at
+the step cap returns a tool-less final answer, not `Error::Runtime`.
+
+**Files.** `crates/apex-agent/src/runtime.rs`. **Size.** M. **Depends on:** none.
+
+## AIC-202 `[P2]` — Richer streaming events
+
+**Problem.** Only text deltas are emitted (`runtime.rs:302-305`); tool-call-argument
+streaming and any reasoning/thinking channel aren't surfaced (`events.rs:13-27`);
+mistralrs has no real streaming (`provider.rs:38-46`). (PRD-004 R-A.5; audit Low.)
+
+**Change.** Add `ToolCallDelta` and (where available) reasoning events to
+`RunEventSink`; surface them in the CLI/dashboard renderers.
+
+**Acceptance criteria.** A test asserts tool-call-argument deltas are emitted during a
+streamed tool turn.
+
+**Files.** `crates/apex-agent/src/{runtime.rs,events.rs}`, CLI/dashboard sinks.
+**Size.** M. **Depends on:** none.
+
+## RUN-201 `[P2]` — `ai` activity: honor model/params + correct error class
+
+**Problem.** The shared executor's `ai` activity ignores temperature/max_tokens/tools
+and always uses the default fast model, and classifies every failure `Retryable`
+even for permanent bad-request errors (`crates/apex-runtime/src/lib.rs:197-217`).
+(PRD-004 R-A.4; audit Med.)
+
+**Change.** Let an `ai` step pin a model and pass temperature/max_tokens/response_format;
+classify permanent (validation/bad-request) errors as non-retryable.
+
+**Acceptance criteria.** A test asserts an `ai` step honors a pinned model and that a
+validation error is not retried.
+
+**Files.** `crates/apex-runtime/src/lib.rs`. **Size.** M. **Depends on:** PRV-202.
+
+## RUN-202 `[P2]` — Sub-agent run observability + real cost
+
+**Problem.** `agent` activities run with `NullSink` and record only cost
+(`crates/apex-runtime/src/lib.rs:253,257`) — which is $0 for real providers until
+PRV-101, making server budget enforcement a no-op. (PRD-004 R-B.1; audit Low.)
+
+**Change.** Attach a real event sink (or a span-emitting sink) to sub-agent runs and
+record the PRV-101 cost against the parent project budget.
+
+**Acceptance criteria.** A test asserts a sub-agent activity's cost is non-zero and is
+charged to the project's daily accumulator.
+
+**Files.** `crates/apex-runtime/src/lib.rs`. **Size.** S. **Depends on:** PRV-101.
+
+---
+
+# WS-I — Guardrails & Prompt Management
+
+## SAF-201 `[P1]` — Content-safety / moderation / PII hooks
+
+**Problem.** No moderation, PII-redaction, or jailbreak checks anywhere in the agent
+loop or provider layer (audit grep). (PRD-004 R-I.1; audit Med.)
+
+**Change.** Add a `Guardrail` trait invoked on model input and output in `run_agent`
+(pluggable: a moderation provider, a PII redactor, a jailbreak classifier), fail-closed
+or annotate per policy.
+
+**Acceptance criteria.** A test asserts a configured guardrail can block/redact a
+flagged input and output; absent config, behavior is unchanged.
+
+**Files.** `crates/apex-agent/src/runtime.rs` + new `guardrail.rs`. **Size.** L.
+**Depends on:** none.
+
+## SAF-202 `[P2]` — Prompt template/versioning registry
+
+**Problem.** Instructions are a raw YAML string (`crates/apex-agent/src/definition.rs:39`);
+only workflow `${...}` interpolation exists — no versioned prompt registry, variables,
+or A/B. (PRD-004 R-I.2; audit Med.)
+
+**Change.** Add a prompt registry (named, versioned templates with typed variables);
+agents reference a template + version; support A/B selection.
+
+**Acceptance criteria.** A test resolves a versioned template with variables and pins a
+version across runs.
+
+**Files.** `crates/apex-agent/src/` (new `prompt.rs`). **Size.** M. **Depends on:** none.
+
+---
+
+# WS-L — Per-Tenant Metrics
+
+## OBS-201 `[P1]` — Per-tenant / per-project metric labels
+
+**Problem.** RED metrics are labeled only `route`/`method`/`status`
+(`crates/apex-server/src/hardening.rs:1008-1020`); LLM cost/token metrics are labeled
+by `model` only (`config.rs:385-406`) — a noisy tenant is invisible. (PRD-004 R-L.1;
+audit Med.)
+
+**Change.** Add a bounded-cardinality `tenant`/`project` label (or a separate
+per-tenant aggregate) to request and LLM metrics.
+
+**Acceptance criteria.** A test asserts a request/LLM metric carries a tenant label and
+that cardinality stays bounded (a capped/hashed label set).
+
+**Files.** `crates/apex-server/src/{hardening.rs,config.rs}`. **Size.** M.
+**Depends on:** PRV-101 (real cost to label).
+
+---
+
+# Exit criteria (Phase 2)
+
+1. Claude is a first-class provider; structured output and multimodal exist (PRV-201/202/204).
+2. Memory chunks + reranks; the semantic cache never serves a wrong-context or
+   wrong-model hit; keyword parity across backends (RAG-201..205).
+3. `apex-eval` fails CI on a real quality regression and can grade RAG (EVL-201..203).
+4. Multi-node rate limits + per-tenant token quotas are correct; daily windows are
+   tenant-local (SRV-201..203).
+5. The agent loop recovers from step errors and always returns an answer; guardrails
+   can gate input/output; prompts are versioned (AIC-201, SAF-201/202).
+6. Per-tenant metrics exist (OBS-201).
+
+---
+
+# Revision History
+
+| Version | Date | Description |
+|---------|------|-------------|
+| 1.0.0 | 2026-07-09 | Initial Phase-2 tickets from PRD-004 / the 2026-07-09 engineering audit (credible-AI-product P1/P2 work) |
