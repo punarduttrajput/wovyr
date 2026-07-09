@@ -7,12 +7,13 @@ Document ID: DEP-BKUP-001
 
 **Document ID:** DEP-BKUP-001
 **File Path:** `docs/12-deployment/backup-and-restore.md`
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Status:** Active — `apex admin backup`/`restore` and KMS root-key escrow are
 implemented and tested; the RPO/RTO targets below are validated by a real,
-timed drill (§4), not aspirational numbers.
+timed drill (§4), not aspirational numbers. §3.1 adds a remote
+(S3-compatible) destination, not yet drilled against a live endpoint.
 **Owner:** Reliability / Deployment Team
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-09
 
 ---
 
@@ -80,6 +81,34 @@ manager/HSM/sealed document *before* the appliance ever touches real data.
 See [encryption.md §5](../13-security/encryption.md#5-key-management) for
 the full rationale and a proven restore test
 (`crates/apex-kms/tests/root_key_escrow_restore.rs`).
+
+## 3.1 Remote (S3-compatible) destination
+
+`<dest>`/`<src>` also accept an `s3://bucket/prefix` URI, so a backup doesn't
+have to live on the same host it was taken from:
+
+```bash
+export APEX_S3_ENDPOINT=https://s3.us-east-1.amazonaws.com   # or a MinIO/Ceph RGW endpoint
+export APEX_S3_REGION=us-east-1                                # optional, defaults to us-east-1
+export APEX_S3_ACCESS_KEY_ID=...
+export APEX_S3_SECRET_ACCESS_KEY=...
+
+apex admin backup s3://my-backups/apex-prod
+apex admin restore s3://my-backups/apex-prod --yes
+```
+
+**Mechanics** (`apps/apex-cli/src/s3.rs`): the local backup/restore logic
+above (§3) is unchanged — the `s3://` path stages the identical local backup
+into a scratch directory, then uploads it (or downloads into one before
+restoring), so the same manifest/checksum/atomic-write guarantees apply
+regardless of destination. Requests are signed with AWS Signature Version 4,
+hand-rolled over `reqwest`+`hmac`/`sha2` rather than the `aws-sdk-s3` crate
+(this command only ever needs `PUT`/`GET`/`ListObjectsV2` against one
+bucket). **Not yet validated against a live S3-compatible endpoint** — no
+MinIO/real bucket exists in this repo's dev environment, so the signing
+logic is verified against independently-computed reference values (see
+`apps/apex-cli/src/s3.rs`'s tests) rather than a live drill; re-run §4.3's
+drill against a real bucket before relying on this in production.
 
 ---
 
@@ -179,4 +208,5 @@ substantially, or after a change to `apps/apex-cli/src/admin.rs`, and update
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-09 | Added §3.1: `apex admin backup\|restore` now accepts an `s3://bucket/prefix` remote destination (GA-002 §4.1), via a hand-rolled SigV4 signer. Not yet drilled against a live S3-compatible endpoint |
 | 1.0.0 | 2026-07-07 | Initial version: documents `apex admin backup`/`restore` (DR-1001) and root-key escrow (DR-1002), and defines RPO (≤15 min, backup-cadence-driven) / RTO (<5 min restore) targets for the single-node appliance, validated by a real timed drill at two scales (DR-1003) |

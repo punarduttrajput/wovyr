@@ -28,6 +28,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::config;
+use crate::s3::{S3Config, S3Uri};
 
 /// Written at the root of a backup directory, alongside the copied store tree.
 /// Named to make an accidental collision with a real `~/.apex` entry
@@ -58,8 +59,13 @@ struct FileEntry {
     size: u64,
 }
 
-/// `apex admin backup <dest>` — snapshot `~/.apex` into `<dest>`.
-pub fn backup_cmd(dest: &str) -> Result<()> {
+/// `apex admin backup <dest>` — snapshot `~/.apex` into `<dest>`: a local
+/// directory, or an `s3://bucket/prefix` URI (GA-002 §4.1) for a remote
+/// object-storage destination. The s3:// path stages the identical local
+/// backup (via [`backup_dir`], unchanged — same manifest, same checksums) into
+/// a scratch directory first, then uploads it, so the well-tested local logic
+/// stays the single source of truth for what a backup actually contains.
+pub async fn backup_cmd(dest: &str) -> Result<()> {
     let source = config::config_dir()?;
     if !source.exists() {
         return Err(Error::config(format!(
@@ -67,7 +73,18 @@ pub fn backup_cmd(dest: &str) -> Result<()> {
             source.display()
         )));
     }
-    let count = backup_dir(&source, Path::new(dest))?;
+
+    let count = if S3Uri::is_s3(dest) {
+        let uri = S3Uri::parse(dest)?;
+        let staging = staging_dir("backup")?;
+        let count = backup_dir(&source, &staging)?;
+        let upload_result = crate::s3::upload_dir(S3Config::from_env()?, &uri, &staging).await;
+        let _ = fs::remove_dir_all(&staging);
+        upload_result?;
+        count
+    } else {
+        backup_dir(&source, Path::new(dest))?
+    };
     println!(
         "backed up {count} file(s) from {} to {dest}",
         source.display()
@@ -76,9 +93,13 @@ pub fn backup_cmd(dest: &str) -> Result<()> {
 }
 
 /// `apex admin restore <src> --yes` — restore `~/.apex` from a backup made by
-/// `apex admin backup`. Overwrites the live `~/.apex` — irreversible for
-/// anything written there since the backup was taken, hence `--yes`.
-pub fn restore_cmd(src: &str, confirmed: bool) -> Result<()> {
+/// `apex admin backup`: a local directory, or an `s3://bucket/prefix` URI
+/// matching a remote backup's destination. Overwrites the live `~/.apex` —
+/// irreversible for anything written there since the backup was taken, hence
+/// `--yes`. The s3:// path downloads into a scratch directory first, then
+/// hands it to [`restore_dir`] unchanged, so the same checksum-before-write
+/// verification applies regardless of where the backup came from.
+pub async fn restore_cmd(src: &str, confirmed: bool) -> Result<()> {
     if !confirmed {
         eprintln!(
             "refusing to restore without --yes: this OVERWRITES the live ~/.apex \
@@ -89,12 +110,43 @@ pub fn restore_cmd(src: &str, confirmed: bool) -> Result<()> {
     }
     let dest = config::config_dir()?;
     fs::create_dir_all(&dest)?;
-    let count = restore_dir(Path::new(src), &dest)?;
+
+    let count = if S3Uri::is_s3(src) {
+        let uri = S3Uri::parse(src)?;
+        let staging = staging_dir("restore")?;
+        let download_result = crate::s3::download_dir(S3Config::from_env()?, &uri, &staging).await;
+        let restore_result = download_result.and_then(|_| restore_dir(&staging, &dest));
+        let _ = fs::remove_dir_all(&staging);
+        restore_result?
+    } else {
+        restore_dir(Path::new(src), &dest)?
+    };
     println!(
         "restored {count} file(s) from {src} into {}",
         dest.display()
     );
     Ok(())
+}
+
+/// A guaranteed-unique local scratch directory for staging an `s3://` backup's
+/// local copy before uploading (or after downloading). Named with a pid +
+/// nanosecond timestamp *and* a process-wide counter, not the timestamp alone —
+/// a timestamp-only name is exactly the shape that caused a real, reproduced
+/// flaky-test collision elsewhere in this workspace (`apex-tools`'
+/// `tempfile_dir` test helper) when two calls landed on the same clock tick.
+fn staging_dir(label: &str) -> Result<std::path::PathBuf> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "apex_admin_{label}_{}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 /// `apex admin migrate --target <workflow|memory|marketplace> --database-url

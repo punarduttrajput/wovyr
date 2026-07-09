@@ -74,3 +74,6 @@ semver.workspace = true
 # same versions already used by apex-plugin/apex-kms elsewhere in the workspace.
 sha2.workspace = true
 hex = "0.4"
+# AWS SigV4 request signing for an s3:// `apex admin backup|restore` destination
+# (GA-002 §4.1) — same crate/version apex-events already uses for webhook signing.
+hmac.workspace = true

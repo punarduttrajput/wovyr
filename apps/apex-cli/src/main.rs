@@ -20,6 +20,7 @@ mod config;
 mod kms;
 mod memory;
 mod plugin;
+mod s3;
 mod stream;
 mod workflow;
 
@@ -115,7 +116,10 @@ enum AdminCommand {
     /// tenancy, kms, and every other local store), quiescing every
     /// DUR-403-locked store directory for a consistent point-in-time copy.
     Backup {
-        /// Destination directory to write the backup into (created if missing).
+        /// Destination directory to write the backup into (created if missing),
+        /// or an `s3://bucket/prefix` URI for a remote object-storage destination
+        /// (needs `APEX_S3_ENDPOINT`/`APEX_S3_ACCESS_KEY_ID`/`APEX_S3_SECRET_ACCESS_KEY`,
+        /// and optionally `APEX_S3_REGION`).
         dest: String,
     },
 
@@ -123,7 +127,8 @@ enum AdminCommand {
     /// the live `~/.apex` — irreversible for anything written there since the
     /// backup was taken.
     Restore {
-        /// Source backup directory, as produced by `apex admin backup`.
+        /// Source backup directory, as produced by `apex admin backup`, or an
+        /// `s3://bucket/prefix` URI matching a remote backup's destination.
         src: String,
 
         /// Confirm the overwrite (required).
@@ -856,8 +861,8 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
             AuthCommand::CreateKey { principal } => auth::create_key_cmd(&principal),
         },
         Command::Admin { command } => match command {
-            AdminCommand::Backup { dest } => admin::backup_cmd(&dest),
-            AdminCommand::Restore { src, yes } => admin::restore_cmd(&src, yes),
+            AdminCommand::Backup { dest } => admin::backup_cmd(&dest).await,
+            AdminCommand::Restore { src, yes } => admin::restore_cmd(&src, yes).await,
             AdminCommand::Migrate {
                 target,
                 database_url,

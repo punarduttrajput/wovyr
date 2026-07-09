@@ -76,6 +76,9 @@ ring = "0.17"
 # apex-marketplace's package digests, apex-plugin's artifact verification, the
 # server's plugin-catalog digests, the CLI's backup-manifest digests).
 sha2 = "0.10"
+# HMAC-SHA256 (apex-events' webhook payload signing; the CLI's AWS SigV4 request
+# signing for an s3:// `apex admin backup` destination, GA-002 §4.1).
+hmac = "0.12"
 # Platform-API / plugin-manifest compatibility ranges (apex-plugin, apex-marketplace,
 # apex-server, the CLI).
 semver = "1"

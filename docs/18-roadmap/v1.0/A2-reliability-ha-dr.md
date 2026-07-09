@@ -7,16 +7,17 @@ Document ID: GA-002
 
 **Document ID:** GA-002
 **File Path:** `docs/18-roadmap/v1.0/A2-reliability-ha-dr.md`
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Status:** In progress — a first slice (single-node compose) has landed, plus
 a first Kubernetes artifact (a Helm chart for that same single-node topology,
 §2), and backup/restore + DR targets are now real for the single-node
 appliance (§2, RM-GA-P2 DR-1001/DR-1002/DR-1003). Neither the Kubernetes
 chart nor the DR targets have been validated against a real multi-replica
-cluster — still gated per §7's own risk note. §4.1 gained a remote
-(S3-compatible) backup-destination item on 2026-07-07.
+cluster — still gated per §7's own risk note. §4.1's remote (S3-compatible)
+backup-destination item, scoped on 2026-07-07, **shipped on 2026-07-09**:
+`apex admin backup|restore` now accepts an `s3://bucket/prefix` destination.
 **Owner:** Reliability / Deployment Team
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-09
 
 ---
 
@@ -83,6 +84,29 @@ remainder is scoped here.
   closes the single-node portion of §5's exit criterion; the **multi-replica,
   real-cluster** "node-loss drill" §5 also requires remains open, gated on
   the same missing live cluster as the rest of this document's HA remainder.
+- **A remote (S3-compatible) backup destination now exists (2026-07-09).**
+  `apex admin backup <dest>`/`restore <src>` accept an `s3://bucket/prefix`
+  URI alongside the original local-path form — the local `backup_dir`/
+  `restore_dir` logic (manifest, sha256 checksums, atomic writes) is unchanged
+  and does all the real work; the `s3://` path just stages that identical
+  local backup into a scratch directory, then syncs it to/from the bucket, so
+  the same tested integrity guarantees apply regardless of destination.
+  Connection details (`APEX_S3_ENDPOINT`/`APEX_S3_REGION`/
+  `APEX_S3_ACCESS_KEY_ID`/`APEX_S3_SECRET_ACCESS_KEY`) are read the same way
+  every other optional backend in this workspace reads its connection string.
+  Implemented as a hand-rolled AWS SigV4 signer (`apps/apex-cli/src/s3.rs`)
+  over `reqwest`+`hmac`/`sha2` rather than the `aws-sdk-s3` crate — backup/
+  restore only ever needs `PUT`/`GET`/`ListObjectsV2` against one bucket, so
+  the full SDK's credential-chain/retry/generated-API surface for ~200 other
+  AWS services would be dead weight. The signing core is verified against
+  reference values independently computed via .NET's `HMACSHA256`/`SHA256`
+  (not by this same Rust code) — a real external check, not a
+  self-consistency check — plus three independently-computed civil-date
+  reference points (including a leap day) for the `x-amz-date` formatter.
+  **Not yet validated against a live S3-compatible endpoint** (no MinIO/real
+  bucket in this dev environment) — the signing logic and the local-stage/
+  sync integration are proven; an actual end-to-end backup→restore round
+  trip against a real bucket is not.
 
 ---
 
@@ -105,14 +129,13 @@ backup/restore, and no DR runbook.
   (`~/.apex/workflows`), memory, tenancy, secrets, the KMS tenant-key catalog
   (`~/.apex/kms`), and the marketplace registry (file or `PostgresRegistryStore`).
 - A **DR runbook** with explicit RPO/RTO targets and a documented restore drill.
-- **A remote (S3-compatible) backup destination, not just a local filesystem
-  path** — `apex admin backup <dest>` (RM-GA-P2 DR-1001) only ever writes to a
-  local `dest`. Object storage was named as platform infrastructure in the
-  Day-1 architecture docs (`docs/01-product/prd.md`,
-  `docs/02-architecture/c4-container.md`) but nothing in the codebase uses it
-  today; a backup command is the first concrete, scoped need for it — added
-  2026-07-07, found while reconciling those docs against reality, not part of
-  the original review.
+- ~~**A remote (S3-compatible) backup destination, not just a local filesystem
+  path**~~ **Done (2026-07-09)** — `apex admin backup <dest>`/`restore <src>`
+  now accept `s3://bucket/prefix`, not just a local path. Object storage was
+  named as platform infrastructure in the Day-1 architecture docs
+  (`docs/01-product/prd.md`, `docs/02-architecture/c4-container.md`) but
+  nothing in the codebase used it before this. See §2 for the implementation
+  notes and the live-endpoint validation caveat.
 
 ## 4.2 Non-functional
 - The artifacts deploy the *actual* built binary/features, not the aspirational
@@ -175,6 +198,7 @@ Feeds the v1.0 exit criterion of meeting published SLOs in production
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.4.0 | 2026-07-09 | Shipped the §4.1 remote (S3-compatible) backup-destination deliverable scoped in 1.3.0: `apex admin backup\|restore` accept an `s3://bucket/prefix` URI, via a hand-rolled SigV4 signer (`apps/apex-cli/src/s3.rs`) verified against independently-computed .NET crypto reference values. Not yet validated against a live S3-compatible endpoint (none available in this dev environment) |
 | 1.3.0 | 2026-07-07 | Added a §4.1 deliverable: a remote (S3-compatible) `apex admin backup` destination — object storage was named as platform infrastructure in the Day-1 architecture docs but nothing uses it; this is the first concrete need. Found during a project-wide doc review, not part of the original review |
 | 1.2.0 | 2026-07-07 | Recorded the single-node slice of §4.1's backup/restore + DR-runbook deliverables as done (RM-GA-P2 DR-1001/DR-1002/DR-1003): `apex admin backup`/`restore`, mandatory KMS root-key escrow, and RPO/RTO targets validated by a real timed drill — see [backup-and-restore.md](../../12-deployment/backup-and-restore.md). Updated §2 to record it; §5's exit criterion remains unmet for the multi-replica/real-cluster case, which this doesn't address |
 | 1.1.0 | 2026-07-05 | Recorded the first real Kubernetes artifact: `deployment/helm/apex/` (single-replica Helm chart for the existing single-binary topology), offline-validated with downloaded `helm`/`kubectl`/`kubeconform` (caught a real duplicate-label bug). Updated §2/§4.1/§6/§7 to state plainly this is not HA and not validated against a real cluster — the exit criterion in §5 is unchanged and unmet |

@@ -209,6 +209,7 @@ dependencies = [
  "async-trait",
  "clap",
  "hex",
+ "hmac 0.12.1",
  "reqwest 0.12.28",
  "ring",
  "semver",

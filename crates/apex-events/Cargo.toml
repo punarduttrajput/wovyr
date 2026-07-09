@@ -15,6 +15,6 @@ apex-common.workspace = true
 apex-kms.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Webhook payload signing (HMAC-SHA256). Both cached and already in the dep graph.
-hmac = "0.12"
+# Webhook payload signing (HMAC-SHA256).
+hmac.workspace = true
 sha2.workspace = true
