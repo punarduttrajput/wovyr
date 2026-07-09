@@ -100,8 +100,30 @@ impl FileKmsStore {
         let bytes = serde_json::to_vec_pretty(&list)
             .map_err(|e| Error::config(format!("encode kms.json: {e}")))?;
         apex_common::fs::atomic_write(&self.path, bytes)
-            .map_err(|e| Error::config(format!("write kms.json: {e}")))
+            .map_err(|e| Error::config(format!("write kms.json: {e}")))?;
+        restrict_permissions(&self.path)
     }
+}
+
+/// Restrict `kms.json` to owner-only access on Unix, mirroring
+/// [`crate::root::from_file`]'s handling of `root.key` — entries here are
+/// inert ciphertext without the root key, but this closes the defense-in-depth
+/// gap where the wrapped tenant-key catalog got whatever the process
+/// umask/ACL default was. No-op on non-Unix, same documented convention as
+/// `root::restrict_permissions` and the CLI's `credentials.json` handling.
+#[cfg(unix)]
+fn restrict_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)
+        .map_err(|e| Error::config(format!("stat kms.json: {e}")))?
+        .permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(path, perms).map_err(|e| Error::config(format!("chmod kms.json: {e}")))
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &std::path::Path) -> Result<()> {
+    Ok(())
 }
 
 impl KmsStore for FileKmsStore {
@@ -163,6 +185,26 @@ mod tests {
         let reopened = FileKmsStore::new(&dir).unwrap();
         assert_eq!(reopened.get("acme").unwrap().unwrap().tenant, "acme");
         assert_eq!(reopened.get("beta").unwrap().unwrap().tenant, "beta");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_store_restricts_kms_json_to_owner_only() {
+        let dir = std::env::temp_dir().join(format!("apex_kms_perm_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FileKmsStore::new(&dir).unwrap();
+        store.put(sample("acme")).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("kms.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

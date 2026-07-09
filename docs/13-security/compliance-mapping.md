@@ -7,13 +7,13 @@ Document ID: SEC-007
 
 **Document ID:** SEC-007  
 **File Path:** `docs/13-security/compliance-mapping.md`  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Draft — first mapping pass, scoped to the encryption/key-management
 control family (`apex-kms`, `apex-secrets`, `apex-memory`'s encrypting store,
 `apex-events`'s encrypting webhook store, `apex-audit`). Verified against real
 code and a new adversarial test suite, not a third-party attestation.  
 **Owner:** Security Team  
-**Last Updated:** 2026-07-05
+**Last Updated:** 2026-07-09
 
 ---
 
@@ -150,16 +150,25 @@ Found during this pass, not fixed here (see rationale per item):
    `APEX_AUTH_MODE` defaulting to `disabled-loopback` when unset, which still
    trusts raw headers exactly as before on a loopback bind (an explicit,
    documented dev-only mode, not a network-reachable default).
-2. **`kms.json` (the wrapped tenant-key catalog) has no restricted file
-   permissions.** `FileKmsStore::new` ([store.rs](../../crates/apex-kms/src/store.rs))
-   writes it with whatever the process umask/ACL defaults to — unlike
-   `root::from_file`'s `root.key`, which is `chmod 0600` on Unix. Lower
-   severity, since entries are inert ciphertext without the root key, but a
-   defense-in-depth gap worth closing alongside item 3.
-3. **Root-key file permissions are a no-op on non-Unix.**
-   `root::restrict_permissions` ([root.rs](../../crates/apex-kms/src/root.rs))
-   only calls `chmod` under `#[cfg(unix)]`; on Windows, `~/.apex/kms/root.key`
-   gets the OS default ACL rather than being locked to the owning process.
+2. **Closed.** `kms.json` (the wrapped tenant-key catalog) is now restricted to
+   owner-only (`0600`) on Unix after every write —
+   `FileKmsStore::persist`'s `restrict_permissions`
+   ([store.rs](../../crates/apex-kms/src/store.rs)), the same treatment
+   `root::from_file` already gave `root.key`. Proven by
+   `store::tests::file_store_restricts_kms_json_to_owner_only`.
+3. **Root-key (and now `kms.json`) file permissions remain a no-op on
+   non-Unix**, by the same explicit, documented convention used elsewhere in
+   this codebase for owner-only file hardening (`apex-kms`'s
+   `root::restrict_permissions`, the CLI's `credentials.json`
+   `restrict_permissions` in
+   [config.rs](../../apps/apex-cli/src/config.rs)) — all only call `chmod`
+   under `#[cfg(unix)]`; on Windows these files get the OS default ACL rather
+   than being locked to the owning process. Writing a real Windows ACL
+   restriction needs a Windows environment to author and verify against
+   (this dev environment and this repo's CI are Linux-only — see
+   [ci.yml](../../.github/workflows/ci.yml), no `windows-latest` job exists),
+   the same category of gap as the HA/DR workstream's live-cluster and
+   Terraform items: reasoned about, not yet buildable-and-verifiable here.
 4. **No cloud-KMS-/HSM-backed root.** `LocalKms` holds the root key in-process
    by design ([kms.rs](../../crates/apex-kms/src/kms.rs) doc comment) — a
    documented, intentional single-host stand-in. The `Kms` trait is the
@@ -187,5 +196,6 @@ Found during this pass, not fixed here (see rationale per item):
 
 | Version | Date | Description |
 |---------|------|--------------|
+| 1.2.0 | 2026-07-09 | Closed residual finding 2: `kms.json` (wrapped tenant-key catalog) now `chmod 0600` on Unix after every write, same treatment as `root.key`. Clarified finding 3 (non-Unix ACL) as matching this codebase's existing documented convention, gated on a Windows environment this repo's CI/dev setup doesn't have |
 | 1.1.0 | 2026-07-05 | Added `apex-events`'s new `EncryptedFileWebhookStore` (webhook subscription signing secrets, `APEX_WEBHOOKS_ENCRYPT_AT_REST`) as a third §4 encrypting-store consumer, updated CC6.6/Art. 32 evidence accordingly |
 | 1.0.0 | 2026-07-05 | Initial mapping: SOC 2 (CC6.1/6.6/6.7/6.8/7.2), ISO 27001 Annex A (8.24/5.15/8.10/8.15/5.31), and GDPR (Art. 32, Art. 17) controls mapped to `apex-kms`/`apex-secrets`/`apex-memory`/`apex-audit`, backed by a new adversarial test suite (`crates/apex-kms/tests/adversarial.rs`) and a documented, proven residual-risk finding (anonymous default-tenant bypass reaching `kms:admin`) |
