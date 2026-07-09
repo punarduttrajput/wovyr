@@ -25,11 +25,12 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 /// Which credential scheme the server verifies, from `APEX_AUTH_MODE`. Resolved
 /// **once**, at [`AppState`](crate::AppState) construction (`AppState.auth_mode`),
@@ -234,10 +235,110 @@ fn hash_key(raw: &str) -> String {
     format!("{:x}", Sha256::digest(raw.as_bytes()))
 }
 
+/// Wall-clock milliseconds since the Unix epoch — read only at the key-store boundary.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// `last_used` is refreshed at most this often per key, so the auth hot path doesn't
+/// rewrite the store on every single request (SRV-104).
+const LAST_USED_PERSIST_INTERVAL_MS: u64 = 60_000;
+
+/// Stored metadata for one API key (RM-AIM-P1 SRV-104). The raw key is never stored —
+/// the map is keyed by its SHA-256 hash — and `key_id` (a stable, non-secret prefix of
+/// that hash) is the handle an operator uses to revoke/rotate it.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct KeyRecord {
+    pub key_id: String,
+    pub principal: String,
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub expires_at_ms: Option<u64>,
+    #[serde(default)]
+    pub revoked: bool,
+    #[serde(default)]
+    pub last_used_ms: Option<u64>,
+}
+
+impl KeyRecord {
+    /// Whether the key is currently usable: not revoked and not past its expiry.
+    fn is_live(&self, now: u64) -> bool {
+        !self.revoked && self.expires_at_ms.is_none_or(|exp| now < exp)
+    }
+}
+
+/// A value-free projection of a [`KeyRecord`] for listing (never carries the hash).
+#[derive(Clone, Serialize)]
+pub struct KeyMetadata {
+    pub key_id: String,
+    pub principal: String,
+    pub created_at_ms: u64,
+    pub expires_at_ms: Option<u64>,
+    pub revoked: bool,
+    pub last_used_ms: Option<u64>,
+}
+
+impl From<&KeyRecord> for KeyMetadata {
+    fn from(r: &KeyRecord) -> Self {
+        Self {
+            key_id: r.key_id.clone(),
+            principal: r.principal.clone(),
+            created_at_ms: r.created_at_ms,
+            expires_at_ms: r.expires_at_ms,
+            revoked: r.revoked,
+            last_used_ms: r.last_used_ms,
+        }
+    }
+}
+
+/// The stable, non-secret handle for a key: `key_<first 12 hex of its hash>`.
+fn key_id_for(hash: &str) -> String {
+    format!("key_{}", &hash[..hash.len().min(12)])
+}
+
+/// A fresh random raw key (shown once) — 40 alphanumerics.
+fn mint_raw() -> String {
+    use rand::Rng;
+    rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(40)
+        .map(char::from)
+        .collect()
+}
+
 /// Resolves a bearer API key to the principal it authenticates.
 pub trait ApiKeyStore: Send + Sync {
-    /// The principal `raw_key` authenticates, if it is a known, live key.
+    /// The principal `raw_key` authenticates, if it maps to a **live** key (not
+    /// revoked, not expired). Refreshes the key's `last_used` (throttled) as a
+    /// side effect.
     fn principal_for(&self, raw_key: &str) -> Option<String>;
+}
+
+/// Look up `raw_key` in `map`, enforcing revocation + expiry. Returns the principal of
+/// a live key and, when its `last_used` is stale enough to persist, `true` so the
+/// caller writes the (already-mutated) map back (SRV-104).
+fn resolve_live_key(
+    map: &mut BTreeMap<String, KeyRecord>,
+    raw_key: &str,
+) -> (Option<String>, bool) {
+    let now = now_ms();
+    let Some(record) = map.get_mut(&hash_key(raw_key)) else {
+        return (None, false);
+    };
+    if !record.is_live(now) {
+        return (None, false);
+    }
+    let principal = record.principal.clone();
+    let should_persist = record
+        .last_used_ms
+        .is_none_or(|lu| now.saturating_sub(lu) >= LAST_USED_PERSIST_INTERVAL_MS);
+    if should_persist {
+        record.last_used_ms = Some(now);
+    }
+    (Some(principal), should_persist)
 }
 
 /// An in-memory key store — the crate's own tests, an `authz_matrix` integration
@@ -245,7 +346,7 @@ pub trait ApiKeyStore: Send + Sync {
 /// credential without touching `~/.apex/auth`.
 #[derive(Default)]
 pub struct InMemoryApiKeyStore {
-    by_hash: RwLock<BTreeMap<String, String>>,
+    by_hash: RwLock<BTreeMap<String, KeyRecord>>,
 }
 
 impl InMemoryApiKeyStore {
@@ -253,28 +354,39 @@ impl InMemoryApiKeyStore {
         Self::default()
     }
 
-    /// Register `raw_key` as authenticating `principal` (test helper / bootstrap).
+    /// Register `raw_key` as authenticating `principal` — a live key with no expiry
+    /// (test helper / bootstrap).
     pub fn insert(&self, raw_key: &str, principal: impl Into<String>) {
+        let hash = hash_key(raw_key);
+        let key_id = key_id_for(&hash);
         self.by_hash
             .write()
             .expect("api key store poisoned")
-            .insert(hash_key(raw_key), principal.into());
+            .insert(
+                hash,
+                KeyRecord {
+                    key_id,
+                    principal: principal.into(),
+                    created_at_ms: now_ms(),
+                    expires_at_ms: None,
+                    revoked: false,
+                    last_used_ms: None,
+                },
+            );
     }
 }
 
 impl ApiKeyStore for InMemoryApiKeyStore {
     fn principal_for(&self, raw_key: &str) -> Option<String> {
-        self.by_hash
-            .read()
-            .expect("api key store poisoned")
-            .get(&hash_key(raw_key))
-            .cloned()
+        let mut map = self.by_hash.write().expect("api key store poisoned");
+        resolve_live_key(&mut map, raw_key).0
     }
 }
 
-/// A durable key store at `~/.apex/auth/api_keys.json` (hash → principal; the raw key
-/// is never stored, mirroring how secrets/webhook signing keys are handled elsewhere
-/// in this codebase).
+/// A durable key store at `~/.apex/auth/api_keys.json` ([`KeyRecord`] keyed by hash;
+/// the raw key is never stored, mirroring secrets/webhook signing keys elsewhere).
+/// Supports the full lifecycle (SRV-104): create (with optional TTL), list, revoke,
+/// rotate-with-grace — used by the CLI's `apex auth` subcommands.
 pub struct FileApiKeyStore {
     path: PathBuf,
 }
@@ -288,33 +400,149 @@ impl FileApiKeyStore {
         })
     }
 
-    fn load(&self) -> BTreeMap<String, String> {
-        std::fs::read(&self.path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+    /// Load the key map, transparently migrating the pre-SRV-104 `hash → principal`
+    /// string format (each entry becomes a live, never-expiring [`KeyRecord`]).
+    fn load(&self) -> BTreeMap<String, KeyRecord> {
+        let Ok(bytes) = std::fs::read(&self.path) else {
+            return BTreeMap::new();
+        };
+        if let Ok(map) = serde_json::from_slice::<BTreeMap<String, KeyRecord>>(&bytes) {
+            return map;
+        }
+        // Fall back to the old `hash -> principal` shape and migrate it in memory.
+        serde_json::from_slice::<BTreeMap<String, String>>(&bytes)
+            .map(|old| {
+                old.into_iter()
+                    .map(|(hash, principal)| {
+                        let key_id = key_id_for(&hash);
+                        (
+                            hash,
+                            KeyRecord {
+                                key_id,
+                                principal,
+                                created_at_ms: now_ms(),
+                                expires_at_ms: None,
+                                revoked: false,
+                                last_used_ms: None,
+                            },
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    /// Mint a fresh random API key for `principal`, persist only its hash, and return
-    /// the raw key — shown once, exactly like every other credential-issuance flow.
-    /// The CLI's `apex auth create-key` is the operator-facing entry point.
-    pub fn create_key(&self, principal: &str) -> std::io::Result<String> {
-        use rand::Rng;
-        let raw: String = rand::thread_rng()
-            .sample_iter(&rand::distributions::Alphanumeric)
-            .take(40)
-            .map(char::from)
-            .collect();
+    fn save(&self, map: &BTreeMap<String, KeyRecord>) -> std::io::Result<()> {
+        std::fs::write(&self.path, serde_json::to_vec_pretty(map)?)
+    }
+
+    /// Mint a fresh key for `principal` (optionally expiring after `ttl`), persist only
+    /// its hash + metadata, and return `(key_id, raw_key)` — the raw key shown once.
+    pub fn create_key(
+        &self,
+        principal: &str,
+        ttl: Option<Duration>,
+    ) -> std::io::Result<(String, String)> {
+        let raw = mint_raw();
+        let hash = hash_key(&raw);
+        let key_id = key_id_for(&hash);
+        let now = now_ms();
         let mut map = self.load();
-        map.insert(hash_key(&raw), principal.to_string());
-        std::fs::write(&self.path, serde_json::to_vec_pretty(&map)?)?;
-        Ok(raw)
+        map.insert(
+            hash,
+            KeyRecord {
+                key_id: key_id.clone(),
+                principal: principal.to_string(),
+                created_at_ms: now,
+                expires_at_ms: ttl.map(|t| now + t.as_millis() as u64),
+                revoked: false,
+                last_used_ms: None,
+            },
+        );
+        self.save(&map)?;
+        Ok((key_id, raw))
+    }
+
+    /// Metadata for every key (value-free — no hashes), sorted by creation time.
+    pub fn list_keys(&self) -> std::io::Result<Vec<KeyMetadata>> {
+        let mut items: Vec<KeyMetadata> = self.load().values().map(KeyMetadata::from).collect();
+        items.sort_by_key(|k| k.created_at_ms);
+        Ok(items)
+    }
+
+    /// Revoke the key with `key_id` (immediately rejected at auth). Returns whether a
+    /// matching key was found.
+    pub fn revoke(&self, key_id: &str) -> std::io::Result<bool> {
+        let mut map = self.load();
+        let mut found = false;
+        for record in map.values_mut() {
+            if record.key_id == key_id {
+                record.revoked = true;
+                found = true;
+            }
+        }
+        if found {
+            self.save(&map)?;
+        }
+        Ok(found)
+    }
+
+    /// Rotate the key with `key_id`: mint a replacement for the same principal and set
+    /// the old key to expire after `grace` (so an in-flight client keeps working during
+    /// the window, then the old key is rejected). Returns the new `(key_id, raw_key)`,
+    /// or `None` if `key_id` was unknown.
+    pub fn rotate(
+        &self,
+        key_id: &str,
+        grace: Duration,
+    ) -> std::io::Result<Option<(String, String)>> {
+        let now = now_ms();
+        let mut map = self.load();
+        let Some(principal) = map
+            .values()
+            .find(|r| r.key_id == key_id)
+            .map(|r| r.principal.clone())
+        else {
+            return Ok(None);
+        };
+        // Expire the old key after the grace window (unless already sooner).
+        let deadline = now + grace.as_millis() as u64;
+        for record in map.values_mut() {
+            if record.key_id == key_id {
+                record.expires_at_ms = Some(match record.expires_at_ms {
+                    Some(existing) => existing.min(deadline),
+                    None => deadline,
+                });
+            }
+        }
+        let raw = mint_raw();
+        let hash = hash_key(&raw);
+        let new_id = key_id_for(&hash);
+        map.insert(
+            hash,
+            KeyRecord {
+                key_id: new_id.clone(),
+                principal,
+                created_at_ms: now,
+                expires_at_ms: None,
+                revoked: false,
+                last_used_ms: None,
+            },
+        );
+        self.save(&map)?;
+        Ok(Some((new_id, raw)))
     }
 }
 
 impl ApiKeyStore for FileApiKeyStore {
     fn principal_for(&self, raw_key: &str) -> Option<String> {
-        self.load().get(&hash_key(raw_key)).cloned()
+        let mut map = self.load();
+        let (principal, changed) = resolve_live_key(&mut map, raw_key);
+        if changed {
+            // Best-effort last-used refresh; failure to persist must not fail auth.
+            let _ = self.save(&map);
+        }
+        principal
     }
 }
 
@@ -447,9 +675,116 @@ mod tests {
     fn file_api_key_store_persists_minted_keys() {
         let dir = std::env::temp_dir().join(format!("apex-auth-test-{}", std::process::id()));
         let store = FileApiKeyStore::new(&dir).unwrap();
-        let raw = store.create_key("alice").unwrap();
+        let (_key_id, raw) = store.create_key("alice", None).unwrap();
         assert_eq!(store.principal_for(&raw).as_deref(), Some("alice"));
         assert_eq!(store.principal_for("not-a-key"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SRV-104: an expired key is rejected at auth.
+    #[test]
+    fn expired_key_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("apex-auth-exp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FileApiKeyStore::new(&dir).unwrap();
+        // A zero-duration TTL is already in the past by the time auth runs.
+        let (_id, raw) = store
+            .create_key("alice", Some(Duration::from_millis(0)))
+            .unwrap();
+        // Ensure the clock has advanced at least 1ms past the expiry.
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(
+            store.principal_for(&raw),
+            None,
+            "an expired key must be rejected"
+        );
+        // A non-expiring key for the same principal still works.
+        let (_id2, raw2) = store.create_key("alice", None).unwrap();
+        assert_eq!(store.principal_for(&raw2).as_deref(), Some("alice"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SRV-104: a revoked key is rejected at auth.
+    #[test]
+    fn revoked_key_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("apex-auth-rev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FileApiKeyStore::new(&dir).unwrap();
+        let (key_id, raw) = store.create_key("alice", None).unwrap();
+        assert_eq!(store.principal_for(&raw).as_deref(), Some("alice"));
+        assert!(store.revoke(&key_id).unwrap(), "revoke finds the key");
+        assert_eq!(
+            store.principal_for(&raw),
+            None,
+            "a revoked key must be rejected"
+        );
+        // Revoking an unknown key id is reported as not-found.
+        assert!(!store.revoke("key_deadbeef").unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SRV-104: rotation issues a new working key and expires the old on a grace
+    /// schedule — both valid during the window, only the old one lapses after it.
+    #[test]
+    fn rotation_issues_new_key_and_expires_old_after_grace() {
+        let dir = std::env::temp_dir().join(format!("apex-auth-rot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FileApiKeyStore::new(&dir).unwrap();
+        let (old_id, old_raw) = store.create_key("svc", None).unwrap();
+
+        // A tiny grace so the test can observe the old key lapse without a long sleep.
+        let (new_id, new_raw) = store
+            .rotate(&old_id, Duration::from_millis(30))
+            .unwrap()
+            .expect("rotate finds the key");
+        assert_ne!(new_id, old_id, "rotation mints a distinct key");
+
+        // Within the grace window both keys authenticate.
+        assert_eq!(store.principal_for(&old_raw).as_deref(), Some("svc"));
+        assert_eq!(store.principal_for(&new_raw).as_deref(), Some("svc"));
+
+        // After the grace window the old key lapses; the new key still works.
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(
+            store.principal_for(&old_raw),
+            None,
+            "old key must expire after grace"
+        );
+        assert_eq!(store.principal_for(&new_raw).as_deref(), Some("svc"));
+
+        // Rotating an unknown key id returns None.
+        assert!(
+            store
+                .rotate("key_deadbeef", Duration::from_secs(1))
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SRV-104: the pre-lifecycle `hash -> principal` on-disk format is migrated on
+    /// load, so existing keys keep authenticating after an upgrade.
+    #[test]
+    fn legacy_hash_to_principal_format_is_migrated() {
+        let dir = std::env::temp_dir().join(format!("apex-auth-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Write the old format directly: { "<sha256(raw)>": "alice" }.
+        let raw = "legacy-key-value";
+        let legacy: BTreeMap<String, String> =
+            [(hash_key(raw), "alice".to_string())].into_iter().collect();
+        std::fs::write(
+            dir.join("api_keys.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let store = FileApiKeyStore::new(&dir).unwrap();
+        assert_eq!(
+            store.principal_for(raw).as_deref(),
+            Some("alice"),
+            "a legacy key must still authenticate after migration"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

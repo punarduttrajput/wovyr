@@ -39,6 +39,7 @@ mod secrets;
 mod state;
 mod tenancy;
 mod tools;
+mod webhook_outbox;
 mod webhooks;
 mod workflow_runner;
 
@@ -304,6 +305,10 @@ pub async fn serve(addr: SocketAddr) -> apex_common::Result<()> {
     // to run (the prior process died mid-drive) would otherwise strand its
     // execution in a non-terminal state forever — nothing else re-scans the store.
     resume_in_flight_executions(&state).await;
+    // Re-dispatch webhook deliveries left pending when the previous process died
+    // (RM-AIM-P1 SRV-103) — they'd otherwise be lost, since delivery was
+    // fire-and-forget with no durable record.
+    webhooks::recover_outbox(&state);
     // Background dispatcher loops (RM-GA-P2 EXE-601): without these, G1 durable
     // timers and G2 schedules only ever fired when an operator ran the CLI's
     // `apex workflows tick` on the same host — a `wait: {timer: {after: "30d"}}`
@@ -313,44 +318,108 @@ pub async fn serve(addr: SocketAddr) -> apex_common::Result<()> {
     let dispatch_interval = Duration::from_secs(env_u64("APEX_DISPATCH_INTERVAL_SECS", 5));
     let dispatch_handles = spawn_dispatch_loops(&state, dispatch_interval);
     let app = router(state);
+    // Bounded drain deadline: how long graceful shutdown waits for in-flight requests
+    // before forcing the listener closed (SRV-101).
+    let grace = Duration::from_secs(env_u64("APEX_SHUTDOWN_GRACE_SECS", 30));
 
+    // Graceful shutdown (RM-AIM-P1 SRV-101): on SIGINT/SIGTERM, stop accepting new
+    // connections and let in-flight requests finish (within `grace`) rather than
+    // dropping them. The serving future then returns and the dispatch loops below are
+    // aborted — previously that abort only ever ran on a hard serve error, since
+    // nothing signaled a clean stop.
     let result = match tls {
-        Some((cert, key)) => {
-            install_default_crypto_provider();
-            match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key).await {
-                Ok(config) => {
-                    tracing::info!(%addr, "apex server listening (https)");
-                    // `with_connect_info` so `rate_limit`'s client-IP fallback
-                    // (SEC-203) sees the real peer address for callers with no
-                    // verified principal.
-                    axum_server::bind_rustls(addr, config)
-                        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                        .await
-                        .map_err(|e| apex_common::Error::Runtime(format!("server error: {e}")))
-                }
-                Err(e) => Err(apex_common::Error::config(format!(
-                    "failed to load TLS cert/key: {e}"
-                ))),
-            }
-        }
+        Some((cert, key)) => serve_tls(addr, &cert, &key, app, grace, shutdown_signal()).await,
         None => match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 tracing::info!(%addr, "apex server listening (http)");
-                axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<SocketAddr>(),
-                )
-                .await
-                .map_err(|e| apex_common::Error::Runtime(format!("server error: {e}")))
+                serve_http(listener, app, shutdown_signal()).await
             }
             Err(e) => Err(apex_common::Error::Io(e)),
         },
     };
 
+    // The serving future returned — a clean drained shutdown or a hard error. Either
+    // way stop the background dispatcher loops so they don't outlive the HTTP server.
     for handle in dispatch_handles {
         handle.abort();
     }
+    tracing::info!("apex server stopped");
     result
+}
+
+/// Serve `app` over plain HTTP on `listener` until `shutdown` resolves, then drain
+/// in-flight requests. Extracted from [`serve`] so tests can drive shutdown via a
+/// future they control instead of a process-global OS signal.
+async fn serve_http(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> apex_common::Result<()> {
+    // `with_connect_info` so `rate_limit`'s client-IP fallback (SEC-203) sees the real
+    // peer address for callers with no verified principal.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+    .map_err(|e| apex_common::Error::Runtime(format!("server error: {e}")))
+}
+
+/// Serve `app` over HTTPS until `shutdown` resolves, then drain in-flight requests
+/// within `grace` via `axum_server`'s own graceful-shutdown handle.
+async fn serve_tls(
+    addr: SocketAddr,
+    cert: &str,
+    key: &str,
+    app: Router,
+    grace: Duration,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> apex_common::Result<()> {
+    install_default_crypto_provider();
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+        .await
+        .map_err(|e| apex_common::Error::config(format!("failed to load TLS cert/key: {e}")))?;
+    tracing::info!(%addr, "apex server listening (https)");
+    let handle = axum_server::Handle::new();
+    let drain = handle.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        // Stop accepting, then wait up to `grace` for in-flight connections.
+        drain.graceful_shutdown(Some(grace));
+    });
+    axum_server::bind_rustls(addr, config)
+        .handle(handle)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+        .map_err(|e| apex_common::Error::Runtime(format!("server error: {e}")))
+}
+
+/// Resolve when the process is asked to stop: SIGINT (Ctrl-C) on any platform, or
+/// SIGTERM on Unix (what systemd/Kubernetes send). The signal is only *observed* here;
+/// the caller decides what draining to do (SRV-101).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            // If the handler can't be installed, never resolve via this arm.
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    tracing::info!("shutdown signal received; draining in-flight requests");
 }
 
 #[cfg(test)]
@@ -2463,6 +2532,85 @@ mod tests {
 
         server.abort();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RM-AIM-P1 SRV-101: a shutdown signal mid-request drains the in-flight request to
+    /// completion, then closes the listener so new connections are refused. Drives the
+    /// same `serve_http` path `serve()` uses, with a test-controlled shutdown future in
+    /// place of a process-global OS signal.
+    #[tokio::test]
+    async fn graceful_shutdown_drains_in_flight_then_refuses_new_connections() {
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let started = Arc::new(Notify::new());
+        let allow = Arc::new(Notify::new());
+        let (s2, a2) = (started.clone(), allow.clone());
+
+        // A slow route: announces it is in-flight, then blocks until the test allows it.
+        let app = Router::new().route(
+            "/slow",
+            axum::routing::get(move || {
+                let (started, allow) = (s2.clone(), a2.clone());
+                async move {
+                    started.notify_one();
+                    allow.notified().await;
+                    "done"
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_http(listener, app, async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        // Fire an in-flight request against the slow route.
+        let url = format!("http://{addr}/slow");
+        let inflight = tokio::spawn({
+            let url = url.clone();
+            async move {
+                reqwest::Client::new()
+                    .get(&url)
+                    .send()
+                    .await
+                    .map(|r| r.status())
+            }
+        });
+
+        // Once the handler is actually running, ask the server to stop.
+        started.notified().await;
+        shutdown_tx.send(()).unwrap();
+
+        // Let the in-flight request finish; graceful shutdown must drain it, not drop it.
+        allow.notify_one();
+        let status = inflight.await.unwrap().unwrap();
+        assert_eq!(
+            status,
+            reqwest::StatusCode::OK,
+            "the in-flight request must drain to completion, not be killed"
+        );
+
+        // Draining complete → the serving future returns cleanly and the listener closes.
+        let result = server.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "graceful shutdown returns Ok, got {result:?}"
+        );
+
+        // A new connection is now refused (the socket is closed).
+        let after = reqwest::Client::new()
+            .get(&url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await;
+        assert!(
+            after.is_err(),
+            "new connections must be refused after shutdown, got {after:?}"
+        );
     }
 
     // --- RM-GA-P1 SEC-203: per-principal rate limiting -------------------------------

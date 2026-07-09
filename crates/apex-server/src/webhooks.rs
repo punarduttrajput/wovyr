@@ -135,6 +135,10 @@ fn jitter_ms(base_ms: u64) -> u64 {
 
 /// Dispatch `event` to all matching subscriptions, spawning one delivery task each.
 /// Returns the join handles (production callers drop them; tests await them).
+///
+/// Each delivery is **journaled to the durable outbox as pending before its task
+/// runs** (SRV-103), so a crash mid-delivery leaves a record that [`recover_outbox`]
+/// re-dispatches on the next start — rather than silently dropping the retry.
 pub(crate) fn dispatch(state: &Arc<AppState>, event: Event) -> Vec<tokio::task::JoinHandle<bool>> {
     let subs = state
         .webhooks
@@ -142,13 +146,89 @@ pub(crate) fn dispatch(state: &Arc<AppState>, event: Event) -> Vec<tokio::task::
         .unwrap_or_default();
     subs.into_iter()
         .map(|sub| {
-            let sender = state.webhook_sender.clone();
-            let policy = state.webhook_policy;
-            let metrics = state.metrics.clone();
-            let event = event.clone();
-            tokio::spawn(async move { deliver(&*sender, policy, &metrics, &sub, &event).await })
+            let delivery_id = format!("{}::{}", event.id, sub.id);
+            state
+                .webhook_outbox
+                .enqueue(crate::webhook_outbox::OutboxEntry {
+                    delivery_id: delivery_id.clone(),
+                    tenant: event.tenant.clone(),
+                    sub_id: sub.id.clone(),
+                    event: event.clone(),
+                    enqueued_at_ms: now_ms(),
+                });
+            spawn_delivery(state.clone(), delivery_id, sub, event.clone())
         })
         .collect()
+}
+
+/// Spawn the delivery task for one journaled entry: attempt delivery (with retries),
+/// then settle the outbox — remove on success, or dead-letter on exhaustion (SRV-103).
+fn spawn_delivery(
+    state: Arc<AppState>,
+    delivery_id: String,
+    sub: WebhookSubscription,
+    event: Event,
+) -> tokio::task::JoinHandle<bool> {
+    tokio::spawn(async move {
+        let delivered = deliver(
+            &*state.webhook_sender,
+            state.webhook_policy,
+            &state.metrics,
+            &sub,
+            &event,
+        )
+        .await;
+        if delivered {
+            state.webhook_outbox.remove(&delivery_id);
+        } else {
+            state.webhook_outbox.dead_letter(
+                &delivery_id,
+                &sub.url,
+                &event.event_type,
+                state.webhook_policy.max_attempts,
+                now_ms(),
+            );
+        }
+        delivered
+    })
+}
+
+/// Re-dispatch every delivery left pending in the durable outbox (SRV-103): deliveries
+/// that were in flight when the previous process died. Called once at startup. The
+/// subscription (and its secret) is re-resolved by id; if it was deleted meanwhile,
+/// the stale entry is dropped rather than retried forever.
+pub(crate) fn recover_outbox(state: &Arc<AppState>) {
+    let pending = state.webhook_outbox.pending();
+    if pending.is_empty() {
+        return;
+    }
+    tracing::info!(
+        count = pending.len(),
+        "re-dispatching webhook deliveries pending from a previous run"
+    );
+    for entry in pending {
+        match state.webhooks.get(&entry.sub_id) {
+            Ok(Some(sub)) => {
+                // Detach the delivery task (it settles the outbox itself); the
+                // `JoinHandle` is intentionally dropped, not awaited.
+                drop(spawn_delivery(
+                    state.clone(),
+                    entry.delivery_id,
+                    sub,
+                    entry.event,
+                ));
+            }
+            _ => state.webhook_outbox.remove(&entry.delivery_id),
+        }
+    }
+}
+
+/// Wall-clock milliseconds since the Unix epoch (read only at this delivery boundary).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Emit a domain event for a tenant mutation and dispatch it to subscribers
@@ -173,7 +253,35 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
             "/api/v1/webhooks",
             get(list_webhooks).post(register_webhook),
         )
+        // Registered before the `{id}` route so the literal path wins the match.
+        .route("/api/v1/webhooks/dead-letters", get(list_dead_letters))
         .route("/api/v1/webhooks/{id}", delete(delete_webhook))
+}
+
+/// List this tenant's dead-lettered webhook deliveries (SRV-103) — the persisted DLQ,
+/// queryable rather than lost to a log. Secrets are never included.
+async fn list_dead_letters(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(page): Query<crate::hardening::PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let ctx = crate::tenancy::context(&state, &headers, None);
+    ctx.authorize("projects:read")?;
+    let items: Vec<Value> = state
+        .webhook_outbox
+        .dead_letters(&ctx.tenant)
+        .into_iter()
+        .map(|d| {
+            json!({
+                "delivery_id": d.delivery_id,
+                "url": d.url,
+                "event_type": d.event_type,
+                "attempts": d.attempts,
+                "failed_at_ms": d.failed_at_ms,
+            })
+        })
+        .collect();
+    Ok(Json(crate::hardening::paginate(items, &page.page())))
 }
 
 #[derive(Deserialize)]
@@ -365,7 +473,8 @@ mod tests {
                 .with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new()))
                 .with_webhooks(store)
                 .with_webhook_sender(sender.clone())
-                .with_webhook_policy(fast_policy()),
+                .with_webhook_policy(fast_policy())
+                .with_in_memory_webhook_outbox(),
         );
 
         // Creating an org (as the platform admin, tenant acme) emits organization.created.
@@ -471,6 +580,50 @@ mod tests {
         assert!(actions.contains(&"webhook.delete"), "actions: {actions:?}");
     }
 
+    /// RM-AIM-P1 SRV-103: a delivery that exhausts its attempts through the real
+    /// `dispatch` path lands in the durable outbox's DLQ (not just a log), and a
+    /// successful delivery leaves nothing pending.
+    #[tokio::test]
+    async fn dispatch_dead_letters_exhausted_delivery_into_the_outbox() {
+        let store = InMemoryWebhookStore::new();
+        let saved = store
+            .register(WebhookSubscription::new(
+                "acme",
+                "https://always-fails",
+                vec!["project.*".into()],
+                "s",
+            ))
+            .unwrap();
+        let sender = Arc::new(MockSender {
+            statuses: vec![500], // always fails → exhausts the attempt budget
+            calls: Mutex::new(Vec::new()),
+        });
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_webhooks(Arc::new(store))
+                .with_webhook_sender(sender.clone())
+                .with_webhook_policy(fast_policy())
+                .with_in_memory_webhook_outbox(),
+        );
+
+        let handles = dispatch(&state, event()); // project.created
+        let results = futures::future::join_all(handles).await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].as_ref().unwrap(), "delivery should have failed");
+
+        // The exhausted delivery is dead-lettered into the persisted DLQ, and nothing
+        // is left pending.
+        assert!(
+            state.webhook_outbox.pending().is_empty(),
+            "a settled delivery must not remain pending"
+        );
+        let dlq = state.webhook_outbox.dead_letters("acme");
+        assert_eq!(dlq.len(), 1, "the exhausted delivery must be in the DLQ");
+        assert_eq!(dlq[0].url, "https://always-fails");
+        assert_eq!(dlq[0].delivery_id, format!("{}::{}", event().id, saved.id));
+    }
+
     #[tokio::test]
     async fn dispatch_fans_out_to_matching_subscriptions_only() {
         let store = InMemoryWebhookStore::new();
@@ -499,7 +652,8 @@ mod tests {
                 .await
                 .with_webhooks(Arc::new(store))
                 .with_webhook_sender(sender.clone())
-                .with_webhook_policy(fast_policy()),
+                .with_webhook_policy(fast_policy())
+                .with_in_memory_webhook_outbox(),
         );
 
         let handles = dispatch(&state, event()); // project.created

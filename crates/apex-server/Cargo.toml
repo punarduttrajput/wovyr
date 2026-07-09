@@ -44,8 +44,9 @@ apex-marketplace.workspace = true
 axum.workspace = true
 # `rt` for the timer/schedule dispatch loops, webhook delivery worker, and the
 # marketplace registry's `spawn_blocking`; `time` for their sleeps; `net` for
-# `serve()`'s listener (RM-GA-P4 HLTH-904).
-tokio = { workspace = true, features = ["rt", "time", "net"] }
+# `serve()`'s listener (RM-GA-P4 HLTH-904); `signal` + `macros` for graceful-shutdown
+# signal handling (SIGINT/SIGTERM via `tokio::select!`, RM-AIM-P1 SRV-101).
+tokio = { workspace = true, features = ["rt", "time", "net", "signal", "macros"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

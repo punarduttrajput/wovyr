@@ -157,6 +157,24 @@ enum AuthCommand {
     CreateKey {
         /// The principal the minted key authenticates as.
         principal: String,
+        /// Optional expiry in days (omit for a non-expiring key).
+        #[arg(long)]
+        ttl_days: Option<u64>,
+    },
+    /// List every API key's metadata (never the secret).
+    ListKeys,
+    /// Revoke an API key by its id (immediately rejected at auth).
+    Revoke {
+        /// The key id (e.g. `key_ab12cd34…`), from `create-key`/`list-keys`.
+        key_id: String,
+    },
+    /// Rotate an API key: mint a replacement and expire the old after a grace window.
+    Rotate {
+        /// The key id to rotate.
+        key_id: String,
+        /// Grace window in hours before the old key lapses (default 24).
+        #[arg(long, default_value_t = 24)]
+        grace_hours: u64,
     },
 }
 
@@ -858,7 +876,16 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
             KmsCommand::Destroy { tenant, yes } => kms::destroy_cmd(&tenant, yes),
         },
         Command::Auth { command } => match command {
-            AuthCommand::CreateKey { principal } => auth::create_key_cmd(&principal),
+            AuthCommand::CreateKey {
+                principal,
+                ttl_days,
+            } => auth::create_key_cmd(&principal, ttl_days),
+            AuthCommand::ListKeys => auth::list_keys_cmd(),
+            AuthCommand::Revoke { key_id } => auth::revoke_key_cmd(&key_id),
+            AuthCommand::Rotate {
+                key_id,
+                grace_hours,
+            } => auth::rotate_key_cmd(&key_id, grace_hours),
         },
         Command::Admin { command } => match command {
             AdminCommand::Backup { dest } => admin::backup_cmd(&dest).await,

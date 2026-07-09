@@ -321,7 +321,7 @@ it), so no new duplicate version / offline fetch and no `cargo-deny` change.
 
 # WS-G — Server Durability & Auth Lifecycle
 
-## SRV-101 `[P0]` — Graceful shutdown / drain
+## SRV-101 `[P0]` — Graceful shutdown / drain — **DONE (2026-07-09)**
 
 **Problem.** `axum::serve` is called without `with_graceful_shutdown` and no
 SIGTERM/SIGINT handling (`crates/apex-server/src/lib.rs:339-344`); in-flight runs and
@@ -336,7 +336,20 @@ in-flight request completes and new connections are refused; dispatch loops stop
 
 **Files.** `crates/apex-server/src/lib.rs`. **Size.** M. **Depends on:** none.
 
-## SRV-102 `[P1]` — Durable async-run store (or documented non-durability)
+**Implementation notes (2026-07-09).** `serve()` extracted into `serve_http`/`serve_tls`
+helpers, each taking a `shutdown: impl Future`. HTTP uses axum's
+`.with_graceful_shutdown(shutdown)`; TLS uses `axum_server::Handle::graceful_shutdown
+(Some(grace))` triggered from a task awaiting the same future. `shutdown_signal()`
+resolves on SIGINT (any platform) or SIGTERM (Unix) via `tokio::select!`. A bounded
+`APEX_SHUTDOWN_GRACE_SECS` (default 30) caps the drain; after the serving future
+returns, the dispatch loops are aborted (previously that abort only ran on a hard
+error, since nothing signaled a clean stop). Added `tokio` `signal`+`macros` features.
+**Acceptance:** `graceful_shutdown_drains_in_flight_then_refuses_new_connections`
+drives `serve_http` with a test-controlled shutdown future: a slow in-flight request
+(gated by a `Notify`) completes with `200` after shutdown is triggered, then a new
+connection is refused once the drained serving future returns.
+
+## SRV-102 `[P1]` — Durable async-run store (or documented non-durability) — **DONE (2026-07-09)**
 
 **Problem.** `RunStore` is in-memory only (`crates/apex-server/src/state.rs:171-180`);
 the background `tokio::spawn` executing an async agent run
@@ -354,7 +367,20 @@ async run is reported terminally (not stuck `Running`) after reopen.
 **Files.** `crates/apex-server/src/{state.rs,agents.rs}`. **Size.** M.
 **Depends on:** none.
 
-## SRV-103 `[P1]` — Durable webhook outbox + delivery worker
+**Implementation notes (2026-07-09).** Chose durability + reconcile-on-startup (the
+first ticket option). `RunStore` gained a `path` and `new_with_path`; `RunRecord`'s
+`inserted_at` switched from a restart-meaningless `Instant` to wall-clock
+`inserted_at_ms` so records round-trip through JSON (the same DUR-404 move
+`IdempotencyStore` made). Every `insert_running`/`finish` persists via `atomic_write`.
+On reopen, any run still `Running` is reconciled to terminal `Failed` ("server
+restarted while the run was in flight; agent runs are not resumable") and re-persisted,
+so a poller gets a truthful terminal status rather than a stuck-`Running` poll or a
+404. `AppState::from_env` opens it at `~/.apex/server/async_runs.json`; `path: None`
+stays in-memory (tests). **Acceptance:** `run_store_tests::running_run_is_reconciled_
+to_failed_after_restart` (reopen against the same path shows the orphan `Failed`, a
+finished run keeps its terminal status) + `in_memory_store_persists_nothing`.
+
+## SRV-103 `[P1]` — Durable webhook outbox + delivery worker — **DONE (2026-07-09)**
 
 **Problem.** Webhook delivery + retries are in-process fire-and-forget
 (`crates/apex-server/src/webhooks.rs:138-152`), retrying via `tokio::sleep` in a
@@ -370,7 +396,24 @@ retried after reopen; an exhausted delivery lands in the persisted DLQ.
 **Files.** `crates/apex-server/src/webhooks.rs`; a durable outbox store.
 **Size.** L. **Depends on:** none.
 
-## SRV-104 `[P1]` — API-key lifecycle: expiry, rotation, revocation
+**Implementation notes (2026-07-09).** New `webhook_outbox` module: a durable
+`WebhookOutbox` (`{pending, dlq}` document, `atomic_write` on every mutation, `path:
+None` = in-memory). `dispatch` now **journals each delivery as pending before its task
+runs** (storing the subscription *id*, not its secret — the secret is re-resolved from
+the webhook store at send time, so it's never duplicated into the outbox even under the
+encrypted store); `spawn_delivery` settles the entry — `remove` on success, `dead_letter`
+on exhaustion. `serve()` calls `webhooks::recover_outbox` on startup to re-dispatch
+deliveries pending from a dead process (re-resolving the sub by id; a deleted sub drops
+the stale entry). A new tenant-scoped `GET /api/v1/webhooks/dead-letters` serves the
+persisted DLQ (secrets never included). `deliver` and its retry/signing tests are
+unchanged. **Acceptance:** `webhook_outbox::tests::{pending_delivery_survives_reopen,
+dead_letter_is_persisted_and_queryable}` (store round-trips across the reopen "restart"
+stand-in) + `webhooks::tests::dispatch_dead_letters_exhausted_delivery_into_the_outbox`
+(the real dispatch path dead-letters an always-failing delivery into the DLQ). The
+existing dispatch tests reset to an in-memory outbox (`with_in_memory_webhook_outbox`)
+so concurrent `from_env` tests don't race the shared durable file.
+
+## SRV-104 `[P1]` — API-key lifecycle: expiry, rotation, revocation — **DONE (2026-07-09)**
 
 **Problem.** The API-key store is a bare `hash → principal` map; the only operation
 is mint (`crates/apex-server/src/auth.rs:238-241,275-277,301-312`). No `created_at`,
@@ -384,6 +427,24 @@ rotation issues a new key and invalidates the old on a grace schedule.
 
 **Files.** `crates/apex-server/src/auth.rs`; CLI `apex auth` subcommands.
 **Size.** M. **Depends on:** none.
+
+**Implementation notes (2026-07-09).** The store value went from a bare `principal`
+string to a `KeyRecord { key_id, principal, created_at_ms, expires_at_ms, revoked,
+last_used_ms }` (keyed by the key's SHA-256 hash; `key_id` = `key_<first 12 hex of the
+hash>`, the non-secret handle for revoke/rotate). `principal_for` now enforces
+revocation + expiry via a shared `resolve_live_key`, refreshing `last_used` at most
+once/min/key to avoid rewriting the file on every request. `FileApiKeyStore` gained
+`create_key(principal, ttl)`, `list_keys`, `revoke(key_id)`, and
+`rotate(key_id, grace)` (mints a replacement, sets the old key to expire after the
+grace window — both valid during it, only the old lapses after). `load()` transparently
+migrates the pre-SRV-104 `hash → principal` on-disk format, so existing keys keep
+authenticating. CLI: `apex auth create-key [--ttl-days]`, `list-keys`, `revoke <id>`,
+`rotate <id> [--grace-hours]`. **Acceptance:** `auth::tests::{expired_key_is_rejected,
+revoked_key_is_rejected, rotation_issues_new_key_and_expires_old_after_grace,
+legacy_hash_to_principal_format_is_migrated}`. **Scope note:** the revoke/rotate
+surface is the CLI (operating on the shared `~/.apex/auth` store, like `kms`/`memory`);
+a server *route* for it wasn't added — the CLI is the operator path, consistent with
+how `apex auth create-key` already worked pre-ticket.
 
 ---
 

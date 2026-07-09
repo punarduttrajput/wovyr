@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// One persisted agent record (RM-GA-P2 DUR-404): a `BTreeMap` keyed by a `(tenant,
 /// id)` tuple can't round-trip through `serde_json` (object keys must be strings), so
@@ -148,7 +148,7 @@ impl AgentStore {
 
 /// The current disposition of an asynchronously-submitted agent run (RM-GA-P2
 /// EXE-604).
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum AsyncRunStatus {
     Running,
@@ -162,25 +162,34 @@ pub(crate) enum AsyncRunStatus {
     },
 }
 
+/// One async-run record. `inserted_at_ms` is wall-clock (not a restart-meaningless
+/// `Instant`) so the store can round-trip through disk (SRV-102), mirroring
+/// `hardening::IdempotencyStore`'s DUR-404 switch.
+#[derive(Clone, Serialize, Deserialize)]
 struct RunRecord {
+    run_id: String,
     tenant: String,
     status: AsyncRunStatus,
-    inserted_at: Instant,
+    inserted_at_ms: u64,
 }
 
 /// Tracks runs submitted via `POST /api/v1/agents:run` with `Prefer: respond-async`
 /// (RM-GA-P2 EXE-604), so `GET /api/v1/agents/runs/{id}` has something to poll.
-/// In-memory only, unlike `AgentStore`/`workflow_owners`/etc. (DUR-404's durable
-/// pieces): an agent run has no checkpoint to resume from, so a run truly in flight
-/// when the process dies is gone regardless of whether its *record* survives —
-/// persisting just the record would misleadingly suggest otherwise. Bounded the
-/// same way `hardening::IdempotencyStore` is (SEC-205's discipline): entries expire
-/// after `ttl` and the map is capped at `max_entries`, so a long-lived server
-/// doesn't accumulate one entry per run forever.
+///
+/// **Durable when opened with a `path` (RM-AIM-P1 SRV-102).** An agent run has no
+/// checkpoint to resume from, so a run truly in flight when the process dies *is*
+/// gone — but that's exactly why the record must survive: on reopen, any run still
+/// marked `Running` is reconciled to a terminal `Failed` ("server restarted…"), so a
+/// polling client gets a truthful terminal status instead of a stuck-`Running` poll
+/// (or a 404 that loses the run entirely). Bounded the same way
+/// `hardening::IdempotencyStore` is (SEC-205's discipline): entries expire after
+/// `ttl` and the map is capped at `max_entries`. `path: None` (what most tests use)
+/// stays purely in-memory, exactly as before.
 pub(crate) struct RunStore {
     inner: Mutex<RunStoreInner>,
     ttl: Duration,
     max_entries: usize,
+    path: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -190,22 +199,79 @@ struct RunStoreInner {
 }
 
 impl RunStore {
-    pub(crate) fn new(ttl: Duration, max_entries: usize) -> Self {
-        Self {
-            inner: Mutex::new(RunStoreInner::default()),
+    /// A durable store backed by `path` (SRV-102): loads any persisted records, then
+    /// **reconciles orphans** — every run still `Running` (the prior process died
+    /// mid-run) becomes terminal `Failed`, since a bare agent run can't be resumed —
+    /// and re-persists the corrected state so repeated restarts stay idempotent.
+    pub(crate) fn new_with_path(ttl: Duration, max_entries: usize, path: Option<PathBuf>) -> Self {
+        let mut inner = RunStoreInner::default();
+        let mut reconciled = false;
+        if let Some(path) = &path
+            && let Ok(bytes) = std::fs::read(path)
+            && let Ok(records) = serde_json::from_slice::<Vec<RunRecord>>(&bytes)
+        {
+            for mut r in records {
+                if matches!(r.status, AsyncRunStatus::Running) {
+                    r.status = AsyncRunStatus::Failed {
+                        error: "server restarted while the run was in flight; agent runs \
+                                are not resumable"
+                            .to_string(),
+                    };
+                    reconciled = true;
+                }
+                inner.order.push_back(r.run_id.clone());
+                inner.entries.insert(r.run_id.clone(), r);
+            }
+        }
+        let store = Self {
+            inner: Mutex::new(inner),
             ttl,
             max_entries,
+            path,
+        };
+        if reconciled {
+            let inner = store.inner.lock().expect("run store poisoned");
+            store.persist(&inner);
+        }
+        store
+    }
+
+    /// Persist the whole record set to `path` (best-effort — logged, not propagated,
+    /// like every other DUR-404 store). A no-op for an in-memory (`path: None`) store.
+    fn persist(&self, inner: &RunStoreInner) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let records: Vec<&RunRecord> = inner
+            .order
+            .iter()
+            .filter_map(|k| inner.entries.get(k))
+            .collect();
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::error!(error = %e, "failed to create async-run store directory");
+            return;
+        }
+        match serde_json::to_vec_pretty(&records) {
+            Ok(bytes) => {
+                if let Err(e) = apex_common::fs::atomic_write(path, bytes) {
+                    tracing::error!(error = %e, "failed to persist async-run store");
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "failed to encode async-run store"),
         }
     }
 
     /// Mirrors `IdempotencyStore::evict`: drop expired entries, or — once at
     /// capacity — the single oldest entry regardless of expiry, to admit one more.
     fn evict(inner: &mut RunStoreInner, ttl: Duration, max_entries: usize, make_room: bool) {
+        let now = now_ms();
         while let Some(front) = inner.order.front() {
             let expired = inner
                 .entries
                 .get(front)
-                .is_none_or(|r| r.inserted_at.elapsed() > ttl);
+                .is_none_or(|r| now.saturating_sub(r.inserted_at_ms) > ttl.as_millis() as u64);
             let over_capacity = make_room && inner.entries.len() >= max_entries;
             if !expired && !over_capacity {
                 break;
@@ -222,12 +288,14 @@ impl RunStore {
         inner.entries.insert(
             run_id.clone(),
             RunRecord {
+                run_id: run_id.clone(),
                 tenant,
                 status: AsyncRunStatus::Running,
-                inserted_at: Instant::now(),
+                inserted_at_ms: now_ms(),
             },
         );
         inner.order.push_back(run_id);
+        self.persist(&inner);
     }
 
     /// Move a run to its terminal status. A no-op if the run was already evicted
@@ -237,6 +305,7 @@ impl RunStore {
         let mut inner = self.inner.lock().expect("run store poisoned");
         if let Some(record) = inner.entries.get_mut(run_id) {
             record.status = status;
+            self.persist(&inner);
         }
     }
 
@@ -248,6 +317,16 @@ impl RunStore {
             .get(run_id)
             .map(|r| (r.tenant.clone(), r.status.clone()))
     }
+}
+
+/// Wall-clock milliseconds since the Unix epoch — read only at this persistence
+/// boundary (SRV-102), like the quota tracker's daily-window clock.
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Shared server state: the LLM gateway, tool registry, metrics, a run counter, and a
@@ -295,6 +374,10 @@ pub struct AppState {
     pub(crate) webhook_sender: Arc<dyn webhooks::WebhookSender>,
     /// Retry/backoff policy for webhook delivery.
     pub(crate) webhook_policy: BackoffPolicy,
+    /// Durable delivery outbox + dead-letter queue (RM-AIM-P1 SRV-103): a pending
+    /// delivery survives a crash and is re-dispatched on startup; an exhausted
+    /// delivery lands in a queryable DLQ instead of just a log line.
+    pub(crate) webhook_outbox: Arc<crate::webhook_outbox::WebhookOutbox>,
     /// Monotonic counter for emitted event ids.
     pub(crate) event_counter: AtomicU64,
     /// Caches responses by `Idempotency-Key` so client retries of mutations are safe.
@@ -429,6 +512,9 @@ impl AppState {
             webhooks: crate::config::default_webhook_store(kms.clone()),
             webhook_sender: Arc::new(webhooks::ReqwestSender::default()),
             webhook_policy: BackoffPolicy::default(),
+            webhook_outbox: Arc::new(crate::webhook_outbox::WebhookOutbox::new(
+                crate::config::server_state_dir().map(|d| d.join("webhook_outbox.json")),
+            )),
             event_counter: AtomicU64::new(1),
             idempotency: hardening::IdempotencyStore::new_with_path(
                 Duration::from_secs(crate::config::env_u64(
@@ -438,9 +524,10 @@ impl AppState {
                 crate::config::env_u64("APEX_IDEMPOTENCY_MAX_ENTRIES", 10_000) as usize,
                 crate::config::server_state_dir().map(|d| d.join("idempotency.json")),
             ),
-            runs: Arc::new(RunStore::new(
+            runs: Arc::new(RunStore::new_with_path(
                 Duration::from_secs(crate::config::env_u64("APEX_ASYNC_RUN_TTL_SECS", 60 * 60)),
                 crate::config::env_u64("APEX_ASYNC_RUN_MAX_ENTRIES", 10_000) as usize,
+                crate::config::server_state_dir().map(|d| d.join("async_runs.json")),
             )),
             memory,
             memory_store,
@@ -486,6 +573,15 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn with_webhook_policy(mut self, policy: BackoffPolicy) -> Self {
         self.webhook_policy = policy;
+        self
+    }
+
+    /// Reset the webhook outbox to an isolated in-memory one (tests): `from_env`
+    /// otherwise shares the durable `~/.apex/server/webhook_outbox.json` across
+    /// concurrent tests, which would race and cross-pollute their DLQ assertions.
+    #[cfg(test)]
+    pub(crate) fn with_in_memory_webhook_outbox(mut self) -> Self {
+        self.webhook_outbox = Arc::new(crate::webhook_outbox::WebhookOutbox::new(None));
         self
     }
 
@@ -657,5 +753,64 @@ impl AppState {
             Some(owner) => owner == tenant,
             None => tenant == tenancy::DEFAULT_TENANT,
         }
+    }
+}
+
+#[cfg(test)]
+mod run_store_tests {
+    use super::*;
+
+    /// RM-AIM-P1 SRV-102: a run left `Running` when the process died is reported
+    /// **terminally** (`Failed`) after a restart, not stuck `Running` forever — proven
+    /// by reopening a fresh `RunStore` against the same path (the "simulated restart"
+    /// stand-in this workspace's other crash-recovery tests use). A run that had
+    /// already finished keeps its terminal status untouched.
+    #[test]
+    fn running_run_is_reconciled_to_failed_after_restart() {
+        let dir = std::env::temp_dir().join(format!("apex_async_runs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("async_runs.json");
+        let ttl = Duration::from_secs(3600);
+
+        {
+            let store = RunStore::new_with_path(ttl, 100, Some(path.clone()));
+            store.insert_running("run-inflight".to_string(), "acme".to_string());
+            store.insert_running("run-done".to_string(), "acme".to_string());
+            store.finish(
+                "run-done",
+                AsyncRunStatus::Succeeded {
+                    output: Value::String("hi".into()),
+                    steps: 1,
+                    usage: Value::Null,
+                },
+            );
+        }
+
+        // Reopen against the same path — a fresh instance with no carried-over memory.
+        let reopened = RunStore::new_with_path(ttl, 100, Some(path));
+        let (tenant, status) = reopened
+            .get("run-inflight")
+            .expect("in-flight run survives");
+        assert_eq!(tenant, "acme", "the run stays tenant-scoped across restart");
+        assert!(
+            matches!(status, AsyncRunStatus::Failed { .. }),
+            "an orphaned Running run must be reconciled to a terminal Failed, not stuck Running"
+        );
+        // The already-finished run keeps its terminal status.
+        assert!(matches!(
+            reopened.get("run-done").expect("finished run survives").1,
+            AsyncRunStatus::Succeeded { .. }
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `path: None` store stays purely in-memory (back-compat: what most tests use).
+    #[test]
+    fn in_memory_store_persists_nothing() {
+        let store = RunStore::new_with_path(Duration::from_secs(3600), 100, None);
+        store.insert_running("r1".to_string(), "t".to_string());
+        assert!(store.get("r1").is_some());
+        assert!(store.path.is_none());
     }
 }
