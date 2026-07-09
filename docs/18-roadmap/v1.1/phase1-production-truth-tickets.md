@@ -112,7 +112,7 @@ fail-safe. `MOCK_USD_PER_TOKEN` is unchanged (the mock already priced its output
 
 # WS-A — AI Core Runtime
 
-## AIC-101 `[P0]` — Context-window management: tokenizer + history compaction
+## AIC-101 `[P0]` — Context-window management: tokenizer + history compaction — **DONE (2026-07-09)**
 
 **Problem.** `run_agent` clones the *entire* message history into every request
 (`crates/apex-agent/src/runtime.rs:240` `messages.clone()`) and appends
@@ -137,7 +137,30 @@ context window and cost. (PRD-004 R-A.1; audit High.)
 `apex-provider` or `apex-common`). **Size.** L. **Depends on:** none.
 **Blocks:** EVL-203.
 
-## AIC-102 `[P0]` — Concurrent tool-call execution within a turn
+**Implementation notes (2026-07-09).** Two new modules. `apex-provider::tokenizer`:
+a `TokenCounter` trait with a dependency-free, deterministic `HeuristicTokenizer`
+default (each whitespace-delimited chunk → ~4-char subword tokens + one per
+punctuation char; a `count_message` helper adds role/tool-call framing overhead via
+`PER_MESSAGE_OVERHEAD`/`PER_TOOL_OVERHEAD`). Deliberately **not** a real BPE encoder
+— a bundled vocab is a heavy dep and this workspace builds offline; documented as a
+~10–20% estimate suitable for *budgeting* (not billing — real cost is PRV-101's
+provider `usage`). A real tokenizer drops in behind the trait later. `apex-agent::
+context`: `compact(messages, tools_overhead, policy, counter)` drops the **oldest
+tool rounds** first (an `assistant` tool-call message + its `tool` results, kept
+whole so the wire sequence stays valid) while always preserving the leading system
+prompt(s) + first user turn; `ContextPolicy { max_prompt_tokens, strategy }` with a
+generous 96k default (so short runs are untouched, back-compat) and a `DropOldest`
+strategy, wired into `RunOptions` (`with_context_policy`) and applied at the top of
+every `run_agent` loop iteration (logged at `debug`, `target: "apex.context"`).
+**Acceptance:** `context::tests::long_tool_loop_stays_under_budget_and_keeps_system_
+and_user` + the through-`run_agent` integration test `runtime::tests::long_tool_
+loop_request_stays_under_context_budget` (a scripted 30-round tool loop asserts the
+largest request the provider ever saw stayed under the budget and the system+user
+turns were present on every request); `context::tests::compaction_is_deterministic`
+covers the house determinism rule; `retained_rounds_stay_coherent` proves no
+dangling tool result survives.
+
+## AIC-102 `[P0]` — Concurrent tool-call execution within a turn — **DONE (2026-07-09)**
 
 **Problem.** When the model requests multiple tool calls in one turn, they run
 one-at-a-time in an awaited `for` loop (`runtime.rs:261-270`); parallelizable I/O-bound
@@ -151,7 +174,25 @@ preserving result ordering by call id when feeding results back to the model.
 
 **Files.** `crates/apex-agent/src/runtime.rs`. **Size.** M. **Depends on:** none.
 
-## AIC-103 `[P1]` — Apply manifest `max_steps` as the default budget
+**Implementation notes (2026-07-09).** `execute_tool_call` was refactored to *not*
+touch the `&mut` sink (it now returns a `ToolOutcome { result_text, ok }`), so the
+whole batch can execute on one task via `futures::future::join_all` — no `Send`/
+spawn requirement, so no threading of a shared sink. The loop emits every `ToolCall`
+event up front (deterministic order), joins the batch concurrently, then emits each
+`ToolResult` and pushes each `Message::tool_result` in **input order** — `join_all`
+returns results positionally regardless of completion timing, so the history fed
+back to the model is deterministic. Chose `join_all` over `JoinSet` deliberately:
+`JoinSet` requires `'static + Send` futures (forcing owned clones of `def`/`registry`
+or an `Arc` refactor), whereas these tool futures only borrow `&` state and share no
+mutable data, so on-task concurrency is both sufficient and simpler. **Acceptance:**
+`runtime::tests::independent_tool_calls_run_concurrently_with_deterministic_order`
+(a `#[tokio::test(start_paused = true)]` with a 300ms + 100ms `SleepyTool` pair;
+asserts paused wall-clock ≈ 300ms = max, definitively under the 400ms a serial loop
+would take, and that results feed back as `[slow, fast]` = call order, not the
+`[fast, slow]` completion order). Added `tokio` `time`+`test-util` dev-features for
+the paused clock (same pattern as apex-provider's hedging tests).
+
+## AIC-103 `[P1]` — Apply manifest `max_steps` as the default budget — **DONE (2026-07-09)**
 
 **Problem.** `spec.max_steps` is parsed (`definition.rs:56-57`) but `run_agent_inner`
 reads only `opts.max_steps` (`runtime.rs:239`); only `apex-runtime` wires it
@@ -165,6 +206,23 @@ unless `RunOptions` explicitly overrides it.
 override stops at N steps.
 
 **Files.** `crates/apex-agent/src/runtime.rs`. **Size.** S. **Depends on:** none.
+
+**Implementation notes (2026-07-09).** `RunOptions.max_steps` changed from `usize`
+(default 8, indistinguishable from an explicit 8) to `Option<usize>` (`None` =
+"defer to the manifest, then the built-in default"); `with_max_steps` sets `Some(n)`.
+`run_agent_inner` now resolves the budget as `opts.max_steps.or(def.spec.max_steps)
+.unwrap_or(DEFAULT_MAX_STEPS)` — precedence **explicit override > manifest >
+built-in** — used for the loop bound, the "did not finish within N steps" error, and
+the `agent.run` span field. Existing pre-resolving callers (`apex-runtime`, the
+server's `agents.rs` doing `req.max_steps.or(def.spec.max_steps)`) are unaffected —
+they set `Some(..)` before the call, so the new default branch only ever fires for
+the previously-broken direct/eval callers. **Acceptance:**
+`runtime::tests::manifest_max_steps_is_the_default_budget` (manifest `max_steps: 0`,
+no override → fails at 0 steps) + `explicit_max_steps_overrides_the_manifest_budget`
+(manifest 0 but `with_max_steps(4)` → completes), and the server's existing
+`agent_level_max_steps_is_a_default_not_a_floor`/`max_steps_override_is_honored`
+still pass. Field-type change rippled to `tool_loop.rs` (`opts.max_steps = Some(3)`)
+and the `with_max_steps` unit test (`Some(0)`).
 
 ---
 

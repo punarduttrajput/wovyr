@@ -10,11 +10,13 @@
 //! [`AgentDefinition`] loader accepts the Kubernetes-style manifest used by the
 //! [hello agent](../../docs/16-examples/hello-agent.md) example.
 
+mod context;
 mod definition;
 mod events;
 mod memory;
 mod runtime;
 
+pub use context::{CompactionStrategy, ContextPolicy};
 pub use definition::{AgentDefinition, MemorySpec, Retrieval};
 pub use events::{NullSink, RunEvent, RunEventSink};
 pub use memory::{ContextRetriever, RetrievedContext};

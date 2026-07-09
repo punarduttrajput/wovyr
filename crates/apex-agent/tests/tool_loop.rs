@@ -272,7 +272,7 @@ async fn run_loop_terminates_on_step_budget() {
     let registry = ToolRegistry::with_builtins();
 
     let mut opts = RunOptions::new(json!("loop"));
-    opts.max_steps = 3;
+    opts.max_steps = Some(3);
 
     let err = run_agent(&def, &gateway, &registry, opts, &mut Capture::default())
         .await
