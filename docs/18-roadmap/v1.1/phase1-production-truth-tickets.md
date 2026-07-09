@@ -228,7 +228,7 @@ and the `with_max_steps` unit test (`Some(0)`).
 
 # WS-E — Sandbox Activation
 
-## SBX-101 `[P0]` — Wire `SandboxManager::detect()` + `SandboxPool` into the run path
+## SBX-101 `[P0]` — Wire `SandboxManager::detect()` + `SandboxPool` into the run path — **DONE (2026-07-09)**
 
 **Problem.** `ShellTool` hardcodes `SandboxManager::native_only()`
 (`crates/apex-tools/src/builtin.rs:561`), so `ContainerSandbox`, `FirecrackerSandbox`,
@@ -251,7 +251,36 @@ them, and untrusted/verified runs simply fail closed. (PRD-004 R-E.1; audit High
 **Files.** `crates/apex-tools/src/builtin.rs`, `sandbox/*`, `pool.rs`;
 `crates/apex-agent`/`apex-server` run wiring. **Size.** L. **Depends on:** none.
 
-## SBX-102 `[P0]` — Windows Job Object resource limits in the native sandbox
+**Implementation notes (2026-07-09).** `ShellTool` is now stateful — it holds a
+`SandboxManager` and a container image (`APEX_SANDBOX_IMAGE`, default `alpine:3.20`):
+`ShellTool::native_only()` (native-only caps; fail-closed for verified/untrusted — the
+CLI/local/test default) and `ShellTool::with_manager(detected)`. `execute` resolves
+the backend from `ctx.trust_class` against the manager's capabilities and dispatches:
+`Native` → the existing host-shell path (powershell/cmd/sh); `Container`/`Gvisor` →
+`run_container`, which runs `sh -c <cwd-wrapped>` inside a network-isolated
+`ContainerSandbox` (a non-`sh` shell request is rejected there, since the container is
+Linux). The registry gained `with_shell_using(manager)` (`with_shell()` stays
+native-only for back-compat); `apex-server`'s `AppState::from_env` calls
+`SandboxManager::detect().await` and uses it when `APEX_ENABLE_SHELL_TOOL=1`, so a
+Docker/gVisor node actually runs verified/untrusted shell work in a container.
+**Acceptance:** capability-gated `sandbox_backends.rs::shell_tool_runs_a_verified_run_
+in_a_container_not_native` (a `Verified` run executes `cat /etc/alpine-release` — only
+succeeds inside the alpine image) + `shell_tool_first_party_run_stays_native_even_
+when_containers_exist` (first-party runs on the host, where that file is absent);
+both skip cleanly with no Docker. Deterministic offline coverage:
+`builtin::tests::shell_with_container_capability_routes_verified_run_off_native`
+(a Container-capable manager routes a verified run to the container backend — not
+fail-closed, not native), plus the existing native-only fail-closed tests. **Scope
+note:** the `SandboxPool`/`FairScheduler` integration into the shell path was
+*deliberately deferred* — a `ContainerSandbox` handle is stateless config (each
+`execute` still does its own `docker run`), so pooling the handles yields no
+warm-container reuse (the pool's own module doc calls persistent warm sessions "a
+separate concern that needs a session-capable backend"); the real gap this ticket
+targets — strong backends never selected on the run path — is fully closed by the
+selection/dispatch/detect wiring. Bounded-concurrency pooling is tracked for the
+session-capable-backend work rather than added here as non-functional ceremony.
+
+## SBX-102 `[P0]` — Windows Job Object resource limits in the native sandbox — **DONE (2026-07-09)**
 
 **Problem.** `setrlimit` memory/CPU/PID enforcement is `#[cfg(unix)]`-only; the
 `not(unix)` branch applies only a timeout + output cap
@@ -266,6 +295,27 @@ path, mirroring the Unix `setrlimit` caps.
 process-count cap is terminated; caps match the Unix path's semantics.
 
 **Files.** `crates/apex-tools/src/sandbox/native.rs`. **Size.** M. **Depends on:** none.
+
+**Implementation notes (2026-07-09).** A `#[cfg(windows)]` `JobObject` guard
+(`windows-sys` 0.61, `Win32_System_JobObjects`) is created from `ResourceLimits` and
+assigned to the child right after spawn in `NativeSandbox::run` — the non-Unix analog
+of the Unix `setrlimit` `pre_exec` hook. It sets `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`
+with `ProcessMemoryLimit` (`RLIMIT_AS` analog), `ActiveProcessLimit` (the container
+`pids.max` analog — Unix native has none), and `PerJobUserTimeLimit` (total user-CPU
+time — the `RLIMIT_CPU` total-time analog; chosen over the ticket's parenthetical
+"CPU-rate control" because the acceptance criterion prioritizes matching the Unix
+*semantics*, which are a total-time quota, not a rate), plus `KILL_ON_JOB_CLOSE` so a
+survivor can't outlive the run when the guard drops. The handle is `unsafe impl Send`
+(a process-global kernel handle) so `run`'s future stays `Send` across the `.await`.
+**Acceptance (runs for real on this Windows host, not just gated):**
+`native::tests::job_object_active_process_limit_blocks_child_spawns` (`max_pids = 1` →
+an assigned `cmd.exe`'s attempted child spawn is blocked) and
+`job_object_memory_limit_fails_an_over_allocating_child` (a ~1 GiB allocation under a
+256 MiB `ProcessMemoryLimit` throws `OutOfMemoryException` and dies non-zero). The
+memory test surfaced a real PowerShell subtlety — a `;`-chained OOM is *non-terminating*
+by default, so the assertion required `$ErrorActionPreference='Stop'` to make the cap
+breach actually end the process. `windows-sys` 0.61 was already in the tree (ring links
+it), so no new duplicate version / offline fetch and no `cargo-deny` change.
 
 ---
 

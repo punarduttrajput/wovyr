@@ -35,11 +35,23 @@ impl ToolRegistry {
     }
 
     /// Register `shell` into this registry — the explicit opt-in `with_builtins()`
-    /// deliberately withholds (SEC-301). For trusted first-party/local contexts only
-    /// (e.g. the CLI's `agents run --local`, or a server explicitly setting
-    /// `APEX_ENABLE_SHELL_TOOL=1`).
+    /// deliberately withholds (SEC-301). Uses a **native-only** sandbox manager, so a
+    /// verified/untrusted run fails closed (no strong backend to run it in). For
+    /// trusted first-party/local contexts (e.g. the CLI's `agents run --local`); a
+    /// server that has probed the node's capabilities should use
+    /// [`Self::with_shell_using`] instead so verified/untrusted work runs in a
+    /// container when one is available (SBX-101).
     pub fn with_shell(mut self) -> Self {
-        self.register(Arc::new(crate::builtin::ShellTool));
+        self.register(Arc::new(crate::builtin::ShellTool::native_only()));
+        self
+    }
+
+    /// Register `shell` driven by the node's **detected** sandbox capabilities
+    /// (RM-AIM-P1 SBX-101): a verified/untrusted run selects the strongest available
+    /// backend (container/gVisor) rather than failing closed. Build `manager` from
+    /// [`crate::SandboxManager::detect`] at startup.
+    pub fn with_shell_using(mut self, manager: crate::SandboxManager) -> Self {
+        self.register(Arc::new(crate::builtin::ShellTool::with_manager(manager)));
         self
     }
 

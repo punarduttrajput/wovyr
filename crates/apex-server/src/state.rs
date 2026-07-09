@@ -366,7 +366,12 @@ impl AppState {
             .map(|v| v == "1")
             .unwrap_or(false)
         {
-            registry = registry.with_shell();
+            // Probe the node's real backend capabilities once at startup (SBX-101) so a
+            // verified/untrusted agent's shell command runs in a container/gVisor
+            // sandbox when this host has one, instead of failing closed as native-only
+            // did. A first-party run still uses the native host shell.
+            let manager = apex_tools::SandboxManager::detect().await;
+            registry = registry.with_shell_using(manager);
         }
         // image_generate needs a real, billed API key, so it's only registered when one
         // is configured — same signal default_gateway() uses to pick a real vs. mock

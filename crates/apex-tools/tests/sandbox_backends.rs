@@ -387,6 +387,81 @@ async fn warm_pool_executes_and_reuses_container_sandboxes() {
     assert_eq!(pool.created(), 2, "no extra sandboxes built");
 }
 
+// --- SBX-101: the shell tool selects a strong backend on the run path -------
+
+#[tokio::test]
+async fn shell_tool_runs_a_verified_run_in_a_container_not_native() {
+    use apex_tools::{ShellTool, Tool, ToolContext, ToolRequest, TrustClass};
+
+    if !has(SandboxBackend::Container).await {
+        return;
+    }
+    // A node that has probed its capabilities (Container present here). The shell tool
+    // resolves the backend from the run's trust class: `Verified` floors to Container,
+    // so a verified run must execute inside the container, never on the native host.
+    let manager = SandboxManager::detect().await;
+    let shell = ShellTool::with_manager(manager).with_image(IMAGE);
+    let ctx = ToolContext {
+        trust_class: TrustClass::Verified,
+        ..ToolContext::default()
+    };
+    // `/etc/alpine-release` exists only inside the alpine image, not on the host CI
+    // node — so a zero exit proves the command ran in the container, not natively.
+    let resp = shell
+        .execute(
+            &ctx,
+            ToolRequest::new(serde_json::json!({ "command": "cat /etc/alpine-release" })),
+        )
+        .await
+        .expect("shell execute");
+    assert!(
+        resp.success,
+        "a verified shell run must succeed inside the alpine container (proving it ran \
+         there, not on the host): {:?}",
+        resp.payload
+    );
+    assert!(
+        resp.payload["stdout"]
+            .as_str()
+            .is_some_and(|s| s.contains('.')),
+        "expected an alpine version string from inside the container: {:?}",
+        resp.payload
+    );
+}
+
+#[tokio::test]
+async fn shell_tool_first_party_run_stays_native_even_when_containers_exist() {
+    use apex_tools::{ShellTool, Tool, ToolContext, ToolRequest, TrustClass};
+
+    if !has(SandboxBackend::Container).await {
+        return;
+    }
+    // Even on a container-capable node, a first-party run uses the native host shell
+    // (the strongest requirement is only Native), so a host-only command succeeds.
+    let manager = SandboxManager::detect().await;
+    let shell = ShellTool::with_manager(manager).with_image(IMAGE);
+    let ctx = ToolContext {
+        trust_class: TrustClass::FirstParty,
+        ..ToolContext::default()
+    };
+    // `/etc/alpine-release` does NOT exist on the (non-alpine) host, so a first-party
+    // run of this command fails — the opposite of the verified/container case above,
+    // confirming it did not run in the alpine container.
+    let resp = shell
+        .execute(
+            &ctx,
+            ToolRequest::new(serde_json::json!({ "command": "cat /etc/alpine-release" })),
+        )
+        .await
+        .expect("shell execute");
+    assert!(
+        !resp.success,
+        "a first-party run executes on the host (no /etc/alpine-release), not in the \
+         alpine container: {:?}",
+        resp.payload
+    );
+}
+
 // --- Adversarial filesystem-escape tests -----------------------------------
 //
 // The container backend bind-mounts exactly one host directory (`cmd.workdir`) at

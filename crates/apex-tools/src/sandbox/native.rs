@@ -86,6 +86,14 @@ impl NativeSandbox {
             .spawn()
             .map_err(|e| SandboxError::Spawn(format!("`{program}`: {e}")))?;
 
+        // Windows: enforce memory/process-count/CPU-time caps via a Job Object
+        // (SBX-102) — the non-Unix analog of the `setrlimit` `pre_exec` hook applied
+        // in `build_command` on Unix. The guard is held across the wait; on drop
+        // (`KILL_ON_JOB_CLOSE`) any process still alive in the job is terminated, so a
+        // timed-out or breaching child can't outlive the call.
+        #[cfg(windows)]
+        let _job = assign_job_object(&child, &self.limits);
+
         match tokio::time::timeout(self.limits.timeout, child.wait_with_output()).await {
             Ok(Ok(output)) => {
                 let (stdout, t1) = cap(&output.stdout, self.limits.max_output_bytes);
@@ -172,6 +180,121 @@ fn apply_rlimits(limits: &ResourceLimits) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Create a Job Object enforcing `limits`, assign `child` to it, and return the guard
+/// (SBX-102). `None` when no enforceable limit is set or job creation fails — the run
+/// then proceeds with just the timeout + output cap, exactly as before. The returned
+/// guard must be held for the child's lifetime; dropping it closes the job (killing
+/// any survivors via `KILL_ON_JOB_CLOSE`).
+#[cfg(windows)]
+fn assign_job_object(child: &tokio::process::Child, limits: &ResourceLimits) -> Option<JobObject> {
+    let job = JobObject::with_limits(limits)?;
+    if let Some(handle) = child.raw_handle() {
+        // SAFETY: `handle` is the live process handle owned by `child`, which outlives
+        // this call (the guard is dropped after `wait_with_output` completes).
+        unsafe { job.assign(handle) };
+    }
+    Some(job)
+}
+
+/// An owned Windows Job Object handle enforcing per-execution resource caps, mirroring
+/// the Unix `setrlimit` path: `ProcessMemoryLimit` ↔ `RLIMIT_AS`, a per-job user-CPU
+/// time limit ↔ `RLIMIT_CPU` (a total-time quota, not a rate — the closest analog),
+/// plus an active-process cap (the container backend's `pids.max` analog, which Unix
+/// native has no equivalent for). `KILL_ON_JOB_CLOSE` guarantees teardown.
+#[cfg(windows)]
+struct JobObject {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: a Windows Job Object HANDLE is a process-global kernel handle — valid and
+// usable from any thread. The guard is held across an `.await` in `run()`, so the
+// future must be `Send`; the raw pointer is the only reason it wouldn't be.
+#[cfg(windows)]
+unsafe impl Send for JobObject {}
+
+#[cfg(windows)]
+impl JobObject {
+    /// Create and configure a job for `limits`, or `None` if nothing to enforce.
+    fn with_limits(limits: &ResourceLimits) -> Option<Self> {
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_TIME,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        if limits.memory_bytes.is_none() && limits.max_pids.is_none() && limits.cpu_millis.is_none()
+        {
+            return None;
+        }
+
+        // SAFETY: null attributes + null name creates a new anonymous, unnamed job.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return None;
+        }
+
+        // SAFETY: the struct is plain-old-data; zeroing is a valid initial state.
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Some(bytes) = limits.memory_bytes {
+            info.ProcessMemoryLimit = bytes as usize;
+            flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        }
+        if let Some(pids) = limits.max_pids {
+            info.BasicLimitInformation.ActiveProcessLimit = pids;
+            flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        }
+        if let Some(millis) = limits.cpu_millis {
+            // Total user-mode CPU time across the job, in 100ns units.
+            info.BasicLimitInformation.PerJobUserTimeLimit = (millis as i64) * 10_000;
+            flags |= JOB_OBJECT_LIMIT_JOB_TIME;
+        }
+        info.BasicLimitInformation.LimitFlags = flags;
+
+        // SAFETY: `info` is a fully-initialized struct of the matching class/size.
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(info).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            // SAFETY: `handle` is a valid job handle we just created.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return None;
+        }
+        Some(Self { handle })
+    }
+
+    /// Assign `process` to this job so the caps apply to it (and, since the job is
+    /// inherited, to any child it spawns).
+    ///
+    /// # Safety
+    /// `process` must be a valid, open process handle for the assignment's duration.
+    unsafe fn assign(&self, process: std::os::windows::io::RawHandle) {
+        // SAFETY: caller guarantees `process` is live; `self.handle` is a valid job.
+        unsafe {
+            windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(
+                self.handle,
+                process as windows_sys::Win32::Foundation::HANDLE,
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for JobObject {
+    fn drop(&mut self) {
+        // Closing the last handle terminates any process still in the job
+        // (`KILL_ON_JOB_CLOSE`), so a survivor can't outlive the run.
+        // SAFETY: `self.handle` is a valid job handle owned by this guard.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +328,87 @@ mod tests {
         let out = sb.run("sh", &["-c", "sleep 5"], ".").await.unwrap();
         assert!(out.timed_out);
         assert_eq!(out.exit_code, None);
+    }
+
+    // --- SBX-102: Windows Job Object resource enforcement ----------------------
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn job_object_active_process_limit_blocks_child_spawns() {
+        // `max_pids = 1`: the assigned `cmd.exe` is the only process the job permits,
+        // so a child it later tries to spawn is blocked — the process-count analog of
+        // the container backend's `pids.max` cap, which native had no enforcement for
+        // before SBX-102. The `ping` delay guarantees the job is assigned before the
+        // child spawn is attempted.
+        let limits = ResourceLimits {
+            timeout: Duration::from_secs(20),
+            max_pids: Some(1),
+            ..ResourceLimits::default()
+        };
+        let sb = NativeSandbox::with_limits(limits);
+        let out = sb
+            .run(
+                "cmd",
+                &["/C", "ping -n 2 127.0.0.1 >nul & cmd /c echo SPAWNED_CHILD"],
+                ".",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !out.stdout.contains("SPAWNED_CHILD"),
+            "the active-process cap must block the child spawn; stdout: {:?}",
+            out.stdout
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn job_object_memory_limit_fails_an_over_allocating_child() {
+        // `ProcessMemoryLimit` ≈ 256 MiB (the `RLIMIT_AS` analog): a process trying to
+        // commit ~1 GiB is denied and dies non-zero, rather than running with zero
+        // memory isolation as the pre-SBX-102 non-Unix path did.
+        let limits = ResourceLimits {
+            timeout: Duration::from_secs(30),
+            memory_bytes: Some(256 * 1024 * 1024),
+            ..ResourceLimits::default()
+        };
+        let sb = NativeSandbox::with_limits(limits);
+        // `ErrorActionPreference = Stop` makes the OutOfMemoryException terminating, so
+        // the cap breach ends the script (non-zero, no `ALLOC_OK`) rather than being a
+        // non-terminating error the next `;`-chained statement would run past.
+        let out = sb
+            .run(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$ErrorActionPreference = 'Stop'; $a = New-Object byte[] 1073741824; \
+                     $a[0] = 1; Write-Output ALLOC_OK",
+                ],
+                ".",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !out.stdout.contains("ALLOC_OK"),
+            "the ~1 GiB allocation must be denied under the 256 MiB job memory cap; \
+             stdout: {:?} stderr: {:?}",
+            out.stdout,
+            out.stderr
+        );
+        assert_ne!(
+            out.exit_code,
+            Some(0),
+            "the memory-cap breach must terminate the process non-zero; stdout: {:?} stderr: {:?}",
+            out.stdout,
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("OutOfMemoryException"),
+            "the breach must surface as an OOM from the job memory cap; stderr: {:?}",
+            out.stderr
+        );
     }
 
     #[cfg(unix)]

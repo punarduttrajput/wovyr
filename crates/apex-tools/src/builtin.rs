@@ -12,7 +12,10 @@
 //! unlike the always-free tools above — so a caller registers it explicitly (see its
 //! doc comment) rather than getting it for free in every agent.
 
-use crate::sandbox::{NativeSandbox, ResourceLimits, SandboxBackend, SandboxManager};
+use crate::sandbox::{
+    CommandOutcome, ContainerSandbox, NativeSandbox, ResourceLimits, Sandbox, SandboxBackend,
+    SandboxCommand, SandboxManager,
+};
 use crate::tool::{Tool, ToolContext, ToolError, ToolMetadata, ToolRequest, ToolResponse};
 use apex_provider::{Gateway, ImageGenRequest};
 use async_trait::async_trait;
@@ -482,16 +485,154 @@ fn extract_cwd_marker(stdout: &str) -> (String, Option<String>) {
     (cleaned, Some(cwd).filter(|c| !c.is_empty()))
 }
 
+/// Default OCI image untrusted/verified shell commands run inside when a container
+/// backend is selected. Overridable via `APEX_SANDBOX_IMAGE`; small + has `/bin/sh`.
+const DEFAULT_SANDBOX_IMAGE: &str = "alpine:3.20";
+
 /// Run a shell command through the sandbox.
 ///
 /// Backend selection is driven by the caller's real `ctx.trust_class`
-/// ([RM-GA-P1 SEC-305](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
-/// a first-party run resolves to the native sandbox (process + timeout + output
-/// cap); a `Verified`/`Untrusted` run is floored to `Container`/`Gvisor` and fails
-/// closed here (`SandboxManager::native_only()` advertises only `Native`), since
-/// this node's default capability set doesn't include those stronger backends —
-/// there is no silent downgrade to native for untrusted provenance.
-pub struct ShellTool;
+/// ([RM-GA-P1 SEC-305](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md))
+/// against this tool's [`SandboxManager`] — the node's *detected* capabilities
+/// (RM-AIM-P1 SBX-101), not a hardcoded native-only set. A first-party run resolves
+/// to the native sandbox (host shell: process + timeout + output cap); a
+/// `Verified`/`Untrusted` run is floored to `Container`/`Gvisor` and, **when the node
+/// actually has Docker/gVisor**, runs the command inside a network-isolated Linux
+/// container via `sh -c` instead of failing closed. On a node with no strong backend
+/// (e.g. [`ShellTool::native_only`], the CLI/local default), such a run still fails
+/// closed — there is never a silent downgrade to native for untrusted provenance.
+pub struct ShellTool {
+    /// The node's backend capabilities, used to resolve the trust-class floor.
+    manager: SandboxManager,
+    /// OCI image used when a container/gVisor backend is selected.
+    image: String,
+}
+
+impl ShellTool {
+    /// A shell tool for a **trusted first-party / local** context: native-only
+    /// capabilities, so a verified/untrusted run fails closed (no strong backend to
+    /// run it in). This is the CLI's `agents run --local` and every test's default.
+    pub fn native_only() -> Self {
+        Self {
+            manager: SandboxManager::native_only(),
+            image: default_sandbox_image(),
+        }
+    }
+
+    /// A shell tool driven by the node's **detected** backend capabilities
+    /// (RM-AIM-P1 SBX-101): a verified/untrusted run uses the strongest available
+    /// backend (container/gVisor) rather than failing closed, if the node has one.
+    pub fn with_manager(manager: SandboxManager) -> Self {
+        Self {
+            manager,
+            image: default_sandbox_image(),
+        }
+    }
+
+    /// Override the container image (builder-style; default [`DEFAULT_SANDBOX_IMAGE`]).
+    pub fn with_image(mut self, image: impl Into<String>) -> Self {
+        self.image = image.into();
+        self
+    }
+
+    /// Run the command on the native host shell (first-party path). Returns the raw
+    /// outcome; the caller strips the cwd marker and shapes the response.
+    async fn run_native(
+        &self,
+        command: &str,
+        shell: Option<&str>,
+        workdir: &str,
+        limits: ResourceLimits,
+    ) -> Result<CommandOutcome, ToolError> {
+        let sandbox = NativeSandbox::with_limits(limits);
+        // Run via the requested (or platform-default) shell so users can write normal
+        // command lines. PowerShell is the Windows default — it's what an interactive
+        // session actually uses, unlike bare `cmd.exe`. Each command is wrapped so it
+        // reports its ending working directory (see `CWD_MARKER`), letting the caller
+        // observe a `cd` without a persistent shell session.
+        let run = if cfg!(windows) {
+            match shell.unwrap_or("powershell") {
+                "powershell" => {
+                    let wrapped = wrap_with_cwd_marker(command, "powershell");
+                    sandbox
+                        .run(
+                            "powershell",
+                            &["-NoProfile", "-NonInteractive", "-Command", &wrapped],
+                            workdir,
+                        )
+                        .await
+                }
+                "cmd" => {
+                    let wrapped = wrap_with_cwd_marker(command, "cmd");
+                    // `/V:ON` enables the delayed `!ERRORLEVEL!`/`!CD!` expansion the
+                    // wrapper relies on.
+                    sandbox
+                        .run("cmd", &["/V:ON", "/C", &wrapped], workdir)
+                        .await
+                }
+                other => {
+                    return Err(ToolError::Validation(format!(
+                        "unsupported `shell` value `{other}` on Windows; expected \
+                         `powershell` or `cmd`"
+                    )));
+                }
+            }
+        } else {
+            match shell {
+                None | Some("sh") => {
+                    let wrapped = wrap_with_cwd_marker(command, "sh");
+                    sandbox.run("sh", &["-c", &wrapped], workdir).await
+                }
+                Some(other) => {
+                    return Err(ToolError::Validation(format!(
+                        "unsupported `shell` value `{other}` on this platform; expected `sh`"
+                    )));
+                }
+            }
+        };
+        run.map_err(|e| ToolError::Internal(e.to_string()))
+    }
+
+    /// Run the command inside a network-isolated Linux container (verified/untrusted
+    /// path). The container is Linux, so only `sh` applies; a Windows-shell request is
+    /// rejected rather than silently ignored.
+    async fn run_container(
+        &self,
+        backend: SandboxBackend,
+        command: &str,
+        shell: Option<&str>,
+        workdir: &str,
+        limits: ResourceLimits,
+    ) -> Result<CommandOutcome, ToolError> {
+        if let Some(other) = shell.filter(|s| *s != "sh") {
+            return Err(ToolError::Validation(format!(
+                "shell `{other}` is unavailable in the isolated container sandbox used \
+                 for verified/untrusted runs; only `sh` is supported there"
+            )));
+        }
+        let wrapped = wrap_with_cwd_marker(command, "sh");
+        let sandbox = match backend {
+            SandboxBackend::Gvisor => ContainerSandbox::gvisor(&self.image),
+            _ => ContainerSandbox::docker(&self.image),
+        };
+        let cmd = SandboxCommand {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), wrapped],
+            workdir: workdir.to_string(),
+            env: Vec::new(),
+            limits,
+        };
+        sandbox
+            .execute(&cmd)
+            .await
+            .map_err(|e| ToolError::Internal(e.to_string()))
+    }
+}
+
+/// The container image for isolated shell runs: `APEX_SANDBOX_IMAGE` or a default.
+fn default_sandbox_image() -> String {
+    std::env::var("APEX_SANDBOX_IMAGE").unwrap_or_else(|_| DEFAULT_SANDBOX_IMAGE.to_string())
+}
 
 #[async_trait]
 impl Tool for ShellTool {
@@ -554,11 +695,13 @@ impl Tool for ShellTool {
 
         let shell = request.parameters.get("shell").and_then(Value::as_str);
 
-        // Resolve the isolation backend from the caller's real trust class
-        // (SEC-305) — an untrusted/verified-but-not-first-party run is floored to a
-        // stronger backend than this node's native-only capability set offers, so
-        // selection fails closed rather than silently running natively.
-        SandboxManager::native_only()
+        // Resolve the isolation backend from the caller's real trust class (SEC-305)
+        // against the node's *detected* capabilities (SBX-101). A first-party run
+        // resolves to Native (host shell); a verified/untrusted run is floored to
+        // Container/Gvisor and runs in an isolated Linux container when the node has
+        // one — else selection fails closed (never a silent native downgrade).
+        let backend = self
+            .manager
             .select(SandboxBackend::Native, ctx.trust_class)
             .map_err(|e| ToolError::PermissionDenied(e.to_string()))?;
 
@@ -566,54 +709,19 @@ impl Tool for ShellTool {
             timeout: Duration::from_secs(timeout_secs),
             ..ResourceLimits::default()
         };
-        let sandbox = NativeSandbox::with_limits(limits);
 
-        // Run via the requested (or platform-default) shell so users can write normal
-        // command lines. PowerShell is the Windows default — it's what an interactive
-        // session actually uses, unlike bare `cmd.exe`. Each command is wrapped so it
-        // reports its ending working directory (see `CWD_MARKER`), letting the caller
-        // observe a `cd` without a persistent shell session.
-        let run = if cfg!(windows) {
-            match shell.unwrap_or("powershell") {
-                "powershell" => {
-                    let wrapped = wrap_with_cwd_marker(command, "powershell");
-                    sandbox
-                        .run(
-                            "powershell",
-                            &["-NoProfile", "-NonInteractive", "-Command", &wrapped],
-                            workdir,
-                        )
-                        .await
-                }
-                "cmd" => {
-                    let wrapped = wrap_with_cwd_marker(command, "cmd");
-                    // `/V:ON` enables the delayed `!ERRORLEVEL!`/`!CD!` expansion the
-                    // wrapper relies on.
-                    sandbox
-                        .run("cmd", &["/V:ON", "/C", &wrapped], workdir)
-                        .await
-                }
-                other => {
-                    return Err(ToolError::Validation(format!(
-                        "unsupported `shell` value `{other}` on Windows; expected \
-                         `powershell` or `cmd`"
-                    )));
-                }
+        let outcome = match backend {
+            SandboxBackend::Native => self.run_native(command, shell, workdir, limits).await?,
+            SandboxBackend::Container | SandboxBackend::Gvisor => {
+                self.run_container(backend, command, shell, workdir, limits)
+                    .await?
             }
-        } else {
-            match shell {
-                None | Some("sh") => {
-                    let wrapped = wrap_with_cwd_marker(command, "sh");
-                    sandbox.run("sh", &["-c", &wrapped], workdir).await
-                }
-                Some(other) => {
-                    return Err(ToolError::Validation(format!(
-                        "unsupported `shell` value `{other}` on this platform; expected `sh`"
-                    )));
-                }
+            other => {
+                return Err(ToolError::Internal(format!(
+                    "the shell tool cannot run on the `{other}` backend"
+                )));
             }
         };
-        let outcome = run.map_err(|e| ToolError::Internal(e.to_string()))?;
 
         // Strip the marker from the visible output; `cwd` is null when the process
         // died before printing it (e.g. timeout) — the directory is then unknown.
@@ -992,7 +1100,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_runs_natively_for_first_party_trust_class() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext {
             trust_class: crate::sandbox::TrustClass::FirstParty,
             ..ToolContext::default()
@@ -1006,7 +1114,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_denies_untrusted_provenance_rather_than_running_natively() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext {
             trust_class: crate::sandbox::TrustClass::Untrusted,
             ..ToolContext::default()
@@ -1022,7 +1130,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_denies_verified_but_not_first_party_provenance() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext {
             trust_class: crate::sandbox::TrustClass::Verified,
             ..ToolContext::default()
@@ -1037,8 +1145,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shell_with_container_capability_routes_verified_run_off_native() {
+        // A manager advertising Container capability must NOT fail closed for a
+        // verified run the way `native_only` does (SBX-101) — it routes to the
+        // container backend. Docker may be absent on this host, so execution then
+        // errors as `Internal` (a spawn failure), never `PermissionDenied` (the
+        // fail-closed selection error) and never the native host-shell path.
+        let manager = SandboxManager::new(
+            vec![SandboxBackend::Native, SandboxBackend::Container],
+            None,
+        );
+        let t = ShellTool::with_manager(manager);
+        let ctx = ToolContext {
+            trust_class: crate::sandbox::TrustClass::Verified,
+            ..ToolContext::default()
+        };
+        let result = t
+            .execute(&ctx, ToolRequest::new(json!({"command": "echo ok"})))
+            .await;
+        match result {
+            // No container runtime here → routed to the container backend, which then
+            // fails to spawn `docker` (Internal). On a Docker host it would be `Ok`.
+            // Either way it did not fail closed and did not run natively.
+            Err(ToolError::Internal(_)) | Ok(_) => {}
+            other => panic!("expected container routing, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn shell_runs_command_and_reports_success() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext::default();
         let resp = t
             .execute(
@@ -1090,7 +1226,7 @@ mod tests {
     #[cfg(not(windows))]
     #[tokio::test]
     async fn shell_reports_ending_working_directory_after_cd() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext::default();
         let resp = t
             .execute(&ctx, ToolRequest::new(json!({"command": "cd /tmp"})))
@@ -1113,7 +1249,7 @@ mod tests {
         // The wrapper's marker print must not mask the command's own failure code.
         // (`false` fails without exiting the shell, so the wrapper's follow-up lines
         // still run — unlike an explicit `exit`, which skips the marker entirely.)
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext::default();
         let resp = t
             .execute(&ctx, ToolRequest::new(json!({"command": "false"})))
@@ -1127,7 +1263,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_missing_command_is_validation_error() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext::default();
         let err = t
             .execute(&ctx, ToolRequest::new(json!({})))
@@ -1139,7 +1275,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn shell_defaults_to_powershell_on_windows() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext::default();
         // `if ($true) { ... }` is PowerShell syntax; cmd.exe would fail to parse it.
         let resp = t
@@ -1161,7 +1297,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn shell_can_request_cmd_explicitly() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext::default();
         // `if 1==1 echo ...` is cmd.exe syntax; PowerShell would fail to parse it.
         let resp = t
@@ -1183,7 +1319,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn shell_rejects_unknown_shell_value_on_windows() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext::default();
         let err = t
             .execute(
@@ -1198,7 +1334,7 @@ mod tests {
     #[cfg(not(windows))]
     #[tokio::test]
     async fn shell_rejects_unknown_shell_value_on_unix() {
-        let t = ShellTool;
+        let t = ShellTool::native_only();
         let ctx = ToolContext::default();
         let err = t
             .execute(

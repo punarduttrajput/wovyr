@@ -33,6 +33,16 @@ wasi-common = { version = "14", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Windows Job Object resource enforcement for the native sandbox (SBX-102), the
+# non-Unix analog of the Unix `setrlimit` path. Pinned to 0.61 to reuse the version
+# already in the tree (ring links it), so no new duplicate version / offline fetch.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }
 # Assembles tiny WASI test modules from WAT in-process, so the WASI tests need no
