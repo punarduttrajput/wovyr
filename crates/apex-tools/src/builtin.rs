@@ -680,16 +680,30 @@ mod tests {
     /// A minimal `TempDir` (create on `new`, `rmdir -rf` on `Drop`) — avoids adding a
     /// dev-dependency just for this test module.
     mod tempfile_dir {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
         pub(super) struct TempDir(std::path::PathBuf);
         impl TempDir {
             pub(super) fn new() -> Self {
+                // A pid+nanos name alone can collide: `workspace_fixture` makes two
+                // `TempDir`s per test and several `fs_read_*` tests run concurrently
+                // (`cargo test`'s default multi-threaded runner), and Windows'
+                // `SystemTime::now()` resolution is coarser than a nanosecond under
+                // load — two calls landing on the same tick get the identical path,
+                // so one test's `Drop` deletes the directory the other is still
+                // using ("the system cannot find the file specified"). Reproduced
+                // live: ~1-in-5 runs of `cargo test -p apex-tools --lib --
+                // --test-threads=8`. A process-wide counter guarantees uniqueness
+                // regardless of clock resolution.
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
                 let dir = std::env::temp_dir().join(format!(
-                    "apex-fs-read-test-{}-{}",
+                    "apex-fs-read-test-{}-{}-{}",
                     std::process::id(),
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
-                        .as_nanos()
+                        .as_nanos(),
+                    COUNTER.fetch_add(1, Ordering::Relaxed)
                 ));
                 std::fs::create_dir_all(&dir).unwrap();
                 Self(dir)
