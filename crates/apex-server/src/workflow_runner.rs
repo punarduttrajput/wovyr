@@ -522,6 +522,17 @@ mod tests {
         crate::router(Arc::new(AppState::from_env().await))
     }
 
+    /// The default identity these test helpers act as (RM-GA-P4/GA-003): since the
+    /// `tenant_authorize` anonymous-default-tenant bypass no longer grants a
+    /// credential-less caller anything, every test driving a `workflows:*`/
+    /// `agents:*`-gated route through `post_json`/`post_json_state_get` needs a real
+    /// principal. `"root"` matches the identical convention `tenancy.rs`'s own tests
+    /// already use for the same purpose — setting the same literal value from
+    /// multiple test threads is a harmless, idempotent race, not a real one.
+    fn ensure_admin_env() {
+        unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
+    }
+
     async fn post_json(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
         post_json_headers(app, uri, &[], body).await
     }
@@ -532,10 +543,17 @@ mod tests {
         headers: &[(&str, &str)],
         body: Value,
     ) -> (StatusCode, Value) {
+        ensure_admin_env();
         let mut builder = Request::builder()
             .method("POST")
             .uri(uri)
             .header("content-type", "application/json");
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-apex-principal"))
+        {
+            builder = builder.header("x-apex-principal", "root");
+        }
         for (k, v) in headers {
             builder = builder.header(*k, *v);
         }
@@ -661,6 +679,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/workflows/cancel-route-test")
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -692,6 +711,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/workflows/cancel-route-test")
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -705,6 +725,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/workflows/does-not-exist")
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -759,6 +780,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/workflows/audit-cancel-test")
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -1155,10 +1177,12 @@ metadata:\n  name: agent-wf\nspec:\n  activities:\n    - id: greet\n      type: 
     }
 
     async fn post_json_state_get(state: &Arc<AppState>, uri: &str) -> (StatusCode, Value) {
+        ensure_admin_env();
         let resp = crate::router(state.clone())
             .oneshot(
                 Request::builder()
                     .uri(uri)
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

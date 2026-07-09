@@ -147,19 +147,30 @@ material. (PRD-003 R-1.2; closes PP-02.)
 **Files.** `crates/apex-server/src/tenancy.rs`, `lib.rs` (`serve` bind check).
 **Size.** M. **Depends on:** SEC-101. **Blocks:** SEC-105.
 
-**Status: Done.** The bypass in `tenant_authorize` is now conditional on
-`AppState.anonymous_allowed` (`auth::resolve_anonymous_allowed`,
-real-deployment default `false`, opt-in via `APEX_ALLOW_ANONYMOUS=1`), and
-`serve()`'s `check_insecure_bind` refuses to bind a non-loopback address when
-that flag is set — an explicit config error, not a silent downgrade. With the
-flag off (the production default), an unauthenticated request to any
-tenant-scoped route is denied. `compliance-mapping.md` §7 item 1 documents
-this precisely: the bypass is "now gated, not open by default," an
-inherent (and intentional) consequence of the dev-only escape hatch when
-someone does opt into it, not an unfixed hole in this ticket's scope. Proven
-by `anonymous_default_tenant_bypass_is_gated_by_the_allow_anonymous_flag`,
-`anonymous_default_tenant_caller_is_denied_when_the_flag_is_off`, and
-`refuses_anonymous_on_non_loopback_bind_only_when_flag_is_set`.
+**Status: Done, then further narrowed (RM-GA-P4/GA-003, 2026-07-09).** This
+ticket's original fix made the bypass conditional on `AppState.anonymous_allowed`
+(`auth::resolve_anonymous_allowed`, real-deployment default `false`, opt-in via
+`APEX_ALLOW_ANONYMOUS=1`), with `serve()`'s `check_insecure_bind` refusing to
+bind a non-loopback address when that flag is set. That was SEC-102's own
+literal, intentional design — "gated, not open by default" — but
+`compliance-mapping.md` §7 item 1 still flagged it as a residual finding worth
+closing further at GA, since `APEX_ALLOW_ANONYMOUS=1` alone still granted an
+anonymous caller *every* scope with zero grant. **That residual has now been
+closed too**: the bypass branch in `tenant_authorize` is deleted outright.
+`anonymous_allowed` today governs only whether `auth::authenticate`'s
+`disabled-loopback` mode lets an unauthenticated request reach a handler at
+all — RBAC downstream (`ctx.authorize(scope)`) is unconditional, and an empty
+role set denies every scope exactly like a real principal with no memberships
+would. Proven by
+`anonymous_default_tenant_caller_reaches_kms_admin_only_up_to_the_auth_layer_now`
+(flag on → `403`, not the old `200`/"destroyed"),
+`anonymous_default_tenant_caller_is_denied_when_the_flag_is_off` (flag off →
+`401`), and `refuses_anonymous_on_non_loopback_bind_only_when_flag_is_set`.
+~10 apex-server tests that relied on the old permissive bypass (mostly in
+`workflow_runner.rs`) were migrated to a real `APEX_PLATFORM_ADMINS` principal
+rather than left passing on a now-false assumption. See
+[A3-security-completion.md §3 item 3](A3-security-completion.md) for the
+GA-completion tracking.
 
 ---
 

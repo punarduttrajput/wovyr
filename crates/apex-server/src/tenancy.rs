@@ -646,20 +646,30 @@ pub(crate) fn tenant_context(state: &AppState, headers: &HeaderMap) -> TenantCon
 /// tenant or any authenticated principal must hold a tenant-scoped role granting `scope`
 /// (→ `403`), which requires real membership — so `X-Apex-Tenant` cannot be spoofed.
 ///
-/// **Local/dev escape hatch** ([SEC-102](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
-/// the anonymous `default` tenant (no principal) retains full single-node access ONLY
-/// when `state.anonymous_allowed` — explicit opt-in (`APEX_ALLOW_ANONYMOUS=1`),
-/// refused by [`crate::serve`] on any non-loopback bind. Without it, an anonymous
-/// caller is authorized like anyone else: no roles, no access (`403`).
+/// **No anonymous-default-tenant RBAC bypass** (RM-GA-P4/GA-003, narrowing SEC-102):
+/// this used to short-circuit `Ok(ctx.tenant)` for an anonymous caller against the
+/// `default` tenant whenever `state.anonymous_allowed` — i.e. `APEX_ALLOW_ANONYMOUS=1`
+/// granted such a caller *every* scope, including `kms:admin` (crypto-shredding), with
+/// zero RBAC check at all. That was SEC-102's own literal design (a documented,
+/// intentional "local/dev convenience," not an oversight — see
+/// [compliance-mapping.md §7](../../docs/13-security/compliance-mapping.md#7-residual-risk-and-gaps)),
+/// but GA-003 scoped it as a residual finding to close: `anonymous_allowed` now governs
+/// **only** whether [`auth::authenticate`]'s `disabled-loopback` mode lets an
+/// unauthenticated request *reach* a handler at all (`APEX_ALLOW_ANONYMOUS=1`, refused
+/// by [`crate::serve`] on any non-loopback bind) — it no longer implies any particular
+/// *authorization* outcome once it does. An anonymous caller is authorized exactly like
+/// any other principal with no memberships: `ctx.authorize(scope)` below, which
+/// [`Role::grants`] guarantees denies every scope for an empty role set (`403`), same
+/// as a real principal with no grants. Local/dev convenience for tenant-scoped routes
+/// now requires a real credential — e.g. `APEX_PLATFORM_ADMINS=<principal>` plus that
+/// principal's own header — the same path a real deployment already uses; nothing
+/// tenant-scoped is reachable "for free" via anonymity alone anymore.
 pub(crate) fn tenant_authorize(
     state: &AppState,
     headers: &HeaderMap,
     scope: &str,
 ) -> std::result::Result<String, ApiError> {
     let ctx = tenant_context(state, headers);
-    if ctx.principal.is_empty() && ctx.tenant == DEFAULT_TENANT && state.anonymous_allowed {
-        return Ok(ctx.tenant);
-    }
     ctx.authorize(scope)?;
     Ok(ctx.tenant)
 }

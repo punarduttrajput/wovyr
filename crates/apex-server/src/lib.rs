@@ -411,6 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn lists_and_inspects_workflow_executions() {
+        ensure_admin_env();
         let app = workflow_app().await;
 
         // List returns the seeded execution.
@@ -419,6 +420,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/workflows")
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -437,6 +439,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/workflows?status=running")
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -452,6 +455,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/workflows/demo-1")
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -468,6 +472,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/workflows/missing")
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -862,18 +867,30 @@ mod tests {
     }
 
     /// POST/GET/DELETE a JSON request against a shared state, returning (status, body).
+    /// The default identity this helper acts as (RM-GA-P4/GA-003): the
+    /// `tenant_authorize` anonymous-default-tenant bypass no longer grants a
+    /// credential-less caller anything, so every `req()`-driven test hitting a
+    /// tenant-scoped route needs a real principal. `"root"` matches the identical
+    /// convention `tenancy.rs`'s own tests already use — setting the same literal
+    /// value from multiple test threads is a harmless, idempotent race.
+    fn ensure_admin_env() {
+        unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
+    }
+
     async fn req(
         state: &Arc<AppState>,
         method: &str,
         uri: &str,
         body: Value,
     ) -> (StatusCode, Value) {
+        ensure_admin_env();
         let resp = router(state.clone())
             .oneshot(
                 Request::builder()
                     .method(method)
                     .uri(uri)
                     .header("content-type", "application/json")
+                    .header("x-apex-principal", "root")
                     .body(axum::body::Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -1820,18 +1837,20 @@ mod tests {
         assert_eq!(beta["total_estimate"], 0);
     }
 
-    /// **SEC-102**: the anonymous default-tenant bypass (`tenant_authorize` skipping
-    /// its RBAC check for a request with no `X-Apex-Principal` against the default
-    /// tenant) is no longer unconditional — it requires `AppState.anonymous_allowed`
-    /// (`APEX_ALLOW_ANONYMOUS=1` in production, refused by [`crate::serve`] on any
-    /// non-loopback bind; enabled here only via the explicit override). With it
-    /// enabled, an anonymous caller can still crypto-shred the default tenant's key
-    /// material through the public KMS route — the documented, explicit dev/local
-    /// escape hatch, not an accidental gap (see
-    /// [compliance-mapping.md §7](../../docs/13-security/compliance-mapping.md#7-residual-risk-and-gaps)).
-    /// With it disabled (the production default), the same request is `403`.
+    /// **RM-GA-P4/GA-003, narrowing SEC-102**: `tenant_authorize` used to skip its
+    /// RBAC check entirely for a request with no `X-Apex-Principal` against the
+    /// `default` tenant whenever `AppState.anonymous_allowed` — meaning
+    /// `APEX_ALLOW_ANONYMOUS=1` alone let an anonymous caller crypto-shred the
+    /// default tenant's KMS key material with zero grant (a documented residual
+    /// finding, [compliance-mapping.md §7](../../docs/13-security/compliance-mapping.md#7-residual-risk-and-gaps)).
+    /// That bypass is now deleted: `anonymous_allowed` governs only whether
+    /// [`auth::authenticate`]'s `disabled-loopback` mode lets the request *reach* a
+    /// handler at all — RBAC downstream is unconditional. An anonymous caller with
+    /// `anonymous_allowed = true` now gets exactly as far as any other principal
+    /// with no memberships: past authentication (proven by the `403`, not a `401`),
+    /// then denied by RBAC.
     #[tokio::test]
-    async fn anonymous_default_tenant_bypass_is_gated_by_the_allow_anonymous_flag() {
+    async fn anonymous_default_tenant_caller_reaches_kms_admin_only_up_to_the_auth_layer_now() {
         let state = Arc::new(
             AppState::from_env()
                 .await
@@ -1839,9 +1858,9 @@ mod tests {
                 .with_anonymous_allowed(true),
         );
 
-        // No `X-Apex-Principal` header, default tenant — the anonymous escape hatch,
-        // not a configured role. Rotate first so the default tenant has key material
-        // to destroy (a never-provisioned tenant would 404, testing the wrong thing).
+        // No `X-Apex-Principal` header, default tenant: authentication passes
+        // (`anonymous_allowed`), but RBAC now fail-closes unconditionally — no more
+        // "destroyed" on the wire for a credential-less caller, ever.
         let (st, _) = tenant_req(
             &state,
             "POST",
@@ -1851,9 +1870,13 @@ mod tests {
             Value::Null,
         )
         .await;
-        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "anonymity must no longer grant kms:write, even with APEX_ALLOW_ANONYMOUS=1"
+        );
 
-        let (st, body) = tenant_req(
+        let (st, _) = tenant_req(
             &state,
             "POST",
             "/api/v1/kms/tenant-key/destroy",
@@ -1862,22 +1885,11 @@ mod tests {
             Value::Null,
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "explicit dev/local escape hatch");
-        assert_eq!(body["status"], "destroyed");
-
-        // Once shredded, even the *same* anonymous caller is fail-closed again —
-        // the bypass grants the action once, it doesn't disable fail-closed
-        // behavior afterward.
-        let (st, _) = tenant_req(
-            &state,
-            "POST",
-            "/api/v1/kms/tenant-key/rotate",
-            "default",
-            "",
-            Value::Null,
-        )
-        .await;
-        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "anonymity must no longer grant kms:admin (crypto-shredding), even with APEX_ALLOW_ANONYMOUS=1"
+        );
     }
 
     /// **SEC-102, production default**: with the anonymous escape hatch disabled (no
@@ -2149,8 +2161,16 @@ mod tests {
 
     #[tokio::test]
     async fn error_envelope_carries_request_id() {
+        ensure_admin_env();
         let state = Arc::new(AppState::from_env().await);
-        let resp = raw(&state, "GET", "/api/v1/agents/missing", &[], Value::Null).await;
+        let resp = raw(
+            &state,
+            "GET",
+            "/api/v1/agents/missing",
+            &[("x-apex-principal", "root")],
+            Value::Null,
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
