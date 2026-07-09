@@ -436,9 +436,21 @@ fn wrap_with_cwd_marker(command: &str, shell: &str) -> String {
              Write-Output \"{CWD_MARKER}$($PWD.Path)\"\n\
              exit $__apexExit"
         ),
-        "cmd" => format!(
-            "{command} & set __apexExit=!ERRORLEVEL! & echo {CWD_MARKER}!CD! & exit /b !__apexExit!"
-        ),
+        "cmd" => {
+            // cmd.exe's parser treats `<`/`>`/`|`/`&` as redirection/control
+            // operators wherever they appear on the line — including inside a
+            // bare `echo` argument, unlike PowerShell's `"..."` string literals
+            // or a Unix shell's quoting. `CWD_MARKER`'s `>>>` would otherwise be
+            // read as output redirection ("> was unexpected at this time."),
+            // verified live against a real cmd.exe. `^` escapes each one to a
+            // literal character; the escaped form only affects parsing, so the
+            // actual printed (and later `extract_cwd_marker`-matched) text is
+            // still the plain, unescaped marker.
+            let escaped_marker = CWD_MARKER.replace('>', "^>");
+            format!(
+                "{command} & set __apexExit=!ERRORLEVEL! & echo {escaped_marker}!CD! & exit /b !__apexExit!"
+            )
+        }
         _ => format!(
             "{command}\n\
              __apex_exit=$?\n\
