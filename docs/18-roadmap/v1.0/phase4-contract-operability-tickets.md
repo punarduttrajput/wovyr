@@ -7,13 +7,11 @@ Document ID: RM-GA-P4
 
 **Document ID:** RM-GA-P4
 **File Path:** `docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md`
-**Version:** 1.9.0
-**Status:** In progress — **WS-7 is fully done** (API-701/702/703/704/705 all
-shipped); **all of WS-9 is done** (HLTH-901 executor unification, HLTH-902 CLI
-panic fix, HLTH-903 `apex-config` crate, HLTH-904 cleanup incl. both
-god-module splits); WS-8 (observability) hasn't started
+**Version:** 1.11.0
+**Status:** **All of Phase 4 is done.** WS-7 (API-701/702/703/704/705), WS-8
+(OBS-801/802/803/804/805), and WS-9 (HLTH-901/902/903/904) are all shipped.
 **Owner:** Engineering (API / Platform)
-**Last Updated:** 2026-07-08
+**Last Updated:** 2026-07-09
 
 ---
 
@@ -47,12 +45,12 @@ WS-7 (freeze first — every day of delay hardens SDK debt) — ALL DONE
   API-703 (idempotency all) ─┘
   API-705 (deprecation headers) ─ independent — Done
 
-WS-8 (next up)
-  OBS-801 (metrics middleware)  ─ independent
-  OBS-802 (request-id correlation) ─ independent
-  OBS-803 (alert rules + dashboards) ─ independent
-  OBS-804 (audit coverage)      ─ independent
-  OBS-805 (dashboard login/CORS/build) ── depends on SEC-101, SEC-204 (Phase 1)
+WS-8 (all done)
+  OBS-801 (metrics middleware)  ─ independent — Done
+  OBS-802 (request-id correlation) ─ independent — Done
+  OBS-803 (alert rules + dashboards) ─ independent — Done
+  OBS-804 (audit coverage)      ─ independent — Done
+  OBS-805 (dashboard login/CORS/build) ── depends on SEC-101, SEC-204 (Phase 1) — Done
 
 WS-9 remainder
   HLTH-901 (unify executors) ─ independent (high value: silent behavioral divergence) — Done
@@ -365,6 +363,47 @@ latency regression. (PRD-003 R-8.1; closes PP-19 metrics portion.)
 **Files.** `crates/apex-server/src/lib.rs` (layer + remove per-handler calls),
 `crates/apex-telemetry` (if a helper is needed). **Size.** M. **Depends on:** none.
 
+**Status: Done (2026-07-08).** Added `hardening::track_metrics`, one
+middleware layer recording `apex_api_requests_total`/
+`apex_api_request_duration_seconds` (labeled `route`/`method`/`status`) for
+**every** route — deleted the two hand-rolled per-handler recordings in
+`agents.rs` (`record_run_metrics` plus the inline block in
+`run_stored_handler`) that used to be the only two request-metric call sites
+in the whole server. Wired into `router()` at the same outer, whole-app
+`.layer()` position as `hardening::request_id`/`deprecation_headers` — a
+deliberate choice over a per-router `route_layer` using axum's real
+`MatchedPath`: that position would only see requests that already reached a
+matched handler, silently excluding the exact responses RED metrics exist to
+surface (an auth `401`, a rate-limit `429`, an idempotency-replay short
+circuit). Axum's `MatchedPath` isn't resolved yet at this outer position —
+the identical constraint API-705's `deprecation_headers` already documents on
+`PathPattern` — so the route label comes from a new hand-maintained
+`ROUTE_LABELS` table (`hardening.rs`, ~55 entries, one per route this server
+actually mounts) matched via `path_matches_template`, a small segment-by-segment
+matcher treating any `{param}` template segment as a wildcard (needed over a
+single `Exact`/`Prefix` string, unlike every existing `PathPattern` entry,
+since most routes here have a parameter followed by more literal segments,
+e.g. `/api/v1/projects/{id}/quota`). An unrecognized `(method, path)` — a
+genuinely unknown path, or a route added to a router module without a
+matching table entry — falls back to the `"unmatched"` label rather than
+being silently dropped from the metrics, so a drift between this table and
+the real router stays visible in `/metrics` instead of invisible.
+Verified: new unit tests for `path_matches_template`/`route_label` against
+representative literal/param/wrong-method cases; a `track_metrics`
+middleware test (isolated throwaway router) proving both a normal response
+and an unmatched path are recorded; and the existing
+`metrics_endpoint_reflects_a_run` integration test (over the real `router()`
++ `AppState`) extended to also hit `GET /api/v1/tools` (asserting the
+`tools_list` label — a route that emitted zero metrics before this ticket)
+and an unregistered path (asserting the `unmatched`/`404` label pair). The
+pre-existing `route="agents_run"` assertion in that test still passes
+unchanged, confirming label-naming continuity for the one route group that
+already had metrics. Full workspace `cargo build`/`clippy -D warnings`/`fmt`/
+`test` clean (`apex-server` 110/110); the one failure in a full workspace run
+is the pre-existing, unrelated Windows `cmd.exe`-quoting flake in
+`apex-tools::builtin::tests::shell_can_request_cmd_explicitly`, confirmed to
+fail identically on `main` before this change (via `git stash`).
+
 ---
 
 ## OBS-802 `[P2]` — Correlate the request id into logs, traces, and audit
@@ -389,6 +428,26 @@ correlation portion.)
 `secrets.rs`, + OBS-804's new ones). **Size.** S. **Depends on:** none (pairs with
 OBS-804).
 
+**Status: Done (2026-07-09).** `hardening::request_id` now writes the resolved id
+back onto the *request's* `x-request-id` header (not just the response's) before
+calling `next.run`, so any handler already extracting `headers: HeaderMap` reads it
+back via a new `hardening::request_id_of` helper — no new axum extractor needed.
+`next.run` is wrapped in an `http.request` tracing span carrying `request_id` as a
+field, so it appears on every log line/OTLP trace produced while handling the
+request (the two existing `#[tracing::instrument]`-annotated handler spans nest as
+children) — simpler than annotating every handler with its own
+`fields(request_id = Empty)` + a manual `.record()` call, which this ticket's text
+originally suggested. A new shared `audit::audit()` helper (used by every OBS-804
+call site, see below) calls `AuditEvent::with_request_id` whenever `request_id_of`
+finds one; `kms.rs`/`secrets.rs`'s existing `audit_kms`/`audit_secret` wrappers now
+delegate to it too, so the correlation applies retroactively to the audit call sites
+that predate this ticket. Verified with two new unit tests
+(`request_id_of_reads_the_header_when_present`,
+`request_id_middleware_writes_the_id_back_onto_the_request_for_handlers` — the
+latter drives the real middleware over a throwaway router, proving both a
+client-supplied and a server-generated id reach a handler). Full workspace build/
+clippy/fmt/test clean.
+
 ---
 
 ## OBS-803 `[P2]` — Ship starter Prometheus alert rules and a Grafana dashboard
@@ -409,6 +468,28 @@ rules or Grafana JSON. The on-call story (page on what? visualize how?) is unbui
 
 **Files.** `deployment/observability/` (new). **Size.** S. **Depends on:** OBS-801
 (series must exist).
+
+**Status: Done (2026-07-09).** Added `deployment/observability/{alerts.yml,
+dashboard.json,README.md}`. `alerts.yml`: 7 Prometheus rules over the real series
+OBS-801/the LLM cost observer/webhooks emit — API error rate (warning at 5%,
+critical at 25%), a p95-latency SLO burn (>1s for 10m), a **contract-drift
+detector** on `route="unmatched"` (flags a router/`ROUTE_LABELS` desync — an
+addition beyond the ticket's literal ask, since OBS-801's own fallback label is
+exactly the kind of "silent drift" signal alerting exists to catch), target-down
+(`up{job="apex"}`), an LLM daily-cost-spike heuristic, and a webhook
+delivery-failure-rate alert. **Downloaded a portable `promtool`/`prometheus`
+binary** from the project's GitHub releases (same offline-validation approach this
+repo's Helm chart used for `kubeconform`) since neither is installed in this dev
+environment — `promtool check rules alerts.yml` reports "SUCCESS: 7 rules found".
+`dashboard.json` (Grafana schema v39): request rate/error-rate/latency-percentiles
+by route (with a `$route` template variable), an unmatched-route panel, LLM
+token/cost panels, a cache-savings stat, and webhook delivery outcomes — validated
+as well-formed JSON, but **never rendered against a live Grafana** (none exists in
+this environment), stated as an explicit caveat in the README rather than implied.
+Added real-vs-aspirational status notes to `docs/14-observability/
+{alerting,dashboards}.md` (both →1.1.0) pointing at this starter, since those
+documents describe a much larger future multi-service SLO/dashboard program this
+slice doesn't claim to satisfy.
 
 ---
 
@@ -433,6 +514,39 @@ permissions / who installed which plugin" — insufficient for GA forensics/comp
 
 **Files.** `crates/apex-server/src/{lib,plugins,tenancy,marketplace,webhooks}.rs`.
 **Size.** M. **Depends on:** Phase-1 SEC-101 (verified actor). *(Pairs with OBS-802.)*
+
+**Status: Done (2026-07-09).** A new shared `audit::audit(state, headers, tenant,
+action, resource_type, resource_id)` helper (built alongside OBS-802, above) is now
+called from every state-changing handler this ticket named: `agents.rs`
+(`agent.create`/`agent.delete`/`agent.run` — the latter required threading
+`headers: &HeaderMap` through `run_definition`/`run_inner`/`run_async_inner`, which
+previously didn't need it), `plugins.rs` (`plugin.{enable,disable,install,upgrade,
+rollback,uninstall,trust}` — each handler's `tenant_authorize(...)?` call had to be
+changed from a discarded `?` to a bound `let tenant = ...?` first), `tenancy.rs`
+(`organization.create`, `project.{create,update,delete}`, `member.{add,remove}`,
+`quota.update`), `marketplace.rs` (`marketplace.{publish,download,install,
+listing.verify,review.approve,review.reject,abuse.report,abuse.resolve,
+abuse.dismiss}` — `download_version`/`install_listing` previously took no `headers`
+at all and needed it added), and `workflow_runner.rs`
+(`workflow.execution.{submit,signal,approve,cancel}`).
+
+**Verified with 4 new tests, each driving the real HTTP route over an isolated
+`AppState` with `AuditLog::in_memory()`** (not the shared `~/.apex/audit`):
+`agent_mutations_are_audited` (create→run→delete, `lib.rs`),
+`org_and_project_mutations_are_audited` (`tenancy.rs`, also asserts the actor
+principal and resource id on the entry), `webhook_management_mutations_are_audited`
+(register→delete, `webhooks.rs`), and `submit_and_cancel_are_audited`
+(`workflow_runner.rs`, using `isolated_state()`'s in-memory-engine pattern). **Two
+modules — `plugins.rs` and `marketplace.rs` — have no equivalent live-success test**:
+both mutate the *real*, shared `~/.apex/plugins`/`~/.apex/marketplace` on whatever
+machine runs the suite with no test-injectable in-memory store (an existing,
+pre-ticket constraint — `plugins.rs`'s own `plugin_lifecycle_routes_require_plugins_
+admin` test already avoids a real mutation for exactly this reason, per its own
+comment). Their audit call sites use the identical `crate::audit::audit()` helper
+already proven by the other four modules' tests plus the pre-existing `kms.rs`/
+`secrets.rs` audit tests — a structural, not per-route, coverage guarantee for
+those two. Full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean
+(`apex-server` 113/113 lib + 3/3 `authz_matrix`).
 
 ---
 
@@ -459,6 +573,73 @@ yet" — false since `workflow_runner.rs` shipped. (PRD-003 R-8.5; closes PP-11-
 
 **Files.** `dashboard/src/app/core/`, `dashboard/` build config, `deployment/docker/`,
 `dashboard/README.md`. **Size.** L. **Depends on:** Phase-1 SEC-101, SEC-204.
+
+**Status: Done (2026-07-09).** Deleted `tenant.config.ts`'s hardcoded `TENANT`/
+`PRINCIPAL` build-time constants; a new `core/session.ts` (`Session`, a signal-based
+`localStorage`-backed service) and `features/login/` (a **Sign in** page + nav
+entry) replace them. **There is no username/password login endpoint anywhere in the
+platform** (`apex-server`'s `auth.rs` only *verifies* a pre-existing JWT/API key,
+never mints one — confirmed by reading it directly rather than assumed) — a
+deliberate scope call, documented in `Session`'s own doc comment and the README's
+new "Authentication" section, that Sign-in collects tenant/principal plus an
+*already-minted* credential (`apex auth create-key`) rather than a password with
+nowhere to go. `tenant.interceptor.ts` now reads from `Session` and adds
+`Authorization: Bearer <value>` once a credential is set, alongside the
+`X-Apex-Tenant`/`X-Apex-Principal` headers it always sent.
+
+**Verified live end to end, not just built** — this environment has Node.js and no
+Docker, so the Angular side got real browser verification and the container side
+got build-only verification, matching each tool's actual availability:
+1. `npm run build`/`ng build` clean both before and after every change (confirmed
+   the exact `dist/dashboard/browser/` output path this ticket's Dockerfile copies
+   from).
+2. Ran the real `dashboard`+`apex-server` dev servers and drove the Sign-in flow in
+   a live browser. First against the *default* `disabled-loopback` auth mode with
+   no `APEX_ALLOW_ANONYMOUS` set — this surfaced a **real, previously-undocumented
+   gotcha** (not introduced by this change): the server 401s *every* request in
+   that mode unless `APEX_ALLOW_ANONYMOUS=1` is explicitly set (SEC-101's
+   secure-by-default), meaning the dashboard's own previously-documented "Run it
+   locally" instructions never actually worked out of the box — now fixed in the
+   README with the required env var spelled out.
+3. Restarted the server with `APEX_AUTH_MODE=apikey`, minted a real key via
+   `apex auth create-key`, pasted it into the Sign-in page, and confirmed
+   `Authorization: Bearer <key>` reached the server and was verified: `GET
+   /api/v1/tools` (authenticated, no RBAC) returned `200`; `GET /api/v1/agents`
+   (RBAC-gated, and this key's principal holds no tenancy membership) correctly
+   returned `403` rather than `401` — proof the credential itself verified and RBAC
+   is a distinct, later gate, not proof of a broken credential.
+4. Confirmed via `preview_console_logs` that no client-side errors accompanied any
+   of the above.
+
+**CORS**: no server-side code changes needed — Phase-1's `cors_layer` (`config.rs`)
+was already fully implemented (allow-list from `APEX_CORS_ALLOWED_ORIGINS`, the
+right allow/expose headers, `allow_credentials(true)`); OBS-805's CORS work is
+purely the deployment-config documentation of setting that env var to the
+dashboard's real origin, now in the README's new "Cross-origin deployment" section.
+
+**Build artifact**: added `deployment/docker/dashboard.Dockerfile` (Node build
+stage → nginx runtime stage with an SPA-fallback `try_files` config), a separate
+image from the existing Rust-only `Dockerfile` per the ticket's own "or" wording —
+**not** wired into `docker-compose.yml` as a running service (documented as an
+explicit, deliberate scope boundary, matching this repo's established "reliability
+first slice" pattern for compose/Helm). Never run through a live `docker build`
+(no Docker daemon in this environment) — the build stage's `npm run build` step was
+independently verified to produce the exact tree the Dockerfile's `COPY --from=build`
+copies.
+
+**README fixes** (beyond the stale claim the ticket named): the "Workflow Builder is
+the lone placeholder" claim was *also* false — `features/workflow-builder/` is a
+real, routed surface, not a placeholder (an inaccuracy this pass found, not just the
+one the ticket already flagged); the "Layout" section's file tree was years out of
+date (listed only 2 of 9 feature directories).
+
+**Not done** (explicitly out of scope, not a gap that slipped through): a route
+guard forcing `/login` before any other route works — the app deliberately keeps
+working with just tenant/principal set (no credential), matching the pre-existing
+`disabled-loopback` dev experience; gating that would be a behavior change beyond
+what this ticket asked for. `docs/10-dashboard/*`'s individual per-surface spec
+docs were not audited for staleness in this pass (only `dashboard/README.md`, which
+the ticket named explicitly).
 
 ---
 
@@ -862,11 +1043,11 @@ than a gap.
 | API-703 | 7 | Idempotency on all mutations — **Done** | M | P1 | SEC-205, DUR-404 |
 | API-704 | 7 | CI contract gate (SDK + redocly) — **Done** | M | P1 | 701,702,703 |
 | API-705 | 7 | Deprecation/Sunset headers — **Done** | S | P2 | — |
-| OBS-801 | 8 | RED metrics middleware (all routes) | M | P1 | — |
-| OBS-802 | 8 | Request-id correlation | S | P2 | — |
-| OBS-803 | 8 | Alert rules + Grafana dashboard | S | P2 | OBS-801 |
-| OBS-804 | 8 | Audit coverage (all mutations) | M | P2 | SEC-101 |
-| OBS-805 | 8 | Dashboard login/CORS/build | L | P2 | SEC-101, SEC-204 |
+| OBS-801 | 8 | RED metrics middleware (all routes) — **Done** | M | P1 | — |
+| OBS-802 | 8 | Request-id correlation — **Done** | S | P2 | — |
+| OBS-803 | 8 | Alert rules + Grafana dashboard — **Done** | S | P2 | OBS-801 |
+| OBS-804 | 8 | Audit coverage (all mutations) — **Done** | M | P2 | SEC-101 |
+| OBS-805 | 8 | Dashboard login/CORS/build — **Done** | L | P2 | SEC-101, SEC-204 |
 | HLTH-901 | 9 | Unify ActivityExecutors — **Done** | L | P1 | — |
 | HLTH-902 | 9 | Fix CLI spawn_blocking panic — **Done** | S | P1 | CI-901 |
 | HLTH-903 | 9 | `apex-config` crate — **Done** | M | P2 | — |
@@ -875,7 +1056,8 @@ than a gap.
 **Rough total:** 3 L + 7 M + 4 S ≈ 9–12 engineer-weeks, parallelizable to ~4–5 calendar
 weeks across 2–3 engineers. **Phase-4 exit** = PRD-003 §11 items 5 (API consistent +
 contract-tested; privileged mutations audited and observable) and 6 (executor unified;
-no known latent panic ships — the CI matrix piece landed in Phase 2).
+no known latent panic ships — the CI matrix piece landed in Phase 2). **Both exit
+criteria are now met — Phase 4 is fully done.**
 
 **Cross-phase note:** WS-7 should start as early as the team can spare it (even
 overlapping Phase 2/3), because the SDK-debt clock is already running. WS-8/WS-9 are
@@ -896,6 +1078,8 @@ genuinely last — they harden and clean up, but nothing depends on them.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.11.0 | 2026-07-09 | OBS-802/803/804/805 done, closing out **all of Phase 4**. OBS-802: `request_id` writes the id back onto the request header (not just the response) + wraps `next.run` in an `http.request` tracing span, so handlers/logs/OTLP traces/audit entries can all correlate on it; a new shared `audit::audit()` helper (used by OBS-804 too) attaches it automatically. OBS-803: a `promtool`-validated `deployment/observability/alerts.yml` (7 rules, incl. a `route="unmatched"` contract-drift detector) + a Grafana `dashboard.json`; portable `promtool`/`prometheus` binaries downloaded for offline validation. OBS-804: every state-changing handler across agents/plugins/tenancy/marketplace/webhooks/workflow_runner now calls the shared audit helper; 4 new tests drive real HTTP routes over in-memory audit logs (plugins/marketplace have no live-success test — both touch the real shared `~/.apex`, a pre-existing constraint, not a new gap). OBS-805: deleted the dashboard's hardcoded `TENANT`/`PRINCIPAL` build-time constants for a `Session` service + a real Sign-in page supporting a pasted API key/JWT; verified live end to end against a real `apex dev` in `apikey` mode (a `200` on an auth-only route, a `403` — not `401` — on an RBAC-gated one the key's principal lacks membership for); found and documented a real pre-existing gotcha (the default `disabled-loopback` mode 401s everything without `APEX_ALLOW_ANONYMOUS=1`, which the dashboard's own README never mentioned); added `deployment/docker/dashboard.Dockerfile` (build-verified, not live-Docker-verified — no daemon here) |
+| 1.10.0 | 2026-07-08 | OBS-801 done: one `hardening::track_metrics` middleware records RED metrics (`apex_api_requests_total`/`apex_api_request_duration_seconds`, labeled route/method/status) for every route, replacing the two hand-rolled per-handler recordings that used to be the only request-metric call sites in the server. Applied at the same outer whole-app layer as `request_id`/`deprecation_headers` (not a `route_layer`+`MatchedPath` approach) so it also counts requests rejected before reaching a handler (401/429/idempotency replay) — the error-rate visibility RED metrics are for. Route labels come from a new hand-maintained `ROUTE_LABELS` table with `{param}`-aware segment matching, mirroring API-705's `PathPattern` pattern at larger scale; an unmatched route falls back to an `"unmatched"` label rather than being silently dropped. **WS-8 now started** |
 | 1.9.0 | 2026-07-08 | HLTH-904's two god-module splits done, closing out **all of WS-9**. `apex-tools/src/sandbox.rs` (1,891 LOC) → `sandbox/{mod,types,native,container,firecracker,wasi}.rs` (largest: `container.rs` at 442 LOC), tests distributed per-backend. `apex-server/src/lib.rs` (4,335 LOC) → `state.rs`/`config.rs`/`agents.rs` (656/516/768 LOC) + a trimmed `lib.rs` (router/serve/bootstrap only) — the untouched ~2,100-line inline test module stays in `lib.rs` since it's one cross-cutting integration suite reaching into `AppState`'s `pub(crate)` fields directly, not decomposable without an API-surface change. Caught and fixed a real Unicode-mangling bug mid-task (a PowerShell text round-trip silently corrupted em dashes/section signs — compiles fine either way, only caught by re-reading the result). Both splits redone directly after two delegated background agents were killed mid-task by an account session limit. Full workspace build/clippy/fmt/test clean; `apex-server` at the exact pre-split test-count baseline |
 | 1.8.0 | 2026-07-08 | HLTH-903 done: new `apex-config` crate centralizes `~/.apex` layout, the two genuinely cross-binary env vars, and the previously byte-for-byte-duplicated KMS/secrets-vault construction logic between `apex-server` and `apex-cli`. Proven by a cross-instance agreement test suite (found and fixed a real env-var test race in the process). HLTH-904 4/5 done: `image_generate` now routes through `Gateway::generate_image` (new gateway/provider API); `sha2`/`semver`/`ring` deduped into `[workspace.dependencies]`; the `tokio` feature-inheritance bug fixed (root `full` was silently defeating every crate's own trimmed feature list) with a per-crate audit of real `tokio::` API usage; `cargo-deny` CI gate added and validated locally against the real dependency graph (caught 3 real config issues a blind config would have shipped wrong). The two god-module splits (`apex-server/src/lib.rs`, `apex-tools/src/sandbox.rs`) are deferred — two delegated sub-agents hit an account session limit mid-task; the `apex-server` side never started (safe), the `apex-tools` side left two orphaned, never-wired-in files that were deleted to restore a clean state. Full workspace build/clippy/fmt/test clean for everything shipped |
 | 1.7.0 | 2026-07-08 | HLTH-901 done: new `apex-runtime` crate holds the one `ActivityExecutor` dispatch body (`PlatformActivityExecutor`) the CLI, server, and eval harness all now call, parameterized over an `AgentResolver` trait for the one genuinely platform-specific piece (agent lookup + tenant/hosted/quota context). Fixed the real semantic drift the ticket named: tool-error retry classification, `function`-vs-`tool` dispatch, `ai`'s system-prompt source and model resolution, and `human`'s decision-variable-key convention all now behave identically everywhere. Full workspace build/clippy/fmt/test clean |

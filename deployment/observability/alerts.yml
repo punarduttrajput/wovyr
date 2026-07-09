@@ -1,0 +1,122 @@
+# Starter Prometheus alert rules for the Apex single-node appliance (RM-GA-P4
+# OBS-803). Built directly on the RED metrics `hardening::track_metrics`
+# (OBS-801) and the LLM/webhook counters already emit — every series named
+# below is real, not aspirational; see `docs/14-observability/metrics.md` and
+# `crates/apex-telemetry/src/metrics.rs` for the full taxonomy.
+#
+# Validate with `promtool check rules alerts.yml`. Scrape config is the
+# caller's concern (this repo ships no Prometheus server config beyond
+# `deployment/docker-compose.yml`'s services) — point a Prometheus instance's
+# `scrape_configs` at `GET /metrics` on the `apex` service and these rules
+# apply unchanged.
+groups:
+  - name: apex.api
+    rules:
+      # --- RED: errors --------------------------------------------------------
+      - alert: ApexHighErrorRate
+        expr: >
+          sum(rate(apex_api_requests_total{status=~"5.."}[5m])) by (route)
+            /
+          sum(rate(apex_api_requests_total[5m])) by (route)
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Apex route {{ $labels.route }} is erroring above 5%"
+          description: >
+            {{ $labels.route }} has a 5xx rate of {{ $value | humanizePercentage }}
+            over the last 5 minutes. Check `/metrics`'s `apex_api_requests_total`
+            by `status`, and correlate via `GET /api/v1/audit`/logs using the
+            failing requests' `X-Request-Id` (RM-GA-P4 OBS-802).
+
+      - alert: ApexCriticalErrorRate
+        expr: >
+          sum(rate(apex_api_requests_total{status=~"5.."}[5m])) by (route)
+            /
+          sum(rate(apex_api_requests_total[5m])) by (route)
+          > 0.25
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Apex route {{ $labels.route }} is erroring above 25%"
+          description: >
+            {{ $labels.route }} has a 5xx rate of {{ $value | humanizePercentage }}
+            over the last 5 minutes — a near-majority of requests are failing.
+
+      # --- RED: latency (burn-rate against a 1s p95 SLO) ----------------------
+      - alert: ApexLatencySLOBurn
+        expr: >
+          histogram_quantile(
+            0.95,
+            sum(rate(apex_api_request_duration_seconds_bucket[5m])) by (le, route)
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Apex route {{ $labels.route }} p95 latency exceeds 1s"
+          description: >
+            The 5-minute p95 for {{ $labels.route }} is {{ $value | humanizeDuration }},
+            above the 1s SLO target, sustained for 10 minutes.
+
+      # --- Contract drift: a route the ROUTE_LABELS table doesn't recognize ---
+      - alert: ApexUnmatchedRouteVolume
+        expr: sum(rate(apex_api_requests_total{route="unmatched"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Apex is serving requests with no route label"
+          description: >
+            Non-zero traffic is landing on `route="unmatched"` — either a
+            client is probing unknown paths, or `hardening::ROUTE_LABELS`
+            (RM-GA-P4 OBS-801) has drifted from the real router and needs a
+            new entry for a route that was added without one.
+
+      # --- Health: the server itself is unreachable ---------------------------
+      - alert: ApexTargetDown
+        expr: up{job="apex"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Apex server target is down"
+          description: >
+            Prometheus has not been able to scrape the `apex` job's `/metrics`
+            endpoint for 2 minutes.
+
+  - name: apex.llm
+    rules:
+      - alert: ApexLLMDailyCostSpike
+        expr: sum(rate(apex_llm_cost_usd_total[1h])) * 24 > 500
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Apex LLM spend is tracking well above its recent baseline"
+          description: >
+            The current hourly LLM cost rate, projected over 24h, is
+            ${{ $value | humanize }} — investigate a runaway agent/workflow
+            loop or a misbehaving retry before it compounds. Tune the `500`
+            threshold to the deployment's actual expected daily spend.
+
+  - name: apex.webhooks
+    rules:
+      - alert: ApexWebhookDeliveryFailureRate
+        expr: >
+          sum(rate(apex_webhook_deliveries_total{result="failed"}[15m]))
+            /
+          sum(rate(apex_webhook_deliveries_total[15m]))
+          > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than half of webhook deliveries are failing"
+          description: >
+            {{ $value | humanizePercentage }} of webhook deliveries failed
+            over the last 15 minutes (after the configured retry/backoff are
+            exhausted — apex-events' `BackoffPolicy`). Check subscriber
+            endpoints for outages before failures dead-letter.

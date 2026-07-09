@@ -7,10 +7,15 @@ Document ID: OBS-004
 
 **Document ID:** OBS-004  
 **File Path:** `docs/14-observability/dashboards.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft (aspirational multi-service catalog) — a **real, working starter**
+dashboard now exists at [`deployment/observability/dashboard.json`](../../deployment/observability/dashboard.json)
+(RM-GA-P4 OBS-803): RED-per-route + LLM cost/token panels over the actual metrics
+the single-node server emits, not the full 7-dashboard catalog §2 describes. Import
+it into a Grafana instance directly; see that directory's `README.md` for scope and
+caveats (never rendered against a live Grafana in this dev environment).  
 **Owner:** Platform Operations Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-09
 
 ---
 
@@ -120,4 +125,5 @@ is access-controlled separately for platform staff.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-09 | Added a status note pointing to the real starter Grafana dashboard at `deployment/observability/dashboard.json` (RM-GA-P4 OBS-803) — one dashboard covering RED + LLM cost/tokens, not this doc's full 7-dashboard catalog |
 | 1.0.0 | 2026-06-27 | Initial Dashboards specification |

@@ -7,10 +7,15 @@ Document ID: OBS-005
 
 **Document ID:** OBS-005  
 **File Path:** `docs/14-observability/alerting.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 1.1.0  
+**Status:** Draft (aspirational multi-service catalog) — a **real, working starter**
+now exists at [`deployment/observability/alerts.yml`](../../deployment/observability/alerts.yml)
+(RM-GA-P4 OBS-803): 7 Prometheus rules over the actual metrics the single-node
+server emits (`promtool`-validated), not the full SLO/routing/runbook program this
+document describes. See that directory's `README.md` for what it does and doesn't
+cover.  
 **Owner:** Platform Operations Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-09
 
 ---
 
@@ -137,4 +142,5 @@ to catch outages independent of traffic, complementing real-traffic SLIs.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-09 | Added a status note pointing to the real, `promtool`-validated starter rule set at `deployment/observability/alerts.yml` (RM-GA-P4 OBS-803) — a small, real subset of this doc's full aspirational alert catalog |
 | 1.0.0 | 2026-06-27 | Initial Alerting & SLOs specification |

@@ -21,18 +21,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
 /// Record a key-management action against the audit log — by tenant reference, never
 /// key material ([audit §2](../../docs/13-security/audit.md#2-what-is-audited)).
 fn audit_kms(state: &AppState, headers: &HeaderMap, tenant: &str, action: &str) {
-    let principal = crate::tenancy::principal(headers);
-    crate::audit::record(
-        state,
-        apex_audit::AuditEvent::new(
-            crate::audit::now_ms(),
-            principal,
-            tenant,
-            action,
-            "kms_tenant_key",
-            tenant,
-        ),
-    );
+    crate::audit::audit(state, headers, tenant, action, "kms_tenant_key", tenant);
 }
 
 /// `POST /api/v1/kms/tenant-key/rotate` — roll a new tenant-key version. Existing

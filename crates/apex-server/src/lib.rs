@@ -79,6 +79,7 @@ use tower::ServiceBuilder;
 /// KMS/secrets, a looser one for everything else.
 pub fn router(state: Arc<AppState>) -> Router {
     let limits = state.http_limits;
+    let metrics = state.metrics.clone();
     let cors = cors_layer(&state.cors_allowed_origins);
     let auth = || axum::middleware::from_fn_with_state(state.clone(), auth::authenticate);
     let rate_limit_sensitive = || {
@@ -192,6 +193,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
         // Stamp every response (incl. errors) with a request id (API overview §14).
         .layer(axum::middleware::from_fn(hardening::request_id))
+        // RED metrics for every route (RM-GA-P4 OBS-801) — same outer position as
+        // `request_id`/`deprecation_headers` so it also counts requests a handler
+        // never sees (an auth 401, a rate-limit 429, an idempotency replay).
+        .layer(axum::middleware::from_fn_with_state(
+            metrics,
+            hardening::track_metrics,
+        ))
         // Deprecation/Sunset headers (deprecation-policy.md §4, RM-GA-P4 API-705) —
         // a no-op today since hardening::DEPRECATIONS is empty; applies broadly since
         // any route, not just a mutating one, could be deprecated.
@@ -746,6 +754,34 @@ mod tests {
             .unwrap();
         assert_eq!(run.status(), StatusCode::OK);
 
+        // A second, unrelated route group (RM-GA-P4 OBS-801: every route now emits
+        // RED metrics, not just the two `agents:run`/`agents/{id}/run` handlers that
+        // used to hand-roll their own recording).
+        let tools = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tools")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tools.status(), StatusCode::OK);
+
+        // And a request the router rejects before any handler runs — an unknown path
+        // never reaches a `route_layer`-style handler-adjacent metric, but this
+        // whole-app middleware still counts it (under the "unmatched" label).
+        let unknown = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
         let metrics = router(state)
             .oneshot(
                 Request::builder()
@@ -761,6 +797,12 @@ mod tests {
 
         assert!(text.contains("apex_api_requests_total"), "metrics:\n{text}");
         assert!(text.contains(r#"route="agents_run""#));
+        assert!(text.contains(r#"route="tools_list""#), "metrics:\n{text}");
+        // Labels render sorted by key (method, route, status).
+        assert!(
+            text.contains(r#"route="unmatched",status="404""#),
+            "metrics:\n{text}"
+        );
         assert!(text.contains("apex_api_request_duration_seconds_count"));
         // The mock provider reports a cost, so an LLM cost metric is present.
         assert!(text.contains("apex_llm_cost_usd_total"), "metrics:\n{text}");
@@ -1629,6 +1671,79 @@ mod tests {
             StatusCode::FORBIDDEN,
             "a destroyed tenant key must fail closed even for an org admin"
         );
+    }
+
+    /// RM-GA-P4 OBS-804: create/run/delete on a stored agent are all audited.
+    #[tokio::test]
+    async fn agent_mutations_are_audited() {
+        use apex_audit::AuditLog;
+        use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+        let tenancy = Arc::new(InMemoryTenancyStore::new());
+        let org = tenancy
+            .create_org(Organization::new("acme", "Acme"))
+            .unwrap();
+        tenancy
+            .add_membership(Membership {
+                user: "alice".to_string(),
+                role: Role::OrgAdmin,
+                scope: MemberScope::Organization(org.id.clone()),
+            })
+            .unwrap();
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_tenancy(tenancy)
+                .with_audit(AuditLog::in_memory()),
+        );
+
+        let manifest = "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n";
+        let (st, created) = tenant_req(
+            &state,
+            "POST",
+            "/api/v1/agents",
+            "acme",
+            "alice",
+            json!({ "manifest": manifest }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{created}");
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let (st, _) = tenant_req(
+            &state,
+            "POST",
+            &format!("/api/v1/agents/{id}/run"),
+            "acme",
+            "alice",
+            json!({ "input": { "message": "hi" } }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+
+        let (st, _) = tenant_req(
+            &state,
+            "DELETE",
+            &format!("/api/v1/agents/{id}"),
+            "acme",
+            "alice",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+
+        let (st, audit) =
+            tenant_req(&state, "GET", "/api/v1/audit", "acme", "alice", Value::Null).await;
+        assert_eq!(st, StatusCode::OK);
+        let actions: Vec<&str> = audit["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["event"]["action"].as_str())
+            .collect();
+        assert!(actions.contains(&"agent.create"), "actions: {actions:?}");
+        assert!(actions.contains(&"agent.run"), "actions: {actions:?}");
+        assert!(actions.contains(&"agent.delete"), "actions: {actions:?}");
     }
 
     #[tokio::test]

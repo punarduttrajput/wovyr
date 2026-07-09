@@ -254,6 +254,14 @@ async fn submit_handler(
         .map_err(ApiError::from)?;
     // Stamp the owning tenant so reads/mutations of this execution are tenant-scoped.
     state.record_workflow_owner(&execution_id, &tenant);
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "workflow.execution.submit",
+        "workflow_execution",
+        &execution_id,
+    );
 
     {
         let engine = state.workflows.clone();
@@ -357,6 +365,14 @@ async fn signal_handler(
         .signal_event(&def, &id, &req.event, payload)
         .await
         .map_err(ApiError::from)?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "workflow.execution.signal",
+        "workflow_execution",
+        &id,
+    );
 
     Ok(Json(json!({
         "execution_id": id,
@@ -403,6 +419,14 @@ async fn approve_handler(
         .signal_event(&def, &id, &req.activity_id, decision)
         .await
         .map_err(ApiError::from)?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "workflow.execution.approve",
+        "workflow_execution",
+        &id,
+    );
 
     Ok(Json(json!({
         "execution_id": id,
@@ -432,6 +456,14 @@ async fn cancel_handler(
     crate::require_workflow_visible(&state, &id, &tenant)?;
     let cancelled = state.workflows.cancel(&id).await.map_err(ApiError::from)?;
     tracing::info!(execution_id = %id, "execution cancelled");
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "workflow.execution.cancel",
+        "workflow_execution",
+        &id,
+    );
     Ok(Json(json!({
         "execution_id": cancelled.execution_id,
         "status": "cancelled",
@@ -679,6 +711,85 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// RM-GA-P4 OBS-804: submitting and cancelling a workflow execution are both
+    /// audited. Mirrors `isolated_state()`'s construction (fresh in-memory engine +
+    /// timer store, not the shared `~/.apex/workflows`) plus an in-memory audit log.
+    #[tokio::test]
+    async fn submit_and_cancel_are_audited() {
+        use apex_audit::{AuditFilter, AuditLog};
+        use apex_workflow::{CheckpointStore, EventLog, InMemoryStore};
+
+        let base = AppState::from_env().await;
+        let agents = Arc::new(AgentStore::new(None));
+        let executor = Arc::new(server_executor(
+            base.gateway.clone(),
+            base.registry.clone(),
+            agents.clone(),
+            base.tenancy.clone(),
+            base.quota.clone(),
+        ));
+        let store = InMemoryStore::new();
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+        let timers: Arc<dyn apex_workflow::TimerStore> =
+            Arc::new(apex_workflow::InMemoryTimerStore::new());
+        let engine = Engine::new(events, checkpoints, executor).with_timer_store(timers.clone());
+        let state = Arc::new(
+            base.with_agents(agents)
+                .with_workflows(engine)
+                .with_timers(timers)
+                .with_audit(AuditLog::in_memory()),
+        );
+        let router = crate::router(state.clone());
+
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/workflows",
+            json!({ "manifest": WAIT_YAML, "execution_id": "audit-cancel-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        wait_for_activity_waiting(&state, "audit-cancel-test", "hold").await;
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/workflows/audit-cancel-test")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let entries = state
+            .audit
+            .query(&AuditFilter {
+                tenant: Some("default".to_string()),
+                principal: None,
+                action: None,
+                limit: None,
+            })
+            .unwrap();
+        let actions: Vec<&str> = entries.iter().map(|e| e.event.action.as_str()).collect();
+        assert!(
+            actions.contains(&"workflow.execution.submit"),
+            "actions: {actions:?}"
+        );
+        assert!(
+            actions.contains(&"workflow.execution.cancel"),
+            "actions: {actions:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.event.resource.id == "audit-cancel-test"),
+            "audit entries should reference the execution id: {entries:?}"
+        );
     }
 
     const TIMER_YAML: &str = "\

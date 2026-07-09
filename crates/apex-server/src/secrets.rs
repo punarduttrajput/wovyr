@@ -57,18 +57,7 @@ fn audit_secret(
     action: &str,
     reference: &str,
 ) {
-    let principal = crate::tenancy::principal(headers);
-    crate::audit::record(
-        state,
-        apex_audit::AuditEvent::new(
-            crate::audit::now_ms(),
-            principal,
-            tenant,
-            action,
-            "secret",
-            reference,
-        ),
-    );
+    crate::audit::audit(state, headers, tenant, action, "secret", reference);
 }
 
 /// `GET /api/v1/secrets` — list the caller's tenant's secrets (metadata only),

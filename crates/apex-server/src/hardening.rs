@@ -3,6 +3,7 @@
 //! propagation (§14). These harden the `/v1` surface so list endpoints page
 //! consistently, client retries are safe, and every response is traceable.
 
+use apex_telemetry::Metrics;
 use axum::{
     Json,
     body::Body,
@@ -18,7 +19,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::Instrument;
 
 // --- pagination (overview §6) ----------------------------------------------------
 
@@ -392,7 +394,21 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Middleware that gives every response a request id: it honors an incoming
 /// `X-Request-Id` (client correlation) or generates `req_<n>`, stamps the response
 /// header, and — for JSON **error** envelopes — fills in `error.request_id` (§8/§14).
-pub(crate) async fn request_id(request: Request, next: Next) -> Response {
+///
+/// **Correlation into logs, traces, and audit (RM-GA-P4 OBS-802):** the id used to
+/// exist only in this function's local scope — never reachable by a handler, a log
+/// line, or an audit call site, even though `AuditEvent.request_id` and every
+/// downstream `HeaderMap`-taking handler could have used it. Two fixes, both here:
+/// (1) the resolved id is written back onto the *request's* `x-request-id` header
+/// (not just the response's) before `next.run`, so any handler already extracting
+/// `headers: HeaderMap` can read it back via [`request_id_of`] — including the
+/// `kms.rs`/`secrets.rs`/OBS-804 audit call sites, with zero new extractor plumbing.
+/// (2) `next.run` is wrapped in an `http.request` span carrying the id as a field,
+/// so it appears on every log line and OTLP trace produced while handling this
+/// request (and on the two existing `#[tracing::instrument]`-annotated handler
+/// spans, which nest as children) — simpler than annotating every handler with its
+/// own `fields(request_id = Empty)` + a manual `.record()` call.
+pub(crate) async fn request_id(mut request: Request, next: Next) -> Response {
     let id = request
         .headers()
         .get("x-request-id")
@@ -401,8 +417,24 @@ pub(crate) async fn request_id(request: Request, next: Next) -> Response {
         .map(str::to_string)
         .unwrap_or_else(|| format!("req_{}", REQUEST_COUNTER.fetch_add(1, Ordering::SeqCst)));
 
-    let response = next.run(request).await;
+    if let Ok(value) = id.parse() {
+        request.headers_mut().insert("x-request-id", value);
+    }
+
+    let span = tracing::info_span!("http.request", request_id = %id);
+    let response = next.run(request).instrument(span).await;
     stamp(response, &id).await
+}
+
+/// Read the request id a request carries — the client-supplied one, or the one
+/// [`request_id`] generated and wrote back onto the request headers, so it's always
+/// present downstream. For a handler wanting to correlate an audit entry (or a
+/// manual log line) with the id already on the eventual response.
+pub(crate) fn request_id_of(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
 }
 
 /// Set the `X-Request-Id` header, and inject `request_id` into a JSON error body.
@@ -535,6 +567,457 @@ fn stamp_deprecation(mut response: Response, sunset_http_date: &str) -> Response
     if let Ok(value) = HeaderValue::from_str(sunset_http_date) {
         headers.insert("sunset", value);
     }
+    response
+}
+
+// --- RED metrics for every route (RM-GA-P4 OBS-801) ------------------------------
+
+/// One route's method + path template + the bounded label its RED metrics use.
+/// `template` reuses this API's own axum route syntax (`{id}`) verbatim, so it can
+/// be copied straight out of each router module's `routes()` fn.
+struct RouteLabel {
+    method: Method,
+    template: &'static str,
+    label: &'static str,
+}
+
+/// Does `path` match `template`, treating any `{...}` template segment as a
+/// wildcard? Segment-by-segment rather than a single `Exact`/`Prefix` string (as
+/// `PathPattern` above uses for deprecations) because most routes here have a path
+/// parameter followed by more literal segments (`/api/v1/projects/{id}/quota`),
+/// which a prefix match alone can't express.
+fn path_matches_template(path: &str, template: &str) -> bool {
+    let mut p = path.trim_matches('/').split('/');
+    let mut t = template.trim_matches('/').split('/');
+    loop {
+        match (p.next(), t.next()) {
+            (Some(ps), Some(ts)) => {
+                let is_param = ts.starts_with('{') && ts.ends_with('}');
+                if !is_param && ps != ts {
+                    return false;
+                }
+            }
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// The bounded `route` label for `(method, path)` — `"unmatched"` for anything not
+/// in the table (a 404 on a genuinely unknown path, or a route added to a router
+/// module without a matching entry here). Hand-maintained for the same reason
+/// `DEPRECATIONS` is: this middleware runs via `Router::layer` on the merged app,
+/// before axum's `MatchedPath` resolves — see [`track_metrics`].
+fn route_label(method: &Method, path: &str) -> &'static str {
+    ROUTE_LABELS
+        .iter()
+        .find(|r| r.method == *method && path_matches_template(path, r.template))
+        .map(|r| r.label)
+        .unwrap_or("unmatched")
+}
+
+/// Every route this server actually mounts (`lib.rs::router` and each route
+/// module's `routes()`), labeled for RED metrics. Keep in sync with the router —
+/// `route_labels_cover_every_mounted_route` (in `lib.rs`'s test module, which can
+/// see the real `router()`) fails if a mounted route has no entry here.
+const ROUTE_LABELS: &[RouteLabel] = &[
+    RouteLabel {
+        method: Method::GET,
+        template: "/healthz",
+        label: "healthz",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/metrics",
+        label: "metrics",
+    },
+    // agents:run / :stream / stored run (lib.rs `run_routes`)
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/agents:run",
+        label: "agents_run",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/agents:stream",
+        label: "agents_stream",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/agents/{id}/run",
+        label: "agents_run_stored",
+    },
+    // secrets.rs
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/secrets",
+        label: "secrets_list",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/secrets",
+        label: "secrets_create",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/secrets/{name}",
+        label: "secrets_get",
+    },
+    RouteLabel {
+        method: Method::DELETE,
+        template: "/api/v1/secrets/{name}",
+        label: "secrets_delete",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/secrets/{name}/rotate",
+        label: "secrets_rotate",
+    },
+    // kms.rs
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/kms/tenant-key/rotate",
+        label: "kms_rotate",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/kms/tenant-key/destroy",
+        label: "kms_destroy",
+    },
+    // agent persistence + workflow visibility (lib.rs `other_protected`)
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/agents",
+        label: "agents_create",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/agents",
+        label: "agents_list",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/agents/{id}",
+        label: "agents_get",
+    },
+    RouteLabel {
+        method: Method::DELETE,
+        template: "/api/v1/agents/{id}",
+        label: "agents_delete",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/agents/runs/{run_id}",
+        label: "agents_run_status",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/workflows",
+        label: "workflows_list",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/workflows/{id}",
+        label: "workflows_get",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/workflows",
+        label: "workflows_ui",
+    },
+    // workflow_runner.rs
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/workflows/validate",
+        label: "workflows_validate",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/workflows",
+        label: "workflows_submit",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/workflows/{id}/signal",
+        label: "workflows_signal",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/workflows/{id}/approve",
+        label: "workflows_approve",
+    },
+    RouteLabel {
+        method: Method::DELETE,
+        template: "/api/v1/workflows/{id}",
+        label: "workflows_cancel",
+    },
+    // tenancy.rs
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/organizations",
+        label: "organizations_list",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/organizations",
+        label: "organizations_create",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/projects",
+        label: "projects_list",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/projects",
+        label: "projects_create",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/projects/{id}",
+        label: "projects_get",
+    },
+    RouteLabel {
+        method: Method::PATCH,
+        template: "/api/v1/projects/{id}",
+        label: "projects_update",
+    },
+    RouteLabel {
+        method: Method::DELETE,
+        template: "/api/v1/projects/{id}",
+        label: "projects_delete",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/projects/{id}/members",
+        label: "project_members_list",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/projects/{id}/members",
+        label: "project_members_add",
+    },
+    RouteLabel {
+        method: Method::DELETE,
+        template: "/api/v1/projects/{id}/members/{uid}",
+        label: "project_members_remove",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/projects/{id}/quota",
+        label: "project_quota_get",
+    },
+    RouteLabel {
+        method: Method::PATCH,
+        template: "/api/v1/projects/{id}/quota",
+        label: "project_quota_update",
+    },
+    // webhooks.rs
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/webhooks",
+        label: "webhooks_list",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/webhooks",
+        label: "webhooks_create",
+    },
+    RouteLabel {
+        method: Method::DELETE,
+        template: "/api/v1/webhooks/{id}",
+        label: "webhooks_delete",
+    },
+    // memory.rs
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/memory/namespaces",
+        label: "memory_namespaces",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/memory/records",
+        label: "memory_records_list",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/memory/records",
+        label: "memory_records_create",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/memory:query",
+        label: "memory_query",
+    },
+    // plugins.rs
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/plugins",
+        label: "plugins_list",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/plugins:install",
+        label: "plugins_install",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/plugins:enable",
+        label: "plugins_enable",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/plugins:disable",
+        label: "plugins_disable",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/plugins:upgrade",
+        label: "plugins_upgrade",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/plugins:rollback",
+        label: "plugins_rollback",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/plugins:trust",
+        label: "plugins_trust",
+    },
+    RouteLabel {
+        method: Method::DELETE,
+        template: "/api/v1/plugins/{id}",
+        label: "plugins_uninstall",
+    },
+    // marketplace.rs
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/marketplace/listings",
+        label: "marketplace_search",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace:publish",
+        label: "marketplace_publish",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/marketplace/listings/{id}",
+        label: "marketplace_get",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/marketplace/listings/{id}/download",
+        label: "marketplace_download",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/marketplace/listings/{id}/attestation",
+        label: "marketplace_attestation",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace/listings/{id}/reviews",
+        label: "marketplace_review",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace/listings/{id}/verify",
+        label: "marketplace_verify",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace/listings/{id}/request-review",
+        label: "marketplace_request_review",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace/listings/{id}/approve",
+        label: "marketplace_approve",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace/listings/{id}/reject",
+        label: "marketplace_reject",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace/listings/{id}/install",
+        label: "marketplace_install",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace/listings/{id}/report",
+        label: "marketplace_report",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/marketplace/listings/{id}/reports",
+        label: "marketplace_reports_list",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace/listings/{id}/reports/{report_id}/resolve",
+        label: "marketplace_report_resolve",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/marketplace/listings/{id}/reports/{report_id}/dismiss",
+        label: "marketplace_report_dismiss",
+    },
+    // audit.rs
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/audit",
+        label: "audit_list",
+    },
+    // tools.rs
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/tools",
+        label: "tools_list",
+    },
+];
+
+/// RED metrics for every route, in one middleware layer. Previously only
+/// `agents:run`/`agents/{id}/run` recorded `apex_api_requests_total`/
+/// `apex_api_request_duration_seconds` — via two hand-rolled, near-duplicate
+/// call sites inside `agents.rs`'s own handlers — leaving every other route group
+/// (workflows, memory, marketplace, tenancy, secrets, plugins, webhooks, audit,
+/// tools, KMS) with no request metrics at all.
+///
+/// Applied at the same outer, whole-app layer as [`request_id`]/
+/// [`deprecation_headers`] rather than a per-router `route_layer` using axum's
+/// `MatchedPath` — deliberately, so it also counts requests a handler never sees at
+/// all (an auth `401`, a rate-limit `429`, an idempotency replay), which is exactly
+/// the error-rate visibility RED metrics exist for. `MatchedPath` isn't resolved at
+/// this position (the same constraint documented on [`PathPattern`]), so the route
+/// label comes from the hand-maintained [`ROUTE_LABELS`] table instead.
+pub(crate) async fn track_metrics(
+    State(metrics): State<Metrics>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let start = Instant::now();
+    let response = next.run(request).await;
+    let label = route_label(&method, &path);
+    let status = response.status().as_u16().to_string();
+    metrics.counter_inc(
+        "apex_api_requests_total",
+        &[
+            ("route", label),
+            ("method", method.as_str()),
+            ("status", &status),
+        ],
+    );
+    metrics.histogram_observe(
+        "apex_api_request_duration_seconds",
+        &[("route", label), ("method", method.as_str())],
+        start.elapsed().as_secs_f64(),
+    );
     response
 }
 
@@ -859,5 +1342,176 @@ mod tests {
             .unwrap();
         assert!(unaffected.headers().get("deprecation").is_none());
         assert!(unaffected.headers().get("sunset").is_none());
+    }
+
+    // --- RM-GA-P4 OBS-801: RED metrics for every route ---------------------------
+
+    #[test]
+    fn path_matches_template_handles_literal_and_param_segments() {
+        assert!(path_matches_template("/healthz", "/healthz"));
+        assert!(path_matches_template(
+            "/api/v1/projects/p1/quota",
+            "/api/v1/projects/{id}/quota"
+        ));
+        // A param segment is a wildcard, but surrounding literals must still match.
+        assert!(!path_matches_template(
+            "/api/v1/projects/p1/members",
+            "/api/v1/projects/{id}/quota"
+        ));
+        // Different segment counts never match, even with a shared prefix.
+        assert!(!path_matches_template(
+            "/api/v1/projects/p1/quota/extra",
+            "/api/v1/projects/{id}/quota"
+        ));
+        assert!(!path_matches_template(
+            "/api/v1/projects",
+            "/api/v1/projects/{id}"
+        ));
+    }
+
+    #[test]
+    fn route_label_resolves_known_routes_and_falls_back_for_unknown_ones() {
+        assert_eq!(route_label(&Method::GET, "/healthz"), "healthz");
+        assert_eq!(
+            route_label(&Method::POST, "/api/v1/agents:run"),
+            "agents_run"
+        );
+        assert_eq!(
+            route_label(&Method::POST, "/api/v1/agents/abc123/run"),
+            "agents_run_stored"
+        );
+        assert_eq!(
+            route_label(&Method::PATCH, "/api/v1/projects/p1/quota"),
+            "project_quota_update"
+        );
+        assert_eq!(
+            route_label(
+                &Method::POST,
+                "/api/v1/marketplace/listings/l1/reports/r1/resolve"
+            ),
+            "marketplace_report_resolve"
+        );
+        // Right path, wrong method: falls back rather than mismatching to a
+        // same-path different-method entry.
+        assert_eq!(
+            route_label(&Method::DELETE, "/api/v1/agents:run"),
+            "unmatched"
+        );
+        assert_eq!(
+            route_label(&Method::GET, "/api/v1/nonexistent"),
+            "unmatched"
+        );
+    }
+
+    #[tokio::test]
+    async fn track_metrics_records_a_normal_response_and_falls_back_for_an_unknown_path() {
+        use axum::{Router, body::Body, http::StatusCode as AxumStatusCode, routing::get};
+        use tower::ServiceExt;
+
+        let metrics = Metrics::new();
+        let build = || {
+            Router::new()
+                .route("/healthz", get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(
+                    metrics.clone(),
+                    track_metrics,
+                ))
+        };
+
+        let ok = build()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), AxumStatusCode::OK);
+
+        let out = metrics.render_prometheus();
+        assert!(
+            out.contains(r#"apex_api_requests_total{method="GET",route="healthz",status="200"} 1"#),
+            "got:\n{out}"
+        );
+        assert!(out.contains(
+            "apex_api_request_duration_seconds_count{method=\"GET\",route=\"healthz\"} 1"
+        ));
+
+        // A path not in `ROUTE_LABELS` (here, unregistered on this throwaway router
+        // too, so axum itself 404s it) still gets counted — under "unmatched" rather
+        // than being silently dropped, so a genuine mismatch between this table and
+        // the real router is visible in `/metrics` instead of invisible.
+        let notfound = build()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(notfound.status(), AxumStatusCode::NOT_FOUND);
+        let out = metrics.render_prometheus();
+        assert!(
+            out.contains(
+                r#"apex_api_requests_total{method="GET",route="unmatched",status="404"} 1"#
+            ),
+            "got:\n{out}"
+        );
+    }
+
+    // --- RM-GA-P4 OBS-802: request id reaches a handler's headers -----------------
+
+    #[test]
+    fn request_id_of_reads_the_header_when_present() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(request_id_of(&headers), None);
+        headers.insert("x-request-id", "req-xyz".parse().unwrap());
+        assert_eq!(request_id_of(&headers), Some("req-xyz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn request_id_middleware_writes_the_id_back_onto_the_request_for_handlers() {
+        use axum::{Router, body::Body, routing::get};
+        use tower::ServiceExt;
+
+        // A handler that echoes back whatever `request_id_of` sees — proving the id
+        // is readable from *inside* the handler, not just on the eventual response
+        // (which `hardening::request_id`'s own pre-existing behavior already covered).
+        async fn echo_request_id(headers: HeaderMap) -> String {
+            request_id_of(&headers).unwrap_or_default()
+        }
+
+        let app = Router::new()
+            .route("/echo", get(echo_request_id))
+            .layer(axum::middleware::from_fn(request_id));
+
+        // Client-supplied id is forwarded to the handler unchanged.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .header("x-request-id", "req-supplied")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(bytes, "req-supplied".as_bytes());
+
+        // A server-generated id (client sent none) is just as visible to the handler.
+        let resp = app
+            .oneshot(Request::builder().uri("/echo").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let seen = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            seen.starts_with("req_"),
+            "handler should see the generated id, got: {seen}"
+        );
     }
 }

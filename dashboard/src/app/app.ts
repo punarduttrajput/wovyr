@@ -33,6 +33,7 @@ export class App {
     marketplace: { root: 'Extend', leaf: 'Marketplace' },
     settings: { root: 'Administer', leaf: 'Settings' },
     executions: { root: 'Operate', leaf: 'Execution' },
+    login: { root: 'Account', leaf: 'Sign in' },
   };
 
   constructor() {
@@ -82,6 +83,11 @@ export class App {
       path: '/settings',
       label: 'Settings',
       icon: '<circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M12 2v3m0 14v3M4.2 4.2l2.1 2.1m11.4 11.4l2.1 2.1M2 12h3m14 0h3M4.2 19.8l2.1-2.1m11.4-11.4l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    },
+    {
+      path: '/login',
+      label: 'Sign in',
+      icon: '<circle cx="12" cy="8" r="3.5" stroke="currentColor" stroke-width="2"/><path d="M5 20c0-3.3 3.1-6 7-6s7 2.7 7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
     },
   ];
 }

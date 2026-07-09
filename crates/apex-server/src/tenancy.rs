@@ -154,6 +154,14 @@ async fn create_org(
     let org = state
         .tenancy
         .create_org(Organization::new(&ctx.tenant, req.name))?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &ctx.tenant,
+        "organization.create",
+        "organization",
+        &org.id,
+    );
     crate::webhooks::emit(&state, "organization.created", &ctx.tenant, json!(org));
     Ok((StatusCode::CREATED, Json(json!(org))))
 }
@@ -201,6 +209,14 @@ async fn create_project(
         ApiError::new(StatusCode::NOT_FOUND, "not_found", "organization not found")
     })?;
     let project = state.tenancy.create_project(Project::new(&org, req.name))?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &ctx.tenant,
+        "project.create",
+        "project",
+        &project.id,
+    );
     crate::webhooks::emit(&state, "project.created", &ctx.tenant, json!(project));
     let etag = crate::hardening::etag(project.version);
     Ok((
@@ -262,6 +278,14 @@ async fn patch_project(
     }
     project.version += 1;
     state.tenancy.update_project(project.clone())?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &ctx.tenant,
+        "project.update",
+        "project",
+        &id,
+    );
     crate::webhooks::emit(&state, "project.updated", &ctx.tenant, json!(project));
     let etag = crate::hardening::etag(project.version);
     Ok(([(header::ETAG, etag)], Json(json!(project))).into_response())
@@ -275,6 +299,14 @@ async fn delete_project(
     let ctx = context(&state, &headers, Some(id.clone()));
     ctx.authorize("projects:admin")?;
     state.tenancy.delete_project(&id)?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &ctx.tenant,
+        "project.delete",
+        "project",
+        &id,
+    );
     crate::webhooks::emit(&state, "project.deleted", &ctx.tenant, json!({ "id": id }));
     Ok(StatusCode::NO_CONTENT)
 }
@@ -312,6 +344,14 @@ async fn add_member(
         scope: MemberScope::Project(id),
     };
     state.tenancy.add_membership(membership.clone())?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &ctx.tenant,
+        "member.add",
+        "membership",
+        &membership.user,
+    );
     crate::webhooks::emit(&state, "member.added", &ctx.tenant, json!(membership));
     Ok((StatusCode::CREATED, Json(json!(membership))))
 }
@@ -326,6 +366,14 @@ async fn remove_member(
     state
         .tenancy
         .remove_membership(&uid, &MemberScope::Project(id.clone()))?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &ctx.tenant,
+        "member.remove",
+        "membership",
+        &uid,
+    );
     crate::webhooks::emit(
         &state,
         "member.removed",
@@ -358,6 +406,14 @@ async fn set_quota(
     let ctx = context(&state, &headers, Some(id.clone()));
     ctx.authorize("org.admin")?;
     state.tenancy.set_quota(&id, limits.clone())?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &ctx.tenant,
+        "quota.update",
+        "project",
+        &id,
+    );
     crate::webhooks::emit(
         &state,
         "quota.updated",
@@ -897,6 +953,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// RM-GA-P4 OBS-804: org/project mutations are audited, by resource id, with the
+    /// acting principal + tenant attributed.
+    #[tokio::test]
+    async fn org_and_project_mutations_are_audited() {
+        use apex_audit::{AuditFilter, AuditLog};
+
+        unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
+        let mut st = AppState::from_env()
+            .await
+            .with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new()));
+        st.idempotency = crate::hardening::IdempotencyStore::default();
+        let st = Arc::new(st.with_audit(AuditLog::in_memory()));
+
+        let (s, org) = req(
+            &st,
+            "POST",
+            "/api/v1/organizations",
+            "root",
+            json!({"name":"AuditCo"}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let org_id = org["id"].as_str().unwrap().to_string();
+
+        let (s, prj) = req(
+            &st,
+            "POST",
+            "/api/v1/projects",
+            "root",
+            json!({"name":"p","organization": org_id}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let prj_id = prj["id"].as_str().unwrap().to_string();
+
+        let entries = st
+            .audit
+            .query(&AuditFilter {
+                tenant: Some("acme".to_string()),
+                principal: None,
+                action: None,
+                limit: None,
+            })
+            .unwrap();
+        let actions: Vec<&str> = entries.iter().map(|e| e.event.action.as_str()).collect();
+        assert!(
+            actions.contains(&"organization.create"),
+            "actions: {actions:?}"
+        );
+        assert!(actions.contains(&"project.create"), "actions: {actions:?}");
+        let org_entry = entries
+            .iter()
+            .find(|e| e.event.action == "organization.create")
+            .unwrap();
+        assert_eq!(org_entry.event.actor.principal, "root");
+        assert_eq!(org_entry.event.resource.id, org_id);
+        let prj_entry = entries
+            .iter()
+            .find(|e| e.event.action == "project.create")
+            .unwrap();
+        assert_eq!(prj_entry.event.resource.id, prj_id);
     }
 
     #[tokio::test]

@@ -210,6 +210,14 @@ async fn register_webhook(
     ctx.authorize("org.admin")?;
     let sub = WebhookSubscription::new(&ctx.tenant, req.url, req.events, req.secret);
     let saved = state.webhooks.register(sub)?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &ctx.tenant,
+        "webhook.create",
+        "webhook",
+        &saved.id,
+    );
     Ok((
         StatusCode::CREATED,
         Json(json!({ "id": saved.id, "url": saved.url, "events": saved.events })),
@@ -224,6 +232,14 @@ async fn delete_webhook(
     let ctx = crate::tenancy::context(&state, &headers, None);
     ctx.authorize("org.admin")?;
     state.webhooks.delete(&id)?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &ctx.tenant,
+        "webhook.delete",
+        "webhook",
+        &id,
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -382,6 +398,77 @@ mod tests {
         let (sig, event_type, body) = &calls[0];
         assert_eq!(event_type, "organization.created");
         assert!(apex_events::sign::verify(b"topsecret", body, sig));
+    }
+
+    /// RM-GA-P4 OBS-804: registering/deleting a webhook subscription is audited.
+    #[tokio::test]
+    async fn webhook_management_mutations_are_audited() {
+        use apex_audit::{AuditFilter, AuditLog};
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        unsafe { std::env::set_var("APEX_PLATFORM_ADMINS", "root") };
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                .with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new()))
+                .with_webhooks(Arc::new(InMemoryWebhookStore::new()))
+                .with_audit(AuditLog::in_memory()),
+        );
+
+        let resp = crate::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/webhooks")
+                    .header("content-type", "application/json")
+                    .header("x-apex-tenant", "acme")
+                    .header("x-apex-principal", "root")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "url": "https://hooks.example.com/y",
+                            "events": ["organization.*"],
+                            "secret": "s3cret",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let resp = crate::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/webhooks/{id}"))
+                    .header("x-apex-tenant", "acme")
+                    .header("x-apex-principal", "root")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let entries = state
+            .audit
+            .query(&AuditFilter {
+                tenant: Some("acme".to_string()),
+                principal: None,
+                action: None,
+                limit: None,
+            })
+            .unwrap();
+        let actions: Vec<&str> = entries.iter().map(|e| e.event.action.as_str()).collect();
+        assert!(actions.contains(&"webhook.create"), "actions: {actions:?}");
+        assert!(actions.contains(&"webhook.delete"), "actions: {actions:?}");
     }
 
     #[tokio::test]

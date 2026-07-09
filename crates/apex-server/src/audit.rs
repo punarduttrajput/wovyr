@@ -40,6 +40,36 @@ pub(crate) fn record(state: &AppState, event: AuditEvent) {
     }
 }
 
+/// Build and append a standard **allowed** audit entry for `action` on
+/// `(resource_type, resource_id)`, attributed to the request's principal and
+/// `tenant` and — when the request carries one (RM-GA-P4 OBS-802) — its
+/// correlating request id. This is the shared shape every mutating handler's audit
+/// call site now uses (RM-GA-P4 OBS-804: agents, plugins, tenancy, marketplace,
+/// webhooks, workflow executions); `kms.rs`/`secrets.rs`'s own small
+/// `audit_kms`/`audit_secret` wrappers predate this and now delegate to it too,
+/// rather than each independently constructing an `AuditEvent`.
+pub(crate) fn audit(
+    state: &AppState,
+    headers: &HeaderMap,
+    tenant: &str,
+    action: &str,
+    resource_type: &str,
+    resource_id: &str,
+) {
+    let mut event = AuditEvent::new(
+        now_ms(),
+        crate::tenancy::principal(headers),
+        tenant,
+        action,
+        resource_type,
+        resource_id,
+    );
+    if let Some(request_id) = crate::hardening::request_id_of(headers) {
+        event = event.with_request_id(request_id);
+    }
+    record(state, event);
+}
+
 #[derive(Deserialize)]
 struct AuditQuery {
     principal: Option<String>,

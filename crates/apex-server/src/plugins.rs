@@ -326,12 +326,20 @@ async fn enable_plugin(
     headers: HeaderMap,
     Json(req): Json<PluginRef>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.enable(&req.id, &mut scratch)?;
     save_catalog(&engine.catalog())?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "plugin.enable",
+        "plugin",
+        &req.id,
+    );
     Ok(Json(json!({ "id": req.id, "state": "enabled" })))
 }
 
@@ -342,12 +350,20 @@ async fn disable_plugin(
     headers: HeaderMap,
     Json(req): Json<PluginRef>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.disable(&req.id, &mut scratch)?;
     save_catalog(&engine.catalog())?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "plugin.disable",
+        "plugin",
+        &req.id,
+    );
     Ok(Json(json!({ "id": req.id, "state": "disabled" })))
 }
 
@@ -370,10 +386,13 @@ async fn install_plugin(
     headers: HeaderMap,
     Json(req): Json<InstallReq>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let bytes = base64_decode(&req.apexpkg)?;
     let package = Package::from_apexpkg(&bytes)?;
-    Ok(Json(install_package(&package, &req.grants)?))
+    let installed = install_package(&package, &req.grants)?;
+    let id = installed["id"].as_str().unwrap_or_default();
+    crate::audit::audit(&state, &headers, &tenant, "plugin.install", "plugin", id);
+    Ok(Json(installed))
 }
 
 /// Install a verified [`Package`] into the durable catalog (disabled), returning its
@@ -396,7 +415,7 @@ async fn upgrade_plugin(
     headers: HeaderMap,
     Json(req): Json<InstallReq>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let bytes = base64_decode(&req.apexpkg)?;
     let package = Package::from_apexpkg(&bytes)?;
     let _lock = acquire_lock()?;
@@ -405,6 +424,7 @@ async fn upgrade_plugin(
     engine.upgrade(&package, &req.grants, &mut scratch)?;
     save_catalog(&engine.catalog())?;
     let id = package.manifest()?.qualified_id();
+    crate::audit::audit(&state, &headers, &tenant, "plugin.upgrade", "plugin", &id);
     Ok(Json(json!({ "id": id, "status": "upgraded" })))
 }
 
@@ -420,12 +440,20 @@ async fn rollback_plugin(
     headers: HeaderMap,
     Json(req): Json<RollbackReq>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.rollback(&req.id, &mut scratch)?;
     save_catalog(&engine.catalog())?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "plugin.rollback",
+        "plugin",
+        &req.id,
+    );
     Ok(Json(json!({ "id": req.id, "status": "rolled_back" })))
 }
 
@@ -438,12 +466,13 @@ async fn uninstall_plugin(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let _lock = acquire_lock()?;
     let mut engine = engine()?;
     let mut scratch = ToolRegistry::new();
     engine.uninstall(&id, &mut scratch)?;
     save_catalog(&engine.catalog())?;
+    crate::audit::audit(&state, &headers, &tenant, "plugin.uninstall", "plugin", &id);
     Ok(Json(json!({ "id": id, "status": "uninstalled" })))
 }
 
@@ -463,7 +492,7 @@ async fn trust_publisher(
     headers: HeaderMap,
     Json(req): Json<TrustReq>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "plugins:admin")?;
     let key_bytes = hex::decode(&req.public_key_hex).map_err(|_| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -475,6 +504,14 @@ async fn trust_publisher(
     let mut trust = load_trust()?;
     trust.trust(req.publisher.clone(), key_bytes);
     save_trust(&trust)?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "plugin.trust",
+        "publisher",
+        &req.publisher,
+    );
     Ok(Json(
         json!({ "publisher": req.publisher, "status": "trusted" }),
     ))

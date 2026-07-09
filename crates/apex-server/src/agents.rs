@@ -21,7 +21,6 @@ use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
 
 /// Liveness probe.
 pub(crate) async fn healthz() -> Json<Value> {
@@ -73,41 +72,14 @@ pub(crate) async fn run_handler(
     headers: HeaderMap,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let start = Instant::now();
     let tenant = tenancy::run_tenant(&headers);
     let project = tenancy::run_project(&headers);
 
     if wants_async(&headers) {
-        let result = run_async_inner(&state, tenant, project, req).await;
-        record_run_metrics(&state, "agents_run_async", &result, start);
-        return result;
+        return run_async_inner(&state, tenant, project, req, headers).await;
     }
 
-    let result = run_inner(&state, tenant.clone(), project, req).await;
-    record_run_metrics(&state, "agents_run", &result, start);
-    result
-}
-
-/// Record the standard RED metrics for an `agents:run` variant.
-fn record_run_metrics(
-    state: &AppState,
-    route: &str,
-    result: &Result<Json<Value>, ApiError>,
-    start: Instant,
-) {
-    let status = match result {
-        Ok(_) => 200u16,
-        Err(e) => e.status.as_u16(),
-    };
-    state.metrics.counter_inc(
-        "apex_api_requests_total",
-        &[("route", route), ("status", &status.to_string())],
-    );
-    state.metrics.histogram_observe(
-        "apex_api_request_duration_seconds",
-        &[("route", route)],
-        start.elapsed().as_secs_f64(),
-    );
+    run_inner(&state, tenant.clone(), project, req, &headers).await
 }
 
 /// Parse the inline manifest then run it ([Agents API §5](../../docs/09-api/agents.md)).
@@ -116,6 +88,7 @@ async fn run_inner(
     tenant: String,
     project: Option<String>,
     req: RunRequest,
+    headers: &HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let def = AgentDefinition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
@@ -126,6 +99,7 @@ async fn run_inner(
         &tenant,
         project.as_deref(),
         req.max_steps,
+        headers,
     )
     .await
 }
@@ -140,6 +114,7 @@ async fn run_async_inner(
     tenant: String,
     project: Option<String>,
     req: RunRequest,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let def = AgentDefinition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
@@ -171,6 +146,7 @@ async fn run_async_inner(
         match run_agent(&def, &state2.gateway, &state2.registry, opts, &mut NullSink).await {
             Ok(out) => {
                 tenancy::record_run_cost(&state2.quota, project.as_deref(), out.usage.cost_usd);
+                crate::audit::audit(&state2, &headers, &tenant, "agent.run", "agent", &run_id2);
                 webhooks::emit(
                     &state2,
                     "agent.run.completed",
@@ -344,6 +320,7 @@ async fn run_definition(
     tenant: &str,
     project: Option<&str>,
     max_steps: Option<usize>,
+    headers: &HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let input = if input.is_null() { json!({}) } else { input };
 
@@ -370,6 +347,7 @@ async fn run_definition(
     tenancy::record_run_cost(&state.quota, project, out.usage.cost_usd);
 
     let run_id = format!("run_{}", state.run_counter.fetch_add(1, Ordering::SeqCst));
+    crate::audit::audit(state, headers, tenant, "agent.run", "agent", &run_id);
     webhooks::emit(
         state,
         "agent.run.completed",
@@ -414,6 +392,7 @@ pub(crate) async fn create_agent_handler(
 ) -> Result<Json<Value>, ApiError> {
     let tenant = tenancy::tenant_authorize(&state, &headers, "agents:write")?;
     let id = state.agents.create(&tenant, req.manifest)?;
+    crate::audit::audit(&state, &headers, &tenant, "agent.create", "agent", &id);
     Ok(Json(json!({ "id": id, "status": "created" })))
 }
 
@@ -459,6 +438,7 @@ pub(crate) async fn delete_agent_handler(
 ) -> Result<StatusCode, ApiError> {
     let tenant = tenancy::tenant_authorize(&state, &headers, "agents:write")?;
     if state.agents.delete(&tenant, &id) {
+        crate::audit::audit(&state, &headers, &tenant, "agent.delete", "agent", &id);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::new(
@@ -477,11 +457,10 @@ pub(crate) async fn run_stored_handler(
     Path(id): Path<String>,
     Json(req): Json<RunStoredRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let start = Instant::now();
     let project = tenancy::run_project(&headers);
     // Authorize the run in the caller's tenant, then resolve the agent *within* that
     // tenant — a caller can only run its own tenant's stored agents.
-    let result = match tenancy::tenant_authorize(&state, &headers, "agents:run") {
+    match tenancy::tenant_authorize(&state, &headers, "agents:run") {
         Ok(tenant) => match state.agents.definition(&tenant, &id) {
             Some(def) => {
                 run_definition(
@@ -491,6 +470,7 @@ pub(crate) async fn run_stored_handler(
                     &tenant,
                     project.as_deref(),
                     req.max_steps,
+                    &headers,
                 )
                 .await
             }
@@ -501,25 +481,7 @@ pub(crate) async fn run_stored_handler(
             )),
         },
         Err(e) => Err(e),
-    };
-
-    let status = match &result {
-        Ok(_) => 200u16,
-        Err(e) => e.status.as_u16(),
-    };
-    state.metrics.counter_inc(
-        "apex_api_requests_total",
-        &[
-            ("route", "agents_run_stored"),
-            ("status", &status.to_string()),
-        ],
-    );
-    state.metrics.histogram_observe(
-        "apex_api_request_duration_seconds",
-        &[("route", "agents_run_stored")],
-        start.elapsed().as_secs_f64(),
-    );
-    result
+    }
 }
 
 /// Query params for `GET /api/v1/workflows`: filters plus cursor pagination.

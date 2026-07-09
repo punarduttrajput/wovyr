@@ -1,0 +1,10 @@
+.narrow { max-width: 560px; }
+.pad { padding: 22px; }
+.ok { display: inline-block; margin-left: 12px; color: var(--ok, #2ea043); font-size: 13px; }
+code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--neutral-bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+}

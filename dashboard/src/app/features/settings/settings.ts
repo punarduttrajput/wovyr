@@ -2,7 +2,7 @@ import { Component, OnInit, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { SettingsService } from './settings.service';
 import { Membership, Organization, Project, QuotaLimits, Role, Webhook } from '../../core/api.types';
-import { PRINCIPAL, TENANT } from '../../core/tenant.config';
+import { Session } from '../../core/session';
 
 type Tab = 'projects' | 'members' | 'quotas' | 'integrations';
 
@@ -14,9 +14,10 @@ type Tab = 'projects' | 'members' | 'quotas' | 'integrations';
 })
 export class Settings implements OnInit {
   private svc = inject(SettingsService);
+  private session = inject(Session);
 
-  readonly tenant = TENANT;
-  readonly principal = PRINCIPAL;
+  readonly tenant = this.session.tenant();
+  readonly principal = this.session.principal();
   readonly roles: Role[] = ['viewer', 'editor', 'project_admin', 'org_admin', 'platform_admin'];
 
   readonly tab = signal<Tab>('projects');

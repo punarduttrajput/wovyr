@@ -264,6 +264,14 @@ async fn publish_listing(
         .get("x-apex-tenant")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("public");
+    crate::audit::audit(
+        &state,
+        &headers,
+        tenant,
+        "marketplace.publish",
+        "marketplace_listing",
+        &out.listing_id,
+    );
     crate::webhooks::emit(
         &state,
         "plugin.published",
@@ -288,12 +296,23 @@ struct DownloadParams {
 /// `GET /api/v1/marketplace/listings/{id}/download?version=` — fetch the `.apexpkg`
 /// bytes (base64) for a version (latest stable if omitted).
 async fn download_version(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<Value>, ApiError> {
     let lookup_id = id.clone();
     let bytes =
         with_registry(move |reg| Ok(reg.download(&lookup_id, params.version.as_deref())?)).await?;
+    let tenant = crate::tenancy::run_tenant(&headers);
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "marketplace.download",
+        "marketplace_listing",
+        &id,
+    );
     Ok(Json(json!({ "id": id, "apexpkg": base64_encode(&bytes) })))
 }
 
@@ -408,10 +427,18 @@ async fn verify_listing(
     Path(id): Path<String>,
     Json(req): Json<VerifyReq>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let id_for_resp = id.clone();
     let verified = req.verified;
     with_registry(move |reg| Ok(reg.set_verified(&id, verified)?)).await?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "marketplace.listing.verify",
+        "marketplace_listing",
+        &id_for_resp,
+    );
     Ok(Json(json!({ "id": id_for_resp, "verified": verified })))
 }
 
@@ -470,11 +497,19 @@ async fn approve_review(
     headers: HeaderMap,
     Json(req): Json<ReviewDecisionReq>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let reviewer = actor_identity(&headers, req.reviewer.as_deref(), "operator");
     let id_for_resp = id.clone();
     let reviewer_for_task = reviewer.clone();
     with_registry(move |reg| Ok(reg.approve_review(&id, &reviewer_for_task)?)).await?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "marketplace.review.approve",
+        "marketplace_listing",
+        &id_for_resp,
+    );
     Ok(Json(
         json!({ "id": id_for_resp, "verified": true, "reviewer": reviewer }),
     ))
@@ -499,7 +534,7 @@ async fn reject_review(
     headers: HeaderMap,
     Json(req): Json<RejectReviewReq>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let reviewer = actor_identity(&headers, req.reviewer.as_deref(), "operator");
     let id_for_resp = id.clone();
     let reviewer_for_task = reviewer.clone();
@@ -507,6 +542,14 @@ async fn reject_review(
     let reason_for_task = reason.clone();
     with_registry(move |reg| Ok(reg.reject_review(&id, &reviewer_for_task, &reason_for_task)?))
         .await?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "marketplace.review.reject",
+        "marketplace_listing",
+        &id_for_resp,
+    );
     Ok(Json(json!({
         "id": id_for_resp,
         "verified": false,
@@ -525,6 +568,8 @@ struct InstallReq {
 /// `POST /api/v1/marketplace/listings/{id}/install` — download a listed package and
 /// install it into the local plugin catalog (disabled), then bump the install count.
 async fn install_listing(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<InstallReq>,
 ) -> Result<Json<Value>, ApiError> {
@@ -537,6 +582,15 @@ async fn install_listing(
         Ok(installed)
     })
     .await?;
+    let tenant = crate::tenancy::run_tenant(&headers);
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "marketplace.install",
+        "marketplace_listing",
+        &id_for_resp,
+    );
     Ok(Json(
         json!({ "id": id_for_resp, "status": "installed", "plugin": installed }),
     ))
@@ -575,6 +629,14 @@ async fn report_abuse(
         .get("x-apex-tenant")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("public");
+    crate::audit::audit(
+        &state,
+        &headers,
+        tenant,
+        "marketplace.abuse.report",
+        "marketplace_listing",
+        &id_for_resp,
+    );
     crate::webhooks::emit(
         &state,
         "plugin.abuse_reported",
@@ -618,7 +680,7 @@ async fn resolve_abuse_report(
     headers: HeaderMap,
     Json(req): Json<ResolveAbuseReportReq>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let moderator = actor_identity(&headers, req.moderator.as_deref(), "operator");
     let id_for_resp = id.clone();
     let moderator_for_task = moderator.clone();
@@ -627,6 +689,14 @@ async fn resolve_abuse_report(
         Ok(reg.resolve_abuse_report(&id, report_id, &moderator_for_task, delist)?)
     })
     .await?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "marketplace.abuse.resolve",
+        "marketplace_listing",
+        &id_for_resp,
+    );
 
     if delist {
         let tenant = headers
@@ -667,7 +737,7 @@ async fn dismiss_abuse_report(
     headers: HeaderMap,
     Json(req): Json<DismissAbuseReportReq>,
 ) -> Result<Json<Value>, ApiError> {
-    crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "marketplace:moderate")?;
     let moderator = actor_identity(&headers, req.moderator.as_deref(), "operator");
     let id_for_resp = id.clone();
     let moderator_for_task = moderator.clone();
@@ -677,6 +747,14 @@ async fn dismiss_abuse_report(
         Ok(reg.dismiss_abuse_report(&id, report_id, &moderator_for_task, &reason_for_task)?)
     })
     .await?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "marketplace.abuse.dismiss",
+        "marketplace_listing",
+        &id_for_resp,
+    );
 
     Ok(Json(json!({
         "id": id_for_resp,
