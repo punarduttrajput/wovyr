@@ -7,10 +7,11 @@ Document ID: GA-003
 
 **Document ID:** GA-003
 **File Path:** `docs/18-roadmap/v1.0/A3-security-completion.md`
-**Version:** 1.1.0
-**Status:** In progress — KMS live + pen-tested + compliance-mapped; the
-anonymous default-tenant RBAC bypass (§4.1 hardening pass) is now **closed**;
-root-of-trust and external validation remain
+**Version:** 1.2.0
+**Status:** In progress — KMS live + pen-tested + compliance-mapped; all three
+§4.1 hardening-pass residual findings (anonymous default-tenant RBAC bypass,
+`kms.json` file permissions, non-Unix root-key/`kms.json` ACL) are now
+**closed**; root-of-trust and external validation remain
 **Owner:** Security Team
 **Last Updated:** 2026-07-09
 
@@ -39,11 +40,14 @@ is the production root-of-trust, broader PII coverage, and *external* validation
   post-crypto-shred replay); [compliance-mapping.md](../../13-security/compliance-mapping.md)
   maps SOC 2 / ISO 27001 / GDPR controls to the implementation — **as an internal
   self-assessment**.
-- **Residual findings — one now closed, two still open**
+- **All three hardening-pass residual findings are now closed**
   ([compliance-mapping §7](../../13-security/compliance-mapping.md#7-residual-risk-and-gaps)):
-  the anonymous default-tenant RBAC bypass reaching `kms:admin` is **fixed**
-  (`tenant_authorize`'s short-circuit deleted — see §3 item 3 below); `kms.json`
-  file permissions and the non-Unix root-key ACL remain.
+  the anonymous default-tenant RBAC bypass reaching `kms:admin` is fixed
+  (`tenant_authorize`'s short-circuit deleted — see §3 item 3 below);
+  `kms.json` file permissions are now owner-only after every write; and the
+  non-Unix root-key/`kms.json` ACL gap is closed too — authored and verified
+  live on a real Windows host via a new shared `apex_common::fs::restrict_to_owner`
+  primitive (Unix: `chmod 0600`; Windows: `icacls /inheritance:r /grant:r`).
 - **The root key is a single-host stand-in.** `LocalKms` holds it in-process
   (`root::from_env` / `root::from_file`); no cloud-KMS/HSM backing.
 
@@ -57,12 +61,14 @@ is the production root-of-trust, broader PII coverage, and *external* validation
    PII resources (e.g. a `User.email` — [users.md](../../09-api/users.md)).
 3. ~~The documented **residual findings** are unaddressed by design (scoped out
    of the pen-test slice, deferred to a hardening pass).~~ **Done (2026-07-09)**
-   for the anonymous default-tenant bypass — `tenant_authorize`
+   for all three: `tenant_authorize`
    ([tenancy.rs](../../../crates/apex-server/src/tenancy.rs)) no longer
-   short-circuits RBAC for an anonymous caller against the default tenant;
-   `APEX_ALLOW_ANONYMOUS=1` now governs only whether such a request reaches a
-   handler at all, never its authorization outcome. `kms.json` file permissions
-   and the non-Unix root-key ACL are still open.
+   short-circuits RBAC for an anonymous caller against the default tenant
+   (`APEX_ALLOW_ANONYMOUS=1` now governs only whether such a request reaches a
+   handler at all, never its authorization outcome); `kms.json` is now
+   `chmod 0600`-equivalent after every write; and the non-Unix ACL gap for both
+   `root.key` and `kms.json` is closed via `apex_common::fs::restrict_to_owner`
+   (`icacls` on Windows), authored and proven live on a real Windows host.
 4. No **external** pen test or **formal** compliance audit has occurred — the
    current mapping is a self-assessment.
 
@@ -79,8 +85,7 @@ is the production root-of-trust, broader PII coverage, and *external* validation
 - ~~A **scoped hardening pass** closing the residual findings — notably narrowing
   the anonymous default-tenant bypass (a *systemic* change across every
   tenant-scoped route, deliberately deferred from the pen-test slice).~~ **Done**
-  for the anonymous-bypass item (2026-07-09); `kms.json` permissions and the
-  non-Unix root-key ACL remain.
+  for all three residual findings (2026-07-09).
 - Engagement of an **external penetration test** and a **formal
   compliance-mapping audit**.
 
@@ -144,5 +149,6 @@ external pen test" ([v1.0 §5](../v1.0.md#5-exit-criteria)).
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-09 | Closed the remaining two §4.1 hardening-pass residual findings: `kms.json` is now owner-only after every write (already landed separately), and the non-Unix root-key/`kms.json` ACL gap is closed via a new shared `apex_common::fs::restrict_to_owner` primitive (`icacls /inheritance:r /grant:r` on Windows), authored and proven live on a real Windows host rather than left as a documented-but-unbuildable gap. Cloud-KMS/HSM and external validation remain |
 | 1.1.0 | 2026-07-09 | Closed the anonymous default-tenant RBAC bypass (§3 item 3 / §4.1's hardening pass): deleted `tenant_authorize`'s short-circuit in `crates/apex-server/src/tenancy.rs` so `APEX_ALLOW_ANONYMOUS=1` no longer implies any RBAC grant, only authentication pass-through. Migrated ~10 tests that relied on the old permissive behavior to a real `APEX_PLATFORM_ADMINS` principal. `kms.json` permissions and the non-Unix root-key ACL remain open, as does cloud-KMS/HSM and external validation |
 | 1.0.0 | 2026-07-05 | Initial GA-completion delivery doc for security; records the live+pen-tested+mapped KMS slice and scopes the root-of-trust, PII, hardening, and external-validation remainder |

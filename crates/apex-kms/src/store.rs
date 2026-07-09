@@ -105,25 +105,14 @@ impl FileKmsStore {
     }
 }
 
-/// Restrict `kms.json` to owner-only access on Unix, mirroring
+/// Restrict `kms.json` to owner-only access, mirroring
 /// [`crate::root::from_file`]'s handling of `root.key` — entries here are
 /// inert ciphertext without the root key, but this closes the defense-in-depth
-/// gap where the wrapped tenant-key catalog got whatever the process
-/// umask/ACL default was. No-op on non-Unix, same documented convention as
-/// `root::restrict_permissions` and the CLI's `credentials.json` handling.
-#[cfg(unix)]
+/// gap where the wrapped tenant-key catalog got whatever the process's
+/// default file permissions/ACL were.
 fn restrict_permissions(path: &std::path::Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)
-        .map_err(|e| Error::config(format!("stat kms.json: {e}")))?
-        .permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms).map_err(|e| Error::config(format!("chmod kms.json: {e}")))
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &std::path::Path) -> Result<()> {
-    Ok(())
+    apex_common::fs::restrict_to_owner(path)
+        .map_err(|e| Error::config(format!("restrict kms.json permissions: {e}")))
 }
 
 impl KmsStore for FileKmsStore {
@@ -204,6 +193,18 @@ mod tests {
                 .mode()
                 & 0o777;
             assert_eq!(mode, 0o600);
+        }
+
+        #[cfg(windows)]
+        {
+            let user = std::env::var("USERNAME").unwrap();
+            let output = std::process::Command::new("icacls")
+                .arg(dir.join("kms.json"))
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert!(text.contains(&user), "icacls output: {text}");
+            assert!(!text.contains("(I)"), "icacls output: {text}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

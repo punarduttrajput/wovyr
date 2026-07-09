@@ -7,15 +7,15 @@ Document ID: SEC-007
 
 **Document ID:** SEC-007  
 **File Path:** `docs/13-security/compliance-mapping.md`  
-**Version:** 1.3.0  
+**Version:** 1.4.0  
 **Status:** Draft — first mapping pass, scoped to the encryption/key-management
 control family (`apex-kms`, `apex-secrets`, `apex-memory`'s encrypting store,
 `apex-events`'s encrypting webhook store, `apex-audit`). Verified against real
 code and a new adversarial test suite, not a third-party attestation.  
 **Owner:** Security Team  
-**Last Updated:** 2026-07-09. §7 items 1 and 2 (the anonymous default-tenant
-bypass, and `kms.json` file permissions) have since been closed — see their
-entries.
+**Last Updated:** 2026-07-09. §7 items 1, 2, and 3 (the anonymous default-tenant
+bypass, `kms.json` file permissions, and the non-Unix root-key/`kms.json` ACL)
+have since been closed — see their entries.
 
 ---
 
@@ -164,19 +164,32 @@ Found during this pass, not fixed here (see rationale per item):
    *identity* on a loopback bind — but identity alone no longer buys RBAC access
    the way anonymity used to.
 2. **Closed.** `kms.json` (the wrapped tenant-key catalog) is now restricted to
-   owner-only (`0600`) on Unix after every write —
+   owner-only access after every write —
    `FileKmsStore::persist`'s `restrict_permissions`
    ([store.rs](../../crates/apex-kms/src/store.rs)), the same treatment
    `root::from_file` already gave `root.key`. Proven by
    `store::tests::file_store_restricts_kms_json_to_owner_only`.
-3. **Root-key (and now `kms.json`) file permissions remain a no-op on
-   non-Unix**, by the same explicit, documented convention used elsewhere in
-   this codebase for owner-only file hardening (`apex-kms`'s
-   `root::restrict_permissions`, the CLI's `credentials.json`
-   `restrict_permissions` in
-   [config.rs](../../apps/apex-cli/src/config.rs)) — all only call `chmod`
-   under `#[cfg(unix)]`; on Windows these files get the OS default ACL rather
-   than being locked to the owning process.
+3. **Closed (2026-07-09, authored and verified on a real Windows host).**
+   Root-key and `kms.json` file permissions used to be a no-op on non-Unix —
+   `root::restrict_permissions`/`store.rs`'s equivalent only ever called
+   `chmod` under `#[cfg(unix)]`, so on Windows these files kept the OS default
+   ACL rather than being locked to the owning process. The three previously
+   independent copies of that `#[cfg(unix)]`/`#[cfg(not(unix))]` pair
+   (`apex-kms`'s `root.rs` and `store.rs`, the CLI's `credentials.json`
+   handling in [config.rs](../../apps/apex-cli/src/config.rs)) are now one
+   shared primitive, `apex_common::fs::restrict_to_owner`
+   ([fs.rs](../../crates/apex-common/src/fs.rs)): `chmod 0600` on Unix
+   unchanged, and on Windows a real ACL restriction via `icacls
+   /inheritance:r /grant:r <user>:F` (std has no ACL-editing API; this shells
+   out to the tool bundled with every Windows install, the same
+   external-tool-via-`Command` pattern `apex-tools`' egress lockdown already
+   uses for `iptables`/`nsenter`, rather than adding a Windows-ACL crate
+   dependency for one call site). Proven live on Windows — not just
+   reasoned about — by `fs::tests::restrict_to_owner_locks_the_file_down`,
+   `root::tests::from_file_generates_once_then_persists_across_calls`, and
+   `store::tests::file_store_restricts_kms_json_to_owner_only`, each of which
+   asserts via `icacls` output that no inherited ACE survives and only the
+   invoking user is granted access.
 4. **No cloud-KMS-/HSM-backed root.** `LocalKms` holds the root key in-process
    by design ([kms.rs](../../crates/apex-kms/src/kms.rs) doc comment) — a
    documented, intentional single-host stand-in. The `Kms` trait is the
@@ -204,6 +217,7 @@ Found during this pass, not fixed here (see rationale per item):
 
 | Version | Date | Description |
 |---------|------|--------------|
+| 1.4.0 | 2026-07-09 | Closed §7 item 3: root-key/`kms.json` file permissions were a no-op on non-Unix. Consolidated the three independent `#[cfg(unix)]`-only permission-restriction copies (`apex-kms`'s `root.rs`/`store.rs`, the CLI's `config.rs`) into one shared `apex_common::fs::restrict_to_owner`, which on Windows shells out to `icacls /inheritance:r /grant:r <user>:F`. Authored and proven live on a real Windows host (not reasoned-about-only), closing the gap the prior 1.3.0 entry left open for lack of a Windows environment |
 | 1.3.0 | 2026-07-09 | Merged two independent closures: §7 item 1 (`tenant_authorize`'s anonymous default-tenant RBAC bypass — `APEX_ALLOW_ANONYMOUS=1` used to grant an anonymous caller every scope, incl. `kms:admin` — is deleted, `anonymous_allowed` now governs only whether an unauthenticated request reaches a handler at all) and §7 item 2 (`kms.json`, the wrapped tenant-key catalog, now `chmod 0600` on Unix after every write, same treatment as `root.key`). Item 3 (non-Unix ACL) remains open |
 | 1.1.0 | 2026-07-05 | Added `apex-events`'s new `EncryptedFileWebhookStore` (webhook subscription signing secrets, `APEX_WEBHOOKS_ENCRYPT_AT_REST`) as a third §4 encrypting-store consumer, updated CC6.6/Art. 32 evidence accordingly |
 | 1.0.0 | 2026-07-05 | Initial mapping: SOC 2 (CC6.1/6.6/6.7/6.8/7.2), ISO 27001 Annex A (8.24/5.15/8.10/8.15/5.31), and GDPR (Art. 32, Art. 17) controls mapped to `apex-kms`/`apex-secrets`/`apex-memory`/`apex-audit`, backed by a new adversarial test suite (`crates/apex-kms/tests/adversarial.rs`) and a documented, proven residual-risk finding (anonymous default-tenant bypass reaching `kms:admin`) |

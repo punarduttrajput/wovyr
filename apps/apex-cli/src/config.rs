@@ -97,15 +97,10 @@ pub fn delete_credentials() -> Result<bool> {
 }
 
 /// Restrict the credentials file to owner-only access where supported.
-#[cfg(unix)]
+/// Best-effort: failure to tighten permissions should not break login.
 fn restrict_permissions(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    // Best-effort: failure to tighten permissions should not break login.
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    let _ = apex_common::fs::restrict_to_owner(path);
 }
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &std::path::Path) {}
 
 #[cfg(test)]
 mod tests {

@@ -31,8 +31,10 @@ pub fn from_env(var: &str) -> Result<KeyBytes> {
 }
 
 /// Load the root key from `path`, generating and persisting a fresh one on
-/// first use (mode `0600` on Unix). Convenient for local/dev; a production
-/// deployment should prefer [`from_env`] (or, later, a real KMS-backed root) —
+/// first use, restricted to the owning user only (via
+/// [`apex_common::fs::restrict_to_owner`]). Convenient for local/dev; a
+/// production deployment should prefer [`from_env`] (or, later, a real
+/// KMS-backed root) —
 /// generating a fresh key here logs a loud warning, since this file is now the
 /// *only* copy of the key that protects every secret/memory this process ever
 /// seals, and nothing escrows it automatically.
@@ -79,20 +81,9 @@ fn decode_hex_key(hex_str: &str, source: &str) -> Result<KeyBytes> {
         .map_err(|_| Error::config(format!("{source} must decode to exactly 32 bytes")))
 }
 
-#[cfg(unix)]
 fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)
-        .map_err(|e| Error::config(format!("stat root key file: {e}")))?
-        .permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms)
-        .map_err(|e| Error::config(format!("chmod root key file: {e}")))
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+    apex_common::fs::restrict_to_owner(path)
+        .map_err(|e| Error::config(format!("restrict root key file permissions: {e}")))
 }
 
 #[cfg(test)]
@@ -140,6 +131,18 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
+        }
+
+        #[cfg(windows)]
+        {
+            let user = std::env::var("USERNAME").unwrap();
+            let output = std::process::Command::new("icacls")
+                .arg(&path)
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert!(text.contains(&user), "icacls output: {text}");
+            assert!(!text.contains("(I)"), "icacls output: {text}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

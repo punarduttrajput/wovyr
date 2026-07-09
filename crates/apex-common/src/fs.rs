@@ -81,6 +81,61 @@ pub fn sync_dir(_dir: impl AsRef<Path>) -> io::Result<()> {
     Ok(())
 }
 
+/// Restrict `path` to the owning user's exclusive access — the shared
+/// primitive behind every owner-only file in the workspace (`apex-kms`'s
+/// `root.key` and `kms.json`, the CLI's `credentials.json`), previously three
+/// independent copies of the same `#[cfg(unix)]`/`#[cfg(not(unix))]` pair.
+/// Unix: `chmod 0600`. Windows: no permission bits exist to `chmod` — access
+/// control is a full ACL, and std has no API for editing one. Rather than add
+/// a Windows-ACL dependency for a single call, this shells out to `icacls`
+/// (bundled with every Windows install since XP), the same
+/// external-tool-via-`Command` pattern `apex-tools`' egress lockdown already
+/// uses for `iptables`/`nsenter`: `/inheritance:r` strips inherited ACEs, then
+/// `/grant:r <user>:F` grants Full Control to the invoking user only,
+/// replacing (`:r`) any prior explicit grant rather than stacking onto it.
+pub fn restrict_to_owner(path: impl AsRef<Path>) -> io::Result<()> {
+    restrict_to_owner_impl(path.as_ref())
+}
+
+#[cfg(unix)]
+fn restrict_to_owner_impl(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(windows)]
+fn restrict_to_owner_impl(path: &Path) -> io::Result<()> {
+    // Windows always sets USERNAME for the process's own session; there is no
+    // sandboxed/service context in this workspace's deployment story where it
+    // would be absent.
+    let user = std::env::var("USERNAME")
+        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "USERNAME is not set"))?;
+    // `.output()`, not `.status()`: icacls prints a "Successfully processed N
+    // files" line to stdout on every call, which would otherwise spam the
+    // server/CLI's own console on every KMS write. Captured and only surfaced
+    // on failure.
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("{user}:F"))
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "icacls exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn restrict_to_owner_impl(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// A held cross-process advisory exclusive lock on `<dir>/.lock` — `flock` on
 /// Unix, `LockFileEx` on Windows, via the `fs2` crate. Acquiring **blocks**
 /// the calling thread until the lock is held (a store's read-modify-write
@@ -228,6 +283,45 @@ mod tests {
         }
         // No hang, no error — the prior lock was released on drop.
         let _lock = FileLock::acquire(&dir).unwrap();
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restrict_to_owner_locks_the_file_down() {
+        let dir = scratch_dir("restrict_to_owner");
+        let path = dir.join("secret.key");
+        fs::write(&path, b"secret").unwrap();
+
+        restrict_to_owner(&path).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        #[cfg(windows)]
+        {
+            // icacls prints one line per ACE; after `/inheritance:r` +
+            // `/grant:r <user>:F` there must be one naming the invoking user,
+            // and no "(I)" marker (which flags a surviving *inherited* ACE).
+            let user = std::env::var("USERNAME").unwrap();
+            let output = std::process::Command::new("icacls")
+                .arg(&path)
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                text.contains(&user),
+                "icacls output should list the owning user: {text}"
+            );
+            assert!(
+                !text.contains("(I)"),
+                "no ACE should remain inherited after /inheritance:r: {text}"
+            );
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }
