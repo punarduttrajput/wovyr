@@ -879,6 +879,36 @@ mod tests {
         assert!(admit_run(&st.tenancy, &st.quota, None).is_ok());
     }
 
+    /// RM-AIM-P1 PRV-101 acceptance: a real, price-book-computed `cost_usd` (the exact
+    /// value `OpenAiProvider` now stamps onto `output.usage.cost_usd`, which
+    /// `apex-runtime` feeds to `record_run_cost`) advances a project's daily accumulator
+    /// by that amount — not the old hardcoded $0 that silently disabled quota enforcement.
+    #[test]
+    fn priced_run_cost_advances_the_daily_accumulator() {
+        use apex_common::Usage;
+        use apex_provider::PriceBook;
+
+        // The same table `OpenAiProvider::from_env` uses; price a known call.
+        let book = PriceBook::with_defaults();
+        // gpt-4o-mini: $0.15/1M in, $0.60/1M out — 1000 in + 500 out.
+        let usage = Usage::new(1000, 500, 0.0);
+        let cost = book.cost("gpt-4o-mini", &usage);
+        let expected = (1000.0 * 0.15 + 500.0 * 0.60) / 1_000_000.0;
+        assert!((cost - expected).abs() < 1e-12, "cost {cost}");
+        assert!(cost > 0.0, "a priced call must not be free");
+
+        // Record it against a project, twice, exactly as a two-run day would.
+        let quota = Arc::new(QuotaTracker::new(None));
+        record_run_cost(&quota, Some("prj-priced"), cost);
+        record_run_cost(&quota, Some("prj-priced"), cost);
+
+        let spent = quota.usage.lock().unwrap().cost["prj-priced"].1;
+        assert!(
+            (spent - 2.0 * cost).abs() < 1e-12,
+            "the accumulator must advance by the computed cost each run, got {spent}"
+        );
+    }
+
     /// RM-GA-P2 DUR-404 acceptance: a daily-cost accumulator survives a restart within
     /// the same UTC day. A fresh `QuotaTracker` opened against the same path (the same
     /// "simulated restart" stand-in used throughout this workspace's crash-recovery

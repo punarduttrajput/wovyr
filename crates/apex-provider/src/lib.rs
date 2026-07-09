@@ -16,6 +16,7 @@ mod image;
 mod mistralrs_provider;
 mod mock;
 mod openai;
+mod pricing;
 mod provider;
 #[cfg(feature = "redis")]
 mod redis_breaker;
@@ -31,6 +32,7 @@ pub use image::{ImageGenRequest, ImageGenResponse};
 pub use mistralrs_provider::MistralRsProvider;
 pub use mock::MockProvider;
 pub use openai::OpenAiProvider;
+pub use pricing::{ModelPrice, PriceBook};
 pub use provider::{AIProvider, ChatStream, ChatStreamEvent};
 #[cfg(feature = "redis")]
 pub use redis_breaker::RedisKv;

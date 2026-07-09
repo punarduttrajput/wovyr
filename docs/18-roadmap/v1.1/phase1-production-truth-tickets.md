@@ -58,7 +58,7 @@ everything at $0 — so PRV-101 is a prerequisite for trusting any Phase-2 quota
 
 # WS-B — Provider & Cost
 
-## PRV-101 `[P0]` — Per-model price table + real `cost_usd`
+## PRV-101 `[P0]` — Per-model price table + real `cost_usd` — **DONE (2026-07-09)**
 
 **Problem.** `OpenAiProvider` hardcodes `cost_usd = 0.0`
 (`crates/apex-provider/src/openai.rs:442,513-515`) and mistralrs likewise
@@ -86,6 +86,27 @@ a no-op. (PRD-004 R-B.1; audit High.)
 **Files.** `crates/apex-provider/src/{openai.rs,mistralrs_provider.rs,gateway.rs}`, a
 new `pricing.rs`; `crates/apex-server/src/tenancy.rs` (quota assertions).
 **Size.** M. **Depends on:** none. **Blocks:** SRV-202 (token quotas), EVL-202.
+
+**Implementation notes (2026-07-09).** New `apex-provider::pricing` module: a
+`PriceBook` (model → `ModelPrice { input_per_1m, output_per_1m }`) with built-in
+defaults for common OpenAI/Anthropic models, overridable via `APEX_MODEL_PRICES`
+(inline JSON) or `APEX_PRICEBOOK_FILE` (a JSON file); lookup is
+exact-match-then-longest-prefix (so `gpt-4o-mini-2024-07-18` → `gpt-4o-mini`), then
+a configurable `default`, then a one-time `tracing::warn!` returning `$0` for a
+genuinely unknown/undefaulted model (fail-safe, never a panic). `OpenAiProvider`
+carries a `PriceBook` (from `PriceBook::from_env()` by default; `with_price_book`
+override) and computes `cost_usd` from returned `Usage` in both `parse_response`
+(non-streaming) and `StreamAccumulator::finish` (streaming), logging it at
+`debug` (`target: "apex.pricing"`) — the "observe" half of observe-then-enforce.
+mistral.rs keeps `$0` with an expanded comment: a local model has no vendor bill,
+so that's the *correct* cost, not a placeholder. **Acceptance:**
+`pricing::tests::known_token_count_times_price_is_expected_cost` +
+`openai::tests::parses_text_completion` (now asserts the computed non-zero cost)
+cover the unit criterion; `tenancy::tests::priced_run_cost_advances_the_daily_
+accumulator` drives a price-book-computed cost through `record_run_cost` and
+asserts the daily accumulator advances by exactly that amount (not $0);
+`pricing::tests::unknown_model_without_default_is_free_not_a_panic` covers
+fail-safe. `MOCK_USD_PER_TOKEN` is unchanged (the mock already priced its output).
 
 ---
 

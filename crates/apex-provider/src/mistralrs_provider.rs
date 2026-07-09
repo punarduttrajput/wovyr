@@ -194,8 +194,10 @@ impl AIProvider for MistralRsProvider {
             name: None,
         };
 
-        // A local model has no per-token price; cost stays 0.0 (same non-issue
-        // as MockProvider's own $0 mock rate).
+        // A local model has no per-token vendor price, so $0 is the *correct* cost
+        // here — not the placeholder-zero PRV-101 removed from `OpenAiProvider`. The
+        // machine's own compute/electricity isn't metered by this platform, and there
+        // is no API bill; the `PriceBook` deliberately doesn't apply to this backend.
         let usage = Usage::new(
             response.usage.prompt_tokens as u32,
             response.usage.completion_tokens as u32,

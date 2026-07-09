@@ -9,6 +9,7 @@
 
 use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
 use crate::image::{ImageGenRequest, ImageGenResponse};
+use crate::pricing::PriceBook;
 use crate::provider::{AIProvider, ChatStream, ChatStreamEvent};
 use crate::types::{ChatRequest, ChatResponse, Message, Role, ToolCall};
 use apex_common::{Error, Result, Usage};
@@ -24,15 +25,22 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// Per-model price table used to compute `cost_usd` from returned token usage.
+    prices: PriceBook,
 }
 
 impl OpenAiProvider {
     /// Build a provider from explicit configuration.
+    ///
+    /// Uses the operator-overridable price table ([`PriceBook::from_env`]) so a run
+    /// through this provider records real cost regardless of which constructor the
+    /// caller used; swap it with [`OpenAiProvider::with_price_book`].
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
+            prices: PriceBook::from_env(),
         }
     }
 
@@ -47,6 +55,12 @@ impl OpenAiProvider {
         let base_url =
             std::env::var("APEX_OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         Ok(Self::new(base_url, api_key))
+    }
+
+    /// Override the price table (builder-style).
+    pub fn with_price_book(mut self, prices: PriceBook) -> Self {
+        self.prices = prices;
+        self
     }
 
     /// Build the `/chat/completions` request body from a normalized request.
@@ -152,7 +166,7 @@ impl AIProvider for OpenAiProvider {
             return Err(classify_http_error(status.as_u16(), msg));
         }
 
-        parse_response(&payload, &request.model)
+        parse_response(&payload, &request.model, &self.prices)
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
@@ -178,10 +192,11 @@ impl AIProvider for OpenAiProvider {
             return Err(classify_http_error(status.as_u16(), &text));
         }
 
+        let prices = self.prices.clone();
         let mut bytes = resp.bytes_stream();
         let stream = async_stream::stream! {
             let mut buf = String::new();
-            let mut acc = StreamAccumulator::new(requested_model);
+            let mut acc = StreamAccumulator::new(requested_model, prices);
 
             while let Some(chunk) = bytes.next().await {
                 let chunk = match chunk {
@@ -338,10 +353,11 @@ struct StreamAccumulator {
     finish_reason: String,
     prompt_tokens: u32,
     completion_tokens: u32,
+    prices: PriceBook,
 }
 
 impl StreamAccumulator {
-    fn new(model: String) -> Self {
+    fn new(model: String, prices: PriceBook) -> Self {
         Self {
             model,
             content: String::new(),
@@ -349,6 +365,7 @@ impl StreamAccumulator {
             finish_reason: "stop".to_string(),
             prompt_tokens: 0,
             completion_tokens: 0,
+            prices,
         }
     }
 
@@ -430,6 +447,9 @@ impl StreamAccumulator {
         } else {
             Some(self.content)
         };
+        let usage = Usage::new(self.prompt_tokens, self.completion_tokens, 0.0);
+        let cost_usd = self.prices.cost(&self.model, &usage);
+        let usage = Usage::new(self.prompt_tokens, self.completion_tokens, cost_usd);
         ChatResponse {
             message: Message {
                 role: Role::Assistant,
@@ -439,14 +459,18 @@ impl StreamAccumulator {
                 name: None,
             },
             model: self.model,
-            usage: Usage::new(self.prompt_tokens, self.completion_tokens, 0.0),
+            usage,
             finish_reason: self.finish_reason,
         }
     }
 }
 
 /// Parse an OpenAI-shaped completion payload into a [`ChatResponse`].
-fn parse_response(payload: &Value, requested_model: &str) -> Result<ChatResponse> {
+fn parse_response(
+    payload: &Value,
+    requested_model: &str,
+    prices: &PriceBook,
+) -> Result<ChatResponse> {
     let choice = payload
         .pointer("/choices/0")
         .ok_or_else(|| Error::provider("response had no choices"))?;
@@ -501,6 +525,16 @@ fn parse_response(payload: &Value, requested_model: &str) -> Result<ChatResponse
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
 
+    // Compute cost from the returned token usage against the price table, keyed by
+    // the model the server actually billed (`model`), not the requested selector
+    // (RM-AIM-P1 PRV-101). "Observe then enforce": log it so an operator can watch
+    // real cost accrue for a release before quota enforcement bites.
+    let usage = Usage::new(prompt_tokens, completion_tokens, 0.0);
+    let cost_usd = prices.cost(&model, &usage);
+    tracing::debug!(target: "apex.pricing", model = %model, prompt_tokens,
+        completion_tokens, cost_usd, "computed llm call cost");
+    let usage = Usage::new(prompt_tokens, completion_tokens, cost_usd);
+
     Ok(ChatResponse {
         message: Message {
             role: Role::Assistant,
@@ -510,9 +544,7 @@ fn parse_response(payload: &Value, requested_model: &str) -> Result<ChatResponse
             name: None,
         },
         model,
-        // Cost is left at 0.0 in v0.1; per-model pricing arrives with the
-        // token-management work in a later milestone.
-        usage: Usage::new(prompt_tokens, completion_tokens, 0.0),
+        usage,
         finish_reason,
     })
 }
@@ -531,11 +563,19 @@ mod tests {
             }],
             "usage": { "prompt_tokens": 12, "completion_tokens": 3 }
         });
-        let r = parse_response(&payload, "requested").unwrap();
+        let r = parse_response(&payload, "requested", &PriceBook::with_defaults()).unwrap();
         assert_eq!(r.message.content.as_deref(), Some("hi!"));
         assert_eq!(r.model, "gpt-4o-mini");
         assert_eq!(r.usage.total_tokens, 15);
         assert!(r.message.tool_calls.is_empty());
+        // Cost is computed from the billed model's price, not left at 0.
+        // gpt-4o-mini: 12*0.15/1e6 + 3*0.60/1e6.
+        let expected = (12.0 * 0.15 + 3.0 * 0.60) / 1_000_000.0;
+        assert!(
+            (r.usage.cost_usd - expected).abs() < 1e-12,
+            "got {}",
+            r.usage.cost_usd
+        );
     }
 
     #[test]
@@ -554,7 +594,7 @@ mod tests {
                 "finish_reason": "tool_calls"
             }]
         });
-        let r = parse_response(&payload, "m").unwrap();
+        let r = parse_response(&payload, "m", &PriceBook::with_defaults()).unwrap();
         assert_eq!(r.finish_reason, "tool_calls");
         assert_eq!(r.message.tool_calls.len(), 1);
         assert_eq!(r.message.tool_calls[0].name, "echo");
@@ -592,7 +632,7 @@ mod tests {
 
     #[test]
     fn accumulates_streamed_text_and_usage() {
-        let mut acc = StreamAccumulator::new("requested".to_string());
+        let mut acc = StreamAccumulator::new("requested".to_string(), PriceBook::with_defaults());
         // Role-only opening chunk carries no content delta.
         assert_eq!(
             acc.ingest(&json!({
@@ -627,7 +667,7 @@ mod tests {
 
     #[test]
     fn accumulates_streamed_tool_call_across_chunks() {
-        let mut acc = StreamAccumulator::new("m".to_string());
+        let mut acc = StreamAccumulator::new("m".to_string(), PriceBook::with_defaults());
         // id + name arrive first, arguments stream in fragments keyed by index.
         acc.ingest(&json!({
             "choices": [{ "delta": { "tool_calls": [{
@@ -654,7 +694,7 @@ mod tests {
 
     #[test]
     fn empty_tool_call_arguments_default_to_object() {
-        let mut acc = StreamAccumulator::new("m".to_string());
+        let mut acc = StreamAccumulator::new("m".to_string(), PriceBook::with_defaults());
         acc.ingest(&json!({
             "choices": [{ "delta": { "tool_calls": [{
                 "index": 0, "id": "call_1",
