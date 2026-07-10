@@ -310,7 +310,16 @@ pub struct Engine {
     /// (G5, [ADR-0008](../../docs/17-adr/ADR-0008-subworkflows.md)). `None` disables
     /// sub-workflows (a `workflow` activity then errors).
     subworkflows: Option<DefinitionResolver>,
+    /// Maximum sub-workflow nesting depth before a `workflow` activity fails closed
+    /// (RM-AIM-P1 WFL-102) — the guard against a self-referential or mutually-recursive
+    /// workflow recursing forever. Default [`DEFAULT_MAX_SUBWORKFLOW_DEPTH`].
+    max_subworkflow_depth: usize,
 }
+
+/// Default cap on sub-workflow nesting depth (WFL-102): generous enough for any
+/// legitimate composition, low enough to stop unbounded recursion well before a
+/// stack overflow.
+pub const DEFAULT_MAX_SUBWORKFLOW_DEPTH: usize = 16;
 
 impl Engine {
     /// Build an engine over an event log, checkpoint store, and activity executor.
@@ -328,6 +337,7 @@ impl Engine {
             clock: Arc::new(SystemClock),
             timers: None,
             subworkflows: None,
+            max_subworkflow_depth: DEFAULT_MAX_SUBWORKFLOW_DEPTH,
         }
     }
 
@@ -347,6 +357,13 @@ impl Engine {
     /// activities (G5, [ADR-0008](../../docs/17-adr/ADR-0008-subworkflows.md)).
     pub fn with_subworkflows(mut self, resolver: DefinitionResolver) -> Self {
         self.subworkflows = Some(resolver);
+        self
+    }
+
+    /// Override the maximum sub-workflow nesting depth (WFL-102). A `workflow` activity
+    /// whose child would exceed this depth fails closed instead of recursing.
+    pub fn with_max_subworkflow_depth(mut self, max_depth: usize) -> Self {
+        self.max_subworkflow_depth = max_depth;
         self
     }
 
@@ -1018,6 +1035,26 @@ impl Engine {
             ))
         })?;
         let child_id = format!("{}::{}", state.execution_id, id);
+
+        // Depth guard (WFL-102): each nesting level appends one `::<activity>` to the
+        // derived child id, so the number of `::` separators is the nesting depth. A
+        // self-referential or mutually-recursive workflow grows this without bound;
+        // fail the activity closed past the configured cap rather than recursing until
+        // the stack overflows. (Root execution ids are simple/`::`-free by
+        // construction, so the separator count is the true depth.)
+        let depth = child_id.matches("::").count();
+        if depth > self.max_subworkflow_depth {
+            let attempt = state.activities[&id].attempts + 1;
+            let msg = format!(
+                "sub-workflow nesting depth {depth} exceeded the maximum of {} at activity \
+                 `{id}` (child `{child_name}`) — likely a recursive or mutually-recursive \
+                 workflow",
+                self.max_subworkflow_depth
+            );
+            return self
+                .terminal_activity_failure(state, &id, attempt, msg)
+                .await;
+        }
 
         // Start the child on first encounter, else resume it. The recursive drive is
         // boxed to keep the future a finite size.

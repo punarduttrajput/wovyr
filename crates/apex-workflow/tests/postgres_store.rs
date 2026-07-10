@@ -295,3 +295,86 @@ async fn connect_refuses_a_schema_newer_than_this_binary_understands() {
         "expected a version-skew error, got: {err}"
     );
 }
+
+/// RM-AIM-P1 WFL-104: concurrent appends to *one* execution get distinct, contiguous
+/// seqs — no `(execution_id, seq)` primary-key violation and no lost writes — proving
+/// the atomic counter-table allocation replaced the old racy `MAX(seq)+1`. This is the
+/// overlapping-workers race the ticket calls out, exercised directly at the event log.
+#[tokio::test]
+async fn concurrent_appends_to_one_execution_get_distinct_contiguous_seqs() {
+    use apex_workflow::WorkflowEvent;
+    let Some(store) = store().await else { return };
+    let exec_id = format!("wf-pg-seq-{}", nonce());
+    const N: u64 = 24;
+
+    let mut handles = Vec::new();
+    for i in 0..N {
+        let store = store.clone();
+        let exec = exec_id.clone();
+        handles.push(tokio::spawn(async move {
+            store
+                .append(
+                    &exec,
+                    WorkflowEvent::ActivityStarted {
+                        id: format!("a{i}"),
+                        attempt: 1,
+                    },
+                )
+                .await
+        }));
+    }
+    let mut seqs = Vec::new();
+    for h in handles {
+        seqs.push(
+            h.await
+                .unwrap()
+                .expect("append must not PK-collide under concurrency"),
+        );
+    }
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        (1..=N).collect::<Vec<u64>>(),
+        "concurrent appends must yield exactly the distinct contiguous seqs 1..=N"
+    );
+    // The log actually persisted all N events in order.
+    assert_eq!(store.load(&exec_id).await.unwrap().len() as u64, N);
+}
+
+/// RM-AIM-P1 WFL-101: concurrent store calls are served without deadlock or
+/// serialization failure — the pool hands out distinct connections (a single shared
+/// `Client` would force every call through one socket). Uses distinct executions so
+/// the calls are genuinely independent.
+#[tokio::test]
+async fn concurrent_store_calls_are_served_by_the_pool() {
+    use apex_workflow::WorkflowEvent;
+    let Some(store) = store().await else { return };
+    let run = nonce();
+    const N: u64 = 16;
+
+    let mut handles = Vec::new();
+    for i in 0..N {
+        let store = store.clone();
+        let exec = format!("wf-pg-pool-{run}-{i}");
+        handles.push(tokio::spawn(async move {
+            // A pair of round-trips per task, so several connections are in flight at once.
+            store
+                .append(
+                    &exec,
+                    WorkflowEvent::ActivityStarted {
+                        id: "a".into(),
+                        attempt: 1,
+                    },
+                )
+                .await?;
+            store.load(&exec).await.map(|evs| evs.len())
+        }));
+    }
+    for h in handles {
+        assert_eq!(
+            h.await.unwrap().unwrap(),
+            1,
+            "each independent execution has one event"
+        );
+    }
+}

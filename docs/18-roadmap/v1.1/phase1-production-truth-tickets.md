@@ -450,7 +450,7 @@ how `apex auth create-key` already worked pre-ticket.
 
 # WS-H — Workflow Postgres Core
 
-## WFL-101 `[P0]` — Postgres connection pool + reconnect
+## WFL-101 `[P0]` — Postgres connection pool + reconnect — **DONE (2026-07-10)**
 
 **Problem.** The Postgres store uses a single `tokio_postgres::Client`
 (`crates/apex-workflow/src/postgres.rs:87`); every call serializes on one TCP
@@ -466,7 +466,22 @@ serialize on one connection and that a dropped connection recovers on the next c
 **Files.** `crates/apex-workflow/src/postgres.rs`. **Size.** M.
 **Depends on:** none. **Blocks:** WFL-103, WFL-104.
 
-## WFL-102 `[P0]` — Sub-workflow recursion depth guard
+**Implementation notes (2026-07-10).** Replaced the single `tokio_postgres::Client`
+with a hand-rolled `PgPool` (semaphore-bounded, `APEX_PG_POOL_MAX` default 8) that
+reuses idle clients and **transparently reconnects** — a client whose background
+driver died (`is_closed()`) is discarded on return to the pool and a fresh one dialed
+on the next checkout. Every store method now does `self.pool.get().await?` +
+`conn.client()...`, so concurrent calls get distinct connections instead of serializing
+on one socket. Hand-rolled rather than pulling `deadpool`/`bb8`: neither is vendored in
+this offline workspace, and the needs are modest — the same "hand-roll to avoid a heavy
+dep" call as the S3 signer / cron evaluator. **Acceptance (capability-gated, runs in
+CI's Postgres service-container job):** `postgres_store::tests::concurrent_store_calls_
+are_served_by_the_pool` (16 independent executions' appends+loads complete
+concurrently without deadlock/serialization failure). The reconnect path is structural
+(every `get()` discards a closed client); forcing a mid-test backend kill needs
+`pg_terminate_backend`, left to the live drill.
+
+## WFL-102 `[P0]` — Sub-workflow recursion depth guard — **DONE (2026-07-10)**
 
 **Problem.** A `workflow` activity naming its own (or a mutually-recursive) workflow
 recurses forever; `run_subworkflow` boxes the future but caps nothing
@@ -480,7 +495,19 @@ depth/cycle error instead of hanging/overflowing.
 
 **Files.** `crates/apex-workflow/src/engine.rs`. **Size.** S. **Depends on:** none.
 
-## WFL-103 `[P1]` — TLS to Postgres
+**Implementation notes (2026-07-10).** `Engine` gained a `max_subworkflow_depth`
+(`with_max_subworkflow_depth`, default `DEFAULT_MAX_SUBWORKFLOW_DEPTH = 16`).
+`run_subworkflow` derives the nesting depth from the `::`-delimited child id (each
+level appends one `::<activity>`), and if it exceeds the cap fails the activity closed
+via `terminal_activity_failure` with a clear "sub-workflow nesting depth N exceeded"
+message rather than recursing until the stack overflows. (Root execution ids are
+`::`-free by construction, so the separator count is the true depth.) **Acceptance:**
+`temporal_gaps::self_referential_subworkflow_fails_with_a_depth_error` (a workflow whose
+`workflow` activity names itself, `with_max_subworkflow_depth(3)`, fails with the depth
+error and creates no execution past the cap — the test terminating proves no
+hang/overflow).
+
+## WFL-103 `[P1]` — TLS to Postgres — **DEFERRED (offline dependency blocker, 2026-07-10)**
 
 **Problem.** `connect`/`run_migrations` hardcode `NoTls`
 (`crates/apex-workflow/src/postgres.rs:98,121`). (PRD-004 R-H.3; audit High.)
@@ -494,7 +521,19 @@ refused; a TLS connection to a loopback test server succeeds.
 **Files.** `crates/apex-workflow/src/postgres.rs`. **Size.** M.
 **Depends on:** WFL-101.
 
-## WFL-104 `[P1]` — Fenced event-sequence generation
+**Deferral note (2026-07-10).** Blocked by the offline dependency situation: a working
+rustls connector needs a rustls-0.23-compatible `tokio-postgres-rustls`, but this
+workspace only vendors `tokio-postgres-rustls` 0.10 (which targets rustls 0.21 and
+fails to compile against the workspace's futures/tokio — verified: an internal
+`.boxed()` error). No newer version is in the offline cache to fetch. The
+refuse-plaintext-to-remote guard was drafted (pure, testable) but pulled back too,
+because enforcing it without a working TLS connector would make a remote Postgres (incl.
+`docker-compose`'s service-DNS host) unreachable rather than merely encrypted — a
+functional regression I can't validate offline. Both the guard and the connector are
+deferred together until a compatible crate is vendored (or `net.offline=false` fetch is
+available); `connect` keeps today's `NoTls` behavior unchanged in the meantime.
+
+## WFL-104 `[P1]` — Fenced event-sequence generation — **PARTIAL (seq-safety done; lease fencing deferred, 2026-07-10)**
 
 **Problem.** Postgres event `append` computes seq via `SELECT MAX(seq)+1`
 (`crates/apex-workflow/src/postgres.rs:152-166`), safe only under "one driver per
@@ -510,6 +549,24 @@ one execution asserts no PK violation and no forked history.
 
 **Files.** `crates/apex-workflow/src/{postgres.rs,worker.rs}`. **Size.** M.
 **Depends on:** WFL-101.
+
+**Implementation notes (2026-07-10).** The **PK-violation half is fixed**: per-execution
+seq allocation moved from the racy `SELECT MAX(seq)+1` (two overlapping appenders both
+read the same MAX → `(execution_id, seq)` PK collision) to an atomic
+`INSERT … ON CONFLICT DO UPDATE SET next_seq = next_seq + 1 RETURNING` on a dedicated
+`workflow_event_seq` counter row (new `V2__event_seq_counter.sql` migration, back-filled
+from existing events). The `UPDATE` row-locks per execution, so concurrent appenders get
+distinct, contiguous seqs and never collide. **Acceptance (capability-gated, CI Postgres
+job):** `postgres_store::tests::concurrent_appends_to_one_execution_get_distinct_
+contiguous_seqs` (24 concurrent appends to one execution yield exactly the distinct seqs
+1..=24, no PK violation). **Deferred — lease-token fencing (the "no forked history"
+half):** rejecting a *superseded* worker's appends needs a fence token threaded from
+`WorkQueue::lease` → `Worker` → `Engine` → `EventLog::append`, a cross-crate signature
+change through the `EventLog` port (and all its impls — in-memory/file/Postgres) that
+can only be validated against the live overlapping-worker race on real Postgres. Left as
+a follow-on rather than shipped blind; the counter table eliminates the concrete crash
+the ticket's evidence cites, and two overlapping workers now corrupt nothing at the PK
+level (though they can still interleave events until fencing lands).
 
 ---
 

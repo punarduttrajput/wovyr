@@ -275,6 +275,51 @@ async fn workflow_activity_without_a_resolver_is_a_clear_error() {
     assert!(err.to_string().contains("child-workflow resolver"));
 }
 
+/// RM-AIM-P1 WFL-102: a self-referential `workflow` activity fails closed with a clear
+/// depth error instead of recursing until the stack overflows (the test *terminating*
+/// is itself the proof it no longer hangs/overflows).
+#[tokio::test]
+async fn self_referential_subworkflow_fails_with_a_depth_error() {
+    // "recur" has a single `workflow` activity naming itself.
+    let recur = Definition::from_yaml(
+        "metadata:\n  name: recur\nspec:\n  activities:\n    - {id: again, type: workflow, name: recur}\n",
+    )
+    .unwrap();
+
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let resolver: DefinitionResolver = {
+        let r = recur.clone();
+        Arc::new(move |name: &str| (name == "recur").then(|| r.clone()))
+    };
+    // A small cap so the test fails fast rather than nesting the default 16 levels.
+    let engine = Engine::new(events, checkpoints, Arc::new(ClosureExecutor::new()))
+        .with_subworkflows(resolver)
+        .with_max_subworkflow_depth(3);
+
+    let (outcome, _) = engine.run(&recur, "r-1", json!({})).await.unwrap();
+    match outcome {
+        RunOutcome::Failed(msg) => {
+            assert!(
+                msg.contains("nesting depth") && msg.contains("exceeded the maximum"),
+                "expected a depth-guard failure, got: {msg}"
+            );
+        }
+        other => panic!("expected a depth-guard failure, got {other:?}"),
+    }
+    // The recursion stopped at the cap: the deepest execution that would exceed depth 3
+    // is `r-1::again::again::again`, and no deeper execution was ever created.
+    assert!(
+        engine
+            .status("r-1::again::again::again::again")
+            .await
+            .unwrap()
+            .is_none(),
+        "recursion must not proceed past the depth cap"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // G7 — definition pinning
 // ---------------------------------------------------------------------------
