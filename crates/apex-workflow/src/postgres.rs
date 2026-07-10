@@ -89,24 +89,176 @@ async fn assert_schema_version(client: &mut tokio_postgres::Client) -> Result<()
 /// `APEX_PG_POOL_MAX`.
 const DEFAULT_POOL_MAX: usize = 8;
 
-/// Dial one connection (NoTls), spawning its background driver task.
+/// How the connection to Postgres is secured (WFL-103).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TlsMode {
+    /// Plaintext — only permitted to a loopback / Unix-socket host.
+    Disabled,
+    /// TLS via rustls (`ring` provider).
+    Rustls,
+}
+
+/// Decide the TLS mode for `conn_str`, **refusing plaintext to a non-loopback host**
+/// (WFL-103). Pure (no I/O), so the refusal is unit-testable without a database:
 ///
-/// **WFL-103 (TLS) deferral:** encrypting the connection needs a rustls-0.23-compatible
-/// `tokio-postgres-rustls`, but this offline workspace only vendors `tokio-postgres-rustls`
-/// 0.10 (which targets rustls 0.21 and fails to compile against this workspace's
-/// futures/tokio). So the TLS connector + the refuse-plaintext-to-remote guard are
-/// deferred until a compatible crate is vendored; today's `NoTls` behavior is
-/// unchanged. Tracked in the WS-H ticket doc.
-async fn dial(conn_str: &str) -> Result<Client> {
-    let (client, connection) = tokio_postgres::connect(conn_str, tokio_postgres::NoTls)
-        .await
-        .map_err(|e| pg_err("connect", e))?;
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::warn!("postgres connection closed: {e}");
+/// - TLS is used when the URL requests it (`sslmode=require`) or `APEX_PG_TLS=1` is set.
+/// - A non-loopback host with no TLS signal is refused (`Error::Config`) rather than
+///   silently sending credentials + data in the clear.
+/// - A loopback / Unix-socket host may use plaintext (the trusted-local default).
+fn resolve_tls_mode(conn_str: &str) -> Result<TlsMode> {
+    let config: tokio_postgres::Config = conn_str
+        .parse()
+        .map_err(|e| Error::config(format!("invalid Postgres connection string: {e}")))?;
+
+    // tokio-postgres surfaces only Disable/Prefer/Require. `Require` (and the explicit
+    // `APEX_PG_TLS=1`) count as "encrypt"; `Prefer` (the libpq default) is treated as
+    // no explicit intent so it doesn't silently satisfy the remote-host requirement.
+    let wants_tls = matches!(
+        config.get_ssl_mode(),
+        tokio_postgres::config::SslMode::Require
+    ) || std::env::var("APEX_PG_TLS")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    let all_loopback = config.get_hosts().iter().all(is_loopback_host);
+    if !all_loopback && !wants_tls {
+        return Err(Error::config(
+            "refusing a plaintext Postgres connection to a non-loopback host; use \
+             `sslmode=require` (or set APEX_PG_TLS=1) so credentials and data are \
+             encrypted in transit",
+        ));
+    }
+    Ok(if wants_tls {
+        TlsMode::Rustls
+    } else {
+        TlsMode::Disabled
+    })
+}
+
+/// Whether a parsed host is loopback / a local Unix socket (plaintext-safe).
+fn is_loopback_host(host: &tokio_postgres::config::Host) -> bool {
+    match host {
+        tokio_postgres::config::Host::Tcp(h) => {
+            h == "localhost"
+                || h.parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
         }
-    });
-    Ok(client)
+        // A Unix-domain socket (unix platforms only) never leaves the machine.
+        #[cfg(unix)]
+        tokio_postgres::config::Host::Unix(_) => true,
+    }
+}
+
+/// A `ServerCertVerifier` that accepts any certificate — the rustls equivalent of
+/// libpq `sslmode=require` (encrypt, don't verify), which is what lets a managed DB
+/// with a private project CA (e.g. Aiven) connect without its CA bundle. Signature
+/// checks still run (delegated to the ring provider's algorithms), so this only skips
+/// *identity* verification, exactly as `require` specifies. Opt into full root
+/// verification with `APEX_PG_TLS_VERIFY=1`.
+#[derive(Debug)]
+struct AcceptAnyServerCert {
+    algs: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl AcceptAnyServerCert {
+    fn new() -> Self {
+        Self {
+            algs: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algs)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algs)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algs.supported_schemes()
+    }
+}
+
+/// Build the rustls connector: `ring` provider, with the provider passed explicitly so
+/// this crate needs no process-global default. Verifies against the Mozilla webpki
+/// roots when `APEX_PG_TLS_VERIFY=1` (for a public-CA host); otherwise encrypts without
+/// identity verification (libpq `require` semantics — see [`AcceptAnyServerCert`]).
+fn rustls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect> {
+    let builder = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| pg_err("tls config", e))?;
+
+    let config = if std::env::var("APEX_PG_TLS_VERIFY")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        builder.with_root_certificates(roots).with_no_client_auth()
+    } else {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyServerCert::new()))
+            .with_no_client_auth()
+    };
+    Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
+}
+
+/// Dial one connection under `tls`, spawning its background driver task. The two TLS
+/// types (`NoTls` vs `MakeRustlsConnect`) differ but both yield a uniform `Client`, so
+/// the pool stores clients without caring which transport backs them.
+async fn dial(conn_str: &str, tls: TlsMode) -> Result<Client> {
+    match tls {
+        TlsMode::Disabled => {
+            let (client, connection) = tokio_postgres::connect(conn_str, tokio_postgres::NoTls)
+                .await
+                .map_err(|e| pg_err("connect", e))?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    tracing::warn!("postgres connection closed: {e}");
+                }
+            });
+            Ok(client)
+        }
+        TlsMode::Rustls => {
+            let (client, connection) = tokio_postgres::connect(conn_str, rustls_connector()?)
+                .await
+                .map_err(|e| pg_err("connect", e))?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    tracing::warn!("postgres connection closed: {e}");
+                }
+            });
+            Ok(client)
+        }
+    }
 }
 
 /// A minimal connection pool over `tokio_postgres::Client` (WFL-101): bounds concurrent
@@ -117,6 +269,7 @@ async fn dial(conn_str: &str) -> Result<Client> {
 /// needs here are modest, matching how apex hand-rolls its S3 signer / cron evaluator.
 struct PgPool {
     conn_str: String,
+    tls: TlsMode,
     idle: Mutex<Vec<Client>>,
     permits: Arc<Semaphore>,
     max_size: usize,
@@ -125,10 +278,11 @@ struct PgPool {
 impl PgPool {
     /// Open the pool, eagerly dialing one connection so a bad URL / unreachable DB
     /// fails fast at `connect()` rather than on the first query.
-    async fn open(conn_str: &str, max_size: usize) -> Result<Self> {
-        let first = dial(conn_str).await?;
+    async fn open(conn_str: &str, tls: TlsMode, max_size: usize) -> Result<Self> {
+        let first = dial(conn_str, tls).await?;
         Ok(Self {
             conn_str: conn_str.to_string(),
+            tls,
             idle: Mutex::new(vec![first]),
             permits: Arc::new(Semaphore::new(max_size)),
             max_size,
@@ -159,7 +313,7 @@ impl PgPool {
         };
         let client = match reused {
             Some(c) => c,
-            None => dial(&self.conn_str).await?,
+            None => dial(&self.conn_str, self.tls).await?,
         };
         Ok(PooledConn {
             pool: self,
@@ -207,14 +361,16 @@ pub struct PostgresStore {
 
 impl PostgresStore {
     /// Connect and verify the schema is at the version this binary expects — never runs
-    /// DDL (see [`Self::run_migrations`]). Uses a reconnecting pool (WFL-101).
+    /// DDL (see [`Self::run_migrations`]). Uses a reconnecting pool (WFL-101) and TLS
+    /// for non-loopback hosts (WFL-103, [`resolve_tls_mode`]).
     pub async fn connect(conn_str: &str) -> Result<Self> {
+        let tls = resolve_tls_mode(conn_str)?;
         let max_size = std::env::var("APEX_PG_POOL_MAX")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_POOL_MAX);
-        let pool = PgPool::open(conn_str, max_size).await?;
+        let pool = PgPool::open(conn_str, tls, max_size).await?;
 
         // Verify the applied schema version on a checked-out connection.
         {
@@ -232,9 +388,10 @@ impl PostgresStore {
     /// Apply every pending migration, creating the tracking table on first run.
     /// The only place this crate ever issues DDL — called explicitly via
     /// `apex admin migrate`, not from `connect`/`serve`, so the serving path
-    /// needs no schema-modification privilege.
+    /// needs no schema-modification privilege. Honors WFL-103 TLS selection.
     pub async fn run_migrations(conn_str: &str) -> Result<()> {
-        let mut client = dial(conn_str).await?;
+        let tls = resolve_tls_mode(conn_str)?;
+        let mut client = dial(conn_str, tls).await?;
         migrations::runner()
             .set_migration_table_name(MIGRATION_TABLE)
             .run_async(&mut client)
@@ -460,5 +617,36 @@ impl WorkQueue for PostgresStore {
             .await
             .map_err(|e| pg_err("remove from queue", e))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WFL-103: the refuse-plaintext-to-non-loopback guard is pure, so it's unit-tested
+    /// without a database. (Assumes `APEX_PG_TLS` is unset, as it is in CI/local test
+    /// runs — the guard only refuses when there's no TLS signal at all.)
+    #[test]
+    fn tls_guard_refuses_plaintext_to_remote_but_allows_loopback() {
+        // Loopback + no TLS → plaintext allowed.
+        assert_eq!(
+            resolve_tls_mode("postgres://u:p@127.0.0.1:5432/db").unwrap(),
+            TlsMode::Disabled
+        );
+        assert_eq!(
+            resolve_tls_mode("postgres://u:p@localhost:5432/db").unwrap(),
+            TlsMode::Disabled
+        );
+        // Remote + no TLS signal → refused (fail closed).
+        assert!(
+            resolve_tls_mode("postgres://u:p@db.example.com:5432/db").is_err(),
+            "a non-loopback host without TLS must be refused"
+        );
+        // Remote + sslmode=require → TLS.
+        assert_eq!(
+            resolve_tls_mode("postgres://u:p@db.example.com:5432/db?sslmode=require").unwrap(),
+            TlsMode::Rustls
+        );
     }
 }

@@ -474,12 +474,13 @@ on the next checkout. Every store method now does `self.pool.get().await?` +
 `conn.client()...`, so concurrent calls get distinct connections instead of serializing
 on one socket. Hand-rolled rather than pulling `deadpool`/`bb8`: neither is vendored in
 this offline workspace, and the needs are modest — the same "hand-roll to avoid a heavy
-dep" call as the S3 signer / cron evaluator. **Acceptance (capability-gated, runs in
-CI's Postgres service-container job):** `postgres_store::tests::concurrent_store_calls_
-are_served_by_the_pool` (16 independent executions' appends+loads complete
-concurrently without deadlock/serialization failure). The reconnect path is structural
-(every `get()` discards a closed client); forcing a mid-test backend kill needs
-`pg_terminate_backend`, left to the live drill.
+dep" call as the S3 signer / cron evaluator. **Acceptance (validated live against a real
+remote Aiven Postgres over TLS, not just capability-gated):**
+`postgres_store::tests::concurrent_store_calls_are_served_by_the_pool` (16 independent
+executions' appends+loads complete concurrently without deadlock/serialization failure)
+passed against the live database. The reconnect path is structural (every `get()`
+discards a closed client); forcing a mid-test backend kill needs `pg_terminate_backend`,
+left to a dedicated drill.
 
 ## WFL-102 `[P0]` — Sub-workflow recursion depth guard — **DONE (2026-07-10)**
 
@@ -507,7 +508,7 @@ message rather than recursing until the stack overflows. (Root execution ids are
 error and creates no execution past the cap — the test terminating proves no
 hang/overflow).
 
-## WFL-103 `[P1]` — TLS to Postgres — **DEFERRED (offline dependency blocker, 2026-07-10)**
+## WFL-103 `[P1]` — TLS to Postgres — **DONE (2026-07-10, live-validated)**
 
 **Problem.** `connect`/`run_migrations` hardcode `NoTls`
 (`crates/apex-workflow/src/postgres.rs:98,121`). (PRD-004 R-H.3; audit High.)
@@ -521,17 +522,26 @@ refused; a TLS connection to a loopback test server succeeds.
 **Files.** `crates/apex-workflow/src/postgres.rs`. **Size.** M.
 **Depends on:** WFL-101.
 
-**Deferral note (2026-07-10).** Blocked by the offline dependency situation: a working
-rustls connector needs a rustls-0.23-compatible `tokio-postgres-rustls`, but this
-workspace only vendors `tokio-postgres-rustls` 0.10 (which targets rustls 0.21 and
-fails to compile against the workspace's futures/tokio — verified: an internal
-`.boxed()` error). No newer version is in the offline cache to fetch. The
-refuse-plaintext-to-remote guard was drafted (pure, testable) but pulled back too,
-because enforcing it without a working TLS connector would make a remote Postgres (incl.
-`docker-compose`'s service-DNS host) unreachable rather than merely encrypted — a
-functional regression I can't validate offline. Both the guard and the connector are
-deferred together until a compatible crate is vendored (or `net.offline=false` fetch is
-available); `connect` keeps today's `NoTls` behavior unchanged in the meantime.
+**Implementation notes (2026-07-10).** `resolve_tls_mode` parses the connection string
+and **refuses plaintext to a non-loopback host** (`Error::Config`) unless TLS is
+requested (`sslmode=require` or `APEX_PG_TLS=1`) — loopback/Unix-socket hosts still
+allow plaintext (trusted-local). The `dial` path branches `NoTls` vs a rustls
+`MakeRustlsConnect` (`tokio-postgres-rustls` 0.13, rustls 0.23 `ring` provider passed
+explicitly so no process-global default is needed). Certificate handling matches libpq
+`sslmode` semantics: `require` encrypts **without identity verification**
+(`AcceptAnyServerCert` — signatures still checked via the ring provider's algorithms),
+which is what lets a managed DB with a private project CA connect without its CA bundle;
+`APEX_PG_TLS_VERIFY=1` opts into full Mozilla-webpki-root verification for a public-CA
+host. **Acceptance:** the refuse-plaintext guard is unit-tested offline
+(`postgres::tests::tls_guard_refuses_plaintext_to_remote_but_allows_loopback`), and the
+**whole store was validated live end-to-end against a real remote managed Postgres
+(Aiven, `sslmode=require`, TCP :10281)** — `apex admin migrate --target workflow`
+succeeded over TLS, and all six `postgres_store` integration tests passed against it
+(so WFL-101's pool and WFL-104's concurrent-seq test are live-validated too, not just
+capability-gated). The earlier offline blocker (only `tokio-postgres-rustls` 0.10 /
+rustls 0.21 was vendored) was resolved by fetching 0.13 with `net.offline=false`. The
+version-skew test opens a raw `NoTls` admin connection for its fake-row setup and now
+skips cleanly on a TLS-only host (that behavior is orthogonal to transport).
 
 ## WFL-104 `[P1]` — Fenced event-sequence generation — **PARTIAL (seq-safety done; lease fencing deferred, 2026-07-10)**
 
@@ -556,10 +566,12 @@ read the same MAX → `(execution_id, seq)` PK collision) to an atomic
 `INSERT … ON CONFLICT DO UPDATE SET next_seq = next_seq + 1 RETURNING` on a dedicated
 `workflow_event_seq` counter row (new `V2__event_seq_counter.sql` migration, back-filled
 from existing events). The `UPDATE` row-locks per execution, so concurrent appenders get
-distinct, contiguous seqs and never collide. **Acceptance (capability-gated, CI Postgres
-job):** `postgres_store::tests::concurrent_appends_to_one_execution_get_distinct_
-contiguous_seqs` (24 concurrent appends to one execution yield exactly the distinct seqs
-1..=24, no PK violation). **Deferred — lease-token fencing (the "no forked history"
+distinct, contiguous seqs and never collide. **Acceptance (validated live against a real
+remote Aiven Postgres, not just capability-gated):**
+`postgres_store::tests::concurrent_appends_to_one_execution_get_distinct_contiguous_seqs`
+(24 concurrent appends to one execution yield exactly the distinct seqs 1..=24, no PK
+violation) passed against the live database over TLS. **Deferred — lease-token fencing
+(the "no forked history"
 half):** rejecting a *superseded* worker's appends needs a fence token threaded from
 `WorkQueue::lease` → `Worker` → `Engine` → `EventLog::append`, a cross-crate signature
 change through the `EventLog` port (and all its impls — in-memory/file/Postgres) that

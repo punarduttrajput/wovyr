@@ -9,8 +9,15 @@ description = "Durable workflow engine: DSL, event-sourced state machine, checkp
 
 [features]
 # Postgres-backed durable event log + checkpoint store, for cross-process/node
-# durable resume. Off by default (pulls tokio-postgres).
-postgres = ["dep:tokio-postgres", "dep:refinery"]
+# durable resume. Off by default (pulls tokio-postgres + a rustls TLS stack for
+# WFL-103's encrypted connections to a remote database).
+postgres = [
+    "dep:tokio-postgres",
+    "dep:refinery",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls",
+    "dep:webpki-roots",
+]
 
 [dependencies]
 apex-common.workspace = true
@@ -28,6 +35,12 @@ tokio-postgres = { version = "0.7", optional = true }
 # `migrations/*.sql` via refinery; `PostgresStore::connect` only ever reads the
 # resulting schema-version row, never runs DDL itself.
 refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
+# TLS to a remote Postgres (WFL-103). `ring` provider (no aws-lc-rs) with the provider
+# passed explicitly at config-build time, matching the rest of the workspace's rustls
+# usage so no two crypto providers are ever linked without a process default installed.
+tokio-postgres-rustls = { version = "0.13", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }

@@ -260,9 +260,17 @@ async fn connect_refuses_a_schema_newer_than_this_binary_understands() {
     let Some(_) = store().await else { return };
     let url = std::env::var("APEX_WORKFLOW_POSTGRES_URL").unwrap();
 
-    let (raw, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
-        .await
-        .unwrap();
+    // This test needs a raw connection to inject a fake future-version row. It uses
+    // NoTls, so against a TLS-only host (e.g. a managed remote with `sslmode=require`)
+    // the raw connect can't be established — skip rather than fail, since the
+    // version-skew behavior under test is orthogonal to transport security.
+    let (raw, connection) = match tokio_postgres::connect(&url, tokio_postgres::NoTls).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("skipping: raw NoTls admin connection unavailable (TLS-only host?): {e}");
+            return;
+        }
+    };
     tokio::spawn(async move {
         let _ = connection.await;
     });
