@@ -1,8 +1,13 @@
 {
   "name": "@apex-ai/sdk",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "TypeScript client for the Apex AI Platform API.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/punarduttrajput/Apex.git",
+    "directory": "sdks/typescript"
+  },
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",

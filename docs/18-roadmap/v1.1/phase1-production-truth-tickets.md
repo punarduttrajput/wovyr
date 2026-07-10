@@ -584,7 +584,7 @@ level (though they can still interleave events until fencing lands).
 
 # WS-I — Secret Default
 
-## SEC-101 `[P1]` — Default the secrets store to encrypted-at-rest
+## SEC-101 `[P1]` — Default the secrets store to encrypted-at-rest — **DONE (2026-07-10)**
 
 **Problem.** The default secrets store writes plaintext `secrets.json`
 (`crates/apex-secrets/src/store.rs:82-126`); at-rest encryption
@@ -601,11 +601,31 @@ plaintext opt-out still works; a migration test re-seals an existing plaintext f
 **Files.** `crates/apex-config/src/secrets.rs`, `crates/apex-secrets/src/*`; docs.
 **Size.** M. **Depends on:** none.
 
+**Implementation notes (2026-07-10).** `apex_config::env::secrets_encrypt_at_rest()`
+now returns `true` by default; `APEX_SECRETS_PLAINTEXT=1` is the explicit opt-out, and
+the old opt-*in* var (`APEX_SECRETS_ENCRYPT_AT_REST`) is still honored and wins over a
+contradictory plaintext opt-out (fail toward the safer mode). The migration is
+**automatic, not just documented**: `EncryptedFileSecretStore::migrate_plaintext()`
+(new, in `apex-secrets`) re-seals every legacy `secrets.json` record whose
+`(namespace, name)` isn't already sealed (existing encrypted records win), persists
+once atomically (all-or-nothing — a KMS failure writes nothing and leaves the
+plaintext file for a retry), then retires `secrets.json` →
+`secrets.json.migrated.bak` with a loud `warn!` telling the operator to delete the
+backup once verified. `build_secrets_vault` invokes it whenever it constructs the
+encrypted store, so both the server and CLI migrate on first touch. **Acceptance:**
+`agreement.rs::build_secrets_vault_agrees_...` (fresh vault writes `secrets.enc.json`
+only, raw bytes never contain the value), `plaintext_opt_out_still_writes_the_legacy_
+store`, `default_flip_migrates_an_existing_plaintext_store` (a plaintext-era secret
+stays resolvable after the flip; the plaintext file is retired), plus
+`encrypted_store::tests::{migrates_a_legacy_plaintext_store_and_retires_the_file,
+migration_does_not_clobber_existing_sealed_records}` (rotation window survives;
+idempotent; sealed records never clobbered).
+
 ---
 
 # WS-J — Release & CI Reconciliation
 
-## DX-101 `[P1]` — Reconcile versioning + add a CHANGELOG
+## DX-101 `[P1]` — Reconcile versioning + add a CHANGELOG — **DONE (2026-07-10)**
 
 **Problem.** `Cargo.toml` version is `0.1.0` (`Cargo.toml:26`), README badge `0.1.0`,
 both SDKs `0.1.0` — while the repo is tagged `v0.3.0`; there is no root `CHANGELOG.md`.
@@ -621,7 +641,19 @@ v0.1–v1.0 history; one canonical repo URL everywhere.
 **Files.** `Cargo.toml`, `README.md`, `sdks/*/`; new `CHANGELOG.md`. **Size.** S.
 **Depends on:** none.
 
-## DX-102 `[P1]` — Release automation: binaries + published image + SDK publish
+**Implementation notes (2026-07-10).** Everything version-bearing now agrees on
+`0.3.0` (the latest tag): workspace `Cargo.toml` (which `env!("CARGO_PKG_VERSION")`
+propagates to `/healthz` and the backup manifest automatically), the README badge +
+"Current Version" note, both SDK manifests (`package.json` + lockfile,
+`pyproject.toml`), the Helm `Chart.yaml` (`version`/`appVersion`), and
+`openapi.yaml`'s `info.version`. Canonical repository URL unified to
+`https://github.com/punarduttrajput/Apex` (the actual remote — the old
+`apex-ai/apex` in `Cargo.toml` was fictional); the TS SDK gained the `repository`
+field it never had. Root `CHANGELOG.md` added (Keep-a-Changelog): `0.1.0`/`0.2.0`/
+`0.3.0` entries dated from the roadmap docs' own records, plus an `[Unreleased]`
+section covering the v1.0 GA-hardening work and v1.1 Phase 1 to date.
+
+## DX-102 `[P1]` — Release automation: binaries + published image + SDK publish — **DONE (authored; dry-run pending a tag, 2026-07-10)**
 
 **Problem.** Only `ci.yml` exists; no `release.yml`, no cargo-dist/`dist-workspace.toml`,
 no changelog generation. The TS SDK is unpublished (`sdks/typescript/README.md`), and
@@ -639,7 +671,23 @@ image + packed SDK tarballs; the Helm chart references the published image.
 **Files.** `.github/workflows/release.yml`, `deployment/helm/apex/values.yaml`,
 SDK publish config. **Size.** L. **Depends on:** DX-101.
 
-## DX-103 `[P1]` — Add the dashboard and a Windows leg to CI
+**Implementation notes (2026-07-10).** New `.github/workflows/release.yml`: on a
+`v*` tag it builds `apex` binaries for Linux x86_64 / Windows x86_64 / macOS arm64
+(+ sha256 sums), pushes the container image to GHCR
+(`ghcr.io/punarduttrajput/apex:{version,latest}`, built with
+`FEATURES=tiered-memory,postgres` — the compose/Helm feature set), packs both SDKs
+(npm tarball, wheel+sdist) as release artifacts, and mints a GitHub Release whose
+body is that version's `CHANGELOG.md` section (awk-extracted). Registry publishes
+are **gated optional steps** (skipped unless `NPM_TOKEN`/`PYPI_API_TOKEN` secrets
+exist — the npm org's 2FA constraint from the GA-005 work made unconditional
+publish a guaranteed failure); the packed artifacts ship regardless.
+`workflow_dispatch` is the built-in dry-run: identical build/pack jobs, zero pushes.
+Helm `values.yaml` now defaults to the published GHCR image. **Validation caveat:**
+GitHub Actions can't execute in this environment — the workflow YAML is
+parse-validated (serde_yaml) and hand-reviewed, but the acceptance dry-run needs a
+real `workflow_dispatch`/pre-release tag on GitHub; run one before relying on it.
+
+## DX-103 `[P1]` — Add the dashboard and a Windows leg to CI — **DONE (2026-07-10)**
 
 **Problem.** `.github/workflows/ci.yml` has zero `dashboard` references despite the
 Angular SPA + `deployment/docker/dashboard.Dockerfile`; every `runs-on:` is
@@ -655,11 +703,25 @@ Windows on every PR; both are required checks.
 **Files.** `.github/workflows/ci.yml`. **Size.** M. **Depends on:** UI-102 (so the
 dashboard test job has specs to run — may land together).
 
+**Implementation notes (2026-07-10, landed together with UI-101/102).** Two new
+`ci.yml` jobs: `rust-windows` (windows-latest, `cargo build`/`cargo test`
+`--workspace` — which finally compiles the `#[cfg(windows)]` SBX-102 Job Object
+path in CI) and `dashboard` (Node 20, `npm ci` + `ng build` + `ng test
+--watch=false --browsers=ChromeHeadless` over UI-102's specs). Landing the Windows
+leg surfaced two latent Windows test failures (`pool.rs`/`scheduler.rs` spawned a
+bare `echo`, a shell builtin with no `.exe`) — fixed to spawn via `cmd /C echo` on
+Windows. **Evidence the Windows leg is green:** the full `cargo test --workspace`
+suite passes on this real Windows 11 host (71 suites, 0 failures), and the
+dashboard job's exact commands pass locally (build clean; 19 specs green in
+headless Chrome). Marking both as *required* checks is a GitHub branch-protection
+setting — flip it in repo settings once the first run is green; not expressible
+in the workflow file itself.
+
 ---
 
 # WS-K — UI Security & Tests
 
-## UI-101 `[P1]` — Move the bearer token off `localStorage`
+## UI-101 `[P1]` — Move the bearer token off `localStorage` — **DONE (2026-07-10, live-verified)**
 
 **Problem.** The API key/JWT is held in `localStorage`
 (`dashboard/src/app/core/session.ts:22-73`) → XSS-exfiltratable. (PRD-004 R-K.1; audit
@@ -675,7 +737,24 @@ via `window.localStorage`; auth still works across a page reload per the chosen 
 **Files.** `dashboard/src/app/core/{session.ts,tenant.interceptor.ts}`. **Size.** M.
 **Depends on:** none.
 
-## UI-102 `[P1]` — UI test coverage + enable specs
+**Implementation notes (2026-07-10).** The credential moved to **`sessionStorage`**
+(`apex.credential.v1`): survives reloads within the tab (the chosen persistence
+model), dies with it, and is never written to `localStorage` — which now holds only
+the non-secret tenant/principal. A legacy pre-UI-101 blob that still embeds an
+`apiKey` is **migrated on first load**: adopted into `sessionStorage` (unless a newer
+credential is already there) and scrubbed from the persisted blob, so upgraders keep
+no residual copy in the weaker store. (`tenant.interceptor.ts` needed no change — it
+reads the `Session` signals, not storage.) The httpOnly-cookie BFF remains the
+preferred end state but the dashboard talks directly to apex-server today (BFF
+deferred, pre-existing decision). **Verified three ways:** unit specs
+(`session.spec.ts`, incl. the literal acceptance assertion that the token appears
+nowhere in `window.localStorage`); **live in a real browser** — this dev machine's
+own pre-UI-101 stored key was observed migrating (localStorage blob scrubbed to
+tenant/principal only, key present in `sessionStorage`), a reload kept the session
+signed in, and a fresh save through the actual Sign-in form landed the token in
+`sessionStorage` only.
+
+## UI-102 `[P1]` — UI test coverage + enable specs — **DONE (2026-07-10)**
 
 **Problem.** Zero specs; `skipTests:true` is set on every schematic
 (`dashboard/angular.json:13-37`); Karma/Jasmine are installed but unused. (PRD-004
@@ -690,6 +769,23 @@ SSE parser and manifest round-trip are covered.
 
 **Files.** `dashboard/angular.json`, `dashboard/src/app/core/*.spec.ts`. **Size.** M.
 **Depends on:** none. **Pairs with:** DX-103 (which runs these in CI).
+
+**Implementation notes (2026-07-10).** The global `skipTests: true` schematic
+defaults are gone from `angular.json` (only the `component` style setting remains).
+Three spec files, **19 specs, all green in headless Chrome** (`ng test
+--watch=false --browsers=ChromeHeadless`): `core/session.spec.ts` (UI-101's storage
+invariants + legacy migration + corrupt-blob fallback),
+`agent-studio/agent.service.spec.ts` (the manifest round-trip — `toManifest ∘
+fromManifest` as inverses incl. pinned-model/minimal/real-example shapes — and the
+SSE parser driven through `runStream` against a mocked streaming `fetch`: event
+ordering, frames split across arbitrary chunk boundaries, SSE comments/unknown
+types ignored, HTTP errors and `event: error` frames surfaced), and
+`workflow-builder/workflow.service.spec.ts` (the YAML serializer: per-type field
+mapping, quote/backslash escaping, invalid-inputs dropped, blank-transition
+skipping, defaults). The "one smoke e2e" was deliberately traded for the live
+browser-driven verification recorded under UI-101 — no e2e framework
+(Cypress/Playwright) is installed or vendored, and adding one offline wasn't
+possible; revisit if an e2e harness lands.
 
 ---
 

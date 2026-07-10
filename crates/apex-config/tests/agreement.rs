@@ -78,7 +78,9 @@ fn build_kms_agrees_across_independently_constructed_instances() {
 
 /// The secrets-vault construction must agree the same way: an
 /// `EncryptedFileSecretStore` built by one "instance" is readable by another
-/// built the same way, both pointed at the shared directory.
+/// built the same way, both pointed at the shared directory. Since SEC-101,
+/// **no env var is set here** — encrypted-at-rest is the default this test
+/// now also proves.
 #[test]
 fn build_secrets_vault_agrees_across_independently_constructed_instances() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -88,7 +90,8 @@ fn build_secrets_vault_agrees_across_independently_constructed_instances() {
         std::env::set_var("HOME", &home);
         std::env::set_var("USERPROFILE", &home);
         std::env::remove_var("APEX_KMS_ROOT_KEY");
-        std::env::set_var("APEX_SECRETS_ENCRYPT_AT_REST", "1");
+        std::env::remove_var("APEX_SECRETS_ENCRYPT_AT_REST");
+        std::env::remove_var("APEX_SECRETS_PLAINTEXT");
     }
 
     let kms = apex_config::kms::build_kms();
@@ -96,6 +99,20 @@ fn build_secrets_vault_agrees_across_independently_constructed_instances() {
     writer
         .create("agreement-tenant", "api-key", "s3cr3t")
         .unwrap();
+
+    // SEC-101: the default store is the encrypting one — ciphertext on disk, no
+    // plaintext catalog, and the raw bytes never contain the value.
+    let secrets_dir = home.join(".apex").join("secrets");
+    assert!(
+        secrets_dir.join("secrets.enc.json").exists(),
+        "a fresh vault must write the encrypted catalog by default"
+    );
+    assert!(
+        !secrets_dir.join("secrets.json").exists(),
+        "no plaintext catalog may be created by default"
+    );
+    let raw = std::fs::read_to_string(secrets_dir.join("secrets.enc.json")).unwrap();
+    assert!(!raw.contains("s3cr3t"), "value must be sealed at rest");
 
     // A fresh "reader instance" built the same way, over the same directory.
     let reader = apex_config::secrets::build_secrets_vault(kms);
@@ -108,8 +125,82 @@ fn build_secrets_vault_agrees_across_independently_constructed_instances() {
         .unwrap();
     assert_eq!(value.expose(), "s3cr3t");
 
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// SEC-101: `APEX_SECRETS_PLAINTEXT=1` is the explicit opt-out — the vault then
+/// writes the legacy plaintext `secrets.json`, exactly the pre-flip behavior.
+#[test]
+fn plaintext_opt_out_still_writes_the_legacy_store() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = scratch_home("secrets-plain");
+    let _ = std::fs::remove_dir_all(&home);
     unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        std::env::remove_var("APEX_KMS_ROOT_KEY");
         std::env::remove_var("APEX_SECRETS_ENCRYPT_AT_REST");
+        std::env::set_var("APEX_SECRETS_PLAINTEXT", "1");
     }
+
+    let kms = apex_config::kms::build_kms();
+    let vault = apex_config::secrets::build_secrets_vault(kms);
+    vault.create("acme", "api-key", "plain-ok").unwrap();
+
+    let secrets_dir = home.join(".apex").join("secrets");
+    assert!(secrets_dir.join("secrets.json").exists());
+    assert!(!secrets_dir.join("secrets.enc.json").exists());
+
+    unsafe {
+        std::env::remove_var("APEX_SECRETS_PLAINTEXT");
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// SEC-101: a vault directory that predates the default flip (a live plaintext
+/// `secrets.json`) is migrated automatically by `build_secrets_vault` — the
+/// secret stays resolvable through the new encrypted default, and the
+/// plaintext file is retired rather than left live.
+#[test]
+fn default_flip_migrates_an_existing_plaintext_store() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = scratch_home("secrets-migrate");
+    let _ = std::fs::remove_dir_all(&home);
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        std::env::remove_var("APEX_KMS_ROOT_KEY");
+        std::env::remove_var("APEX_SECRETS_ENCRYPT_AT_REST");
+        std::env::remove_var("APEX_SECRETS_PLAINTEXT");
+    }
+    let kms = apex_config::kms::build_kms();
+
+    // Yesterday: a plaintext vault (the pre-SEC-101 default), holding one secret.
+    unsafe { std::env::set_var("APEX_SECRETS_PLAINTEXT", "1") };
+    apex_config::secrets::build_secrets_vault(kms.clone())
+        .create("acme", "db-password", "hunter2")
+        .unwrap();
+    unsafe { std::env::remove_var("APEX_SECRETS_PLAINTEXT") };
+
+    // Today: the same directory under the new encrypted default.
+    let vault = apex_config::secrets::build_secrets_vault(kms);
+    let access =
+        apex_secrets::SecretAccess::new("acme", vec!["secret:read:db-password".to_string()]);
+    let value = vault
+        .resolve_str("secret://acme/db-password", &access)
+        .unwrap();
+    assert_eq!(
+        value.expose(),
+        "hunter2",
+        "legacy secret must survive the flip"
+    );
+
+    let secrets_dir = home.join(".apex").join("secrets");
+    assert!(
+        !secrets_dir.join("secrets.json").exists(),
+        "the plaintext catalog must be retired after migration"
+    );
+    assert!(secrets_dir.join("secrets.json.migrated.bak").exists());
+
     let _ = std::fs::remove_dir_all(&home);
 }

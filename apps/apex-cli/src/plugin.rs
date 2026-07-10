@@ -145,11 +145,13 @@ fn with_runtime(engine: PluginEngine) -> PluginEngine {
 }
 
 /// The local secret vault over `~/.apex/secrets` (falls back to in-memory if the home
-/// directory is unavailable). Honors the same `APEX_SECRETS_ENCRYPT_AT_REST` opt-in as
-/// the server's `default_secrets_vault` — both processes read the same directory, so
-/// they must agree on which file (`secrets.json` vs `secrets.enc.json`) is live, or a
-/// plugin's `secret:read:<name>` grant would silently fail to find a secret the server
-/// API created (or vice versa).
+/// directory is unavailable). Encrypted-at-rest by default with the same
+/// `APEX_SECRETS_PLAINTEXT=1` opt-out as the server's `default_secrets_vault`
+/// (RM-AIM-P1 SEC-101) — both processes read the same directory, so they must agree
+/// on which file (`secrets.json` vs `secrets.enc.json`) is live, or a plugin's
+/// `secret:read:<name>` grant would silently fail to find a secret the server API
+/// created (or vice versa). Both call the identical `apex-config` constructor, so
+/// they agree by construction.
 #[cfg(feature = "plugin-wasi")]
 fn secrets_vault() -> apex_secrets::Vault {
     apex_config::secrets::build_secrets_vault(config::kms())

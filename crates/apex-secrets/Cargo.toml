@@ -12,3 +12,6 @@ apex-common.workspace = true
 apex-kms.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# For the loud plaintext-migration warning (SEC-101) — the operator must be told a
+# plaintext backup file still exists after the one-time re-seal.
+tracing.workspace = true

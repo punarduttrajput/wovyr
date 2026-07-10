@@ -252,12 +252,21 @@ mod tests {
         }
 
         // Admit fairly, run each admitted item on a pooled sandbox, then release.
+        // `echo` is a shell builtin, not a standalone executable on Windows — spawn
+        // it through `cmd` there so this test runs on every CI leg (DX-103).
+        let (program, pre_args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/C", "echo"])
+        } else {
+            ("echo", &[])
+        };
         let mut ran = Vec::new();
         while let Some((tenant, tag)) = sched.poll() {
             let sb = pool.acquire().await.unwrap();
+            let mut args: Vec<String> = pre_args.iter().map(|s| s.to_string()).collect();
+            args.push(tag.clone());
             let cmd = SandboxCommand {
-                program: "echo".into(),
-                args: vec![tag.clone()],
+                program: program.into(),
+                args,
                 workdir: ".".into(),
                 env: vec![],
                 limits: ResourceLimits {

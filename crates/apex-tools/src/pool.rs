@@ -261,9 +261,16 @@ mod tests {
     }
 
     fn echo() -> SandboxCommand {
+        // `echo` is a shell builtin, not a standalone executable on Windows — spawn
+        // it through `cmd` there so this test runs on every CI leg (DX-103).
+        let (program, args): (&str, Vec<String>) = if cfg!(windows) {
+            ("cmd", vec!["/C".into(), "echo".into(), "hi".into()])
+        } else {
+            ("echo", vec!["hi".into()])
+        };
         SandboxCommand {
-            program: "echo".into(),
-            args: vec!["hi".into()],
+            program: program.into(),
+            args,
             workdir: ".".into(),
             env: vec![],
             limits: crate::sandbox::ResourceLimits {

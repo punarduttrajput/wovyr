@@ -23,11 +23,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+# Kept in lockstep with the latest release tag (RM-AIM-P1 DX-101) — see CHANGELOG.md.
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"
-repository = "https://github.com/apex-ai/apex"
+# The one canonical repository URL (DX-101) — every manifest (this, both SDKs, the
+# Helm chart) must agree with it.
+repository = "https://github.com/punarduttrajput/Apex"
 
 [workspace.dependencies]
 # Internal crates

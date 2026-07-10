@@ -7,8 +7,8 @@ description: >-
   described in docs/12-deployment/kubernetes.md and helm.md. See this
   chart's README.md for exactly what that means and what's still open.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.3.0
+appVersion: "0.3.0"
 keywords:
   - apex
   - agent-platform

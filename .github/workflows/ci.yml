@@ -89,6 +89,60 @@ jobs:
           cargo test -p apex-eval --test regression_detection -- --nocapture
           cargo test -p apex-eval --test multi_agent_vs_single_agent -- --nocapture
 
+  # RM-AIM-P1 DX-103 (Windows leg): every runner above is ubuntu-latest, but the
+  # platform is developed on (and ships for) Windows too — and Windows-specific
+  # breakage has happened in practice (cmd.exe vs sh, temp-dir semantics, and the
+  # SBX-102 Job Object sandbox path, which is `#[cfg(windows)]`-only and therefore
+  # *never compiled* by a Linux-only pipeline). Build + test the whole workspace on
+  # windows-latest so that code is exercised on every PR, not just on a
+  # contributor's machine.
+  rust-windows:
+    name: build + test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+  # RM-AIM-P1 DX-103 (dashboard leg): the Angular SPA had zero CI references — a
+  # broken dashboard build/test shipped silently. Builds the production bundle and
+  # runs the Jasmine/Karma suite (UI-102's specs: the SSE stream parser, the agent
+  # manifest round-trip, the workflow serializer, and UI-101's
+  # credential-not-in-localStorage assertions) in headless Chrome.
+  dashboard:
+    name: dashboard build + test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build (production)
+        run: npx ng build
+
+      - name: Test (headless)
+        run: npx ng test --watch=false --browsers=ChromeHeadless
+
   # RM-GA-P2 CI-901 (first half): compile + lint every feature-gated code path.
   # `cargo hack clippy --each-feature` runs clippy once per crate per feature (plus
   # the no-feature baseline), so a warning inside a `#[cfg(feature = ...)]` module

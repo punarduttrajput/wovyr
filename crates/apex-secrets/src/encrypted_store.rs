@@ -129,6 +129,64 @@ impl EncryptedFileSecretStore {
             record.version,
         ))
     }
+
+    /// One-time migration of a legacy plaintext `secrets.json` into this encrypted
+    /// store (RM-AIM-P1 SEC-101 — encrypted-at-rest became the *default*, so a vault
+    /// that predates the flip would otherwise silently lose sight of its plaintext
+    /// records, since the two stores use distinct filenames by design).
+    ///
+    /// Re-seals every plaintext record whose `(namespace, name)` isn't already in
+    /// `secrets.enc.json` (existing sealed records win — never clobbered), persists
+    /// once atomically, then retires the plaintext file to
+    /// `secrets.json.migrated.bak` so it is no longer live — with a loud warning to
+    /// delete the backup once verified, since plaintext-at-rest is exactly what this
+    /// store exists to end. Returns the number of records migrated; `Ok(0)` when
+    /// there is no plaintext file (the steady state).
+    ///
+    /// All-or-nothing: sealing happens in memory before the single `persist`, so a
+    /// KMS failure mid-migration writes nothing and leaves `secrets.json` untouched
+    /// for a retry.
+    pub fn migrate_plaintext(&self) -> Result<usize> {
+        let plaintext_path = self.dir.join("secrets.json");
+        if !plaintext_path.exists() {
+            return Ok(0);
+        }
+
+        let _flock = self.lock()?;
+        // Re-check under the lock: a concurrent process may have just migrated.
+        if !plaintext_path.exists() {
+            return Ok(0);
+        }
+        let bytes = std::fs::read(&plaintext_path)
+            .map_err(|e| Error::config(format!("read legacy secrets.json: {e}")))?;
+        let legacy: Vec<Secret> = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::config(format!("parse legacy secrets.json: {e}")))?;
+
+        let mut map = self.load()?;
+        let mut migrated = 0usize;
+        for secret in legacy {
+            let key = (secret.namespace.clone(), secret.name.clone());
+            if map.contains_key(&key) {
+                continue; // already sealed — the encrypted record wins
+            }
+            map.insert(key, self.encrypt(&secret)?);
+            migrated += 1;
+        }
+        self.persist(&map)?;
+
+        // Only after the sealed catalog is durably written: retire the plaintext file
+        // so it stops being live (and can't diverge from the encrypted store).
+        let backup = self.dir.join("secrets.json.migrated.bak");
+        std::fs::rename(&plaintext_path, &backup)
+            .map_err(|e| Error::config(format!("retire legacy secrets.json: {e}")))?;
+        tracing::warn!(
+            migrated,
+            backup = %backup.display(),
+            "migrated plaintext secrets to encrypted-at-rest storage; the plaintext \
+             backup still holds secret values — delete it once you've verified the vault"
+        );
+        Ok(migrated)
+    }
 }
 
 impl SecretStore for EncryptedFileSecretStore {
@@ -295,6 +353,96 @@ mod tests {
 
         assert_eq!(store.list("acme").unwrap().len(), 2);
         assert_eq!(store.list("beta").unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RM-AIM-P1 SEC-101 acceptance: an existing plaintext `secrets.json` is re-sealed
+    /// into the encrypted store on migration — values readable through the encrypted
+    /// store, the plaintext file retired (no longer live), and no plaintext left in the
+    /// ciphertext catalog.
+    #[test]
+    fn migrates_a_legacy_plaintext_store_and_retires_the_file() {
+        use crate::store::{FileSecretStore, SecretStore as _};
+        let dir = temp_dir("migration");
+
+        // A pre-SEC-101 plaintext store with a rotated secret (previous retained).
+        {
+            let plain = FileSecretStore::new(&dir).unwrap();
+            let mut token = Secret::new("acme", "token", "v1");
+            token.rotate("v2-plain-marker");
+            plain.put(token).unwrap();
+            plain
+                .put(Secret::new("beta", "key", "beta-plain-marker"))
+                .unwrap();
+        }
+        assert!(dir.join("secrets.json").exists());
+
+        let store = EncryptedFileSecretStore::new(&dir, kms()).unwrap();
+        let migrated = store.migrate_plaintext().unwrap();
+        assert_eq!(migrated, 2, "both legacy records re-sealed");
+
+        // Values (incl. the rotation window) survive, readable through the vault path.
+        let token = store.get("acme", "token").unwrap().unwrap();
+        assert_eq!(token.value().expose(), "v2-plain-marker");
+        assert_eq!(token.previous_value().unwrap().expose(), "v1");
+        assert_eq!(token.version, 2);
+        assert_eq!(
+            store.get("beta", "key").unwrap().unwrap().value().expose(),
+            "beta-plain-marker"
+        );
+
+        // The plaintext file is retired (renamed) — no longer live — and the sealed
+        // catalog holds no plaintext.
+        assert!(!dir.join("secrets.json").exists());
+        assert!(dir.join("secrets.json.migrated.bak").exists());
+        let enc = String::from_utf8(std::fs::read(dir.join("secrets.enc.json")).unwrap()).unwrap();
+        assert!(
+            !enc.contains("plain-marker"),
+            "ciphertext must not embed values"
+        );
+
+        // Idempotent: a second call (no plaintext file left) is a no-op.
+        assert_eq!(store.migrate_plaintext().unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Migration never clobbers an already-sealed record: the encrypted store wins
+    /// when both files hold the same `(namespace, name)`.
+    #[test]
+    fn migration_does_not_clobber_existing_sealed_records() {
+        use crate::store::{FileSecretStore, SecretStore as _};
+        let dir = temp_dir("migration-noclobber");
+
+        {
+            let plain = FileSecretStore::new(&dir).unwrap();
+            plain
+                .put(Secret::new("acme", "token", "stale-plaintext"))
+                .unwrap();
+        }
+        let store = EncryptedFileSecretStore::new(&dir, kms()).unwrap();
+        store
+            .put(Secret::new("acme", "token", "current-sealed"))
+            .unwrap();
+
+        assert_eq!(
+            store.migrate_plaintext().unwrap(),
+            0,
+            "nothing new to migrate"
+        );
+        assert_eq!(
+            store
+                .get("acme", "token")
+                .unwrap()
+                .unwrap()
+                .value()
+                .expose(),
+            "current-sealed",
+            "the sealed record must win over the stale plaintext one"
+        );
+        // The plaintext file is still retired.
+        assert!(!dir.join("secrets.json").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

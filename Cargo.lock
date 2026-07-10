@@ -164,7 +164,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "apex-agent"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-provider",
@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "apex-audit"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "serde",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "apex-cli"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-agent",
  "apex-common",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "apex-common"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "fs2",
  "serde",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "apex-config"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-kms",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "apex-eval"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-agent",
  "apex-common",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "apex-events"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-kms",
@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "apex-kms"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "hex",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "apex-marketplace"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-plugin",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "apex-memory"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-kms",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "apex-plugin"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-secrets",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "apex-provider"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-agent",
  "apex-common",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "apex-runtime"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-agent",
  "apex-common",
@@ -372,17 +372,18 @@ dependencies = [
 
 [[package]]
 name = "apex-secrets"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-kms",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
 name = "apex-server"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-agent",
  "apex-audit",
@@ -423,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "apex-telemetry"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -436,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "apex-tenancy"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "serde",
@@ -445,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "apex-tools"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-provider",
@@ -465,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "apex-workflow"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "apex-common",
  "async-trait",

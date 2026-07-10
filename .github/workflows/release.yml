@@ -1,0 +1,237 @@
+# Release pipeline for the Apex AI Platform (RM-AIM-P1 DX-102).
+#
+# Before this existed, "releasing" meant a git tag and nothing else: no binaries, no
+# published container image (CI built `apex:ci` and threw it away), no SDK artifacts,
+# no release notes. This workflow makes a tag push produce all of them:
+#
+#   - cross-platform `apex` binaries (Linux x86_64, Windows x86_64, macOS arm64)
+#     with sha256 checksums,
+#   - a container image pushed to GHCR (`ghcr.io/<owner>/apex`) tagged with both the
+#     version and `latest` — the repo the Helm chart now defaults to,
+#   - packed SDK artifacts: an npm tarball for `@apex-ai/sdk` and a wheel+sdist for
+#     `apex-ai-sdk`, attached to the release so a consumer can install a pinned
+#     artifact even before/without a registry publish,
+#   - a GitHub Release whose body is this version's section of CHANGELOG.md.
+#
+# Registry publishes are deliberately *gated, optional* steps: `npm publish`
+# requires a granular NPM_TOKEN secret (the org enforces 2FA — see
+# sdks/typescript/README.md's publish note) and PyPI requires PYPI_API_TOKEN;
+# when a secret is absent the corresponding publish step is skipped rather than
+# failing the whole release, because the packed artifacts above are still produced
+# and attached either way.
+#
+# `workflow_dispatch` is the dry-run path (acceptance criterion): it runs every
+# build/pack job identically but pushes nothing — no image push, no registry
+# publish, no GitHub Release — so the pipeline can be exercised end to end without
+# minting a release.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  # A tag push is a real release; a manual dispatch is a dry run.
+  IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
+permissions:
+  contents: write # create the GitHub Release
+  packages: write # push the image to GHCR
+
+jobs:
+  binaries:
+    name: binaries (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - name: macos-aarch64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p apex-cli --target ${{ matrix.target }}
+
+      - name: Package (tar.gz + sha256)
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          BIN=target/${{ matrix.target }}/release/apex
+          OUT=apex-${{ matrix.name }}.tar.gz
+          tar -czf "$OUT" -C "$(dirname "$BIN")" "$(basename "$BIN")"
+          shasum -a 256 "$OUT" > "$OUT.sha256"
+
+      - name: Package (zip + sha256)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $bin = "target/${{ matrix.target }}/release/apex.exe"
+          $out = "apex-${{ matrix.name }}.zip"
+          Compress-Archive -Path $bin -DestinationPath $out
+          (Get-FileHash $out -Algorithm SHA256).Hash.ToLower() + "  $out" | Out-File -Encoding ascii "$out.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-${{ matrix.name }}
+          path: |
+            apex-${{ matrix.name }}.*
+          if-no-files-found: error
+
+  image:
+    name: container image (GHCR)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image name + version
+        id: meta
+        shell: bash
+        run: |
+          # GHCR requires a lowercase repository path.
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${OWNER}/apex" >> "$GITHUB_OUTPUT"
+          if [[ "$IS_RELEASE" == "true" ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dry-run" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        if: env.IS_RELEASE == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push on a real release)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployment/docker/Dockerfile
+          # Same feature set docker-compose/Helm run with, so the published image
+          # supports the tiered Postgres/Qdrant backends out of the box.
+          build-args: |
+            FEATURES=tiered-memory,postgres
+          push: ${{ env.IS_RELEASE == 'true' }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
+
+  sdks:
+    name: pack SDKs (npm + PyPI artifacts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Pack @apex-ai/sdk
+        working-directory: sdks/typescript
+        run: |
+          npm ci
+          npm run build
+          npm pack --pack-destination ..
+        # Produces sdks/apex-ai-sdk-<version>.tgz
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build apex-ai-sdk (wheel + sdist)
+        working-directory: sdks/python
+        run: |
+          python -m pip install --upgrade build
+          python -m build --outdir ../dist-python
+
+      - name: Upload SDK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-packages
+          path: |
+            sdks/*.tgz
+            sdks/dist-python/*
+          if-no-files-found: error
+
+      # Registry publishes: optional, gated on secrets being configured. Skipping
+      # them never fails the release — the packed artifacts above ship regardless.
+      - name: Publish to npm (if NPM_TOKEN configured)
+        if: env.IS_RELEASE == 'true' && env.NODE_AUTH_TOKEN != ''
+        working-directory: sdks/typescript
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to PyPI (if PYPI_API_TOKEN configured)
+        if: env.IS_RELEASE == 'true' && env.TWINE_PASSWORD != ''
+        working-directory: sdks/python
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine upload ../dist-python/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+
+  release:
+    name: GitHub release
+    # A dry run stops after building everything; only a real tag mints a release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binaries, image, sdks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract this version's CHANGELOG section
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Print the block between "## [<version>]" and the next "## [" heading.
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md > release-notes.md
+          if [[ ! -s release-notes.md ]]; then
+            echo "No CHANGELOG section found for ${VERSION}; using a stub." >&2
+            echo "See CHANGELOG.md." > release-notes.md
+          fi
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          files: artifacts/**
+          fail_on_unmatched_files: true

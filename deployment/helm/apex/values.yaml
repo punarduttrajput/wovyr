@@ -3,11 +3,12 @@
 
 apex:
   image:
-    # No registry to push to from this dev environment — point this at
-    # wherever you push deployment/docker/Dockerfile's image (built with
-    # --build-arg FEATURES=tiered-memory,postgres to match the values below).
-    repository: apex
-    tag: dev
+    # The image .github/workflows/release.yml publishes on every version tag
+    # (RM-AIM-P1 DX-102), built from deployment/docker/Dockerfile with
+    # FEATURES=tiered-memory,postgres to match the values below. Override for a
+    # locally-built image (e.g. repository: apex, tag: dev).
+    repository: ghcr.io/punarduttrajput/apex
+    tag: 0.3.0
     pullPolicy: IfNotPresent
   # Fixed at 1: apex's durable state (~/.apex/{tenancy,kms,secrets,webhooks,
   # workflows,memory,audit}) is local files on a PVC, not shared/replicated —

@@ -82,12 +82,11 @@ pub(crate) fn default_kms() -> Arc<dyn apex_kms::Kms> {
 
 /// A secret [`Vault`](apex_secrets::Vault) over a durable store at
 /// `~/.apex/secrets` (shared with the CLI via `apex-config`, RM-GA-P4
-/// HLTH-903). Seals values through `kms` before they reach disk (a distinct
-/// `secrets.enc.json`, never mixed with the plaintext `secrets.json`) when
-/// `APEX_SECRETS_ENCRYPT_AT_REST` is set — **opt-in**, unlike the always-on
-/// memory encryption below: switching the default here would abandon any
-/// secrets already sitting in the plaintext file rather than transparently
-/// coexisting with them.
+/// HLTH-903). **Encrypted-at-rest by default (RM-AIM-P1 SEC-101):** values are
+/// sealed through `kms` into a distinct `secrets.enc.json`, and a legacy
+/// plaintext `secrets.json` is auto-migrated (re-sealed, then retired) on first
+/// construction so nothing is abandoned by the filename switch.
+/// `APEX_SECRETS_PLAINTEXT=1` is the explicit opt-out.
 pub(crate) fn default_secrets_vault(kms: Arc<dyn apex_kms::Kms>) -> apex_secrets::Vault {
     apex_config::secrets::build_secrets_vault(kms)
 }

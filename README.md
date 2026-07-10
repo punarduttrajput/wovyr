@@ -2,7 +2,7 @@
 
 > An Enterprise AI Agent Operating System written in Rust.
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Version](https://img.shields.io/badge/version-0.3.0-blue)
 ![Rust](https://img.shields.io/badge/Rust-Edition%202024-orange)
 ![License](https://img.shields.io/badge/license-Apache%202.0-green)
 
@@ -350,9 +350,10 @@ what each crate actually does.
 
 Current Version
 
-Crate version `0.1.0` (unbumped since inception — "v0.1"/"v0.2"/"v0.3" above
-refer to roadmap milestones tracked in [`docs/18-roadmap/`](docs/18-roadmap/),
-not Cargo semver).
+Crate version `0.3.0`, in lockstep with the latest release tag (`v0.3.0`) —
+reconciled by RM-AIM-P1 DX-101 after drifting since inception. Release history
+lives in [`CHANGELOG.md`](CHANGELOG.md); the roadmap milestones ("v0.1"…"v1.1")
+are tracked in [`docs/18-roadmap/`](docs/18-roadmap/).
 
 ## Quickstart (code)
 
