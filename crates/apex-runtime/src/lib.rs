@@ -43,7 +43,7 @@
 //! before this crate existed (`apex_workflow::resolve_template`, used by all
 //! three); this crate unifies the dispatch it feeds into.
 
-use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent};
+use apex_agent::{AgentDefinition, RunEvent, RunEventSink, RunOptions, run_agent};
 use apex_provider::{ChatRequest, Gateway, Message, ModelSelector};
 use apex_tools::{ToolContext, ToolError, ToolRegistry, ToolRequest, TrustClass};
 use apex_workflow::{ActivityContext, ActivityError, ActivityExecutor, resolve_template};
@@ -117,6 +117,67 @@ fn classify_gateway_error(e: apex_common::Error) -> ActivityError {
             ActivityError::Retryable(e.to_string())
         }
         other => ActivityError::Permanent(other.to_string()),
+    }
+}
+
+/// A [`RunEventSink`] that surfaces a sub-agent run's lifecycle as structured
+/// `tracing` events (target `apex.runtime.agent`), keyed by the workflow activity
+/// that owns the run (RM-AIM-P2 RUN-202). Previously sub-agent runs went to a
+/// `NullSink` — a workflow fanning out to N agents produced zero observable
+/// events for any of them. Token-level streams (`Delta`/`ToolCallDelta`/
+/// `ReasoningDelta`) are deliberately not logged: per-token log lines are noise,
+/// and the OTLP `agent.run` span already carries the run's timing.
+struct TracingSink<'a> {
+    activity_id: &'a str,
+    agent: &'a str,
+}
+
+impl RunEventSink for TracingSink<'_> {
+    fn emit(&mut self, event: RunEvent<'_>) {
+        match event {
+            RunEvent::Start { model, provider } => tracing::info!(
+                target: "apex.runtime.agent",
+                activity = self.activity_id,
+                agent = self.agent,
+                model,
+                provider,
+                "sub-agent run started"
+            ),
+            RunEvent::MemoryRetrieved { source, score } => tracing::debug!(
+                target: "apex.runtime.agent",
+                activity = self.activity_id,
+                agent = self.agent,
+                source,
+                score,
+                "sub-agent retrieved memory"
+            ),
+            RunEvent::ToolCall { name, .. } => tracing::debug!(
+                target: "apex.runtime.agent",
+                activity = self.activity_id,
+                agent = self.agent,
+                tool = name,
+                "sub-agent tool call"
+            ),
+            RunEvent::ToolResult { name, ok } => tracing::debug!(
+                target: "apex.runtime.agent",
+                activity = self.activity_id,
+                agent = self.agent,
+                tool = name,
+                ok,
+                "sub-agent tool result"
+            ),
+            RunEvent::Done { usage } => tracing::info!(
+                target: "apex.runtime.agent",
+                activity = self.activity_id,
+                agent = self.agent,
+                total_tokens = usage.total_tokens,
+                cost_usd = usage.cost_usd,
+                "sub-agent run finished"
+            ),
+            RunEvent::Delta { .. }
+            | RunEvent::ToolCallDelta { .. }
+            | RunEvent::ReasoningDelta { .. } => {}
+        }
     }
 }
 
@@ -291,7 +352,12 @@ impl ActivityExecutor for PlatformActivityExecutor {
                 }
                 opts = self.agents.customize_options(ctx, opts);
 
-                let mut sink = NullSink;
+                // A real sink (RUN-202): the sub-agent's lifecycle lands in
+                // logs/OTLP instead of vanishing into a NullSink.
+                let mut sink = TracingSink {
+                    activity_id: &ctx.id,
+                    agent: agent_id,
+                };
                 let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
                     .await
                     .map_err(classify_gateway_error)?;
@@ -644,6 +710,54 @@ mod tests {
         assert!(
             seen.lock().unwrap().is_empty(),
             "the model must never be called with an invalid constraint"
+        );
+    }
+
+    // --- RUN-202: a sub-agent run's real cost reaches the platform's
+    // accounting hook. (The server-side half — that `record` charges the
+    // project's daily accumulator — is proven in `apex-server`'s
+    // `workflow_runner` tests, where the accumulator lives.) ---
+
+    #[tokio::test]
+    async fn agent_activity_records_a_non_zero_run_cost() {
+        struct CostRecorder {
+            recorded: Arc<Mutex<Vec<f64>>>,
+        }
+        #[async_trait]
+        impl AgentResolver for CostRecorder {
+            async fn resolve(
+                &self,
+                _ctx: &ActivityContext,
+                id: &str,
+            ) -> Result<AgentDefinition, String> {
+                AgentDefinition::from_yaml(&format!(
+                    "metadata:\n  name: {id}\nspec:\n  instructions: hi\n"
+                ))
+                .map_err(|e| e.to_string())
+            }
+            fn record(&self, _ctx: &ActivityContext, cost_usd: f64) {
+                self.recorded.lock().unwrap().push(cost_usd);
+            }
+        }
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let exec = PlatformActivityExecutor::new(
+            ToolRegistry::with_builtins(),
+            // The mock provider reports real (synthetic, non-zero) usage cost.
+            Arc::new(Gateway::new(Box::new(apex_provider::MockProvider::new()))),
+            Arc::new(CostRecorder {
+                recorded: recorded.clone(),
+            }),
+        );
+        exec.execute(&ctx("agent", Some("hello"), json!({"message": "hi"})))
+            .await
+            .expect("agent activity should succeed");
+
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "exactly one run recorded");
+        assert!(
+            recorded[0] > 0.0,
+            "the run's cost must be non-zero and reach the accounting hook, got {}",
+            recorded[0]
         );
     }
 

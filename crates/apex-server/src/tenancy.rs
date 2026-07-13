@@ -471,6 +471,20 @@ impl QuotaTracker {
         }
     }
 
+    /// The project's LLM spend recorded for the current rolling day, if any —
+    /// the read half of [`record_run_cost`] (RM-AIM-P2 RUN-202: lets tests
+    /// observe that a sub-agent run's cost actually landed in the accumulator).
+    /// Test-only until a route needs it (e.g. a future usage endpoint).
+    #[cfg(test)]
+    pub(crate) fn spent_today(&self, project: &str) -> Option<f64> {
+        let usage = self.usage.lock().expect("quota mutex poisoned");
+        usage
+            .cost
+            .get(project)
+            .filter(|(day, _)| *day == current_day())
+            .map(|(_, usd)| *usd)
+    }
+
     /// Persist the daily-cost accumulator (best-effort — logged, not propagated,
     /// since the in-memory update this follows has already succeeded either way).
     fn persist(&self, cost: &BTreeMap<String, (u64, f64)>) {

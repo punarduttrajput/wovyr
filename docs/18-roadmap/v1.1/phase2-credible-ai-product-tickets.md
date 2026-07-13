@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.16.0
-**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), and WS-D (EVL-201..203) fully done; AIC-201/202 and RUN-201 done
+**Version:** 1.17.0
+**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), WS-D (EVL-201..203), and WS-A/runtime (AIC-201/202, RUN-201/202) fully done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -997,7 +997,7 @@ either), `ai_activity_transient_provider_error_stays_retryable`, and
 Not addressed (matches the ticket's own scope): `ai` steps still can't
 advertise *tools* — a tool-using step is what `agent` activities are for.
 
-## RUN-202 `[P2]` — Sub-agent run observability + real cost
+## RUN-202 `[P2]` — Sub-agent run observability + real cost — **DONE (2026-07-13)**
 
 **Problem.** `agent` activities run with `NullSink` and record only cost
 (`crates/apex-runtime/src/lib.rs:253,257`) — which is $0 for real providers until
@@ -1010,6 +1010,29 @@ record the PRV-101 cost against the parent project budget.
 charged to the project's daily accumulator.
 
 **Files.** `crates/apex-runtime/src/lib.rs`. **Size.** S. **Depends on:** PRV-101.
+
+**Implementation notes (2026-07-13).** **Observability:** the `agent` branch's
+`NullSink` is replaced by a `TracingSink` (in `apex-runtime`) emitting each
+sub-agent run's lifecycle as structured `tracing` events under target
+`apex.runtime.agent`, keyed by the owning workflow activity id + agent name —
+`Start` (model/provider) and `Done` (total tokens + cost) at `info`,
+memory-retrieval and tool call/result at `debug`; token-level streams
+(`Delta`/`ToolCallDelta`/`ReasoningDelta`) deliberately unlogged (per-token log
+lines are noise, and the OTLP `agent.run` span already carries run timing).
+These flow to OTLP logs automatically via `apex-telemetry`'s existing
+appender bridge — no new wiring needed. **Cost:** the accounting *plumbing*
+already existed (`AgentResolver::record` → the server's
+`tenancy::record_run_cost`) and PRV-101 already made `usage.cost_usd` real —
+what RUN-202 adds is *proof the chain actually works end to end*, which no
+test asserted: `apex-runtime`'s `agent_activity_records_a_non_zero_run_cost`
+(a recording resolver sees exactly one `record` call with cost > 0 from a
+provider that reports real usage) and `apex-server`'s
+`agent_activity_cost_is_charged_to_the_project_accumulator` (a full
+HTTP-submitted agent workflow with `X-Apex-Project` completes and the
+project's daily accumulator shows a non-zero spend — read back via a new
+test-only `QuotaTracker::spent_today` accessor, the read half of
+`record_run_cost`). This closes **WS-A / WS-runtime entirely** —
+AIC-201/202 and RUN-201/202 all done.
 
 ---
 
@@ -1101,3 +1124,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.14.0 | 2026-07-13 | AIC-201 (step-error recovery + forced final answer) implemented and marked DONE with implementation notes |
 | 1.15.0 | 2026-07-13 | AIC-202 (richer streaming events: tool-call-argument + reasoning deltas, wire → sink → CLI/SSE/dashboard) implemented and marked DONE with implementation notes |
 | 1.16.0 | 2026-07-13 | RUN-201 (`ai` activity honors model/temperature/max_tokens/response_format; gateway errors classify Retryable-vs-Permanent by kind) implemented and marked DONE with implementation notes |
+| 1.17.0 | 2026-07-13 | RUN-202 (sub-agent runs get a TracingSink instead of NullSink; non-zero run cost proven to reach the project's daily accumulator end to end) implemented and marked DONE with implementation notes — all of WS-A / WS-runtime is now done |

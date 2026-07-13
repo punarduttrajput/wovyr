@@ -1386,4 +1386,44 @@ metadata:\n  name: agent-wf-quota\nspec:\n  activities:\n    - id: greet\n      
             "expected a quota-related failure reason, got: {error}"
         );
     }
+
+    /// RUN-202 acceptance: a sub-agent activity's (non-zero) run cost is charged
+    /// to the submitting project's daily accumulator — the same accounting a
+    /// direct `agents:run` call feeds — not silently dropped.
+    #[tokio::test]
+    async fn agent_activity_cost_is_charged_to_the_project_accumulator() {
+        let state = isolated_state().await;
+
+        let (st, body) = post_json(
+            crate::router(state.clone()),
+            "/api/v1/agents",
+            json!({ "manifest": "metadata:\n  name: greeter\nspec:\n  instructions: Be friendly.\n" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        let (st, body) = post_json_headers(
+            crate::router(state.clone()),
+            "/api/v1/workflows",
+            &[("x-apex-project", "prj-run202-cost")],
+            json!({ "manifest": QUOTA_AGENT_YAML, "execution_id": "agent-wf-cost-test" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        let detail = wait_for_terminal(&state, "agent-wf-cost-test").await;
+        assert_eq!(
+            detail["execution"]["status"], "completed",
+            "the agent workflow should complete: {detail}"
+        );
+
+        let spent = state
+            .quota
+            .spent_today("prj-run202-cost")
+            .expect("the project must have a spend entry for today");
+        assert!(
+            spent > 0.0,
+            "the sub-agent run's cost must land in the project's daily accumulator, got {spent}"
+        );
+    }
 }
