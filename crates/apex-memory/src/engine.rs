@@ -5,6 +5,7 @@ use crate::record::{
     CompactionOutcome, CompactionPolicy, DocumentIngest, MemoryQuery, MemoryRecord, MemoryType,
     RetrievalStrategy, ScoreBreakdown, ScoredMemory,
 };
+use crate::rerank::Reranker;
 use crate::store::MemoryStore;
 use apex_common::{Error, Result};
 use apex_provider::{
@@ -13,20 +14,64 @@ use apex_provider::{
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-/// RRF smoothing constant ([retrieval §4](../../docs/06-memory-engine/retrieval.md)).
-const RRF_K: f32 = 60.0;
+/// Default RRF smoothing constant ([retrieval §4](../../docs/06-memory-engine/retrieval.md));
+/// override per engine via [`MemoryEngine::with_rrf_k`] (RM-AIM-P2 RAG-202).
+const DEFAULT_RRF_K: f32 = 60.0;
+
+/// Default cap on how many fused candidates the optional [`Reranker`] re-scores.
+const DEFAULT_RERANK_TOP_N: usize = 20;
 
 /// Ties memory storage to embeddings (via the [`Gateway`]) and serves ranked
 /// hybrid retrieval.
 pub struct MemoryEngine {
     gateway: Gateway,
     store: Arc<dyn MemoryStore>,
+    /// Optional second-stage reranker over the fused top-N (RAG-202). `None`
+    /// (the default) keeps single-stage retrieval exactly as before.
+    reranker: Option<Arc<dyn Reranker>>,
+    /// How many fused candidates the reranker re-scores (top-N by fused
+    /// relevance; the rest keep their fused scores).
+    rerank_top_n: usize,
+    /// RRF smoothing constant used by hybrid fusion.
+    rrf_k: f32,
 }
 
 impl MemoryEngine {
     /// Build an engine over a gateway (for embeddings) and a store.
     pub fn new(gateway: Gateway, store: Arc<dyn MemoryStore>) -> Self {
-        Self { gateway, store }
+        Self {
+            gateway,
+            store,
+            reranker: None,
+            rerank_top_n: DEFAULT_RERANK_TOP_N,
+            rrf_k: DEFAULT_RRF_K,
+        }
+    }
+
+    /// Attach a second-stage [`Reranker`] (RM-AIM-P2 RAG-202) applied to the
+    /// fused top-N candidates before the weighted ranker. Opt-in: without
+    /// this, retrieval behavior is unchanged. A reranker failure degrades to
+    /// the fused order with a warning (availability over quality — the same
+    /// stance as the gateway's semantic-cache degradation), never a failed
+    /// query.
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = Some(reranker);
+        self
+    }
+
+    /// Cap how many fused candidates the reranker re-scores (default 20).
+    /// The effective N is never below the query's own `limit`.
+    pub fn with_rerank_top_n(mut self, top_n: usize) -> Self {
+        self.rerank_top_n = top_n.max(1);
+        self
+    }
+
+    /// Override the RRF smoothing constant `k` (default 60) used by hybrid
+    /// fusion: a smaller `k` weights top ranks more heavily (RM-AIM-P2
+    /// RAG-202 — previously hardcoded).
+    pub fn with_rrf_k(mut self, k: f32) -> Self {
+        self.rrf_k = k.max(0.0);
+        self
     }
 
     /// Embed `content` and store it as a (public) memory; returns the new record id.
@@ -299,17 +344,71 @@ impl MemoryEngine {
     /// candidate ids come from the store (vector ANN / keyword search); otherwise
     /// the engine scans all records and computes relevance in-process.
     pub async fn query(&self, q: &MemoryQuery) -> Result<Vec<ScoredMemory>> {
-        let mut results = if self.store.supports_pushdown()
-            && let Some(scored) = self.query_pushdown(q).await?
+        // Stage 1: retrieve + fuse into (candidates, relevance).
+        let (records, mut relevance) = if self.store.supports_pushdown()
+            && let Some(fused) = self.fused_pushdown(q).await?
         {
-            scored
+            fused
         } else {
-            self.query_in_process(q).await?
+            self.fused_in_process(q).await?
         };
+        // Stage 2 (opt-in, RAG-202): re-score the fused top-N with the
+        // reranker; degrade to the fused order on any failure.
+        if self.reranker.is_some() {
+            self.apply_rerank(q, &records, &mut relevance).await;
+        }
+        // Stage 3: weighted ranking (+ optional MMR), then parent expansion.
+        let mut results = rank(records, &relevance, q);
         if q.expand_parents {
             self.attach_parents(&mut results, q).await?;
         }
         Ok(results)
+    }
+
+    /// Re-score the top-N candidates (by fused relevance) through the
+    /// configured [`Reranker`], overwriting their relevance in place.
+    /// Candidates beyond N keep their fused scores. Never fails the query:
+    /// a reranker error or a wrong-shaped response logs a warning and leaves
+    /// the fused scores untouched.
+    async fn apply_rerank(
+        &self,
+        q: &MemoryQuery,
+        records: &[MemoryRecord],
+        relevance: &mut HashMap<String, f32>,
+    ) {
+        let Some(reranker) = &self.reranker else {
+            return;
+        };
+        let mut ordered: Vec<&MemoryRecord> = records.iter().collect();
+        // Same deterministic order the ranker uses: fused score desc, id asc.
+        ordered.sort_by(|a, b| {
+            let sa = relevance.get(&a.id).copied().unwrap_or(0.0);
+            let sb = relevance.get(&b.id).copied().unwrap_or(0.0);
+            sb.partial_cmp(&sa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let top: Vec<&MemoryRecord> = ordered
+            .into_iter()
+            .take(self.rerank_top_n.max(q.limit))
+            .collect();
+        if top.is_empty() {
+            return;
+        }
+        let contents: Vec<&str> = top.iter().map(|r| r.content.as_str()).collect();
+        match reranker.rerank(&q.text, &contents).await {
+            Ok(scores) if scores.len() == top.len() => {
+                for (record, score) in top.iter().zip(scores) {
+                    relevance.insert(record.id.clone(), score.clamp(0.0, 1.0));
+                }
+            }
+            Ok(scores) => tracing::warn!(
+                "reranker returned {} scores for {} candidates; keeping fused order",
+                scores.len(),
+                top.len()
+            ),
+            Err(e) => tracing::warn!("reranker failed, keeping fused order: {e}"),
+        }
     }
 
     /// Attach the full parent document to each chunk result (RM-AIM-P2
@@ -342,21 +441,29 @@ impl MemoryEngine {
         Ok(())
     }
 
-    /// In-process retrieval: scan `all()` and score every candidate.
-    async fn query_in_process(&self, q: &MemoryQuery) -> Result<Vec<ScoredMemory>> {
+    /// In-process retrieval: scan `all()` and score every candidate, returning
+    /// the filtered candidates with their fused relevance.
+    async fn fused_in_process(
+        &self,
+        q: &MemoryQuery,
+    ) -> Result<(Vec<MemoryRecord>, HashMap<String, f32>)> {
         let mut candidates = self.store.all(q.namespace.as_deref()).await?;
         candidates.retain(|r| passes_filters(r, q));
         if candidates.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), HashMap::new()));
         }
         let relevance = self.relevance(q, &candidates).await?;
-        Ok(rank(candidates, &relevance, q))
+        Ok((candidates, relevance))
     }
 
-    /// Pushdown retrieval: ask the store's index for candidate ids per the strategy,
-    /// fetch those records, then apply the weighted ranker. Returns `None` if the
-    /// store cannot satisfy the requested strategy (caller falls back to in-process).
-    async fn query_pushdown(&self, q: &MemoryQuery) -> Result<Option<Vec<ScoredMemory>>> {
+    /// Pushdown retrieval: ask the store's index for candidate ids per the strategy
+    /// and fetch those records, returning them with their fused relevance. `None`
+    /// if the store cannot satisfy the requested strategy (caller falls back to
+    /// in-process).
+    async fn fused_pushdown(
+        &self,
+        q: &MemoryQuery,
+    ) -> Result<Option<(Vec<MemoryRecord>, HashMap<String, f32>)>> {
         // Over-fetch so metadata filtering still leaves enough to rank.
         let k = q.limit.saturating_mul(4).max(50);
         let ns = q.namespace.as_deref();
@@ -378,7 +485,9 @@ impl MemoryEngine {
                 let vector = self.store.vector_search(ns, &qv, k).await?;
                 let keyword = self.store.keyword_search(ns, &q.text, k).await?;
                 match (vector, keyword) {
-                    (Some(v), Some(kw)) => reciprocal_rank_fusion(&[ids_of(&v), ids_of(&kw)]),
+                    (Some(v), Some(kw)) => {
+                        reciprocal_rank_fusion(&[ids_of(&v), ids_of(&kw)], self.rrf_k)
+                    }
                     // Partial support → let the in-process path handle it.
                     _ => return Ok(None),
                 }
@@ -386,12 +495,12 @@ impl MemoryEngine {
         };
 
         if relevance.is_empty() {
-            return Ok(Some(Vec::new()));
+            return Ok(Some((Vec::new(), HashMap::new())));
         }
         let ids: Vec<String> = relevance.keys().cloned().collect();
         let mut records = self.store.get(&ids).await?;
         records.retain(|r| passes_filters(r, q));
-        Ok(Some(rank(records, &relevance, q)))
+        Ok(Some((records, relevance)))
     }
 
     /// Compute the normalized relevance of each candidate per the query strategy.
@@ -410,7 +519,7 @@ impl MemoryEngine {
                 let qv = self.embed(&q.text).await?;
                 let vlist = ranked_ids(vector_relevance(&qv, candidates));
                 let klist = ranked_ids(keyword_relevance(&q.text, candidates));
-                Ok(reciprocal_rank_fusion(&[vlist, klist]))
+                Ok(reciprocal_rank_fusion(&[vlist, klist], self.rrf_k))
             }
         }
     }
@@ -487,11 +596,13 @@ fn ranked_ids(scores: HashMap<String, f32>) -> Vec<String> {
 }
 
 /// Reciprocal Rank Fusion over several ranked id lists, normalized to `[0,1]`.
-fn reciprocal_rank_fusion(lists: &[Vec<String>]) -> HashMap<String, f32> {
+/// `k` is the smoothing constant: smaller values weight top ranks more heavily
+/// (configurable per engine since RM-AIM-P2 RAG-202).
+fn reciprocal_rank_fusion(lists: &[Vec<String>], k: f32) -> HashMap<String, f32> {
     let mut fused: HashMap<String, f32> = HashMap::new();
     for list in lists {
         for (rank, id) in list.iter().enumerate() {
-            *fused.entry(id.clone()).or_insert(0.0) += 1.0 / (RRF_K + (rank as f32 + 1.0));
+            *fused.entry(id.clone()).or_insert(0.0) += 1.0 / (k + (rank as f32 + 1.0));
         }
     }
     let max = fused.values().copied().fold(0.0_f32, f32::max);
@@ -1122,6 +1233,186 @@ mod tests {
         assert_eq!(
             outcome.compacted, 0,
             "parents and chunks must be excluded from compaction"
+        );
+    }
+
+    // --- Re-ranking stage (RM-AIM-P2 RAG-202) ---------------------------------
+
+    /// A deterministic test reranker: scores by substring match, and records
+    /// what it was asked to score.
+    struct ScriptedReranker {
+        /// `(substring, score)` — first match wins; unmatched candidates get 0.1.
+        rules: Vec<(&'static str, f32)>,
+        seen: std::sync::Mutex<Vec<Vec<String>>>,
+        fail: bool,
+    }
+
+    impl ScriptedReranker {
+        fn new(rules: Vec<(&'static str, f32)>) -> Arc<Self> {
+            Arc::new(Self {
+                rules,
+                seen: std::sync::Mutex::new(Vec::new()),
+                fail: false,
+            })
+        }
+        fn failing() -> Arc<Self> {
+            Arc::new(Self {
+                rules: Vec::new(),
+                seen: std::sync::Mutex::new(Vec::new()),
+                fail: true,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::rerank::Reranker for ScriptedReranker {
+        async fn rerank(&self, _query: &str, candidates: &[&str]) -> Result<Vec<f32>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(candidates.iter().map(|c| c.to_string()).collect());
+            if self.fail {
+                return Err(Error::provider("reranker down"));
+            }
+            Ok(candidates
+                .iter()
+                .map(|c| {
+                    self.rules
+                        .iter()
+                        .find(|(needle, _)| c.contains(needle))
+                        .map(|(_, s)| *s)
+                        .unwrap_or(0.1)
+                })
+                .collect())
+        }
+    }
+
+    /// Weights isolating relevance so ordering is decided by (re)ranked
+    /// relevance alone.
+    fn relevance_only(q: &mut MemoryQuery) {
+        q.weights = RankingWeights {
+            relevance: 1.0,
+            recency: 0.0,
+            importance: 0.0,
+        };
+    }
+
+    /// Two memories where the keyword-fused order puts `alpha` first for the
+    /// query "alpha" (it literally contains the term).
+    async fn seed_rerank(eng: &MemoryEngine) {
+        eng.remember("kb", "alpha alpha alpha", MemoryType::Semantic, 0.5, vec![])
+            .await
+            .unwrap();
+        eng.remember(
+            "kb",
+            "beta document about other things",
+            MemoryType::Semantic,
+            0.5,
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// RAG-202 acceptance (half 1): the reranker reorders the fused list.
+    #[tokio::test]
+    async fn reranker_reorders_the_fused_candidates() {
+        let reranker = ScriptedReranker::new(vec![("beta", 0.9), ("alpha", 0.2)]);
+        let gateway = Gateway::new(Box::new(MockProvider::new()));
+        let eng = MemoryEngine::new(gateway, Arc::new(InMemoryStore::new()))
+            .with_reranker(reranker.clone());
+        seed_rerank(&eng).await;
+
+        let mut q = MemoryQuery::new("alpha");
+        q.namespace = Some("kb".into());
+        relevance_only(&mut q);
+        let results = eng.query(&q).await.unwrap();
+
+        assert!(
+            results[0].record.content.contains("beta"),
+            "reranker must override the fused order, got: {}",
+            results[0].record.content
+        );
+        // The reranked score is what the breakdown reports.
+        assert_eq!(results[0].breakdown.relevance, 0.9);
+        assert_eq!(reranker.seen.lock().unwrap().len(), 1, "one rerank call");
+    }
+
+    /// RAG-202 acceptance (half 2): off by default — behavior is unchanged.
+    #[tokio::test]
+    async fn without_a_reranker_the_fused_order_stands() {
+        let eng = engine(); // no reranker attached
+        seed_rerank(&eng).await;
+
+        let mut q = MemoryQuery::new("alpha");
+        q.namespace = Some("kb".into());
+        relevance_only(&mut q);
+        let results = eng.query(&q).await.unwrap();
+        assert!(
+            results[0].record.content.contains("alpha"),
+            "default behavior must be the fused order"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_reranker_degrades_to_the_fused_order() {
+        let reranker = ScriptedReranker::failing();
+        let gateway = Gateway::new(Box::new(MockProvider::new()));
+        let eng =
+            MemoryEngine::new(gateway, Arc::new(InMemoryStore::new())).with_reranker(reranker);
+        seed_rerank(&eng).await;
+
+        let mut q = MemoryQuery::new("alpha");
+        q.namespace = Some("kb".into());
+        relevance_only(&mut q);
+        let results = eng.query(&q).await.unwrap();
+        assert!(
+            results[0].record.content.contains("alpha"),
+            "a reranker outage must not change results, let alone fail the query"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_fused_top_n_reaches_the_reranker() {
+        let reranker = ScriptedReranker::new(vec![]);
+        let gateway = Gateway::new(Box::new(MockProvider::new()));
+        let eng = MemoryEngine::new(gateway, Arc::new(InMemoryStore::new()))
+            .with_reranker(reranker.clone())
+            .with_rerank_top_n(2);
+        for i in 0..5 {
+            eng.remember("kb", format!("note {i}"), MemoryType::Semantic, 0.5, vec![])
+                .await
+                .unwrap();
+        }
+
+        let mut q = MemoryQuery::new("note");
+        q.namespace = Some("kb".into());
+        q.limit = 2;
+        eng.query(&q).await.unwrap();
+
+        let seen = reranker.seen.lock().unwrap();
+        assert_eq!(seen[0].len(), 2, "only top-N candidates are re-scored");
+    }
+
+    #[test]
+    fn rrf_k_changes_the_fusion_ratio() {
+        // Item `a` leads list 1, item `b` leads list 2 and also appears second
+        // in list 1 — with a small k the double appearance dominates harder.
+        let lists = vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["b".to_string()],
+        ];
+        let tight = reciprocal_rank_fusion(&lists, 1.0);
+        let smooth = reciprocal_rank_fusion(&lists, 60.0);
+        // `a` holds one rank-1 slot; `b` holds a rank-1 and a rank-2 slot.
+        // With small k a rank-2 appearance is worth much less than rank-1, so
+        // `a` closes the gap; with large k all ranks flatten toward equal
+        // weight and `b`'s double appearance dominates (ratio → 0.5).
+        let ratio_tight = tight["a"] / tight["b"];
+        let ratio_smooth = smooth["a"] / smooth["b"];
+        assert!(
+            ratio_tight > ratio_smooth,
+            "smaller k must weight top ranks more heavily ({ratio_tight} vs {ratio_smooth})"
         );
     }
 

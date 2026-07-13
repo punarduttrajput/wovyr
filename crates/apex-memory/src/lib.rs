@@ -10,9 +10,11 @@
 //!
 //! Implemented beyond the v0.2 core: MMR diversification, ABAC filtering,
 //! compression, sensitive-record encryption ([`EncryptingMemoryStore`]), the
-//! tiered Postgres+Qdrant backend (`tiered` feature), and document chunking
+//! tiered Postgres+Qdrant backend (`tiered` feature), document chunking
 //! with parent linkage ([`MemoryEngine::remember_document`], RM-AIM-P2
-//! RAG-201). **Deferred:** the knowledge graph.
+//! RAG-201), and an opt-in second-stage reranker
+//! ([`MemoryEngine::with_reranker`], RAG-202). **Deferred:** the knowledge
+//! graph.
 
 #[cfg(feature = "tiered")]
 mod backends;
@@ -20,6 +22,7 @@ mod chunk;
 mod encrypting_store;
 mod engine;
 mod record;
+mod rerank;
 mod store;
 
 #[cfg(feature = "tiered")]
@@ -31,4 +34,5 @@ pub use record::{
     AccessContext, CompactionOutcome, CompactionPolicy, DocumentIngest, MemoryQuery, MemoryRecord,
     MemoryType, RankingWeights, RetrievalStrategy, ScoreBreakdown, ScoredMemory,
 };
+pub use rerank::{LlmReranker, Reranker};
 pub use store::{FileStore, InMemoryStore, MemoryStore, ScoredId};

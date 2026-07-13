@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.6.0
-**Status:** In progress — WS-B (PRV-201..205) fully done; RAG-201 done
+**Version:** 1.7.0
+**Status:** In progress — WS-B (PRV-201..205) fully done; RAG-201, RAG-202 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -396,7 +396,7 @@ engine-level); wiring a `chunk: true`/policy option through the API + SDKs +
 `ScoredMemory.parent` is invisible until a caller opts in — the server hand-builds
 its record JSON, so no wire change shipped here).
 
-## RAG-202 `[P1]` — Re-ranking stage
+## RAG-202 `[P1]` — Re-ranking stage — **DONE (2026-07-13)**
 
 **Problem.** Hybrid retrieval is RRF + a linear weighted score
 (`engine.rs:234-243,331-407`); no cross-encoder/LLM reranker; `RRF_K` hardcoded 60
@@ -410,6 +410,45 @@ and that it's off by default (opt-in), preserving current behavior.
 
 **Files.** `crates/apex-memory/src/engine.rs` + new `rerank.rs`. **Size.** L.
 **Depends on:** none.
+
+**Implementation notes (2026-07-13).** New `apex-memory::rerank` module: a
+`Reranker` trait (`rerank(query, candidates) -> Vec<f32>` — **scores in `[0,1]`,
+not a permutation**, so reranked relevance flows through the existing weighted
+ranker with recency/importance still applied, and stays visible in each result's
+`ScoreBreakdown.relevance`) plus `LlmReranker`, the gateway-backed implementation:
+one chat call listing the numbered candidates, constrained via PRV-202's
+`ResponseFormat::JsonSchema` to `{"scores": [...]}`, with a lenient parser
+(bare array / fenced / prose-embedded JSON also accepted, since not every
+provider honors the constraint; a wrong-length or non-numeric reply is a clear
+`Error::Provider`, never silent misalignment; out-of-range scores clamp). A
+cross-encoder implementation drops in behind the same trait later. **Engine
+wiring:** `query()` was restructured into explicit stages — retrieve+fuse
+(`fused_in_process`/`fused_pushdown`, both now returning `(records, relevance)`
+instead of ranked results) → optional rerank → weighted rank (+ MMR) → optional
+parent expansion. `MemoryEngine::with_reranker(Arc<dyn Reranker>)` is the opt-in
+(default `None` — behavior byte-identical to before); `with_rerank_top_n`
+(default 20, never below the query's `limit`) caps how many fused candidates are
+re-scored, the rest keeping their fused scores; a reranker failure or
+wrong-shaped response **degrades to the fused order with a warning** rather than
+failing the query (availability over quality — the same stance as the gateway's
+semantic-cache degradation). Reranking runs *after* ABAC/metadata filtering, so
+no protected content ever reaches the reranker for a caller who couldn't see it
+anyway. **`RRF_K` configurable:** `reciprocal_rank_fusion` takes `k` as a
+parameter, threaded from a new `MemoryEngine.rrf_k` field
+(`with_rrf_k`, default 60 — previously a hardcoded const), used by both the
+in-process and pushdown hybrid paths. **Acceptance:**
+`engine::tests::reranker_reorders_the_fused_candidates` (a scripted reranker
+inverts the keyword-fused order and the breakdown reports the reranked score) and
+`without_a_reranker_the_fused_order_stands` (off by default), plus
+`a_failing_reranker_degrades_to_the_fused_order`,
+`only_the_fused_top_n_reaches_the_reranker`, `rrf_k_changes_the_fusion_ratio`
+(smaller k weights top ranks more heavily), and 6 `rerank::tests` covering
+schema-shaped/bare/fenced parsing, clamping, length-mismatch and garbage errors,
+the empty-candidates short-circuit, and that the outbound request carries the
+JSON-schema constraint + numbered candidates. Not yet surfaced: the server's
+`memory:query` route and the CLI construct their engines without a reranker —
+wiring an opt-in (e.g. `APEX_MEMORY_RERANK=llm`) is a follow-on slice, as is a
+real cross-encoder backend.
 
 ## RAG-203 `[P1]` — Semantic-cache key + embedding-model id
 
@@ -706,3 +745,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.4.0 | 2026-07-13 | PRV-204 (multimodal content parts) implemented and marked DONE with implementation notes |
 | 1.5.0 | 2026-07-13 | PRV-205 (retry jitter + `Retry-After`) implemented and marked DONE with implementation notes — all of WS-B (Providers) is now done |
 | 1.6.0 | 2026-07-13 | RAG-201 (document chunking with parent-document linkage) implemented and marked DONE with implementation notes |
+| 1.7.0 | 2026-07-13 | RAG-202 (re-ranking stage) implemented and marked DONE with implementation notes |
