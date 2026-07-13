@@ -12,7 +12,7 @@ use crate::image::{ImageGenRequest, ImageGenResponse};
 use crate::pricing::PriceBook;
 use crate::provider::{AIProvider, ChatStream, ChatStreamEvent};
 use crate::types::{
-    ChatRequest, ChatResponse, Message, ResponseFormat, Role, ToolCall, ToolChoice,
+    ChatRequest, ChatResponse, ContentPart, Message, ResponseFormat, Role, ToolCall, ToolChoice,
 };
 use apex_common::{Error, Result, Usage};
 use async_trait::async_trait;
@@ -66,7 +66,21 @@ impl OpenAiProvider {
     }
 
     /// Build the `/chat/completions` request body from a normalized request.
-    fn request_body(request: &ChatRequest) -> Value {
+    ///
+    /// Fallible since PRV-204: multimodal parts are only valid on user turns —
+    /// anywhere else is a permanent [`Error::Invalid`] (no failover), same
+    /// fail-closed contract as the PRV-202 constraints.
+    fn request_body(request: &ChatRequest) -> Result<Value> {
+        if let Some(bad) = request
+            .messages
+            .iter()
+            .find(|m| !m.parts.is_empty() && m.role != Role::User)
+        {
+            return Err(Error::invalid(format!(
+                "multimodal content parts are only supported on user messages (found on a {:?} turn)",
+                bad.role
+            )));
+        }
         let messages: Vec<Value> = request.messages.iter().map(Self::encode_message).collect();
         let mut body = json!({ "model": request.model, "messages": messages });
         if let Some(t) = request.temperature {
@@ -119,7 +133,7 @@ impl OpenAiProvider {
                 }),
             };
         }
-        body
+        Ok(body)
     }
 
     /// Translate a normalized [`Message`] into the OpenAI wire shape.
@@ -133,9 +147,40 @@ impl OpenAiProvider {
         let mut obj = json!({ "role": role });
 
         // `content` may be null on an assistant turn that is purely tool calls.
-        obj["content"] = match &msg.content {
-            Some(c) => json!(c),
-            None => Value::Null,
+        // A message with multimodal parts (PRV-204) renders as a content-block
+        // array instead: the `content` text (if any) first, then each part.
+        obj["content"] = if msg.parts.is_empty() {
+            match &msg.content {
+                Some(c) => json!(c),
+                None => Value::Null,
+            }
+        } else {
+            let mut blocks: Vec<Value> = Vec::new();
+            if let Some(text) = msg.content.as_deref().filter(|c| !c.is_empty()) {
+                blocks.push(json!({ "type": "text", "text": text }));
+            }
+            for part in &msg.parts {
+                blocks.push(match part {
+                    ContentPart::Text { text } => json!({ "type": "text", "text": text }),
+                    ContentPart::ImageUrl { url } => {
+                        json!({ "type": "image_url", "image_url": { "url": url } })
+                    }
+                    // Inline images ride as a data URI inside image_url.
+                    ContentPart::Image { media_type, data } => json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:{media_type};base64,{data}") },
+                    }),
+                    // OpenAI wants the bare format name (e.g. `wav`), not a MIME type.
+                    ContentPart::Audio { media_type, data } => json!({
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": data,
+                            "format": media_type.strip_prefix("audio/").unwrap_or(media_type),
+                        },
+                    }),
+                });
+            }
+            Value::Array(blocks)
         };
 
         if !msg.tool_calls.is_empty() {
@@ -169,7 +214,7 @@ impl AIProvider for OpenAiProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
-        let body = Self::request_body(&request);
+        let body = Self::request_body(&request)?;
         let url = format!("{}/chat/completions", self.base_url);
         let resp = self
             .client
@@ -199,7 +244,7 @@ impl AIProvider for OpenAiProvider {
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
         // Ask for an SSE stream and (where supported) usage in the final chunk.
-        let mut body = Self::request_body(&request);
+        let mut body = Self::request_body(&request)?;
         body["stream"] = json!(true);
         body["stream_options"] = json!({ "include_usage": true });
 
@@ -482,6 +527,7 @@ impl StreamAccumulator {
             message: Message {
                 role: Role::Assistant,
                 content,
+                parts: Vec::new(),
                 tool_calls,
                 tool_call_id: None,
                 name: None,
@@ -567,6 +613,7 @@ fn parse_response(
         message: Message {
             role: Role::Assistant,
             content,
+            parts: Vec::new(),
             tool_calls,
             tool_call_id: None,
             name: None,
@@ -633,6 +680,7 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: None,
+            parts: Vec::new(),
             tool_calls: vec![ToolCall {
                 id: "call_1".to_string(),
                 name: "echo".to_string(),
@@ -649,6 +697,41 @@ mod tests {
     }
 
     #[test]
+    fn multimodal_user_message_encodes_as_content_blocks() {
+        let msg = Message::user("what is this?")
+            .with_part(ContentPart::image_url("https://x/img.png"))
+            .with_part(ContentPart::image_base64("image/png", "AAAA"))
+            .with_part(ContentPart::audio_base64("audio/wav", "BBBB"));
+        let v = OpenAiProvider::encode_message(&msg);
+        let blocks = v["content"].as_array().unwrap();
+        // `content` text leads, then the parts in order.
+        assert_eq!(blocks[0], json!({ "type": "text", "text": "what is this?" }));
+        assert_eq!(
+            blocks[1],
+            json!({ "type": "image_url", "image_url": { "url": "https://x/img.png" } })
+        );
+        // Inline image rides as a data URI.
+        assert_eq!(
+            blocks[2]["image_url"]["url"],
+            json!("data:image/png;base64,AAAA")
+        );
+        // Audio format is the bare name, not the MIME type.
+        assert_eq!(
+            blocks[3],
+            json!({ "type": "input_audio", "input_audio": { "data": "BBBB", "format": "wav" } })
+        );
+    }
+
+    #[test]
+    fn parts_on_a_non_user_turn_fail_closed() {
+        let mut assistant = Message::assistant("look");
+        assistant.parts = vec![ContentPart::image_url("https://x/img.png")];
+        let req = ChatRequest::new("m", vec![Message::user("hi"), assistant]);
+        let err = OpenAiProvider::request_body(&req).unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+    }
+
+    #[test]
     fn strict_tool_emits_strict_flag_and_normalized_schema() {
         use crate::types::ToolSpec;
         let mut req = ChatRequest::new("m", vec![Message::user("hi")]);
@@ -661,7 +744,7 @@ mod tests {
             }),
             strict: true,
         }];
-        let body = OpenAiProvider::request_body(&req);
+        let body = OpenAiProvider::request_body(&req).unwrap();
         let function = &body["tools"][0]["function"];
         assert_eq!(function["strict"], json!(true));
         assert_eq!(
@@ -673,7 +756,7 @@ mod tests {
 
         // Non-strict: schema forwarded verbatim, no strict flag.
         req.tools[0].strict = false;
-        let body = OpenAiProvider::request_body(&req);
+        let body = OpenAiProvider::request_body(&req).unwrap();
         let function = &body["tools"][0]["function"];
         assert!(function.get("strict").is_none());
         assert_eq!(
@@ -687,22 +770,22 @@ mod tests {
         let mut req = ChatRequest::new("m", vec![Message::user("hi")]);
         req.tool_choice = Some(ToolChoice::Auto);
         assert_eq!(
-            OpenAiProvider::request_body(&req)["tool_choice"],
+            OpenAiProvider::request_body(&req).unwrap()["tool_choice"],
             json!("auto")
         );
         req.tool_choice = Some(ToolChoice::None);
         assert_eq!(
-            OpenAiProvider::request_body(&req)["tool_choice"],
+            OpenAiProvider::request_body(&req).unwrap()["tool_choice"],
             json!("none")
         );
         req.tool_choice = Some(ToolChoice::Required);
         assert_eq!(
-            OpenAiProvider::request_body(&req)["tool_choice"],
+            OpenAiProvider::request_body(&req).unwrap()["tool_choice"],
             json!("required")
         );
         req.tool_choice = Some(ToolChoice::Tool("echo".to_string()));
         assert_eq!(
-            OpenAiProvider::request_body(&req)["tool_choice"],
+            OpenAiProvider::request_body(&req).unwrap()["tool_choice"],
             json!({ "type": "function", "function": { "name": "echo" } })
         );
     }
@@ -712,14 +795,14 @@ mod tests {
         let mut req = ChatRequest::new("m", vec![Message::user("hi")]);
         req.response_format = Some(ResponseFormat::JsonObject);
         assert_eq!(
-            OpenAiProvider::request_body(&req)["response_format"],
+            OpenAiProvider::request_body(&req).unwrap()["response_format"],
             json!({ "type": "json_object" })
         );
         req.response_format = Some(ResponseFormat::JsonSchema {
             name: "answer".to_string(),
             schema: json!({ "type": "object", "properties": { "n": { "type": "integer" } } }),
         });
-        let body = OpenAiProvider::request_body(&req);
+        let body = OpenAiProvider::request_body(&req).unwrap();
         assert_eq!(body["response_format"]["type"], "json_schema");
         assert_eq!(body["response_format"]["json_schema"]["name"], "answer");
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
@@ -728,7 +811,8 @@ mod tests {
 
     #[test]
     fn unconstrained_request_omits_choice_and_format() {
-        let body = OpenAiProvider::request_body(&ChatRequest::new("m", vec![Message::user("hi")]));
+        let body =
+            OpenAiProvider::request_body(&ChatRequest::new("m", vec![Message::user("hi")])).unwrap();
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("response_format").is_none());
     }

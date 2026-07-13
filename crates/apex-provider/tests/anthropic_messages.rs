@@ -352,3 +352,46 @@ async fn json_schema_constrained_request_returns_schema_valid_output() {
     assert!(obj["confident"].is_boolean());
     assert_eq!(obj.len(), 2, "additionalProperties: false");
 }
+
+/// PRV-204 acceptance: an image content part round-trips through the
+/// multimodal-capable Messages API path — the wire carries the typed image
+/// block and the model's (recorded) answer about it comes back.
+#[tokio::test]
+async fn image_content_part_round_trips_through_the_messages_api() {
+    let fixture = json!({
+        "id": "msg_1", "type": "message", "role": "assistant",
+        "model": "claude-opus-4-8",
+        "content": [ { "type": "text", "text": "A one-pixel red square." } ],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 90, "output_tokens": 9 }
+    });
+    let (base_url, requests) = serve(vec![("application/json", fixture.to_string())]);
+    let provider =
+        AnthropicProvider::new(base_url, "test-key").with_price_book(PriceBook::with_defaults());
+
+    // A 1x1 PNG, base64-encoded — real image bytes, not a placeholder string.
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let req = ChatRequest::new(
+        "claude-opus-4-8",
+        vec![
+            Message::user("Describe this image.")
+                .with_part(apex_provider::ContentPart::image_base64("image/png", png)),
+        ],
+    );
+    let resp = provider.chat(req).await.unwrap();
+
+    // Outbound: the typed part became Anthropic's image block, after the text.
+    let sent = requests.recv().unwrap();
+    let blocks = sent["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "Describe this image.");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["type"], "base64");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    assert_eq!(blocks[1]["source"]["data"], png);
+
+    // Inbound: the answer parsed back through the normal response path.
+    assert_eq!(resp.message.content.as_deref(), Some("A one-pixel red square."));
+    assert_eq!(resp.finish_reason, "stop");
+    assert!(resp.usage.cost_usd > 0.0);
+}

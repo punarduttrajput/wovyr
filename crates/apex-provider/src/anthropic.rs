@@ -30,7 +30,7 @@
 use crate::pricing::PriceBook;
 use crate::provider::{AIProvider, ChatStream, ChatStreamEvent};
 use crate::types::{
-    ChatRequest, ChatResponse, Message, ResponseFormat, Role, ToolCall, ToolChoice,
+    ChatRequest, ChatResponse, ContentPart, Message, ResponseFormat, Role, ToolCall, ToolChoice,
 };
 use apex_common::{Error, Result, Usage};
 use async_trait::async_trait;
@@ -107,7 +107,7 @@ impl AnthropicProvider {
         let mut body = json!({
             "model": request.model,
             "max_tokens": request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            "messages": encode_messages(&request.messages),
+            "messages": encode_messages(&request.messages)?,
         });
         if let Some(t) = request.temperature {
             body["temperature"] = json!(t);
@@ -286,16 +286,56 @@ fn system_blocks(messages: &[Message], prompt_caching: bool) -> Vec<Value> {
 
 /// Translate the non-system conversation into Anthropic `messages`, merging
 /// consecutive tool results into a single `user` turn.
-fn encode_messages(messages: &[Message]) -> Vec<Value> {
+fn encode_messages(messages: &[Message]) -> Result<Vec<Value>> {
     let mut out: Vec<Value> = Vec::new();
     for msg in messages {
+        if !msg.parts.is_empty() && msg.role != Role::User {
+            return Err(Error::invalid(format!(
+                "multimodal content parts are only supported on user messages (found on a {:?} turn)",
+                msg.role
+            )));
+        }
         match msg.role {
             Role::System => {} // hoisted into the top-level `system` field
-            Role::User => {
+            Role::User if msg.parts.is_empty() => {
                 out.push(json!({
                     "role": "user",
                     "content": msg.content.clone().unwrap_or_default(),
                 }));
+            }
+            // A multimodal user turn (PRV-204) renders as a content-block
+            // array: the `content` text (if any) first, then each part.
+            Role::User => {
+                let mut blocks: Vec<Value> = Vec::new();
+                if let Some(text) = msg.content.as_deref().filter(|c| !c.is_empty()) {
+                    blocks.push(json!({ "type": "text", "text": text }));
+                }
+                for part in &msg.parts {
+                    blocks.push(match part {
+                        ContentPart::Text { text } => json!({ "type": "text", "text": text }),
+                        ContentPart::ImageUrl { url } => json!({
+                            "type": "image",
+                            "source": { "type": "url", "url": url },
+                        }),
+                        ContentPart::Image { media_type, data } => json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data,
+                            },
+                        }),
+                        // The Messages API has no audio input — fail closed
+                        // (permanent, so the gateway won't fail over into
+                        // silently different semantics).
+                        ContentPart::Audio { .. } => {
+                            return Err(Error::invalid(
+                                "anthropic does not accept audio input; remove the audio part",
+                            ));
+                        }
+                    });
+                }
+                out.push(json!({ "role": "user", "content": blocks }));
             }
             Role::Assistant => {
                 let mut blocks: Vec<Value> = Vec::new();
@@ -336,7 +376,7 @@ fn encode_messages(messages: &[Message]) -> Vec<Value> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Parse a tool call's JSON-string arguments into the object the wire wants;
@@ -465,6 +505,7 @@ fn parse_response(
         message: Message {
             role: Role::Assistant,
             content,
+            parts: Vec::new(),
             tool_calls,
             tool_call_id: None,
             name: None,
@@ -633,6 +674,7 @@ impl StreamAccumulator {
             message: Message {
                 role: Role::Assistant,
                 content,
+                parts: Vec::new(),
                 tool_calls,
                 tool_call_id: None,
                 name: None,
@@ -708,6 +750,42 @@ mod tests {
         let mut req = ChatRequest::new("m", vec![Message::user("hi")]);
         req.max_tokens = Some(99);
         assert_eq!(provider().request_body(&req).unwrap()["max_tokens"], 99);
+    }
+
+    #[test]
+    fn multimodal_user_message_encodes_as_image_blocks() {
+        let msg = Message::user("what is this?")
+            .with_part(ContentPart::image_base64("image/png", "AAAA"))
+            .with_part(ContentPart::image_url("https://x/img.png"))
+            .with_part(ContentPart::text("be brief"));
+        let msgs = encode_messages(&[msg]).unwrap();
+        let blocks = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0], json!({ "type": "text", "text": "what is this?" }));
+        assert_eq!(
+            blocks[1],
+            json!({ "type": "image",
+                    "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" } })
+        );
+        assert_eq!(
+            blocks[2],
+            json!({ "type": "image", "source": { "type": "url", "url": "https://x/img.png" } })
+        );
+        assert_eq!(blocks[3], json!({ "type": "text", "text": "be brief" }));
+    }
+
+    #[test]
+    fn audio_parts_fail_closed_as_invalid() {
+        let msg = Message::user("listen").with_part(ContentPart::audio_base64("audio/wav", "BB"));
+        let err = encode_messages(&[msg]).unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parts_on_a_non_user_turn_fail_closed() {
+        let mut assistant = Message::assistant("look");
+        assistant.parts = vec![ContentPart::image_url("https://x/img.png")];
+        let err = encode_messages(&[assistant]).unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
     }
 
     #[test]
@@ -804,6 +882,7 @@ mod tests {
         let assistant = Message {
             role: Role::Assistant,
             content: Some("checking".to_string()),
+            parts: Vec::new(),
             tool_calls: vec![ToolCall {
                 id: "toolu_1".to_string(),
                 name: "calc".to_string(),
@@ -812,7 +891,7 @@ mod tests {
             tool_call_id: None,
             name: None,
         };
-        let msgs = encode_messages(&[Message::user("q"), assistant]);
+        let msgs = encode_messages(&[Message::user("q"), assistant]).unwrap();
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[1]["content"][0]["type"], "text");
         assert_eq!(msgs[1]["content"][1]["type"], "tool_use");
@@ -826,6 +905,7 @@ mod tests {
         let assistant = Message {
             role: Role::Assistant,
             content: None,
+            parts: Vec::new(),
             tool_calls: vec![
                 ToolCall {
                     id: "a".into(),
@@ -846,7 +926,8 @@ mod tests {
             assistant,
             Message::tool_result("a", "t1", "r1"),
             Message::tool_result("b", "t2", "r2"),
-        ]);
+        ])
+        .unwrap();
         // user, assistant, then ONE user turn holding both tool_result blocks.
         assert_eq!(msgs.len(), 3);
         let results = msgs[2]["content"].as_array().unwrap();

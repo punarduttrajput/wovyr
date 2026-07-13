@@ -635,6 +635,7 @@ mod tests {
                 apex_provider::Message {
                     role: apex_provider::Role::Assistant,
                     content: None,
+                    parts: Vec::new(),
                     tool_calls: vec![apex_provider::ToolCall {
                         id: format!("call-{n}"),
                         name: "echo".into(),
@@ -736,6 +737,7 @@ mod tests {
                 apex_provider::Message {
                     role: apex_provider::Role::Assistant,
                     content: None,
+                    parts: Vec::new(),
                     tool_calls: vec![
                         apex_provider::ToolCall {
                             id: "call-slow".into(),

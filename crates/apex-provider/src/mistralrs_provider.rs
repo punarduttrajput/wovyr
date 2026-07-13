@@ -138,6 +138,14 @@ impl AIProvider for MistralRsProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+        // This backend loads a text-only GGUF pipeline — multimodal parts
+        // (PRV-204) fail closed rather than being silently dropped. (mistral.rs
+        // has a separate VisionModelBuilder; wiring it is its own slice.)
+        if request.messages.iter().any(|m| !m.parts.is_empty()) {
+            return Err(Error::invalid(
+                "the mistralrs backend is text-only; multimodal content parts are not supported",
+            ));
+        }
         let mut builder = RequestBuilder::new();
         for msg in &request.messages {
             let text = msg.content.clone().unwrap_or_default();
@@ -226,6 +234,7 @@ impl AIProvider for MistralRsProvider {
         let message = Message {
             role: Role::Assistant,
             content: choice.message.content,
+            parts: Vec::new(),
             tool_calls,
             tool_call_id: None,
             name: None,

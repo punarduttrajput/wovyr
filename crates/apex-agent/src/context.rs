@@ -161,6 +161,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             content: None,
+            parts: Vec::new(),
             tool_calls: vec![ToolCall {
                 id: id.into(),
                 name: "search".into(),

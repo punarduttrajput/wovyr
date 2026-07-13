@@ -62,6 +62,7 @@ impl AIProvider for ScriptedProvider {
             message: Message {
                 role: Role::Assistant,
                 content: None,
+                parts: Vec::new(),
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_string(),
                     name: "echo".to_string(),
@@ -193,6 +194,7 @@ impl AIProvider for CallsRecorder {
             message: Message {
                 role: Role::Assistant,
                 content: None,
+                parts: Vec::new(),
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_string(),
                     name: "recorder".to_string(),
@@ -252,6 +254,7 @@ async fn run_loop_terminates_on_step_budget() {
                 message: Message {
                     role: Role::Assistant,
                     content: None,
+                    parts: Vec::new(),
                     tool_calls: vec![ToolCall {
                         id: "c".to_string(),
                         name: "echo".to_string(),
@@ -303,6 +306,7 @@ async fn agent_denies_tool_requiring_an_ungranted_permission() {
                 message: Message {
                     role: Role::Assistant,
                     content: None,
+                    parts: Vec::new(),
                     tool_calls: vec![ToolCall {
                         id: "c1".to_string(),
                         name: "shell".to_string(),
@@ -376,6 +380,7 @@ impl AIProvider for RequestsFsRead {
             message: Message {
                 role: Role::Assistant,
                 content: None,
+                parts: Vec::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".to_string(),
                     name: "fs_read".to_string(),
@@ -543,6 +548,7 @@ impl AIProvider for FixedArgsProvider {
             message: Message {
                 role: Role::Assistant,
                 content: None,
+                parts: Vec::new(),
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_string(),
                     name: "argrec".to_string(),

@@ -132,6 +132,7 @@ mod tests {
         let with_call = Message {
             role: crate::types::Role::Assistant,
             content: None,
+            parts: Vec::new(),
             tool_calls: vec![ToolCall {
                 id: "c1".into(),
                 name: "search".into(),
