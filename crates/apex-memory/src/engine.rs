@@ -566,21 +566,72 @@ fn vector_relevance(query: &[f32], candidates: &[MemoryRecord]) -> HashMap<Strin
         .collect()
 }
 
-/// Keyword relevance from query-term overlap, normalized by the best overlap.
+/// BM25 `k1`: term-frequency saturation (standard default).
+const BM25_K1: f32 = 1.2;
+/// BM25 `b`: document-length normalization strength (standard default).
+const BM25_B: f32 = 0.75;
+
+/// In-process keyword relevance via **BM25 over stemmed tokens**, normalized
+/// to `[0,1]` by the best score (RM-AIM-P2 RAG-204).
+///
+/// Replaces the old unnormalized set-overlap count, closing the quality gap
+/// against the Postgres pushdown path's real full-text ranking: term
+/// *frequency* now matters (saturating via `k1`), rare terms outweigh common
+/// ones (IDF, Lucene's non-negative `ln(1 + (N - df + 0.5)/(df + 0.5))`
+/// variant), long documents no longer win by sheer surface area (`b`
+/// length-normalization), and light stemming matches morphological variants
+/// ("refunds" ↔ "refund"). IDF is computed over the candidate set itself —
+/// the same corpus the scores are compared within.
 fn keyword_relevance(query: &str, candidates: &[MemoryRecord]) -> HashMap<String, f32> {
-    let q_terms = tokenize(query);
-    let overlaps: Vec<(String, f32)> = candidates
+    // Query terms deduped: BM25 sums per unique term.
+    let q_terms: BTreeSet<String> = tokens(query).into_iter().collect();
+    if q_terms.is_empty() || candidates.is_empty() {
+        return candidates.iter().map(|r| (r.id.clone(), 0.0)).collect();
+    }
+
+    // Per-document term frequencies + lengths, one tokenization pass each.
+    let tf_maps: Vec<HashMap<String, f32>> = candidates
         .iter()
         .map(|r| {
-            let terms = tokenize(&r.content);
-            let overlap = q_terms.iter().filter(|t| terms.contains(*t)).count() as f32;
-            (r.id.clone(), overlap)
+            let mut tf: HashMap<String, f32> = HashMap::new();
+            for t in tokens(&r.content) {
+                *tf.entry(t).or_insert(0.0) += 1.0;
+            }
+            tf
         })
         .collect();
-    let max = overlaps.iter().map(|(_, o)| *o).fold(0.0_f32, f32::max);
-    overlaps
+    let doc_lens: Vec<f32> = tf_maps.iter().map(|m| m.values().sum()).collect();
+    let n = candidates.len() as f32;
+    let avgdl = (doc_lens.iter().sum::<f32>() / n).max(1.0);
+
+    let idf: HashMap<&String, f32> = q_terms
+        .iter()
+        .map(|t| {
+            let df = tf_maps.iter().filter(|m| m.contains_key(t)).count() as f32;
+            (t, (1.0 + (n - df + 0.5) / (df + 0.5)).ln())
+        })
+        .collect();
+
+    let scores: Vec<(String, f32)> = candidates
+        .iter()
+        .zip(tf_maps.iter().zip(&doc_lens))
+        .map(|(r, (tf_map, dl))| {
+            let score: f32 = q_terms
+                .iter()
+                .filter_map(|t| {
+                    let tf = *tf_map.get(t)?;
+                    let norm = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / avgdl);
+                    Some(idf[t] * tf * (BM25_K1 + 1.0) / norm)
+                })
+                .sum();
+            (r.id.clone(), score)
+        })
+        .collect();
+
+    let max = scores.iter().map(|(_, s)| *s).fold(0.0_f32, f32::max);
+    scores
         .into_iter()
-        .map(|(id, o)| (id, if max > 0.0 { o / max } else { 0.0 }))
+        .map(|(id, s)| (id, if max > 0.0 { s / max } else { 0.0 }))
         .collect()
 }
 
@@ -738,13 +789,48 @@ fn recency_decay(age: u64, memory_type: MemoryType) -> f32 {
     }
 }
 
-/// Lowercase alphanumeric tokenization into a set.
-fn tokenize(text: &str) -> BTreeSet<String> {
+/// Lowercase alphanumeric tokenization with light stemming, order/frequency
+/// preserved (BM25 needs term counts, not a set).
+fn tokens(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
+        .map(stem)
         .collect()
+}
+
+/// A light English suffix-stripper (≈ Porter step 1, RM-AIM-P2 RAG-204) so
+/// morphological variants match ("refunds" ↔ "refund", "policies" ↔ "policy",
+/// "shipping" ↔ "shipp"…). Deliberately *light*: at most one rule fires, and a
+/// minimum-stem-length guard keeps short words intact ("ring" is not "r" +
+/// "-ing"). Approximate by design — a mismatch degrades to the unstemmed
+/// token, never an error — mirroring how the Postgres path's `english`
+/// snowball config also stems both sides.
+fn stem(token: &str) -> String {
+    if let Some(base) = token.strip_suffix("ies")
+        && base.len() >= 2
+    {
+        return format!("{base}y");
+    }
+    if let Some(base) = token.strip_suffix("sses") {
+        return format!("{base}ss");
+    }
+    for suffix in ["ing", "ed", "es"] {
+        if let Some(base) = token.strip_suffix(suffix)
+            && base.len() >= 3
+        {
+            return base.to_string();
+        }
+    }
+    if let Some(base) = token.strip_suffix('s')
+        && base.len() >= 3
+        && !base.ends_with('s')
+        && !base.ends_with('u')
+        && !base.ends_with('i')
+    {
+        return base.to_string();
+    }
+    token.to_string()
 }
 
 #[cfg(test)]
@@ -1234,6 +1320,161 @@ mod tests {
             outcome.compacted, 0,
             "parents and chunks must be excluded from compaction"
         );
+    }
+
+    // --- BM25 keyword relevance (RM-AIM-P2 RAG-204) ----------------------------
+
+    /// RAG-204 acceptance: term frequency matters — a document mentioning the
+    /// query term repeatedly outranks a same-length single-mention one. The
+    /// old set-overlap scorer tied these (both "contain the term") and the
+    /// heavy doc is seeded *second*, so an id-ascending tiebreak would pick
+    /// the wrong one — only real tf scoring makes this pass.
+    #[tokio::test]
+    async fn bm25_ranks_term_frequency_above_a_single_mention() {
+        let eng = engine();
+        eng.remember(
+            "kb",
+            "refund mentioned once alongside office parking badges visitors",
+            MemoryType::Semantic,
+            0.5,
+            vec![],
+        )
+        .await
+        .unwrap();
+        eng.remember(
+            "kb",
+            "refund policy refund window refund processing takes five days",
+            MemoryType::Semantic,
+            0.5,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        let mut q = MemoryQuery::new("refund");
+        q.namespace = Some("kb".into());
+        q.strategy = RetrievalStrategy::Keyword;
+        let results = eng.query(&q).await.unwrap();
+        assert!(
+            results[0].record.content.contains("policy"),
+            "the term-frequency-heavy doc must rank first, got: {}",
+            results[0].record.content
+        );
+        assert!(
+            results[0].score > results[1].score,
+            "and strictly outscore the single-mention doc"
+        );
+    }
+
+    /// IDF: matching a rare term is worth more than matching a ubiquitous one.
+    /// Both docs match exactly one query term, so the old overlap scorer tied
+    /// them (and its id tiebreak picked the wrong one).
+    #[tokio::test]
+    async fn bm25_weights_a_rare_term_above_a_ubiquitous_one() {
+        let eng = engine();
+        // "the" appears in every doc (df = 3); "zebra" in exactly one (df = 1).
+        eng.remember(
+            "kb",
+            "the office in berlin",
+            MemoryType::Semantic,
+            0.5,
+            vec![],
+        )
+        .await
+        .unwrap();
+        eng.remember("kb", "the support hours", MemoryType::Semantic, 0.5, vec![])
+            .await
+            .unwrap();
+        // No "the" here: this doc matches exactly one query term, like the
+        // others — the old overlap scorer tied all three and its id-ascending
+        // tiebreak picked the first doc; only IDF separates them.
+        eng.remember(
+            "kb",
+            "zebra spotted near zoo",
+            MemoryType::Semantic,
+            0.5,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        let mut q = MemoryQuery::new("the zebra");
+        q.namespace = Some("kb".into());
+        q.strategy = RetrievalStrategy::Keyword;
+        let results = eng.query(&q).await.unwrap();
+        assert!(
+            results[0].record.content.contains("zebra"),
+            "the rare-term match must rank first, got: {}",
+            results[0].record.content
+        );
+    }
+
+    /// Stemming: a plural query matches a singular document (the old scorer
+    /// scored zero overlap for "refunds" vs "refund").
+    #[tokio::test]
+    async fn stemming_matches_morphological_variants() {
+        let eng = engine();
+        eng.remember(
+            "kb",
+            "refund policy details",
+            MemoryType::Semantic,
+            0.5,
+            vec![],
+        )
+        .await
+        .unwrap();
+        eng.remember(
+            "kb",
+            "office parking rules",
+            MemoryType::Semantic,
+            0.5,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        let mut q = MemoryQuery::new("refunds");
+        q.namespace = Some("kb".into());
+        q.strategy = RetrievalStrategy::Keyword;
+        let results = eng.query(&q).await.unwrap();
+        assert!(
+            results[0].record.content.contains("refund"),
+            "\"refunds\" must match \"refund\" via stemming"
+        );
+        assert!(
+            results[0].breakdown.relevance > 0.0,
+            "the match must carry positive relevance, not win by tiebreak"
+        );
+    }
+
+    #[test]
+    fn stem_strips_common_suffixes_with_short_word_guards() {
+        let cases = [
+            ("refunds", "refund"),
+            ("policies", "policy"),
+            ("processes", "process"),
+            ("boxes", "box"),
+            ("shipping", "shipp"), // light stemmer: no double-consonant undoubling
+            ("walked", "walk"),
+            ("ring", "ring"),     // min-stem guard: not "r" + "-ing"
+            ("red", "red"),       // not "r" + "-ed"
+            ("bus", "bus"),       // too short to strip "s"
+            ("pass", "pass"),     // "-ss" is not a plural
+            ("status", "status"), // "-us" is not a plural
+            ("this", "this"),     // "-is" is not a plural
+            ("zebra", "zebra"),   // nothing to strip
+        ];
+        for (input, want) in cases {
+            assert_eq!(stem(input), want, "stem({input:?})");
+        }
+    }
+
+    #[test]
+    fn keyword_relevance_handles_empty_query_and_empty_corpus() {
+        let candidates = vec![rec("a", vec![1.0])];
+        let scores = keyword_relevance("", &candidates);
+        assert_eq!(scores["a"], 0.0, "empty query scores zero, never panics");
+        assert!(keyword_relevance("q", &[]).is_empty());
     }
 
     // --- Re-ranking stage (RM-AIM-P2 RAG-202) ---------------------------------

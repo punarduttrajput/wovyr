@@ -326,3 +326,65 @@ async fn tiered_hybrid_query_ranks_keyword_match_via_engine() {
         results[0].record.content
     );
 }
+
+/// RAG-204 parity smoke: on a shared fixture, the in-process BM25 keyword
+/// branch and Postgres's real FTS (`ts_rank`) agree on the top result. The
+/// fixture is built so term frequency decides — a set-overlap scorer would
+/// tie the first two documents, so agreement here means the in-process path
+/// now has the FTS backend's ranking character, not just its match set.
+#[tokio::test]
+async fn in_process_bm25_agrees_with_postgres_fts_on_the_top_result() {
+    use apex_memory::InMemoryStore;
+
+    let Some(store) = pg().await else { return };
+    let ns = format!("it-bm25-parity-{}", nonce());
+    let fixture = [
+        "refund mentioned once alongside office parking badges visitors",
+        "refund policy refund window refund processing takes five days",
+        "office parking and visitor badges and sign in procedures",
+    ];
+    let query = "refund window";
+
+    // Postgres side: seed and rank via real FTS, mapping ids back to content.
+    for content in fixture {
+        store.put(rec(&ns, content, vec![0.0])).await.unwrap();
+    }
+    let fts_hits = store
+        .keyword_search(Some(&ns), query, 10)
+        .await
+        .unwrap()
+        .expect("postgres advertises keyword pushdown");
+    assert!(!fts_hits.is_empty(), "FTS must match the fixture");
+    let fts_top = store
+        .get(std::slice::from_ref(&fts_hits[0].0))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+        .content;
+
+    // In-process side: identical fixture through the engine's keyword branch.
+    let engine = MemoryEngine::new(
+        Gateway::new(Box::new(MockProvider::new())),
+        Arc::new(InMemoryStore::new()),
+    );
+    for content in fixture {
+        engine
+            .remember(&ns, content, MemoryType::Semantic, 0.5, vec![])
+            .await
+            .unwrap();
+    }
+    let mut q = MemoryQuery::new(query);
+    q.namespace = Some(ns.clone());
+    q.strategy = RetrievalStrategy::Keyword;
+    let results = engine.query(&q).await.unwrap();
+
+    assert_eq!(
+        results[0].record.content, fts_top,
+        "BM25 and Postgres FTS must agree on the top result for this fixture"
+    );
+    assert!(
+        fts_top.contains("policy"),
+        "and that top result is the term-frequency-heavy document"
+    );
+}

@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.8.0
-**Status:** In progress — WS-B (PRV-201..205) fully done; RAG-201, RAG-202, RAG-203 done
+**Version:** 1.9.0
+**Status:** In progress — WS-B (PRV-201..205) fully done; RAG-201..204 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -508,7 +508,7 @@ signatures; `--features qdrant` clippy-clean. `docs/05-llm-gateway/caching.md`
 serialized full messages + tools, so the exact cache never had this bug — this
 was purely a semantic-path fix.
 
-## RAG-204 `[P2]` — BM25/TF-IDF keyword parity
+## RAG-204 `[P2]` — BM25/TF-IDF keyword parity — **DONE (2026-07-13)**
 
 **Problem.** In-process keyword relevance is unnormalized set-overlap of alphanumeric
 tokens (`engine.rs:302-317,468-474`) — no BM25/TF-IDF/stemming — while the Postgres
@@ -521,6 +521,37 @@ branch to match the FTS backend's ranking character.
 a single-mention doc; parity smoke vs the FTS path on a shared fixture.
 
 **Files.** `crates/apex-memory/src/engine.rs`. **Size.** M. **Depends on:** none.
+
+**Implementation notes (2026-07-13).** `keyword_relevance` is now **BM25 over
+stemmed tokens** (`k1 = 1.2`, `b = 0.75`, Lucene's non-negative
+`ln(1 + (N − df + 0.5)/(df + 0.5))` IDF variant, computed over the candidate
+set itself — the same corpus the scores are compared within), still normalized
+to `[0,1]` by the best score so the fusion/ranker contract is unchanged. What
+the old set-overlap scorer couldn't express and now works: term *frequency*
+(saturating via `k1`), rare-vs-ubiquitous term weighting (IDF), document-length
+normalization (`b`), and morphological matching — the old `tokenize` set became
+`tokens` (order/frequency-preserving `Vec`) over a new `stem()`, a light
+English suffix-stripper (≈ Porter step 1: `-ies`→`-y`, `-sses`→`-ss`,
+`-ing`/`-ed`/`-es`/`-s` with minimum-stem-length and `-ss`/`-us`/`-is` guards
+so "ring"/"pass"/"status" survive; at most one rule fires; approximate by
+design — a miss degrades to the unstemmed token). Pure and deterministic
+throughout, per the house rule. **Acceptance:**
+`engine::tests::bm25_ranks_term_frequency_above_a_single_mention` (the heavy
+doc is seeded *second*, so the old scorer's tie + id-ascending tiebreak would
+pick the wrong one — only real tf scoring passes),
+`bm25_weights_a_rare_term_above_a_ubiquitous_one` (each doc matches exactly
+one query term; only IDF separates them),
+`stemming_matches_morphological_variants` ("refunds" query finds a "refund"
+doc with positive relevance — the old scorer scored zero overlap), a 13-case
+`stem()` unit table, and empty-query/empty-corpus guards. **Parity smoke:**
+`tests/tiered_backend.rs::in_process_bm25_agrees_with_postgres_fts_on_the_top_result`
+runs the identical fixture through Postgres `ts_rank` and the in-process
+keyword branch and asserts they agree on the top result (the
+term-frequency-heavy doc) — capability-gated like the rest of that file, so it
+executes for real in CI's service-container job (note: `plainto_tsquery` ANDs
+terms, so FTS also drops the partial-match doc entirely; top-1 agreement is the
+deliberately scoped claim). All pre-existing keyword/hybrid tests
+(engine, chunking acceptance, RAG-bench) pass unchanged on BM25 scoring.
 
 ## RAG-205 `[P2]` — Real timestamps + range/time metadata filters
 
@@ -785,3 +816,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.6.0 | 2026-07-13 | RAG-201 (document chunking with parent-document linkage) implemented and marked DONE with implementation notes |
 | 1.7.0 | 2026-07-13 | RAG-202 (re-ranking stage) implemented and marked DONE with implementation notes |
 | 1.8.0 | 2026-07-13 | RAG-203 (semantic-cache context compatibility + embedding-model stamping) implemented and marked DONE with implementation notes |
+| 1.9.0 | 2026-07-13 | RAG-204 (BM25 + light stemming for the in-process keyword branch) implemented and marked DONE with implementation notes |
