@@ -1,8 +1,9 @@
 //! The memory engine: ingestion, hybrid retrieval, and ranking.
 
+use crate::chunk::ChunkPolicy;
 use crate::record::{
-    CompactionOutcome, CompactionPolicy, MemoryQuery, MemoryRecord, MemoryType, RetrievalStrategy,
-    ScoreBreakdown, ScoredMemory,
+    CompactionOutcome, CompactionPolicy, DocumentIngest, MemoryQuery, MemoryRecord, MemoryType,
+    RetrievalStrategy, ScoreBreakdown, ScoredMemory,
 };
 use crate::store::MemoryStore;
 use apex_common::{Error, Result};
@@ -100,9 +101,110 @@ impl MemoryEngine {
             tags,
             required_scopes,
             sensitive,
+            parent_id: None,
+            is_parent: false,
             seq: 0,
         };
         self.store.put(record).await
+    }
+
+    /// Ingest a **document** with chunking + parent linkage (RM-AIM-P2 RAG-201).
+    ///
+    /// Splits `content` into overlapping windows per `policy`
+    /// ([`crate::chunk::split`]), stores the full document as a *parent*
+    /// record (never a direct retrieval hit — see
+    /// [`MemoryRecord::is_parent`]), and stores each chunk as its own
+    /// embedded retrieval unit linked back via `parent_id`. Chunks inherit
+    /// the document's metadata (type/importance/tags/scopes/`sensitive`), so
+    /// ABAC and at-rest encryption apply to every piece identically. A
+    /// document that fits one window is stored as an ordinary memory — no
+    /// linkage overhead for short content.
+    ///
+    /// Chunk embeddings are computed in **one** batched gateway call.
+    /// Ingestion is not transactional: a failure partway can leave a parent
+    /// with fewer chunks than intended (the stored pieces remain valid).
+    #[allow(clippy::too_many_arguments)] // mirrors remember_full's positional-arg style
+    pub async fn remember_document(
+        &self,
+        namespace: impl Into<String>,
+        content: impl Into<String>,
+        memory_type: MemoryType,
+        importance: f32,
+        tags: Vec<String>,
+        required_scopes: Vec<String>,
+        sensitive: bool,
+        policy: &ChunkPolicy,
+    ) -> Result<DocumentIngest> {
+        let namespace = namespace.into();
+        let content = content.into();
+        let chunks = crate::chunk::split(&content, policy);
+        if chunks.len() <= 1 {
+            let parent_id = self
+                .remember_full(
+                    namespace,
+                    content,
+                    memory_type,
+                    importance,
+                    tags,
+                    required_scopes,
+                    sensitive,
+                )
+                .await?;
+            return Ok(DocumentIngest {
+                parent_id,
+                chunk_ids: Vec::new(),
+            });
+        }
+
+        let importance = importance.clamp(0.0, 1.0);
+        // The parent holds the verbatim document with no embedding: it is
+        // excluded from retrieval by construction, so indexing its diluted
+        // one-vector representation would only waste space (the tiered
+        // backend skips the vector index entirely for parent records).
+        let parent_id = self
+            .store
+            .put(MemoryRecord {
+                id: String::new(),
+                namespace: namespace.clone(),
+                content,
+                embedding: Vec::new(),
+                memory_type,
+                importance,
+                tags: tags.clone(),
+                required_scopes: required_scopes.clone(),
+                sensitive,
+                parent_id: None,
+                is_parent: true,
+                seq: 0,
+            })
+            .await?;
+
+        let embeddings = self.embed_batch(&chunks).await?;
+        let mut chunk_ids = Vec::with_capacity(chunks.len());
+        for (chunk, embedding) in chunks.into_iter().zip(embeddings) {
+            let id = self
+                .store
+                .put(MemoryRecord {
+                    id: String::new(),
+                    namespace: namespace.clone(),
+                    content: chunk,
+                    embedding,
+                    memory_type,
+                    importance,
+                    tags: tags.clone(),
+                    required_scopes: required_scopes.clone(),
+                    sensitive,
+                    parent_id: Some(parent_id.clone()),
+                    is_parent: false,
+                    seq: 0,
+                })
+                .await?;
+            chunk_ids.push(id);
+        }
+        Ok(DocumentIngest {
+            parent_id,
+            chunk_ids,
+        })
     }
 
     /// Consolidate stale, low-importance memories in `namespace` into a single
@@ -119,12 +221,17 @@ impl MemoryEngine {
     ) -> Result<CompactionOutcome> {
         let mut records = self.store.all(Some(namespace)).await?;
         records.sort_by_key(|r| r.seq);
-        // Protect the most recent `keep_recent` from compaction.
+        // Protect the most recent `keep_recent` from compaction. Document
+        // records (parents and their chunks, RAG-201) are excluded outright:
+        // compacting one half would tear the parent↔chunk linkage (dangling
+        // `parent_id`s or an unreachable parent).
         let cutoff = records.len().saturating_sub(policy.keep_recent);
         let candidates: Vec<MemoryRecord> = records
             .into_iter()
             .take(cutoff)
-            .filter(|r| r.importance < policy.max_importance)
+            .filter(|r| {
+                r.importance < policy.max_importance && !r.is_parent && r.parent_id.is_none()
+            })
             .collect();
 
         if candidates.len() < policy.min_candidates {
@@ -192,12 +299,47 @@ impl MemoryEngine {
     /// candidate ids come from the store (vector ANN / keyword search); otherwise
     /// the engine scans all records and computes relevance in-process.
     pub async fn query(&self, q: &MemoryQuery) -> Result<Vec<ScoredMemory>> {
-        if self.store.supports_pushdown()
+        let mut results = if self.store.supports_pushdown()
             && let Some(scored) = self.query_pushdown(q).await?
         {
-            return Ok(scored);
+            scored
+        } else {
+            self.query_in_process(q).await?
+        };
+        if q.expand_parents {
+            self.attach_parents(&mut results, q).await?;
         }
-        self.query_in_process(q).await
+        Ok(results)
+    }
+
+    /// Attach the full parent document to each chunk result (RM-AIM-P2
+    /// RAG-201). A parent that fails the query's ABAC check is *not* attached
+    /// (fail-closed), and a dangling `parent_id` (parent since deleted) is
+    /// silently skipped — the chunk itself is still a valid result.
+    async fn attach_parents(&self, results: &mut [ScoredMemory], q: &MemoryQuery) -> Result<()> {
+        let ids: Vec<String> = results
+            .iter()
+            .filter_map(|r| r.record.parent_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let parents: HashMap<String, MemoryRecord> = self
+            .store
+            .get(&ids)
+            .await?
+            .into_iter()
+            .filter(|p| abac_allows(p, q))
+            .map(|p| (p.id.clone(), p))
+            .collect();
+        for r in results.iter_mut() {
+            if let Some(pid) = &r.record.parent_id {
+                r.parent = parents.get(pid).cloned();
+            }
+        }
+        Ok(())
     }
 
     /// In-process retrieval: scan `all()` and score every candidate.
@@ -285,6 +427,23 @@ impl MemoryEngine {
             .next()
             .ok_or_else(|| Error::provider("embedding response was empty"))
     }
+
+    /// Embed several strings in one gateway call (chunk ingestion, RAG-201).
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let model = self.gateway.resolve_embedding_model(None);
+        let resp = self
+            .gateway
+            .embed(EmbeddingRequest::new(model, texts.to_vec()))
+            .await?;
+        if resp.vectors.len() != texts.len() {
+            return Err(Error::provider(format!(
+                "embedding response returned {} vectors for {} inputs",
+                resp.vectors.len(),
+                texts.len()
+            )));
+        }
+        Ok(resp.vectors)
+    }
 }
 
 /// Normalized cosine relevance per record (`(cos + 1) / 2` → `[0,1]`).
@@ -345,9 +504,12 @@ fn reciprocal_rank_fusion(lists: &[Vec<String>]) -> HashMap<String, f32> {
 }
 
 /// Whether a record passes the query's metadata filters (importance + tags) and the
-/// ABAC access policy.
+/// ABAC access policy. Parent-document records (RAG-201) never pass: they exist
+/// only for [`MemoryQuery::expand_parents`] expansion — their chunks are the
+/// retrieval units.
 fn passes_filters(r: &MemoryRecord, q: &MemoryQuery) -> bool {
-    r.importance >= q.min_importance
+    !r.is_parent
+        && r.importance >= q.min_importance
         && (q.tags.is_empty() || q.tags.iter().any(|t| r.tags.contains(t)))
         && abac_allows(r, q)
 }
@@ -395,6 +557,7 @@ fn rank(
                 },
                 score: total,
                 record: r,
+                parent: None,
             }
         })
         .collect();
@@ -585,6 +748,8 @@ mod tests {
             tags: Vec::new(),
             required_scopes: Vec::new(),
             sensitive: false,
+            parent_id: None,
+            is_parent: false,
             seq: 0,
         }
     }
@@ -599,6 +764,7 @@ mod tests {
                 importance: 0.0,
                 total: score,
             },
+            parent: None,
         }
     }
 
@@ -737,6 +903,226 @@ mod tests {
 
         q.access = Some(AccessContext::new(vec!["pii".into(), "legal".into()]));
         assert!(abac_allows(&r, &q), "both scopes granted must allow");
+    }
+
+    // --- Document chunking + parent linkage (RM-AIM-P2 RAG-201) ---------------
+
+    /// A two-topic document long enough to split at the test's window size:
+    /// a refund-policy section followed by an office-logistics section.
+    fn two_topic_document() -> String {
+        let refunds = "Refunds are honored within a thirty day refund window. \
+                       A refund request needs the original receipt. Refund \
+                       processing takes five business days once approved."
+            .to_string();
+        let office = "The office is located in Berlin near the station. \
+                      Visitors must sign in at the front desk on arrival. \
+                      Parking spaces are available in the basement garage.";
+        format!("{refunds} {office}")
+    }
+
+    fn doc_policy() -> ChunkPolicy {
+        // Small windows so the two topics land in different chunks.
+        ChunkPolicy {
+            max_chars: 160,
+            overlap_chars: 20,
+        }
+    }
+
+    async fn ingest_two_topic_doc(eng: &MemoryEngine) -> DocumentIngest {
+        eng.remember_document(
+            "kb",
+            two_topic_document(),
+            MemoryType::Semantic,
+            0.5,
+            vec![],
+            vec![],
+            false,
+            &doc_policy(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_long_document_is_split_into_linked_chunks() {
+        let eng = engine();
+        let ingest = ingest_two_topic_doc(&eng).await;
+
+        assert!(
+            ingest.chunk_ids.len() > 1,
+            "expected multiple chunks, got {}",
+            ingest.chunk_ids.len()
+        );
+        let all = eng.store.all(Some("kb")).await.unwrap();
+        let parent = all.iter().find(|r| r.id == ingest.parent_id).unwrap();
+        assert!(parent.is_parent, "the document record is marked as parent");
+        assert_eq!(
+            parent.content,
+            two_topic_document(),
+            "parent holds the full document verbatim"
+        );
+        for cid in &ingest.chunk_ids {
+            let chunk = all.iter().find(|r| &r.id == cid).unwrap();
+            assert_eq!(
+                chunk.parent_id.as_ref(),
+                Some(&ingest.parent_id),
+                "every chunk links back to the parent"
+            );
+            assert!(!chunk.is_parent);
+            assert!(!chunk.embedding.is_empty(), "chunks are embedded");
+        }
+    }
+
+    /// RAG-201 acceptance: retrieval scores the relevant chunk above an
+    /// irrelevant chunk from the same document.
+    #[tokio::test]
+    async fn retrieval_scores_the_relevant_chunk_above_an_irrelevant_one() {
+        let eng = engine();
+        let ingest = ingest_two_topic_doc(&eng).await;
+
+        let mut q = MemoryQuery::new("what is the refund window");
+        q.namespace = Some("kb".into());
+        let results = eng.query(&q).await.unwrap();
+
+        assert!(!results.is_empty());
+        let top = &results[0];
+        assert!(
+            top.record.content.contains("refund"),
+            "the refund chunk must rank first, got: {}",
+            top.record.content
+        );
+        assert!(
+            ingest.chunk_ids.contains(&top.record.id),
+            "the top hit is one of the document's chunks"
+        );
+        // The office chunk (same document, different topic) scores lower.
+        let office = results.iter().find(|r| r.record.content.contains("Berlin"));
+        if let Some(office) = office {
+            assert!(
+                top.score > office.score,
+                "relevant chunk ({}) must outscore the irrelevant one ({})",
+                top.score,
+                office.score
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_documents_never_surface_as_direct_hits() {
+        let eng = engine();
+        let ingest = ingest_two_topic_doc(&eng).await;
+
+        // Even a query matching the whole document never returns the parent.
+        let mut q = MemoryQuery::new("refund window office Berlin");
+        q.namespace = Some("kb".into());
+        q.limit = 50;
+        let results = eng.query(&q).await.unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results.iter().all(|r| r.record.id != ingest.parent_id),
+            "the parent document must be expansion-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_parents_attaches_the_full_document() {
+        let eng = engine();
+        let ingest = ingest_two_topic_doc(&eng).await;
+
+        let mut q = MemoryQuery::new("what is the refund window");
+        q.namespace = Some("kb".into());
+
+        // Off by default: no parent attached.
+        let plain = eng.query(&q).await.unwrap();
+        assert!(plain[0].parent.is_none());
+
+        // Opted in: the chunk hit carries the full parent document.
+        q.expand_parents = true;
+        let expanded = eng.query(&q).await.unwrap();
+        let top = &expanded[0];
+        let parent = top.parent.as_ref().expect("parent attached");
+        assert_eq!(parent.id, ingest.parent_id);
+        assert_eq!(parent.content, two_topic_document());
+    }
+
+    #[tokio::test]
+    async fn parent_expansion_is_abac_fail_closed() {
+        let eng = engine();
+        // Craft a pathological store state directly: a public chunk whose
+        // parent is scope-protected (normal ingestion gives both the same
+        // scopes; this guards the expansion path itself).
+        let mut parent = rec("ignored", vec![1.0, 0.0]);
+        parent.content = "full secret document".into();
+        parent.is_parent = true;
+        parent.required_scopes = vec!["pii".into()];
+        let parent_id = eng.store.put(parent).await.unwrap();
+
+        let mut chunk = rec("ignored", vec![1.0, 0.0]);
+        chunk.content = "public chunk about refunds".into();
+        chunk.parent_id = Some(parent_id);
+        eng.store.put(chunk).await.unwrap();
+
+        let mut q = MemoryQuery::new("refunds");
+        q.namespace = Some("kb".into());
+        q.expand_parents = true;
+        let results = eng.query(&q).await.unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results[0].parent.is_none(),
+            "an ungranted parent must not be attached (fail-closed)"
+        );
+
+        // With the grant, the same query attaches it.
+        q.access = Some(AccessContext::new(vec!["pii".into()]));
+        let granted = eng.query(&q).await.unwrap();
+        assert!(granted[0].parent.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_short_document_stores_as_an_ordinary_memory() {
+        let eng = engine();
+        let ingest = eng
+            .remember_document(
+                "kb",
+                "a short note that fits one window",
+                MemoryType::Semantic,
+                0.5,
+                vec![],
+                vec![],
+                false,
+                &ChunkPolicy::default(),
+            )
+            .await
+            .unwrap();
+        assert!(ingest.chunk_ids.is_empty(), "no chunks for a short doc");
+        let all = eng.store.all(Some("kb")).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(!all[0].is_parent, "no linkage overhead for short content");
+        assert!(all[0].parent_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn compress_leaves_document_records_alone() {
+        let eng = engine();
+        ingest_two_topic_doc(&eng).await;
+        // Low importance + keep_recent 0 would compact everything if document
+        // records were eligible.
+        let eng2 = &eng;
+        let outcome = eng2
+            .compress(
+                "kb",
+                CompactionPolicy {
+                    max_importance: 1.0,
+                    keep_recent: 0,
+                    min_candidates: 1,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.compacted, 0,
+            "parents and chunks must be excluded from compaction"
+        );
     }
 
     // --- Compression / compaction -------------------------------------------

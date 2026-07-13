@@ -8,13 +8,15 @@
 //! weighted [ranker](../../docs/06-memory-engine/ranking.md) (relevance + recency +
 //! importance) with a transparent score breakdown.
 //!
-//! v0.2 slice scope: namespaces, hybrid/vector/keyword strategies, metadata
-//! filters, deterministic ranking, and in-memory + file stores. **Deferred:**
-//! Postgres/Qdrant/Redis backends, the knowledge graph, MMR diversification,
-//! compression, and policy/ABAC filtering.
+//! Implemented beyond the v0.2 core: MMR diversification, ABAC filtering,
+//! compression, sensitive-record encryption ([`EncryptingMemoryStore`]), the
+//! tiered Postgres+Qdrant backend (`tiered` feature), and document chunking
+//! with parent linkage ([`MemoryEngine::remember_document`], RM-AIM-P2
+//! RAG-201). **Deferred:** the knowledge graph.
 
 #[cfg(feature = "tiered")]
 mod backends;
+mod chunk;
 mod encrypting_store;
 mod engine;
 mod record;
@@ -22,10 +24,11 @@ mod store;
 
 #[cfg(feature = "tiered")]
 pub use backends::{PostgresStore, QdrantStore, TieredStore};
+pub use chunk::{ChunkPolicy, split};
 pub use encrypting_store::EncryptingMemoryStore;
 pub use engine::MemoryEngine;
 pub use record::{
-    AccessContext, CompactionOutcome, CompactionPolicy, MemoryQuery, MemoryRecord, MemoryType,
-    RankingWeights, RetrievalStrategy, ScoreBreakdown, ScoredMemory,
+    AccessContext, CompactionOutcome, CompactionPolicy, DocumentIngest, MemoryQuery, MemoryRecord,
+    MemoryType, RankingWeights, RetrievalStrategy, ScoreBreakdown, ScoredMemory,
 };
 pub use store::{FileStore, InMemoryStore, MemoryStore, ScoredId};

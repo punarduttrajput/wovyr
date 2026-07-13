@@ -91,6 +91,8 @@ fn rec(ns: &str, content: &str, embedding: Vec<f32>) -> MemoryRecord {
         tags: Vec::new(),
         required_scopes: Vec::new(),
         sensitive: false,
+        parent_id: None,
+        is_parent: false,
         seq: 0,
     }
 }

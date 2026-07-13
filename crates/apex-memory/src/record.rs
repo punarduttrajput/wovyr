@@ -63,6 +63,16 @@ pub struct MemoryRecord {
     /// [`EncryptingMemoryStore`](crate::EncryptingMemoryStore) acts on it.
     #[serde(default)]
     pub sensitive: bool,
+    /// For a chunk record (RM-AIM-P2 RAG-201): the id of the parent document
+    /// it was split from. `None` for ordinary memories and parent documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// True for a parent-document record: it holds the full document verbatim
+    /// and exists only for expansion ([`MemoryQuery::expand_parents`]) — it is
+    /// never returned as a direct retrieval hit (its one-vector embedding is
+    /// exactly the diluted representation chunking exists to avoid).
+    #[serde(default)]
+    pub is_parent: bool,
     /// Monotonic insertion sequence (assigned by the store; used for recency).
     #[serde(default)]
     pub seq: u64,
@@ -144,6 +154,12 @@ pub struct MemoryQuery {
     /// `None` grants nothing, so any scope-protected record is hidden (fail-closed);
     /// public records (no required scopes) are always visible.
     pub access: Option<AccessContext>,
+    /// Parent-document expansion (RM-AIM-P2 RAG-201): when `true`, a result
+    /// that is a chunk of a larger document gets its full parent document
+    /// attached as [`ScoredMemory::parent`] — retrieval stays chunk-precise
+    /// while the caller can ground on the whole document. The parent must
+    /// itself pass the query's ABAC check (fail-closed). Off by default.
+    pub expand_parents: bool,
 }
 
 impl MemoryQuery {
@@ -159,6 +175,7 @@ impl MemoryQuery {
             weights: RankingWeights::default(),
             diversity: 0.0,
             access: None,
+            expand_parents: false,
         }
     }
 }
@@ -218,6 +235,25 @@ pub struct ScoredMemory {
     pub score: f32,
     /// Why it scored that way.
     pub breakdown: ScoreBreakdown,
+    /// The full parent document, when `record` is a chunk and the query set
+    /// [`MemoryQuery::expand_parents`] (RM-AIM-P2 RAG-201). Absent otherwise —
+    /// including when the parent exists but the query's access context does
+    /// not pass its ABAC check (fail-closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<MemoryRecord>,
+}
+
+/// The outcome of ingesting a document via
+/// [`MemoryEngine::remember_document`](crate::MemoryEngine::remember_document)
+/// (RM-AIM-P2 RAG-201).
+#[derive(Debug, Clone)]
+pub struct DocumentIngest {
+    /// Id of the stored record holding the full document. When the document
+    /// fit in a single chunk window, this is an ordinary memory record (no
+    /// linkage was needed) and `chunk_ids` is empty.
+    pub parent_id: String,
+    /// Ids of the chunk records linked to the parent, in document order.
+    pub chunk_ids: Vec<String>,
 }
 
 #[cfg(test)]

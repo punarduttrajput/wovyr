@@ -131,6 +131,8 @@ mod tests {
             tags: Vec::new(),
             required_scopes: Vec::new(),
             sensitive,
+            parent_id: None,
+            is_parent: false,
             seq: 0,
         }
     }

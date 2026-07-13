@@ -153,6 +153,8 @@ impl PostgresStore {
             tags: row.get("tags"),
             required_scopes: row.get("required_scopes"),
             sensitive: row.get("sensitive"),
+            parent_id: row.get("parent_id"),
+            is_parent: row.get("is_parent"),
             seq: row.get::<_, i64>("seq") as u64,
         }
     }
@@ -171,8 +173,8 @@ impl MemoryStore for PostgresStore {
         self.client
             .execute(
                 "INSERT INTO memory_records
-                   (id, namespace, content, embedding, memory_type, importance, tags, required_scopes, sensitive, seq)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                   (id, namespace, content, embedding, memory_type, importance, tags, required_scopes, sensitive, parent_id, is_parent, seq)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 &[
                     &id,
                     &record.namespace,
@@ -183,6 +185,8 @@ impl MemoryStore for PostgresStore {
                     &record.tags,
                     &record.required_scopes,
                     &record.sensitive,
+                    &record.parent_id,
+                    &record.is_parent,
                     &seq,
                 ],
             )
@@ -501,9 +505,15 @@ impl MemoryStore for TieredStore {
     async fn put(&self, record: MemoryRecord) -> Result<String> {
         let namespace = record.namespace.clone();
         let embedding = record.embedding.clone();
+        // Parent-document records (RAG-201) are expansion-only — never a
+        // retrieval hit — so indexing them would waste vector space (and a
+        // parent carries no embedding to index anyway).
+        let index_vector = !record.is_parent && !embedding.is_empty();
         // Postgres is the system of record (assigns id/seq); Qdrant indexes the vector.
         let id = self.postgres.put(record).await?;
-        self.qdrant.upsert(&id, &namespace, &embedding).await?;
+        if index_vector {
+            self.qdrant.upsert(&id, &namespace, &embedding).await?;
+        }
         Ok(id)
     }
 

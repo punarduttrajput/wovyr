@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.5.0
-**Status:** In progress — WS-B (PRV-201..205) fully done
+**Version:** 1.6.0
+**Status:** In progress — WS-B (PRV-201..205) fully done; RAG-201 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -332,7 +332,7 @@ now done.
 
 # WS-C — Memory & RAG
 
-## RAG-201 `[P1]` — Document chunking with parent-document linkage
+## RAG-201 `[P1]` — Document chunking with parent-document linkage — **DONE (2026-07-13)**
 
 **Problem.** `remember_full` embeds the entire `content` as one vector
 (`crates/apex-memory/src/engine.rs:91-105`); long docs get one diluted embedding, no
@@ -347,6 +347,54 @@ that retrieval scores a relevant chunk above an irrelevant one from the same doc
 
 **Files.** `crates/apex-memory/src/engine.rs` + record model. **Size.** L.
 **Depends on:** none.
+
+**Implementation notes (2026-07-13).** New `apex-memory::chunk` module:
+`ChunkPolicy { max_chars, overlap_chars }` (default 1200/200 — ~300/~50 tokens at
+the ~4 chars/token heuristic) and `split()` — a pure, deterministic splitter over
+**character windows with word-boundary snapping** (characters as a dependency-free
+token proxy, the same documented-estimate stance as `apex_provider`'s
+`HeuristicTokenizer`; a word is never cut mid-way, an over-long single word is kept
+whole, and overlap is clamped below the window so every step provably advances).
+**Record model:** `MemoryRecord` gained `parent_id: Option<String>` (chunk → parent
+link, `skip_serializing_if` for wire back-compat) and `is_parent: bool` (marks the
+full-document record). **Ingestion:** `MemoryEngine::remember_document` (returning
+`DocumentIngest { parent_id, chunk_ids }`) stores the verbatim document as a parent
+record with **no embedding** (it is excluded from retrieval by construction, so
+indexing its diluted one-vector representation would only waste space), then each
+chunk as its own retrieval unit — embedded in **one batched gateway call**
+(`embed_batch`) — inheriting the document's full metadata
+(type/importance/tags/scopes/`sensitive`), so ABAC and the `EncryptingMemoryStore`
+apply to every piece identically. A document fitting one window stores as an
+ordinary memory (no linkage overhead). **Retrieval:** `passes_filters` never passes
+an `is_parent` record (both the in-process and pushdown paths already funnel
+through it), so parents are expansion-only; `MemoryQuery.expand_parents` (default
+off) attaches the full parent document to each chunk hit as
+`ScoredMemory.parent: Option<MemoryRecord>` — fail-closed through the query's own
+ABAC check, and a dangling `parent_id` (parent deleted) is skipped silently.
+`compress` excludes parents *and* chunks from compaction candidates outright —
+consolidating one half would tear the linkage. **Tiered backend:** migration
+`V2__parent_linkage.sql` adds the two columns + a partial index on `parent_id`
+(existing deployments fail closed with "run `apex admin migrate --target memory`"
+until migrated — the MIG-A1 contract working as designed); `TieredStore::put`
+skips the Qdrant upsert for parent records. **Acceptance:**
+`engine::tests::a_long_document_is_split_into_linked_chunks` (parent marked +
+verbatim, every chunk linked and embedded) and
+`retrieval_scores_the_relevant_chunk_above_an_irrelevant_one` (a two-topic document;
+the refund-topic query's top hit is the refund chunk, outscoring the office chunk
+from the same document — on the default hybrid strategy against the mock provider),
+plus `parent_documents_never_surface_as_direct_hits`,
+`expand_parents_attaches_the_full_document` (and off-by-default),
+`parent_expansion_is_abac_fail_closed`,
+`a_short_document_stores_as_an_ordinary_memory`,
+`compress_leaves_document_records_alone`, and 10 `chunk::tests` covering
+determinism, overlap, exact partition at zero overlap, no-word-lost coverage,
+over-long words, pathological overlap ≥ window, and multibyte (UTF-8) content.
+Not yet surfaced: the server's `POST /api/v1/memory/records` and the CLI's
+`memory put` still ingest single records only (`remember_document` is
+engine-level); wiring a `chunk: true`/policy option through the API + SDKs +
+`openapi.yaml` is its own follow-on slice (the response-shape addition
+`ScoredMemory.parent` is invisible until a caller opts in — the server hand-builds
+its record JSON, so no wire change shipped here).
 
 ## RAG-202 `[P1]` — Re-ranking stage
 
@@ -657,3 +705,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.3.0 | 2026-07-13 | PRV-203 (tool-schema normalization + surfaced arg-parse errors) implemented and marked DONE with implementation notes |
 | 1.4.0 | 2026-07-13 | PRV-204 (multimodal content parts) implemented and marked DONE with implementation notes |
 | 1.5.0 | 2026-07-13 | PRV-205 (retry jitter + `Retry-After`) implemented and marked DONE with implementation notes — all of WS-B (Providers) is now done |
+| 1.6.0 | 2026-07-13 | RAG-201 (document chunking with parent-document linkage) implemented and marked DONE with implementation notes |
