@@ -947,6 +947,7 @@ mod tests {
                     text.push_str(&t);
                 }
                 ChatStreamEvent::Done(r) => done = Some(r),
+                ChatStreamEvent::ToolCallDelta { .. } | ChatStreamEvent::ReasoningDelta(_) => {}
             }
         }
         let response = done.expect("a Done event ends the stream");

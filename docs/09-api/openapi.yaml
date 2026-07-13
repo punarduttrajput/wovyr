@@ -265,10 +265,14 @@ paths:
             `text/event-stream`. Unnamed `data:` frames in order:
             `{"type":"start",...}`, optional `{"type":"memory",...}`,
             repeated `{"type":"delta","text":...}`, optional
-            `{"type":"tool_call",...}`/`{"type":"tool_result",...}`,
+            `{"type":"reasoning","text":...}` (the model's thinking channel,
+            where the provider exposes one) and
+            `{"type":"tool_call_delta","index":...,"name":...,"arguments":...}`
+            (incremental argument fragments as the model composes a call),
+            optional `{"type":"tool_call",...}`/`{"type":"tool_result",...}`,
             `{"type":"done","usage":{...}}`. Terminal **named** event
             `event: result` (`data`: run result) or `event: error` (plain-text
-            data).
+            data). Consumers should ignore frame types they don't recognize.
           content:
             text/event-stream: { schema: { type: string } }
         '429': { $ref: '#/components/responses/Error' }

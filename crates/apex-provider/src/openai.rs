@@ -291,8 +291,8 @@ impl AIProvider for OpenAiProvider {
                             return;
                         }
                         let Ok(json) = serde_json::from_str::<Value>(data) else { continue };
-                        if let Some(delta) = acc.ingest(&json) {
-                            yield Ok(ChatStreamEvent::Delta(delta));
+                        for event in acc.ingest(&json) {
+                            yield Ok(event);
                         }
                     }
                 }
@@ -455,8 +455,9 @@ impl StreamAccumulator {
         }
     }
 
-    /// Fold one chunk in; return any new content delta to surface to the caller.
-    fn ingest(&mut self, json: &Value) -> Option<String> {
+    /// Fold one chunk in; return the incremental events to surface to the caller
+    /// (tool-call-argument fragments, reasoning, text — AIC-202), in wire order.
+    fn ingest(&mut self, json: &Value) -> Vec<ChatStreamEvent> {
         if let Some(m) = json.get("model").and_then(Value::as_str) {
             self.model = m.to_string();
         }
@@ -470,11 +471,14 @@ impl StreamAccumulator {
             self.completion_tokens = ct as u32;
         }
 
-        let choice = json.pointer("/choices/0")?;
+        let Some(choice) = json.pointer("/choices/0") else {
+            return Vec::new();
+        };
         if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
             self.finish_reason = fr.to_string();
         }
         let delta = choice.get("delta");
+        let mut events = Vec::new();
 
         if let Some(tcs) = delta
             .and_then(|d| d.get("tool_calls"))
@@ -496,20 +500,43 @@ impl StreamAccumulator {
                 if let Some(n) = tc.pointer("/function/name").and_then(Value::as_str) {
                     self.tool_calls[idx].1.push_str(n);
                 }
-                if let Some(a) = tc.pointer("/function/arguments").and_then(Value::as_str) {
-                    self.tool_calls[idx].2.push_str(a);
-                }
+                let fragment = tc
+                    .pointer("/function/arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.tool_calls[idx].2.push_str(fragment);
+                // Surface every chunk (incl. the fragment-less opener carrying
+                // id/name) with the id/name accumulated so far, so a consumer can
+                // announce the call before its arguments finish arriving.
+                events.push(ChatStreamEvent::ToolCallDelta {
+                    index: idx,
+                    id: self.tool_calls[idx].0.clone(),
+                    name: self.tool_calls[idx].1.clone(),
+                    arguments: fragment.to_string(),
+                });
             }
         }
 
-        let content = delta
-            .and_then(|d| d.get("content"))
-            .and_then(Value::as_str)?;
-        if content.is_empty() {
-            return None;
+        // A reasoning channel, where the (OpenAI-compatible) server exposes one —
+        // e.g. DeepSeek-style `delta.reasoning_content`. Display-only: not
+        // accumulated into the final message.
+        if let Some(reasoning) = delta
+            .and_then(|d| d.get("reasoning_content"))
+            .and_then(Value::as_str)
+            .filter(|r| !r.is_empty())
+        {
+            events.push(ChatStreamEvent::ReasoningDelta(reasoning.to_string()));
         }
-        self.content.push_str(content);
-        Some(content.to_string())
+
+        if let Some(content) = delta
+            .and_then(|d| d.get("content"))
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty())
+        {
+            self.content.push_str(content);
+            events.push(ChatStreamEvent::Delta(content.to_string()));
+        }
+        events
     }
 
     /// Assemble the completed response from the accumulated state.
@@ -843,23 +870,35 @@ mod tests {
         assert_eq!(v["content"], "{\"ok\":true}");
     }
 
+    /// Extract the text of a lone `Delta` event (test helper).
+    fn text_delta(events: &[ChatStreamEvent]) -> Option<String> {
+        match events {
+            [ChatStreamEvent::Delta(t)] => Some(t.clone()),
+            [] => None,
+            other => panic!(
+                "expected at most one text delta, got {} events",
+                other.len()
+            ),
+        }
+    }
+
     #[test]
     fn accumulates_streamed_text_and_usage() {
         let mut acc = StreamAccumulator::new("requested".to_string(), PriceBook::with_defaults());
         // Role-only opening chunk carries no content delta.
         assert_eq!(
-            acc.ingest(&json!({
+            text_delta(&acc.ingest(&json!({
                 "model": "gpt-4o-mini",
                 "choices": [{ "delta": { "role": "assistant" } }]
-            })),
+            }))),
             None
         );
         assert_eq!(
-            acc.ingest(&json!({ "choices": [{ "delta": { "content": "Hel" } }] })),
+            text_delta(&acc.ingest(&json!({ "choices": [{ "delta": { "content": "Hel" } }] }))),
             Some("Hel".to_string())
         );
         assert_eq!(
-            acc.ingest(&json!({ "choices": [{ "delta": { "content": "lo" } }] })),
+            text_delta(&acc.ingest(&json!({ "choices": [{ "delta": { "content": "lo" } }] }))),
             Some("lo".to_string())
         );
         // Terminal chunk: finish reason + a usage-only frame.
@@ -882,18 +921,51 @@ mod tests {
     fn accumulates_streamed_tool_call_across_chunks() {
         let mut acc = StreamAccumulator::new("m".to_string(), PriceBook::with_defaults());
         // id + name arrive first, arguments stream in fragments keyed by index.
-        acc.ingest(&json!({
+        let first = acc.ingest(&json!({
             "choices": [{ "delta": { "tool_calls": [{
                 "index": 0, "id": "call_1",
                 "function": { "name": "echo", "arguments": "{\"x\"" }
             }] } }]
         }));
-        acc.ingest(&json!({
+        let second = acc.ingest(&json!({
             "choices": [{ "delta": { "tool_calls": [{
                 "index": 0,
                 "function": { "arguments": ":1}" }
             }] }, "finish_reason": "tool_calls" }]
         }));
+
+        // Each chunk surfaces a ToolCallDelta fragment (AIC-202), carrying the
+        // id/name accumulated so far even when the wire chunk omitted them.
+        match (&first[..], &second[..]) {
+            (
+                [
+                    ChatStreamEvent::ToolCallDelta {
+                        index: 0,
+                        id: id1,
+                        name: name1,
+                        arguments: args1,
+                    },
+                ],
+                [
+                    ChatStreamEvent::ToolCallDelta {
+                        index: 0,
+                        id: id2,
+                        name: name2,
+                        arguments: args2,
+                    },
+                ],
+            ) => {
+                assert_eq!(
+                    (id1.as_str(), name1.as_str(), args1.as_str()),
+                    ("call_1", "echo", "{\"x\"")
+                );
+                assert_eq!(
+                    (id2.as_str(), name2.as_str(), args2.as_str()),
+                    ("call_1", "echo", ":1}")
+                );
+            }
+            _ => panic!("expected one ToolCallDelta per chunk"),
+        }
 
         let r = acc.finish();
         assert_eq!(r.finish_reason, "tool_calls");
@@ -903,6 +975,20 @@ mod tests {
         assert_eq!(r.message.tool_calls[0].arguments, "{\"x\":1}");
         // A tool-call-only response carries no text content.
         assert!(r.message.content.is_none());
+    }
+
+    #[test]
+    fn reasoning_content_surfaces_as_a_reasoning_delta() {
+        let mut acc = StreamAccumulator::new("m".to_string(), PriceBook::with_defaults());
+        let events = acc.ingest(&json!({
+            "choices": [{ "delta": { "reasoning_content": "thinking about it" } }]
+        }));
+        assert!(
+            matches!(&events[..], [ChatStreamEvent::ReasoningDelta(t)] if t == "thinking about it"),
+            "expected a lone ReasoningDelta"
+        );
+        // Reasoning is display-only: it never lands in the final message content.
+        assert_eq!(acc.finish().message.content.as_deref(), Some(""));
     }
 
     #[test]

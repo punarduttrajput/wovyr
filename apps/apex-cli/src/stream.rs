@@ -39,6 +39,18 @@ impl RunEventSink for StreamSink {
             RunEvent::Delta { text } => {
                 println!("delta  · {text:?}");
             }
+            RunEvent::ToolCallDelta {
+                index,
+                name,
+                arguments,
+            } => {
+                // Argument fragments as the model composes the call (AIC-202);
+                // the assembled call still prints as its own `tool` line.
+                println!("targs  · #{index} {name} {arguments:?}");
+            }
+            RunEvent::ReasoningDelta { text } => {
+                println!("think  · {text:?}");
+            }
             RunEvent::ToolCall { name, arguments } => {
                 println!("tool   · {name}({arguments})");
             }

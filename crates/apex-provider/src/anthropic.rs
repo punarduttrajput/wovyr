@@ -250,6 +250,10 @@ impl AIProvider for AnthropicProvider {
                         let Ok(json) = serde_json::from_str::<Value>(data.trim()) else { continue };
                         match acc.ingest(&json) {
                             Ingested::Delta(text) => yield Ok(ChatStreamEvent::Delta(text)),
+                            Ingested::ToolCallDelta { index, id, name, arguments } => {
+                                yield Ok(ChatStreamEvent::ToolCallDelta { index, id, name, arguments });
+                            }
+                            Ingested::Reasoning(text) => yield Ok(ChatStreamEvent::ReasoningDelta(text)),
                             Ingested::Done => {
                                 yield Ok(ChatStreamEvent::Done(acc.finish()));
                                 return;
@@ -529,6 +533,18 @@ fn parse_response(
 enum Ingested {
     /// Surface a text delta to the caller.
     Delta(String),
+    /// Surface a tool-call-argument fragment (AIC-202): the block's accumulated
+    /// id/name plus this event's incremental piece of the input JSON (empty on the
+    /// `content_block_start` announcement).
+    ToolCallDelta {
+        index: usize,
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// Surface a `thinking_delta` fragment (AIC-202). Display-only — never part of
+    /// the final message.
+    Reasoning(String),
     /// `message_stop` arrived — finish and end the stream.
     Done,
     /// The server sent an `error` event.
@@ -596,7 +612,16 @@ impl StreamAccumulator {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    self.tool_blocks.push((index, id, name, String::new()));
+                    self.tool_blocks
+                        .push((index, id.clone(), name.clone(), String::new()));
+                    // Announce the call (AIC-202): id + name are known up front on
+                    // this API; arguments follow as input_json_delta fragments.
+                    return Ingested::ToolCallDelta {
+                        index: index as usize,
+                        id,
+                        name,
+                        arguments: String::new(),
+                    };
                 }
                 Ingested::Continue
             }
@@ -620,10 +645,29 @@ impl StreamAccumulator {
                             && let Some(block) = self.tool_blocks.iter_mut().find(|b| b.0 == index)
                         {
                             block.3.push_str(partial);
+                            // Surface the fragment with the block's id/name (AIC-202).
+                            return Ingested::ToolCallDelta {
+                                index: index as usize,
+                                id: block.1.clone(),
+                                name: block.2.clone(),
+                                arguments: partial.to_string(),
+                            };
                         }
                         Ingested::Continue
                     }
-                    _ => Ingested::Continue, // thinking_delta etc.
+                    Some("thinking_delta") => {
+                        // Extended-thinking channel (AIC-202): surfaced for display,
+                        // never accumulated into the final message.
+                        match json
+                            .pointer("/delta/thinking")
+                            .and_then(Value::as_str)
+                            .filter(|t| !t.is_empty())
+                        {
+                            Some(text) => Ingested::Reasoning(text.to_string()),
+                            None => Ingested::Continue,
+                        }
+                    }
+                    _ => Ingested::Continue, // signature_delta etc.
                 }
             }
             Some("message_delta") => {
@@ -1068,12 +1112,25 @@ mod tests {
     #[test]
     fn accumulates_streamed_tool_use_across_json_deltas() {
         let mut acc = StreamAccumulator::new("m".into(), PriceBook::with_defaults());
-        acc.ingest(&json!({ "type": "content_block_start", "index": 0,
-            "content_block": { "type": "tool_use", "id": "toolu_1", "name": "calc", "input": {} } }));
-        acc.ingest(&json!({ "type": "content_block_delta", "index": 0,
-            "delta": { "type": "input_json_delta", "partial_json": "{\"expr\"" } }));
-        acc.ingest(&json!({ "type": "content_block_delta", "index": 0,
-            "delta": { "type": "input_json_delta", "partial_json": ":\"2+2\"}" } }));
+        // The tool_use block start announces the call (id + name, no arguments yet)…
+        assert!(matches!(
+            acc.ingest(&json!({ "type": "content_block_start", "index": 0,
+                "content_block": { "type": "tool_use", "id": "toolu_1", "name": "calc", "input": {} } })),
+            Ingested::ToolCallDelta { index: 0, id, name, arguments }
+                if id == "toolu_1" && name == "calc" && arguments.is_empty()
+        ));
+        // …and each input_json_delta surfaces its fragment with the block's id/name.
+        assert!(matches!(
+            acc.ingest(&json!({ "type": "content_block_delta", "index": 0,
+                "delta": { "type": "input_json_delta", "partial_json": "{\"expr\"" } })),
+            Ingested::ToolCallDelta { index: 0, id, name, arguments }
+                if id == "toolu_1" && name == "calc" && arguments == "{\"expr\""
+        ));
+        assert!(matches!(
+            acc.ingest(&json!({ "type": "content_block_delta", "index": 0,
+                "delta": { "type": "input_json_delta", "partial_json": ":\"2+2\"}" } })),
+            Ingested::ToolCallDelta { arguments, .. } if arguments == ":\"2+2\"}"
+        ));
         acc.ingest(&json!({ "type": "message_delta",
             "delta": { "stop_reason": "tool_use" }, "usage": { "output_tokens": 9 } }));
 
@@ -1095,6 +1152,24 @@ mod tests {
         acc.ingest(&json!({ "type": "content_block_start", "index": 0,
             "content_block": { "type": "tool_use", "id": "toolu_1", "name": "noop", "input": {} } }));
         assert_eq!(acc.finish().message.tool_calls[0].arguments, "{}");
+    }
+
+    #[test]
+    fn thinking_delta_surfaces_as_reasoning() {
+        let mut acc = StreamAccumulator::new("m".into(), PriceBook::with_defaults());
+        assert!(matches!(
+            acc.ingest(&json!({ "type": "content_block_delta", "index": 0,
+                "delta": { "type": "thinking_delta", "thinking": "let me check" } })),
+            Ingested::Reasoning(t) if t == "let me check"
+        ));
+        // signature_delta (and other unknown delta types) stay bookkeeping-only.
+        assert!(matches!(
+            acc.ingest(&json!({ "type": "content_block_delta", "index": 0,
+                "delta": { "type": "signature_delta", "signature": "abc" } })),
+            Ingested::Continue
+        ));
+        // Reasoning is display-only: the final message content is untouched.
+        assert_eq!(acc.finish().message.content.as_deref(), Some(""));
     }
 
     #[test]

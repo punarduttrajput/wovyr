@@ -221,13 +221,18 @@ export interface PluginAttestation {
 
 /**
  * A normalized run-stream event. The server emits anonymous `data:` frames carrying a
- * `type` discriminator (start/memory/delta/tool_call/tool_result/done), then a terminal
- * named `result` or `error` event.
+ * `type` discriminator (start/memory/delta/reasoning/tool_call_delta/tool_call/
+ * tool_result/done), then a terminal named `result` or `error` event.
  */
 export type StreamEvent =
   | { kind: 'start'; model?: string; provider?: string }
   | { kind: 'memory'; source?: string; score?: number }
   | { kind: 'delta'; text: string }
+  /** The model's reasoning/thinking channel, where the provider exposes one (AIC-202). */
+  | { kind: 'reasoning'; text: string }
+  /** An incremental fragment of a tool call's JSON arguments as the model composes
+   * it (AIC-202); `arguments` is this frame's fragment, not the whole. */
+  | { kind: 'tool_call_delta'; index: number; name: string; arguments: string }
   | { kind: 'tool_call'; name: string; arguments?: unknown }
   | { kind: 'tool_result'; name: string; ok: boolean }
   | { kind: 'done'; usage?: { total_tokens?: number; cost_usd?: number } }

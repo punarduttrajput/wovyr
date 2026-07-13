@@ -45,6 +45,8 @@ export class AgentStudio implements OnInit, OnDestroy {
   readonly loadedId = signal<string | null>(null);
   readonly events = signal<StreamEvent[]>([]);
   readonly answer = signal('');
+  /** Accumulated reasoning/thinking text, where the provider streams one (AIC-202). */
+  readonly reasoning = signal('');
   readonly running = signal(false);
   readonly usage = signal<{ total_tokens?: number; cost_usd?: number } | undefined>(undefined);
   readonly status = signal('');
@@ -87,6 +89,7 @@ export class AgentStudio implements OnInit, OnDestroy {
     this.loadedId.set(null);
     this.events.set([]);
     this.answer.set('');
+    this.reasoning.set('');
     this.usage.set(undefined);
     this.status.set('New draft — edit and Save.');
   }
@@ -99,6 +102,7 @@ export class AgentStudio implements OnInit, OnDestroy {
         this.loadedId.set(id);
         this.events.set([]);
         this.answer.set('');
+        this.reasoning.set('');
         this.usage.set(undefined);
         this.status.set('Loaded · ' + id);
       },
@@ -131,16 +135,31 @@ export class AgentStudio implements OnInit, OnDestroy {
     this.stop();
     this.events.set([]);
     this.answer.set('');
+    this.reasoning.set('');
     this.usage.set(undefined);
     this.status.set('');
     this.running.set(true);
     this.sub = this.svc.runStream(this.manifest(), this.message).subscribe({
       next: (e) => {
         if (e.kind === 'delta') this.answer.update((a) => a + e.text);
+        else if (e.kind === 'reasoning') this.reasoning.update((r) => r + e.text);
+        else if (e.kind === 'tool_call_delta') this.coalesceToolDelta(e);
         else this.events.update((l) => [...l, e]);
         if (e.kind === 'done') this.usage.set(e.usage);
       },
       complete: () => this.running.set(false),
+    });
+  }
+
+  /** Fold a tool-call-argument fragment (AIC-202) into the console feed: extend the
+   * in-progress entry for the same call rather than adding a line per fragment. */
+  private coalesceToolDelta(e: StreamEvent & { kind: 'tool_call_delta' }): void {
+    this.events.update((l) => {
+      const last = l[l.length - 1];
+      if (last?.kind === 'tool_call_delta' && last.index === e.index) {
+        return [...l.slice(0, -1), { ...last, name: e.name || last.name, arguments: last.arguments + e.arguments }];
+      }
+      return [...l, e];
     });
   }
 

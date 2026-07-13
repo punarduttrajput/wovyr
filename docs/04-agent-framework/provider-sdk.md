@@ -7,10 +7,10 @@ Document ID: AGENT-006
 
 **Document ID:** AGENT-006  
 **File Path:** `docs/04-agent-framework/provider-sdk.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Draft  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-13
 
 ---
 
@@ -305,7 +305,15 @@ Supported streaming:
 - Audio streaming
 - Image progress events
 
-Streaming follows a unified event model.
+Streaming follows a unified event model: `ChatStreamEvent` (AIC-202) —
+`Delta(text)` for assistant tokens, `ToolCallDelta { index, id, name, arguments }`
+for incremental tool-call-argument fragments as the model composes a call
+(`id`/`name` carry the values accumulated so far; the complete call still arrives
+in the terminal response, which remains what the agent loop executes),
+`ReasoningDelta(text)` for a provider-exposed thinking channel (Anthropic
+`thinking_delta`, OpenAI-compatible `delta.reasoning_content` — display-only,
+never part of the final message), and a terminal `Done(ChatResponse)`. Audio
+streaming and image progress events are not yet implemented.
 
 ---
 
@@ -530,3 +538,4 @@ engine-provider/
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-06-26 | Initial Provider SDK Specification |
+| 1.1.0 | 2026-07-13 | §13: concrete `ChatStreamEvent` model — tool-call-argument + reasoning deltas (RM-AIM-P2 AIC-202) |

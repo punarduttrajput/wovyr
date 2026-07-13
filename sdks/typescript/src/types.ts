@@ -63,6 +63,13 @@ export type AgentStreamEvent =
   | { type: "start"; [key: string]: unknown }
   | { type: "memory"; [key: string]: unknown }
   | { type: "delta"; text: string }
+  /** The model's reasoning/thinking channel, where the provider exposes one
+   * (AIC-202). Display-only — never part of the final answer. */
+  | { type: "reasoning"; text: string }
+  /** An incremental fragment of a tool call's JSON arguments as the model
+   * composes it (AIC-202); `arguments` is this frame's fragment only. The
+   * complete call still arrives as its own `tool_call` frame. */
+  | { type: "tool_call_delta"; index: number; name: string; arguments: string }
   | { type: "tool_call"; [key: string]: unknown }
   | { type: "tool_result"; [key: string]: unknown }
   | { type: "done"; usage: Usage }

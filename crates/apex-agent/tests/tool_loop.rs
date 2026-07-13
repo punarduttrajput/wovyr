@@ -90,6 +90,8 @@ impl RunEventSink for Capture {
             RunEvent::Start { provider, .. } => format!("start:{provider}"),
             RunEvent::MemoryRetrieved { source, .. } => format!("memory:{source}"),
             RunEvent::Delta { .. } => "delta".to_string(),
+            RunEvent::ToolCallDelta { name, .. } => format!("tooldelta:{name}"),
+            RunEvent::ReasoningDelta { .. } => "reasoning".to_string(),
             RunEvent::ToolCall { name, .. } => format!("toolcall:{name}"),
             RunEvent::ToolResult { name, ok } => format!("toolresult:{name}:{ok}"),
             RunEvent::Done { .. } => "done".to_string(),

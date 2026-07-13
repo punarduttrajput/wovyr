@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.14.0
-**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), and WS-D (EVL-201..203) fully done; AIC-201 done
+**Version:** 1.15.0
+**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), and WS-D (EVL-201..203) fully done; AIC-201/202 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -887,7 +887,7 @@ request it saw is asserted tool-less and carrying the injected note) — plus
 an updated comment on `tool_loop.rs::run_loop_terminates_on_step_budget`,
 which now documents that it exercises the pathological-provider fallback.
 
-## AIC-202 `[P2]` — Richer streaming events
+## AIC-202 `[P2]` — Richer streaming events — **DONE (2026-07-13)**
 
 **Problem.** Only text deltas are emitted (`runtime.rs:302-305`); tool-call-argument
 streaming and any reasoning/thinking channel aren't surfaced (`events.rs:13-27`);
@@ -901,6 +901,54 @@ streamed tool turn.
 
 **Files.** `crates/apex-agent/src/{runtime.rs,events.rs}`, CLI/dashboard sinks.
 **Size.** M. **Depends on:** none.
+
+**Implementation notes (2026-07-13).** The channel is plumbed end to end,
+provider wire → agent sink → every renderer. **Provider layer:**
+`ChatStreamEvent` gained `ToolCallDelta { index, id, name, arguments }` (one
+event per wire chunk; `id`/`name` always carry the values accumulated so far —
+both protocols send them at the call's start — so consumers never join
+fragments across events; `arguments` is the chunk's fragment only, empty on
+the announcement that opens a call) and `ReasoningDelta(String)`
+(display-only; never accumulated into the final message). `OpenAiProvider`'s
+`StreamAccumulator::ingest` now returns the `Vec<ChatStreamEvent>` to surface
+(tool-call fragments from `delta.tool_calls`, reasoning from an
+OpenAI-compatible server's `delta.reasoning_content` — the DeepSeek-style
+channel, since OpenAI's own o-series hides its reasoning); `AnthropicProvider`'s
+`Ingested` gained matching variants (`content_block_start`/`tool_use`
+announces the call, each `input_json_delta` streams its fragment,
+`thinking_delta` surfaces as reasoning; `signature_delta` stays
+bookkeeping-only). The terminal `Done` response is unchanged and remains the
+only thing the agent loop *acts* on — the incremental channel is
+display-only, so a consumer that ignores it sees exactly the old behavior.
+The gateway needed no change (its stream map only touches `Done`).
+**Agent layer:** `RunEvent::ToolCallDelta { index, name, arguments }` +
+`RunEvent::ReasoningDelta { text }`, emitted by `stream_chat` as the events
+pass through. **Renderers:** the CLI's `StreamSink` prints `targs · #0 echo
+"…"` / `think · "…"` lines; the server's `ChannelSink` emits
+`{"type":"tool_call_delta",...}` / `{"type":"reasoning",...}` SSE frames
+(documented in `openapi.yaml`'s `agents:stream` description, with an explicit
+"ignore unknown frame types" note — both SDKs' parsers already pass unknown
+frames through, and the TS SDK's `AgentStreamEvent` union gained the two new
+frame types); the dashboard parses both (`agent.service.ts`), coalesces
+argument fragments per call into one live "composing…" console line rather
+than a line per fragment, and accumulates reasoning into a dim `think` block
+above the answer (`agent-studio.ts`/`.html`). Proven by
+`runtime.rs::tool_call_argument_deltas_stream_through_the_sink` (the
+acceptance test: a scripted streaming tool turn yields reasoning + argument
+fragments in wire order through the sink, before the complete `ToolCall`
+announcement), extended adapter tests
+(`accumulates_streamed_tool_call_across_chunks`,
+`reasoning_content_surfaces_as_a_reasoning_delta`,
+`accumulates_streamed_tool_use_across_json_deltas`,
+`thinking_delta_surfaces_as_reasoning`), the real-HTTP fixture tests
+(`openai_stream.rs::streams_tool_call_in_final_done`,
+`anthropic_messages.rs::streams_tool_use_assembled_from_partial_json` — both
+now assert the live fragments too), and the dashboard's extended SSE-parsing
+spec (19/19 Jasmine specs pass; `ng build` clean). Deliberately **not**
+addressed from the problem statement: `MistralRsProvider` still streams via
+the default chat-wrapping shim — real mistral.rs token streaming is its own
+slice (the ticket's Files list never included it, and the crate is excluded
+from CI as too heavy a compile).
 
 ## RUN-201 `[P2]` — `ai` activity: honor model/params + correct error class
 
@@ -1019,3 +1067,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.12.0 | 2026-07-13 | EVL-202 (quantified regression gate: golden baselines, thresholds, repeat-N variance, CI artifact persistence) implemented and marked DONE with implementation notes |
 | 1.13.0 | 2026-07-13 | EVL-203 (RAG-path eval + retrieval metrics) implemented and marked DONE with implementation notes — all of WS-D (Evaluation) is now done (row added retroactively in 1.14.0; the version bump itself happened with EVL-203) |
 | 1.14.0 | 2026-07-13 | AIC-201 (step-error recovery + forced final answer) implemented and marked DONE with implementation notes |
+| 1.15.0 | 2026-07-13 | AIC-202 (richer streaming events: tool-call-argument + reasoning deltas, wire → sink → CLI/SSE/dashboard) implemented and marked DONE with implementation notes |

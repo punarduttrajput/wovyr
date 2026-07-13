@@ -145,6 +145,10 @@
                   <span class="tag">memory</span>
                   <span class="bod">retrieved {{ e.source || '' }} <span class="dim">score {{ e.score ?? '—' }}</span></span>
                 }
+                @case ('tool_call_delta') {
+                  <span class="tag">tool</span>
+                  <span class="bod">{{ e.name }}(<span class="dim">{{ e.arguments }}</span>) <span class="dim">composing…</span></span>
+                }
                 @case ('tool_call') {
                   <span class="tag">tool</span>
                   <span class="bod">{{ e.name }}() <span class="dim">calling…</span></span>
@@ -168,10 +172,13 @@
               }
             </div>
           }
+          @if (reasoning()) {
+            <div class="ln reasoning"><span class="tag">think</span><span class="bod dim">{{ reasoning() }}</span></div>
+          }
           @if (answer()) {
             <div class="answer">{{ answer() }}<span class="caret" [class.on]="running()">▌</span></div>
           }
-          @if (!steps().length && !answer() && !running()) {
+          @if (!steps().length && !answer() && !reasoning() && !running()) {
             <div class="placeholder-line">Run the agent to stream its planner, tool calls, and answer here.</div>
           }
         </div>

@@ -20,6 +20,16 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
 
+/// A short label for an unexpected stream event (test diagnostics).
+fn kind_of(event: &ChatStreamEvent) -> &'static str {
+    match event {
+        ChatStreamEvent::Delta(_) => "Delta",
+        ChatStreamEvent::ToolCallDelta { .. } => "ToolCallDelta",
+        ChatStreamEvent::ReasoningDelta(_) => "ReasoningDelta",
+        ChatStreamEvent::Done(_) => "Done",
+    }
+}
+
 /// Spawn a one-shot-per-response HTTP/1.1 server that answers successive
 /// connections with `responses` (in order), sending each captured request body
 /// through the returned channel. Returns the base URL.
@@ -209,6 +219,7 @@ data: {\"type\":\"message_stop\"}\n\n";
         match ev.unwrap() {
             ChatStreamEvent::Delta(d) => deltas.push(d),
             ChatStreamEvent::Done(r) => done = Some(r),
+            other => panic!("unexpected event kind: {}", kind_of(&other)),
         }
     }
 
@@ -249,17 +260,32 @@ data: {\"type\":\"message_stop\"}\n\n";
     let mut stream = provider.chat_stream(req).await.unwrap();
 
     let mut deltas = Vec::new();
+    let mut tool_fragments = Vec::new();
     let mut done = None;
     while let Some(ev) = stream.next().await {
         match ev.unwrap() {
             ChatStreamEvent::Delta(d) => deltas.push(d),
+            ChatStreamEvent::ToolCallDelta {
+                name, arguments, ..
+            } => tool_fragments.push((name, arguments)),
             ChatStreamEvent::Done(r) => done = Some(r),
+            other => panic!("unexpected event kind: {}", kind_of(&other)),
         }
     }
 
     assert!(
         deltas.is_empty(),
         "tool-use-only stream yields no text deltas"
+    );
+    // AIC-202: the block start announces the call, then each partial_json
+    // fragment streams live with the block's name attached.
+    assert_eq!(
+        tool_fragments,
+        vec![
+            ("calc".to_string(), String::new()),
+            ("calc".to_string(), "{\"expr\"".to_string()),
+            ("calc".to_string(), ":\"2+2\"}".to_string()),
+        ]
     );
     let done = done.expect("stream must end with Done");
     assert_eq!(done.finish_reason, "tool_calls");

@@ -18,6 +18,19 @@ pub enum RunEvent<'a> {
     MemoryRetrieved { source: &'a str, score: f32 },
     /// A chunk of streamed assistant text (multiple per answer as tokens arrive).
     Delta { text: &'a str },
+    /// An incremental fragment of a tool call's streamed JSON arguments (AIC-202),
+    /// emitted as the model composes the call — before [`ToolCall`](Self::ToolCall)
+    /// announces the complete one. `name` is the name known so far (may be empty
+    /// early in the stream); `arguments` is this event's fragment only, empty on
+    /// the announcement that opens a call.
+    ToolCallDelta {
+        index: usize,
+        name: &'a str,
+        arguments: &'a str,
+    },
+    /// An incremental piece of the model's reasoning/thinking channel, where the
+    /// provider exposes one (AIC-202). Display-only — never part of the answer.
+    ReasoningDelta { text: &'a str },
     /// The model requested a tool call.
     ToolCall { name: &'a str, arguments: &'a str },
     /// A tool finished.

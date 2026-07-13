@@ -230,6 +230,15 @@ export class AgentService {
           return { kind: 'memory', source: p.source, score: p.score };
         case 'delta':
           return { kind: 'delta', text: p.text ?? '' };
+        case 'reasoning':
+          return { kind: 'reasoning', text: p.text ?? '' };
+        case 'tool_call_delta':
+          return {
+            kind: 'tool_call_delta',
+            index: p.index ?? 0,
+            name: p.name ?? '',
+            arguments: p.arguments ?? '',
+          };
         case 'tool_call':
           return { kind: 'tool_call', name: p.name, arguments: p.arguments };
         case 'tool_result':

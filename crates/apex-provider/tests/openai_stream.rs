@@ -10,6 +10,16 @@ use futures::StreamExt;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
+/// A short label for an unexpected stream event (test diagnostics).
+fn kind_of(event: &ChatStreamEvent) -> &'static str {
+    match event {
+        ChatStreamEvent::Delta(_) => "Delta",
+        ChatStreamEvent::ToolCallDelta { .. } => "ToolCallDelta",
+        ChatStreamEvent::ReasoningDelta(_) => "ReasoningDelta",
+        ChatStreamEvent::Done(_) => "Done",
+    }
+}
+
 /// Spawn a one-shot HTTP/1.1 server that replies to the first connection with
 /// `body` (served as `text/event-stream`), and return its base URL.
 fn serve_sse(body: &'static str) -> String {
@@ -52,6 +62,7 @@ data: [DONE]\n\n";
         match ev.unwrap() {
             ChatStreamEvent::Delta(d) => deltas.push(d),
             ChatStreamEvent::Done(r) => done = Some(r),
+            other => panic!("unexpected event kind: {}", kind_of(&other)),
         }
     }
 
@@ -66,7 +77,8 @@ data: [DONE]\n\n";
 
 #[tokio::test]
 async fn streams_tool_call_in_final_done() {
-    // Tool call assembled across chunks; no text content surfaces as a delta.
+    // Tool call assembled across chunks; no text content surfaces as a delta, but
+    // each chunk surfaces a ToolCallDelta argument fragment (AIC-202).
     let body = "\
 data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"echo\",\"arguments\":\"{\\\"x\\\"\"}}]}}]}\n\n\
 data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n\
@@ -77,17 +89,33 @@ data: [DONE]\n\n";
     let mut stream = provider.chat_stream(req).await.unwrap();
 
     let mut deltas = Vec::new();
+    let mut tool_fragments = Vec::new();
     let mut done = None;
     while let Some(ev) = stream.next().await {
         match ev.unwrap() {
             ChatStreamEvent::Delta(d) => deltas.push(d),
+            ChatStreamEvent::ToolCallDelta {
+                index,
+                name,
+                arguments,
+                ..
+            } => tool_fragments.push((index, name, arguments)),
             ChatStreamEvent::Done(r) => done = Some(r),
+            other => panic!("unexpected event kind: {}", kind_of(&other)),
         }
     }
 
     assert!(
         deltas.is_empty(),
         "tool-call-only stream yields no text deltas"
+    );
+    // The argument fragments streamed live, in wire order, each with the name.
+    assert_eq!(
+        tool_fragments,
+        vec![
+            (0, "echo".to_string(), "{\"x\"".to_string()),
+            (0, "echo".to_string(), ":1}".to_string()),
+        ]
     );
     let done = done.expect("stream must end with Done");
     assert_eq!(done.finish_reason, "tool_calls");

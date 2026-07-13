@@ -11,6 +11,29 @@ use futures::stream::BoxStream;
 pub enum ChatStreamEvent {
     /// An incremental piece of the assistant's text content.
     Delta(String),
+    /// An incremental fragment of a requested tool call's JSON arguments as the
+    /// model composes it (AIC-202). `id`/`name` carry the accumulated values known
+    /// so far (both protocols send them at the call's start), so consumers never
+    /// need to join fragments across events; `arguments` is this event's fragment
+    /// only — empty on the announcement event that opens a call. The complete,
+    /// assembled call still arrives in the terminal [`Done`](Self::Done) response,
+    /// which remains the source of truth the agent loop executes from.
+    ToolCallDelta {
+        /// Position of the call within the assistant turn (OpenAI `index` /
+        /// Anthropic content-block order).
+        index: usize,
+        /// The call id accumulated so far (may be empty early in the stream).
+        id: String,
+        /// The tool name accumulated so far (may be empty early in the stream).
+        name: String,
+        /// This event's incremental piece of the JSON arguments.
+        arguments: String,
+    },
+    /// An incremental piece of the model's reasoning/thinking channel, where the
+    /// provider exposes one (AIC-202) — Anthropic `thinking_delta`s, or an
+    /// OpenAI-compatible server's `delta.reasoning_content`. Display-only: the
+    /// terminal [`Done`](Self::Done) message never includes it.
+    ReasoningDelta(String),
     /// The completed response — full message (incl. any tool calls), usage, and
     /// finish reason. Always the final event of a successful stream.
     Done(ChatResponse),

@@ -458,6 +458,26 @@ async fn stream_chat(
                     sink.emit(RunEvent::Delta { text: &text });
                 }
             }
+            // Incremental tool-call/reasoning channels (AIC-202) are surfaced for
+            // display as they arrive; the loop still acts only on the complete
+            // calls in the terminal `Done` response.
+            ChatStreamEvent::ToolCallDelta {
+                index,
+                name,
+                arguments,
+                ..
+            } => {
+                sink.emit(RunEvent::ToolCallDelta {
+                    index,
+                    name: &name,
+                    arguments: &arguments,
+                });
+            }
+            ChatStreamEvent::ReasoningDelta(text) => {
+                if !text.is_empty() {
+                    sink.emit(RunEvent::ReasoningDelta { text: &text });
+                }
+            }
             ChatStreamEvent::Done(response) => completed = Some(response),
         }
     }
@@ -1070,6 +1090,144 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "permanent errors never retry"
+        );
+    }
+
+    // ---- richer streaming events (AIC-202) -------------------------------------
+
+    /// A provider that streams a tool turn the way a real adapter does: reasoning
+    /// deltas, then tool-call-argument fragments, then a `Done` carrying the
+    /// assembled call. The second call streams a plain text answer.
+    struct StreamsToolTurn {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl apex_provider::AIProvider for StreamsToolTurn {
+        fn name(&self) -> &str {
+            "streams-tool-turn"
+        }
+
+        async fn chat(
+            &self,
+            _request: apex_provider::ChatRequest,
+        ) -> Result<apex_provider::ChatResponse> {
+            unreachable!("the agent loop streams; chat is never called")
+        }
+
+        async fn chat_stream(
+            &self,
+            request: apex_provider::ChatRequest,
+        ) -> Result<apex_provider::ChatStream> {
+            use apex_provider::ChatStreamEvent;
+            use std::sync::atomic::Ordering;
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events: Vec<Result<ChatStreamEvent>> = if n == 0 {
+                vec![
+                    Ok(ChatStreamEvent::ReasoningDelta("I should echo".into())),
+                    Ok(ChatStreamEvent::ToolCallDelta {
+                        index: 0,
+                        id: "c1".into(),
+                        name: "echo".into(),
+                        arguments: String::new(),
+                    }),
+                    Ok(ChatStreamEvent::ToolCallDelta {
+                        index: 0,
+                        id: "c1".into(),
+                        name: "echo".into(),
+                        arguments: "{\"payload\"".into(),
+                    }),
+                    Ok(ChatStreamEvent::ToolCallDelta {
+                        index: 0,
+                        id: "c1".into(),
+                        name: "echo".into(),
+                        arguments: ":\"hi\"}".into(),
+                    }),
+                    Ok(ChatStreamEvent::Done(apex_provider::ChatResponse {
+                        message: apex_provider::Message {
+                            role: apex_provider::Role::Assistant,
+                            content: None,
+                            parts: Vec::new(),
+                            tool_calls: vec![apex_provider::ToolCall {
+                                id: "c1".into(),
+                                name: "echo".into(),
+                                arguments: "{\"payload\":\"hi\"}".into(),
+                            }],
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        model: request.model,
+                        usage: Usage::new(1, 1, 0.0),
+                        finish_reason: "tool_calls".into(),
+                    })),
+                ]
+            } else {
+                vec![Ok(ChatStreamEvent::Done(apex_provider::ChatResponse {
+                    message: apex_provider::Message::assistant("echoed"),
+                    model: request.model,
+                    usage: Usage::new(1, 1, 0.0),
+                    finish_reason: "stop".into(),
+                }))]
+            };
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    /// Records the AIC-202 event stream as strings.
+    #[derive(Default)]
+    struct StreamCapture {
+        lines: Vec<String>,
+    }
+
+    impl RunEventSink for StreamCapture {
+        fn emit(&mut self, event: RunEvent<'_>) {
+            match event {
+                RunEvent::ToolCallDelta {
+                    index,
+                    name,
+                    arguments,
+                } => self.lines.push(format!("targs:{index}:{name}:{arguments}")),
+                RunEvent::ReasoningDelta { text } => self.lines.push(format!("think:{text}")),
+                RunEvent::ToolCall { name, .. } => self.lines.push(format!("call:{name}")),
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_argument_deltas_stream_through_the_sink() {
+        let def = AgentDefinition::from_yaml(
+            "metadata:\n  name: streamy\nspec:\n  instructions: Use tools.\n  tools: [echo]\n",
+        )
+        .unwrap();
+        let gw = Gateway::new(Box::new(StreamsToolTurn {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let reg = ToolRegistry::with_builtins();
+        let mut sink = StreamCapture::default();
+
+        let out = run_agent(
+            &def,
+            &gw,
+            &reg,
+            RunOptions::new(json!({"message": "echo hi"})),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.text, "echoed");
+        // Reasoning and argument fragments streamed in wire order, before the
+        // complete ToolCall announcement that precedes execution.
+        assert_eq!(
+            sink.lines,
+            vec![
+                "think:I should echo".to_string(),
+                "targs:0:echo:".to_string(),
+                "targs:0:echo:{\"payload\"".to_string(),
+                "targs:0:echo::\"hi\"}".to_string(),
+                "call:echo".to_string(),
+            ]
         );
     }
 

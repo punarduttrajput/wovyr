@@ -127,6 +127,8 @@ describe('AgentService', () => {
           'data: {"type":"start","model":"mock-model","provider":"mock"}\n\n',
           'data: {"type":"delta","text":"Hel"}\n\n',
           'data: {"type":"delta","text":"lo"}\n\n',
+          'data: {"type":"reasoning","text":"let me echo"}\n\n',
+          'data: {"type":"tool_call_delta","index":0,"name":"echo","arguments":"{\\"x\\""}\n\n',
           'data: {"type":"tool_call","name":"echo","arguments":"{}"}\n\n',
           'data: {"type":"tool_result","name":"echo","ok":true}\n\n',
           'data: {"type":"done","usage":{"total_tokens":7}}\n\n',
@@ -139,14 +141,27 @@ describe('AgentService', () => {
         'start',
         'delta',
         'delta',
+        'reasoning',
+        'tool_call_delta',
         'tool_call',
         'tool_result',
         'done',
         'result',
       ]);
       expect(events[1]).toEqual(jasmine.objectContaining({ kind: 'delta', text: 'Hel' }));
-      expect(events[3]).toEqual(jasmine.objectContaining({ kind: 'tool_call', name: 'echo' }));
-      expect(events[6]).toEqual(
+      expect(events[3]).toEqual(
+        jasmine.objectContaining({ kind: 'reasoning', text: 'let me echo' }),
+      );
+      expect(events[4]).toEqual(
+        jasmine.objectContaining({
+          kind: 'tool_call_delta',
+          index: 0,
+          name: 'echo',
+          arguments: '{"x"',
+        }),
+      );
+      expect(events[5]).toEqual(jasmine.objectContaining({ kind: 'tool_call', name: 'echo' }));
+      expect(events[8]).toEqual(
         jasmine.objectContaining({ kind: 'result', status: 'succeeded', steps: 1 }),
       );
     });

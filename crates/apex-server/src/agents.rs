@@ -237,6 +237,14 @@ impl RunEventSink for ChannelSink {
                 json!({ "type": "memory", "source": source, "score": score })
             }
             RunEvent::Delta { text } => json!({ "type": "delta", "text": text }),
+            RunEvent::ToolCallDelta {
+                index,
+                name,
+                arguments,
+            } => {
+                json!({ "type": "tool_call_delta", "index": index, "name": name, "arguments": arguments })
+            }
+            RunEvent::ReasoningDelta { text } => json!({ "type": "reasoning", "text": text }),
             RunEvent::ToolCall { name, arguments } => {
                 json!({ "type": "tool_call", "name": name, "arguments": arguments })
             }
@@ -255,7 +263,8 @@ impl RunEventSink for ChannelSink {
 }
 
 /// `POST /api/v1/agents:stream` — run an inline-manifest agent, streaming its events
-/// (start / delta / tool_call / tool_result / done, then a final `result`) as SSE.
+/// (start / delta / tool_call_delta / reasoning / tool_call / tool_result / done,
+/// then a final `result`) as SSE.
 pub(crate) async fn run_stream_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
