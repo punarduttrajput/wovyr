@@ -16,6 +16,7 @@
 //! against its successors), and emits [`CostEvent`]s. A single-provider gateway
 //! (`new`/`from_env`) is just a candidate list of length one.
 
+use crate::anthropic::AnthropicProvider;
 use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
 use crate::image::{ImageGenRequest, ImageGenResponse};
 use crate::mock::MockProvider;
@@ -106,19 +107,22 @@ impl Gateway {
 
     /// Build a gateway from the environment.
     ///
-    /// Uses the OpenAI-compatible provider when `OPENAI_API_KEY` is set; otherwise
-    /// falls back to the offline [`MockProvider`] so local runs work with no setup.
+    /// Uses the OpenAI-compatible provider when `OPENAI_API_KEY` is set (the
+    /// original behavior, kept first for back-compat), then the native
+    /// [`AnthropicProvider`] when `ANTHROPIC_API_KEY` is set (RM-AIM-P2
+    /// PRV-201); otherwise falls back to the offline [`MockProvider`] so local
+    /// runs work with no setup.
     pub fn from_env() -> Self {
-        match OpenAiProvider::from_env() {
-            Ok(p) => {
-                tracing::info!("llm gateway: using openai-compatible provider");
-                Self::new(Box::new(p))
-            }
-            Err(_) => {
-                tracing::info!("llm gateway: OPENAI_API_KEY not set, using mock provider");
-                Self::new(Box::new(MockProvider::new()))
-            }
+        if let Ok(p) = OpenAiProvider::from_env() {
+            tracing::info!("llm gateway: using openai-compatible provider");
+            return Self::new(Box::new(p));
         }
+        if let Ok(p) = AnthropicProvider::from_env() {
+            tracing::info!("llm gateway: using anthropic provider");
+            return Self::new(Box::new(p));
+        }
+        tracing::info!("llm gateway: no API key set, using mock provider");
+        Self::new(Box::new(MockProvider::new()))
     }
 
     /// Override the retry policy.
@@ -219,6 +223,12 @@ impl Gateway {
             "openai" => match selector.class.as_str() {
                 "balanced" | "frontier" => "gpt-4o",
                 _ => "gpt-4o-mini",
+            }
+            .to_string(),
+            "anthropic" => match selector.class.as_str() {
+                "frontier" => "claude-opus-4-8",
+                "balanced" => "claude-sonnet-5",
+                _ => "claude-haiku-4-5",
             }
             .to_string(),
             // Mock and unknown providers echo a descriptive synthetic id.
@@ -650,6 +660,19 @@ mod tests {
             gw.resolve_model(None, &ModelSelector::default()),
             "mock-chat-fast"
         );
+    }
+
+    #[test]
+    fn anthropic_selector_resolves_by_class() {
+        let gw = Gateway::new(Box::new(AnthropicProvider::new("http://localhost", "k")));
+        let sel = |class: &str| ModelSelector {
+            capability: "chat".to_string(),
+            class: class.to_string(),
+        };
+        assert_eq!(gw.resolve_model(None, &sel("fast")), "claude-haiku-4-5");
+        assert_eq!(gw.resolve_model(None, &sel("balanced")), "claude-sonnet-5");
+        assert_eq!(gw.resolve_model(None, &sel("frontier")), "claude-opus-4-8");
+        assert_eq!(gw.resolve_model(Some("pinned"), &sel("fast")), "pinned");
     }
 
     #[test]

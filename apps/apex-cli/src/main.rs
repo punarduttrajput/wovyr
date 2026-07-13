@@ -471,8 +471,10 @@ enum AgentsCommand {
         max_steps: Option<usize>,
 
         /// Provider backend for a local run (local mode only). `auto` (default)
-        /// mirrors `Gateway::from_env()` — OpenAI if `OPENAI_API_KEY` is set, else the
-        /// deterministic mock. `mistralrs` runs a real local model in-process via
+        /// mirrors `Gateway::from_env()` — OpenAI if `OPENAI_API_KEY` is set, then
+        /// Anthropic if `ANTHROPIC_API_KEY` is set, else the deterministic mock.
+        /// `anthropic` selects the native Messages-API provider explicitly (needs
+        /// `ANTHROPIC_API_KEY`). `mistralrs` runs a real local model in-process via
         /// mistral.rs (needs a `--features mistralrs` build; first use downloads GGUF
         /// weights — see APEX_MISTRALRS_GGUF_REPO/_GGUF_FILE/_TOK_MODEL_ID).
         #[arg(long, default_value = "auto")]
@@ -969,11 +971,16 @@ async fn run_agent_cmd(
 }
 
 /// Build the gateway a local run uses. `auto` mirrors `Gateway::from_env()`; other
-/// names select an explicit backend (currently only `mistralrs`, gated behind the
-/// `mistralrs` cargo feature since it pulls a heavy inference engine).
+/// names select an explicit backend: `anthropic` (native Messages API, needs
+/// `ANTHROPIC_API_KEY`) or `mistralrs` (gated behind the `mistralrs` cargo feature
+/// since it pulls a heavy inference engine).
 async fn build_local_gateway(provider: &str) -> apex_common::Result<Gateway> {
     match provider {
         "auto" => Ok(Gateway::from_env()),
+        "anthropic" => {
+            let backend = apex_provider::AnthropicProvider::from_env()?;
+            Ok(Gateway::new(Box::new(backend)))
+        }
         "mistralrs" => {
             #[cfg(feature = "mistralrs")]
             {
@@ -989,7 +996,7 @@ async fn build_local_gateway(provider: &str) -> apex_common::Result<Gateway> {
             }
         }
         other => Err(apex_common::Error::config(format!(
-            "unknown provider \"{other}\" (expected \"auto\" or \"mistralrs\")"
+            "unknown provider \"{other}\" (expected \"auto\", \"anthropic\", or \"mistralrs\")"
         ))),
     }
 }

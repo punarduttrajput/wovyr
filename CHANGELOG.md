@@ -49,6 +49,12 @@ v1.0 "GA hardening" (PRD-003, complete) and v1.1 "AI Platform Maturity" Phase 1
   live-validated (WFL-103); race-free event sequencing (WFL-104, fencing pending);
   secrets encrypted-at-rest by default with automatic plaintext migration (SEC-101);
   version/CHANGELOG reconciliation (DX-101).
+- **v1.1 Phase 2 (RM-AIM-P2, in progress):** first-class `AnthropicProvider` against
+  the native Messages API (PRV-201) — tool use via `tool_use`/`tool_result` blocks,
+  system-prompt hoisting, prompt caching with cache-rate-aware `cost_usd`, real SSE
+  streaming; wired into `Gateway::from_env()` (`ANTHROPIC_API_KEY`), class-based model
+  resolution (haiku/sonnet/opus), current Claude prices in the `PriceBook`, and
+  `apex agents run --local --provider anthropic`.
 
 ## [0.3.0] — 2026-07-03
 

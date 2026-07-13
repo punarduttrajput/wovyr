@@ -9,6 +9,7 @@
 //! and an OpenAI-compatible [`OpenAiProvider`]. Routing is handled by the
 //! [`Gateway`], which resolves a [`ModelSelector`] to a concrete model.
 
+mod anthropic;
 mod embeddings;
 mod gateway;
 mod image;
@@ -26,6 +27,7 @@ mod semantic_qdrant;
 mod tokenizer;
 mod types;
 
+pub use anthropic::AnthropicProvider;
 pub use embeddings::{EmbeddingRequest, EmbeddingResponse, cosine_similarity};
 pub use gateway::{Gateway, ModelSelector};
 pub use image::{ImageGenRequest, ImageGenResponse};

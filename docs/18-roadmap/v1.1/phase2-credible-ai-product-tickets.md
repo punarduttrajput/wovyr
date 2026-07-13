@@ -7,10 +7,10 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.0.0
-**Status:** Planned — not started
+**Version:** 1.1.0
+**Status:** In progress — PRV-201 done
 **Owner:** Engineering (AI / Platform)
-**Last Updated:** 2026-07-09
+**Last Updated:** 2026-07-13
 
 ---
 
@@ -53,7 +53,7 @@ OBS-201 (per-tenant metrics)
 
 # WS-B — Providers
 
-## PRV-201 `[P1]` — First-class `AnthropicProvider`
+## PRV-201 `[P1]` — First-class `AnthropicProvider` — **DONE (2026-07-13)**
 
 **Problem.** Only mock, OpenAI-compatible, and local mistralrs providers exist
 (`crates/apex-provider/src/lib.rs:12-33`); Claude is reachable only via an
@@ -71,6 +71,45 @@ table for Claude models.
 
 **Files.** `crates/apex-provider/src/` (new `anthropic.rs`), `gateway.rs` resolution.
 **Size.** L. **Depends on:** PRV-101.
+
+**Implementation notes (2026-07-13).** New `apex-provider::anthropic` module: an
+`AnthropicProvider` implementing `AIProvider` against the native Messages API
+(`POST /v1/messages`, `x-api-key` + `anthropic-version` headers), constructed from
+`ANTHROPIC_API_KEY`/`APEX_ANTHROPIC_BASE_URL`. Translation: `Role::System` messages
+hoist to the top-level `system` block list; assistant `tool_calls` become
+`tool_use` blocks (JSON-string `arguments` ↔ JSON-object `input`); `Role::Tool`
+results become `tool_result` blocks in a `user` turn, with consecutive results
+merged into one turn (Anthropic requires all parallel-call results in a single
+user message); `max_tokens` (required by the API) defaults to 4096 when the
+normalized request leaves it unset; `stop_reason` normalizes `end_turn`→`stop`,
+`tool_use`→`tool_calls`, everything else passes through. **Prompt caching** is on
+by default (`with_prompt_caching(false)` to disable): `cache_control: {type:
+"ephemeral"}` breakpoints on the last tool + last system block — the stable prefix
+of an agent loop — and `cost_usd` weights cache writes/reads at their real
+1.25×/0.1× input rates while `prompt_tokens` reports the true three-category sum.
+`chat_stream` parses the real SSE event stream (`message_start` /
+`content_block_start` / `text_delta` / `input_json_delta` / `message_delta` /
+`message_stop`, `error` events surfaced as stream errors). 429/5xx (incl. 529
+`overloaded_error`) classify transient, other 4xx permanent — same resilience
+contract as `OpenAiProvider`. Wiring: `Gateway::from_env()` tries OpenAI (existing
+precedence, unchanged), then Anthropic, then mock; `resolve_model` maps
+fast/balanced/frontier → `claude-haiku-4-5`/`claude-sonnet-5`/`claude-opus-4-8`;
+`PriceBook::with_defaults()` gained current Claude prices (`claude-fable-5`,
+`claude-opus-4` prefix, `claude-sonnet-5`/`-4` prefix, `claude-haiku-4-5`); the CLI
+gained an explicit `agents run --local --provider anthropic`. Anthropic has no
+embeddings/images API, so those trait defaults ("unsupported") stand — semantic
+caching degrades to a live call by design. **Acceptance:**
+`tests/anthropic_messages.rs::tool_round_trip_via_recorded_fixtures` drives a full
+model → tool → model round-trip through the provider against recorded fixtures,
+asserting both the parsed tool call and the wire bodies it sends back
+(`tool_use_id` correlation, system hoisting, cache breakpoints), with `cost_usd`
+computed from PRV-101's table for `claude-opus-4-8` including the 0.1× cache-read
+rate; `streams_text_deltas_then_done`/`streams_tool_use_assembled_from_partial_json`
+cover the SSE path; 15 unit tests cover the translation edge cases. Verified live
+end to end: `apex agents run --local --provider anthropic` against a canned local
+Messages-API server streamed real deltas and reported the exact table-computed
+cost. Deferred to their own tickets: `tool_choice`/structured output (PRV-202) and
+extended thinking / multimodal content parts (PRV-204).
 
 ## PRV-202 `[P1]` — Structured output / forced tool
 
@@ -460,3 +499,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-07-09 | Initial Phase-2 tickets from PRD-004 / the 2026-07-09 engineering audit (credible-AI-product P1/P2 work) |
+| 1.1.0 | 2026-07-13 | PRV-201 (first-class `AnthropicProvider`) implemented and marked DONE with implementation notes |

@@ -91,7 +91,26 @@ impl PriceBook {
         prices.insert("o1".to_string(), ModelPrice::per_1m(15.00, 60.00));
         prices.insert("o1-mini".to_string(), ModelPrice::per_1m(1.10, 4.40));
         prices.insert("o3-mini".to_string(), ModelPrice::per_1m(1.10, 4.40));
-        // Anthropic (public list prices).
+        // Anthropic (public list prices). Current generation first — the
+        // "claude-opus-4"/"claude-sonnet-4" keys price every dotted variant
+        // (4-6/4-7/4-8, 4-5/4-6) via the longest-prefix match.
+        prices.insert(
+            "claude-fable-5".to_string(),
+            ModelPrice::per_1m(10.00, 50.00),
+        );
+        prices.insert("claude-opus-4".to_string(), ModelPrice::per_1m(5.00, 25.00));
+        prices.insert(
+            "claude-sonnet-5".to_string(),
+            ModelPrice::per_1m(3.00, 15.00),
+        );
+        prices.insert(
+            "claude-sonnet-4".to_string(),
+            ModelPrice::per_1m(3.00, 15.00),
+        );
+        prices.insert(
+            "claude-haiku-4-5".to_string(),
+            ModelPrice::per_1m(1.00, 5.00),
+        );
         prices.insert(
             "claude-3-5-sonnet".to_string(),
             ModelPrice::per_1m(3.00, 15.00),
@@ -238,6 +257,26 @@ mod tests {
         assert_eq!(
             book.price("gpt-4o-mini-2024-07-18").unwrap(),
             ModelPrice::per_1m(0.15, 0.60)
+        );
+    }
+
+    #[test]
+    fn claude_4_family_variants_resolve_by_prefix() {
+        let book = PriceBook::with_defaults();
+        // Every dotted Opus 4.x variant resolves to the "claude-opus-4" entry.
+        assert_eq!(
+            book.price("claude-opus-4-8").unwrap(),
+            ModelPrice::per_1m(5.00, 25.00)
+        );
+        // A date-suffixed Haiku snapshot resolves to its exact-family entry,
+        // not a shorter prefix.
+        assert_eq!(
+            book.price("claude-haiku-4-5-20251001").unwrap(),
+            ModelPrice::per_1m(1.00, 5.00)
+        );
+        assert_eq!(
+            book.price("claude-sonnet-5").unwrap(),
+            ModelPrice::per_1m(3.00, 15.00)
         );
     }
 

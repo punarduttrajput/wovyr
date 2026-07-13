@@ -104,6 +104,18 @@ Initial provider implementations include:
 | Mistral | Planned |
 | Cohere | Planned |
 
+**Implementation status (2026-07-13).** Two adapters exist in code:
+`OpenAiProvider` speaks the OpenAI-compatible `/chat/completions` shape, which is
+what makes the Azure OpenAI / Ollama / llama.cpp / HuggingFace (TGI) / OpenRouter /
+Gemini-compat rows above work — one adapter, many endpoints, selected via
+`APEX_OPENAI_BASE_URL`. `AnthropicProvider` (RM-AIM-P2 PRV-201) speaks Anthropic's
+**native Messages API** — first-class `tool_use`/`tool_result` translation,
+top-level `system` blocks, prompt caching (`cache_control`, on by default), and
+real SSE streaming — selected via `ANTHROPIC_API_KEY` (`Gateway::from_env()` tries
+OpenAI first when both keys are set) or the CLI's `--provider anthropic`. A local
+in-process model is additionally available via the feature-gated
+`MistralRsProvider`. Bedrock/Vertex-style prefixed-model routing remains planned.
+
 ---
 
 # 6. Provider Abstraction
