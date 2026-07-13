@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.3.0
-**Status:** In progress — PRV-201, PRV-202, PRV-203 done
+**Version:** 1.4.0
+**Status:** In progress — PRV-201, PRV-202, PRV-203, PRV-204 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -222,7 +222,7 @@ run path yet — `resolve_tools` advertises registry tools non-strict;
 per-tool/manifest opt-in can ride a later slice once a consumer wants
 guaranteed argument shapes.
 
-## PRV-204 `[P2]` — Multimodal content parts
+## PRV-204 `[P2]` — Multimodal content parts — **DONE (2026-07-13)**
 
 **Problem.** `Message.content` is `Option<String>` (`types.rs:31`); no image/audio
 parts. (PRD-004 R-B.5; audit Med.)
@@ -235,6 +235,43 @@ multimodal-capable provider path.
 
 **Files.** `crates/apex-provider/src/types.rs` + provider translators. **Size.** M.
 **Depends on:** none.
+
+**Implementation notes (2026-07-13).** `Message` gained a `parts: Vec<ContentPart>`
+field (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so a text-only
+`Message` keeps its old wire shape and old callers are untouched) alongside the
+existing `content: Option<String>`, plus a `with_part` builder. `ContentPart` is an
+internally-tagged enum (`Text`/`ImageUrl`/`Image { media_type, data }`/
+`Audio { media_type, data }`) with `text()`/`image_url()`/`image_base64()`/
+`audio_base64()` constructors. Only `Role::User` turns may carry parts — every
+provider rejects parts on any other role fail-closed (`Error::Invalid`, permanent,
+same contract as PRV-202's constraints) rather than silently dropping them.
+Per-provider translation, rendered as `content` text (if any) first, then each part
+in order: **Anthropic** — `image_url`/`image_base64` become `image` blocks
+(`source: {type: "url"|"base64", ...}`); `Audio` has no Messages-API equivalent and
+fails closed. **OpenAI** — `image_url` passes through; `image_base64` rides as a
+`data:` URI inside `image_url` (OpenAI has no separate inline-image block); `Audio`
+becomes `input_audio` with the bare format name (`audio/wav` → `wav`, since OpenAI
+wants a format string, not a MIME type). **mistral.rs** — this backend loads a
+text-only GGUF pipeline (no `VisionModelBuilder` wiring yet), so any message with
+parts fails closed rather than silently ignoring the image/audio; a real
+vision-capable local model is a later slice. **Acceptance:**
+`tests/anthropic_messages.rs::image_content_part_round_trips_through_the_messages_api`
+drives a real image through `AnthropicProvider::chat` against a recorded fixture,
+asserting the wire carries the base64 image block after the text block and the
+model's answer parses back through the normal response path with real cost;
+`anthropic::tests::multimodal_user_message_encodes_as_image_blocks`/
+`audio_parts_fail_closed_as_invalid`/`parts_on_a_non_user_turn_fail_closed` and the
+equivalent `openai::tests::multimodal_user_message_encodes_as_content_blocks`/
+`parts_on_a_non_user_turn_fail_closed` cover the translation + fail-closed edge
+cases; `types::tests::message_with_parts_round_trips`/
+`message_without_parts_keeps_its_old_wire_shape_and_deserializes_back`/
+`content_parts_serialize_internally_tagged` cover the wire-shape/back-compat
+contract. `ChatRequest`/message-construction call sites across `apex-agent`
+(`context.rs`, `runtime.rs`, `tool_loop.rs` tests, `tokenizer.rs` tests) updated for
+the new field; full workspace build + `apex-provider`/`apex-agent` suites (108
+tests) pass. Not yet surfaced in the agent manifest YAML DSL or the CLI — callers
+attach parts programmatically; manifest wiring (e.g. `--image <path>`) can ride a
+later slice once a consumer needs it.
 
 ## PRV-205 `[P3]` — Retry jitter + `Retry-After`
 
@@ -578,3 +615,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.1.0 | 2026-07-13 | PRV-201 (first-class `AnthropicProvider`) implemented and marked DONE with implementation notes |
 | 1.2.0 | 2026-07-13 | PRV-202 (structured output / forced tool) implemented and marked DONE with implementation notes |
 | 1.3.0 | 2026-07-13 | PRV-203 (tool-schema normalization + surfaced arg-parse errors) implemented and marked DONE with implementation notes |
+| 1.4.0 | 2026-07-13 | PRV-204 (multimodal content parts) implemented and marked DONE with implementation notes |

@@ -391,7 +391,10 @@ async fn image_content_part_round_trips_through_the_messages_api() {
     assert_eq!(blocks[1]["source"]["data"], png);
 
     // Inbound: the answer parsed back through the normal response path.
-    assert_eq!(resp.message.content.as_deref(), Some("A one-pixel red square."));
+    assert_eq!(
+        resp.message.content.as_deref(),
+        Some("A one-pixel red square.")
+    );
     assert_eq!(resp.finish_reason, "stop");
     assert!(resp.usage.cost_usd > 0.0);
 }

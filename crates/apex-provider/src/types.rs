@@ -345,8 +345,8 @@ mod tests {
 
     #[test]
     fn message_with_parts_round_trips() {
-        let msg = Message::user("look at this")
-            .with_part(ContentPart::image_base64("image/png", "AAAA"));
+        let msg =
+            Message::user("look at this").with_part(ContentPart::image_base64("image/png", "AAAA"));
         let wire = serde_json::to_value(&msg).unwrap();
         assert_eq!(wire["parts"][0]["type"], "image");
         let back: Message = serde_json::from_value(wire).unwrap();
