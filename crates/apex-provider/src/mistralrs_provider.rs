@@ -31,12 +31,14 @@
 //! platform, not two competing ones.
 
 use crate::provider::AIProvider;
-use crate::types::{ChatRequest, ChatResponse, Message, Role, ToolCall, ToolSpec};
+use crate::types::{
+    ChatRequest, ChatResponse, Message, ResponseFormat, Role, ToolCall, ToolChoice, ToolSpec,
+};
 use apex_common::{Error, Result, Usage};
 use async_trait::async_trait;
 use mistralrs::{
-    CalledFunction, Function, GgufModelBuilder, Model, RequestBuilder, TextMessageRole, Tool,
-    ToolCallResponse, ToolCallType, ToolChoice, ToolType,
+    CalledFunction, Constraint, Function, GgufModelBuilder, Model, RequestBuilder, TextMessageRole,
+    Tool, ToolCallResponse, ToolCallType, ToolChoice as MrsToolChoice, ToolType,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -163,7 +165,42 @@ impl AIProvider for MistralRsProvider {
 
         if !request.tools.is_empty() {
             let tools: Vec<Tool> = request.tools.iter().map(to_mistralrs_tool).collect();
-            builder = builder.set_tools(tools).set_tool_choice(ToolChoice::Auto);
+            // Translate the normalized tool-choice constraint (RM-AIM-P2
+            // PRV-202). mistral.rs has no "must call *some* tool" variant, so
+            // `Required` fails closed rather than silently degrading to Auto.
+            let choice = match &request.tool_choice {
+                None | Some(ToolChoice::Auto) => MrsToolChoice::Auto,
+                Some(ToolChoice::None) => MrsToolChoice::None,
+                Some(ToolChoice::Tool(name)) => {
+                    let spec =
+                        request.tools.iter().find(|t| &t.name == name).ok_or_else(|| {
+                            Error::invalid(format!(
+                                "tool_choice names `{name}`, which is not among the advertised tools"
+                            ))
+                        })?;
+                    MrsToolChoice::Tool(to_mistralrs_tool(spec))
+                }
+                Some(ToolChoice::Required) => {
+                    return Err(Error::invalid(
+                        "mistralrs does not support tool_choice `required`; pin a specific tool",
+                    ));
+                }
+            };
+            builder = builder.set_tools(tools).set_tool_choice(choice);
+        }
+        // Structured output via mistral.rs's grammar constraint (PRV-202) —
+        // real constrained decoding, so the schema is enforced at generation.
+        if let Some(rf) = &request.response_format {
+            match rf {
+                ResponseFormat::JsonSchema { schema, .. } => {
+                    builder = builder.set_constraint(Constraint::JsonSchema(schema.clone()));
+                }
+                ResponseFormat::JsonObject => {
+                    return Err(Error::invalid(
+                        "mistralrs has no schema-less JSON mode; use ResponseFormat::JsonSchema",
+                    ));
+                }
+            }
         }
 
         let response = self

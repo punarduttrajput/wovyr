@@ -607,9 +607,15 @@ fn canonical_request(request: &ChatRequest) -> String {
 }
 
 /// Parameter-compatibility key: a semantic entry may only be served for a request
-/// with the same model and temperature ([caching §4](../../docs/05-llm-gateway/caching.md)).
+/// with the same model, temperature, and output-shaping constraints
+/// ([caching §4](../../docs/05-llm-gateway/caching.md)) — a response produced
+/// under a different `tool_choice`/`response_format` (PRV-202) has a different
+/// shape and must never be served for this request.
 fn param_key(request: &ChatRequest) -> String {
-    format!("{}|{:?}", request.model, request.temperature)
+    format!(
+        "{}|{:?}|{:?}|{:?}",
+        request.model, request.temperature, request.tool_choice, request.response_format
+    )
 }
 
 /// Whether an error is a transient provider failure (retry + failover) versus a
@@ -630,8 +636,12 @@ fn cache_key(request: &ChatRequest) -> String {
     let messages = serde_json::to_string(&request.messages).unwrap_or_default();
     let tools = serde_json::to_string(&request.tools).unwrap_or_default();
     format!(
-        "{}|{:?}|{:?}|{messages}|{tools}",
-        request.model, request.temperature, request.max_tokens
+        "{}|{:?}|{:?}|{:?}|{:?}|{messages}|{tools}",
+        request.model,
+        request.temperature,
+        request.max_tokens,
+        request.tool_choice,
+        request.response_format
     )
 }
 
@@ -837,6 +847,40 @@ mod tests {
         assert_eq!(events[0].cache, None);
         assert_eq!(events[1].cache.as_deref(), Some("exact"));
         assert!(events[1].estimated_savings_usd > 0.0);
+    }
+
+    /// A constrained request must never be served another request's cached
+    /// response: `tool_choice`/`response_format` are part of the exact cache
+    /// key (PRV-202).
+    #[tokio::test]
+    async fn exact_cache_does_not_cross_output_constraints() {
+        let gw = Gateway::with_providers(vec![Box::new(FlakyProvider::new("p", 0, false))])
+            .with_cache(CacheConfig {
+                mode: CacheMode::Exact,
+                ttl_ms: 60_000,
+                ..CacheConfig::default()
+            });
+
+        let first = gw.chat(req()).await.unwrap();
+        assert!(first.usage.cost_usd > 0.0, "live call has cost");
+        let hit = gw.chat(req()).await.unwrap();
+        assert_eq!(hit.usage.cost_usd, 0.0, "identical request is a cache hit");
+
+        // Same messages, but a forced tool: must go live, not serve the hit.
+        let forced = req().with_tool_choice(crate::types::ToolChoice::Tool("echo".to_string()));
+        let third = gw.chat(forced).await.unwrap();
+        assert!(
+            third.usage.cost_usd > 0.0,
+            "constrained request must not reuse the cache"
+        );
+
+        // Same messages, but a schema constraint: also live.
+        let shaped = req().with_response_format(crate::types::ResponseFormat::JsonObject);
+        let fourth = gw.chat(shaped).await.unwrap();
+        assert!(
+            fourth.usage.cost_usd > 0.0,
+            "shaped request must not reuse the cache"
+        );
     }
 
     /// Collects cost events for the semantic-cache tests.

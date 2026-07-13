@@ -29,7 +29,9 @@
 
 use crate::pricing::PriceBook;
 use crate::provider::{AIProvider, ChatStream, ChatStreamEvent};
-use crate::types::{ChatRequest, ChatResponse, Message, Role, ToolCall};
+use crate::types::{
+    ChatRequest, ChatResponse, Message, ResponseFormat, Role, ToolCall, ToolChoice,
+};
 use apex_common::{Error, Result, Usage};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -96,7 +98,12 @@ impl AnthropicProvider {
     }
 
     /// Build the `/v1/messages` request body from a normalized request.
-    fn request_body(&self, request: &ChatRequest) -> Value {
+    ///
+    /// Fallible because not every normalized constraint has a Messages-API
+    /// equivalent: schema-less [`ResponseFormat::JsonObject`] fails closed
+    /// ([`Error::Invalid`] — permanent, so the gateway won't fail over to a
+    /// provider that would silently change the semantics).
+    fn request_body(&self, request: &ChatRequest) -> Result<Value> {
         let mut body = json!({
             "model": request.model,
             "max_tokens": request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
@@ -130,7 +137,31 @@ impl AnthropicProvider {
             }
             body["tools"] = Value::Array(tools);
         }
-        body
+
+        // Tool-selection / output-shape constraints (RM-AIM-P2 PRV-202).
+        if let Some(tc) = &request.tool_choice {
+            body["tool_choice"] = match tc {
+                ToolChoice::Auto => json!({ "type": "auto" }),
+                ToolChoice::None => json!({ "type": "none" }),
+                ToolChoice::Required => json!({ "type": "any" }),
+                ToolChoice::Tool(name) => json!({ "type": "tool", "name": name }),
+            };
+        }
+        if let Some(rf) = &request.response_format {
+            match rf {
+                ResponseFormat::JsonObject => {
+                    return Err(Error::invalid(
+                        "anthropic has no schema-less JSON mode; use ResponseFormat::JsonSchema",
+                    ));
+                }
+                // `name` is OpenAI-only; Anthropic's format takes the schema bare.
+                ResponseFormat::JsonSchema { schema, .. } => {
+                    body["output_config"] =
+                        json!({ "format": { "type": "json_schema", "schema": schema } });
+                }
+            }
+        }
+        Ok(body)
     }
 
     /// POST `body` to `/v1/messages`, mapping HTTP errors to the platform's
@@ -155,7 +186,7 @@ impl AIProvider for AnthropicProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
-        let body = self.request_body(&request);
+        let body = self.request_body(&request)?;
         let resp = self.post_messages(&body).await?;
 
         let status = resp.status();
@@ -176,7 +207,7 @@ impl AIProvider for AnthropicProvider {
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream> {
-        let mut body = self.request_body(&request);
+        let mut body = self.request_body(&request)?;
         body["stream"] = json!(true);
 
         let requested_model = request.model.clone();
@@ -630,7 +661,7 @@ mod tests {
 
     #[test]
     fn system_messages_hoist_to_top_level_with_cache_breakpoint() {
-        let body = provider().request_body(&request_with_tools());
+        let body = provider().request_body(&request_with_tools()).unwrap();
         assert_eq!(body["system"][0]["type"], "text");
         assert_eq!(body["system"][0]["text"], "be terse");
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
@@ -641,7 +672,7 @@ mod tests {
 
     #[test]
     fn tools_use_input_schema_and_last_gets_cache_breakpoint() {
-        let body = provider().request_body(&request_with_tools());
+        let body = provider().request_body(&request_with_tools()).unwrap();
         assert_eq!(body["tools"][0]["name"], "calc");
         assert!(body["tools"][0]["input_schema"]["properties"]["expr"].is_object());
         assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
@@ -651,7 +682,8 @@ mod tests {
     fn prompt_caching_off_omits_cache_control() {
         let body = provider()
             .with_prompt_caching(false)
-            .request_body(&request_with_tools());
+            .request_body(&request_with_tools())
+            .unwrap();
         assert!(body["system"][0].get("cache_control").is_none());
         assert!(body["tools"][0].get("cache_control").is_none());
     }
@@ -659,12 +691,69 @@ mod tests {
     #[test]
     fn max_tokens_is_always_present() {
         // Required by the Messages API — default when the request leaves it unset.
-        let body = provider().request_body(&ChatRequest::new("m", vec![Message::user("hi")]));
+        let body = provider()
+            .request_body(&ChatRequest::new("m", vec![Message::user("hi")]))
+            .unwrap();
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
 
         let mut req = ChatRequest::new("m", vec![Message::user("hi")]);
         req.max_tokens = Some(99);
-        assert_eq!(provider().request_body(&req)["max_tokens"], 99);
+        assert_eq!(provider().request_body(&req).unwrap()["max_tokens"], 99);
+    }
+
+    #[test]
+    fn encodes_tool_choice_variants() {
+        let base = || request_with_tools();
+        let body = |tc: ToolChoice| {
+            provider()
+                .request_body(&base().with_tool_choice(tc))
+                .unwrap()
+        };
+        assert_eq!(
+            body(ToolChoice::Auto)["tool_choice"],
+            json!({ "type": "auto" })
+        );
+        assert_eq!(
+            body(ToolChoice::None)["tool_choice"],
+            json!({ "type": "none" })
+        );
+        assert_eq!(
+            body(ToolChoice::Required)["tool_choice"],
+            json!({ "type": "any" })
+        );
+        assert_eq!(
+            body(ToolChoice::Tool("calc".to_string()))["tool_choice"],
+            json!({ "type": "tool", "name": "calc" })
+        );
+        // Unconstrained requests don't send the field at all.
+        assert!(
+            provider()
+                .request_body(&base())
+                .unwrap()
+                .get("tool_choice")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn json_schema_response_format_becomes_output_config() {
+        let req = request_with_tools().with_response_format(ResponseFormat::JsonSchema {
+            name: "ignored-by-anthropic".to_string(),
+            schema: json!({ "type": "object", "properties": { "n": { "type": "integer" } } }),
+        });
+        let body = provider().request_body(&req).unwrap();
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert!(body["output_config"]["format"]["schema"]["properties"]["n"].is_object());
+    }
+
+    #[test]
+    fn schemaless_json_mode_fails_closed_as_invalid() {
+        let req = request_with_tools().with_response_format(ResponseFormat::JsonObject);
+        let err = provider().request_body(&req).unwrap_err();
+        assert!(
+            matches!(err, Error::Invalid(_)),
+            "must be permanent (no failover), got {err:?}"
+        );
     }
 
     #[test]

@@ -47,4 +47,6 @@ pub use resilience::{
 #[cfg(feature = "qdrant")]
 pub use semantic_qdrant::QdrantSemanticCache;
 pub use tokenizer::{HeuristicTokenizer, PER_MESSAGE_OVERHEAD, PER_TOOL_OVERHEAD, TokenCounter};
-pub use types::{ChatRequest, ChatResponse, Message, Role, ToolCall, ToolSpec};
+pub use types::{
+    ChatRequest, ChatResponse, Message, ResponseFormat, Role, ToolCall, ToolChoice, ToolSpec,
+};

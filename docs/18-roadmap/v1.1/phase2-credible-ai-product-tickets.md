@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.1.0
-**Status:** In progress — PRV-201 done
+**Version:** 1.2.0
+**Status:** In progress — PRV-201, PRV-202 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -111,7 +111,7 @@ Messages-API server streamed real deltas and reported the exact table-computed
 cost. Deferred to their own tickets: `tool_choice`/structured output (PRV-202) and
 extended thinking / multimodal content parts (PRV-204).
 
-## PRV-202 `[P1]` — Structured output / forced tool
+## PRV-202 `[P1]` — Structured output / forced tool — **DONE (2026-07-13)**
 
 **Problem.** `ChatRequest` has no `response_format`/`tool_choice`/`json_schema`
 (`crates/apex-provider/src/types.rs:107-123`); mistralrs hardcodes `ToolChoice::Auto`
@@ -128,6 +128,40 @@ selects the named tool.
 
 **Files.** `crates/apex-provider/src/{types.rs,openai.rs,anthropic.rs,mistralrs_provider.rs}`.
 **Size.** M. **Depends on:** none.
+
+**Implementation notes (2026-07-13).** `ChatRequest` gained two optional fields
+with builder helpers (`with_tool_choice`/`with_response_format`): `ToolChoice`
+(`Auto`/`None`/`Required`/`Tool(name)`) and `ResponseFormat` (`JsonObject` |
+`JsonSchema { name, schema }`). Per-provider translation, all fail-closed
+(`Error::Invalid` — permanent, so the gateway never fails over to a provider
+that would silently change the semantics) where a backend lacks an equivalent:
+**OpenAI** — `tool_choice` (`"auto"`/`"none"`/`"required"`/
+`{type:"function",function:{name}}`) and `response_format`
+(`{type:"json_object"}` / `{type:"json_schema", json_schema:{name, schema,
+strict:true}}`); **Anthropic** — `tool_choice` (`auto`/`none`/`any`/`tool`) and
+`output_config.format` (`json_schema`, schema bare — `name` is OpenAI-only);
+schema-less `JsonObject` is rejected (the Messages API has no JSON mode), and
+`request_body` became fallible for it; **mistral.rs** — `set_tool_choice`
+(`Auto`/`None`/`Tool(spec)`, resolving the named tool against the advertised
+list and rejecting unknown names; `Required` has no mistral.rs equivalent →
+`Invalid`) and `set_constraint(Constraint::JsonSchema)` — real constrained
+decoding, compile-checked with `--features mistralrs` (not blind-edited).
+**Cache correctness:** both fields joined the gateway's exact `cache_key` *and*
+the semantic `param_key` — a response produced under one constraint set must
+never be served for another; proven by
+`gateway::tests::exact_cache_does_not_cross_output_constraints`. **Acceptance:**
+`tests/anthropic_messages.rs::forced_tool_choice_selects_the_named_tool`
+(recorded fixture: the wire carries `{"type":"tool","name":"calc"}` and the
+response selects exactly the named tool) and
+`json_schema_constrained_request_returns_schema_valid_output` (the wire carries
+the schema in `output_config.format`; the answer is validated against it —
+required fields, types, `additionalProperties: false`); OpenAI wire shapes are
+unit-tested (`encodes_tool_choice_variants`/`encodes_response_format_variants`),
+as are Anthropic's (`encodes_tool_choice_variants`/
+`json_schema_response_format_becomes_output_config`/
+`schemaless_json_mode_fails_closed_as_invalid`). Not yet surfaced in the agent
+manifest/YAML DSL — callers set the fields programmatically; manifest wiring
+can ride a later slice (e.g. SAF-202's prompt registry) once a consumer needs it.
 
 ## PRV-203 `[P2]` — Tool-schema normalization + surfaced arg-parse errors
 
@@ -500,3 +534,4 @@ that cardinality stays bounded (a capped/hashed label set).
 |---------|------|-------------|
 | 1.0.0 | 2026-07-09 | Initial Phase-2 tickets from PRD-004 / the 2026-07-09 engineering audit (credible-AI-product P1/P2 work) |
 | 1.1.0 | 2026-07-13 | PRV-201 (first-class `AnthropicProvider`) implemented and marked DONE with implementation notes |
+| 1.2.0 | 2026-07-13 | PRV-202 (structured output / forced tool) implemented and marked DONE with implementation notes |

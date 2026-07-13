@@ -104,6 +104,46 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
+/// Constraint on the model's tool selection for a turn (RM-AIM-P2 PRV-202).
+///
+/// Providers translate this to their own wire shapes (OpenAI `tool_choice`,
+/// Anthropic `tool_choice`, mistral.rs `ToolChoice`). Unset means the
+/// provider's default (the model decides).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// The model decides whether to call a tool (every provider's default).
+    Auto,
+    /// The model must not call any tool this turn.
+    None,
+    /// The model must call at least one tool (any of the advertised ones).
+    /// Not every backend supports it (mistral.rs doesn't) — unsupported
+    /// providers fail closed with [`apex_common::Error::Invalid`].
+    Required,
+    /// The model must call the named tool.
+    Tool(String),
+}
+
+/// Constraint on the shape of the model's final answer (RM-AIM-P2 PRV-202).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// Any syntactically valid JSON object (OpenAI "JSON mode"). Providers
+    /// without a schema-less JSON mode (Anthropic, mistral.rs) fail closed
+    /// with [`apex_common::Error::Invalid`] — prefer
+    /// [`ResponseFormat::JsonSchema`], which every backend supports.
+    JsonObject,
+    /// JSON validating against the given schema (OpenAI structured outputs,
+    /// Anthropic `output_config.format`, mistral.rs grammar constraint).
+    JsonSchema {
+        /// A short identifier for the schema (OpenAI requires one; others
+        /// ignore it).
+        name: String,
+        /// The JSON Schema the answer must validate against.
+        schema: serde_json::Value,
+    },
+}
+
 /// A normalized chat completion request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -120,6 +160,12 @@ pub struct ChatRequest {
     /// Tools the model may call this turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolSpec>,
+    /// Constraint on tool selection, if any (unset = provider default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+    /// Constraint on the final answer's shape, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
 }
 
 impl ChatRequest {
@@ -131,7 +177,21 @@ impl ChatRequest {
             temperature: None,
             max_tokens: None,
             tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
         }
+    }
+
+    /// Constrain tool selection (builder-style).
+    pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
+        self.tool_choice = Some(choice);
+        self
+    }
+
+    /// Constrain the answer's shape (builder-style).
+    pub fn with_response_format(mut self, format: ResponseFormat) -> Self {
+        self.response_format = Some(format);
+        self
     }
 }
 

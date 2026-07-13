@@ -6,10 +6,13 @@
 //! the result back → the model answers), asserting both directions of the wire
 //! translation: what the provider *sends* (system hoisting, `tool_result`
 //! blocks, cache breakpoints) and what it *parses* (tool_use blocks, usage,
-//! PRV-101 cost). Streaming is covered against a canned SSE body.
+//! PRV-101 cost). Streaming is covered against a canned SSE body. The forced
+//! tool-choice and JSON-schema-constrained tests are the recorded-fixture
+//! acceptance tests for RM-AIM-P2 PRV-202.
 
 use apex_provider::{
-    AIProvider, AnthropicProvider, ChatRequest, ChatStreamEvent, Message, PriceBook, ToolSpec,
+    AIProvider, AnthropicProvider, ChatRequest, ChatStreamEvent, Message, PriceBook,
+    ResponseFormat, ToolChoice, ToolSpec,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -265,4 +268,86 @@ data: {\"type\":\"message_stop\"}\n\n";
     assert_eq!(done.message.tool_calls[0].arguments, "{\"expr\":\"2+2\"}");
     assert!(done.message.content.is_none());
     assert_eq!(done.usage.completion_tokens, 11);
+}
+
+/// PRV-202 acceptance: a forced tool choice reaches the wire as
+/// `{"type":"tool","name":...}` and the model's answer selects that tool.
+#[tokio::test]
+async fn forced_tool_choice_selects_the_named_tool() {
+    let fixture = json!({
+        "id": "msg_1", "type": "message", "role": "assistant",
+        "model": "claude-opus-4-8",
+        "content": [
+            { "type": "tool_use", "id": "toolu_f1", "name": "calc",
+              "input": { "expr": "17*3" } }
+        ],
+        "stop_reason": "tool_use",
+        "usage": { "input_tokens": 40, "output_tokens": 12 }
+    });
+    let (base_url, requests) = serve(vec![("application/json", fixture.to_string())]);
+    let provider =
+        AnthropicProvider::new(base_url, "test-key").with_price_book(PriceBook::with_defaults());
+
+    let mut req = ChatRequest::new("claude-opus-4-8", vec![Message::user("What is 17*3?")])
+        .with_tool_choice(ToolChoice::Tool("calc".to_string()));
+    req.tools = vec![calc_tool()];
+
+    let resp = provider.chat(req).await.unwrap();
+
+    // The wire carried the forced-tool constraint.
+    let sent = requests.recv().unwrap();
+    assert_eq!(
+        sent["tool_choice"],
+        json!({ "type": "tool", "name": "calc" })
+    );
+
+    // And the (recorded) model selected exactly the named tool.
+    assert_eq!(resp.finish_reason, "tool_calls");
+    assert_eq!(resp.message.tool_calls.len(), 1);
+    assert_eq!(resp.message.tool_calls[0].name, "calc");
+}
+
+/// PRV-202 acceptance: a JSON-schema-constrained request carries the schema on
+/// the wire (`output_config.format`) and the answer validates against it.
+#[tokio::test]
+async fn json_schema_constrained_request_returns_schema_valid_output() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "answer": { "type": "integer" },
+            "confident": { "type": "boolean" }
+        },
+        "required": ["answer", "confident"],
+        "additionalProperties": false
+    });
+    let fixture = json!({
+        "id": "msg_1", "type": "message", "role": "assistant",
+        "model": "claude-opus-4-8",
+        "content": [ { "type": "text", "text": "{\"answer\":51,\"confident\":true}" } ],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 40, "output_tokens": 12 }
+    });
+    let (base_url, requests) = serve(vec![("application/json", fixture.to_string())]);
+    let provider =
+        AnthropicProvider::new(base_url, "test-key").with_price_book(PriceBook::with_defaults());
+
+    let req = ChatRequest::new("claude-opus-4-8", vec![Message::user("What is 17*3?")])
+        .with_response_format(ResponseFormat::JsonSchema {
+            name: "arith_answer".to_string(),
+            schema: schema.clone(),
+        });
+    let resp = provider.chat(req).await.unwrap();
+
+    // The wire carried the schema constraint in Anthropic's shape.
+    let sent = requests.recv().unwrap();
+    assert_eq!(sent["output_config"]["format"]["type"], "json_schema");
+    assert_eq!(sent["output_config"]["format"]["schema"], schema);
+
+    // The answer is valid JSON satisfying the schema: both required fields
+    // present, correctly typed, and nothing else.
+    let parsed: Value = serde_json::from_str(resp.message.content.as_deref().unwrap()).unwrap();
+    let obj = parsed.as_object().unwrap();
+    assert!(obj["answer"].is_i64());
+    assert!(obj["confident"].is_boolean());
+    assert_eq!(obj.len(), 2, "additionalProperties: false");
 }

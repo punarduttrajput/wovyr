@@ -114,7 +114,11 @@ top-level `system` blocks, prompt caching (`cache_control`, on by default), and
 real SSE streaming — selected via `ANTHROPIC_API_KEY` (`Gateway::from_env()` tries
 OpenAI first when both keys are set) or the CLI's `--provider anthropic`. A local
 in-process model is additionally available via the feature-gated
-`MistralRsProvider`. Bedrock/Vertex-style prefixed-model routing remains planned.
+`MistralRsProvider`. All three real adapters honor the normalized `tool_choice`
+(auto / none / required / named tool) and `response_format` (JSON mode / JSON
+Schema) constraints on `ChatRequest` (RM-AIM-P2 PRV-202), failing closed on
+combinations a backend can't express rather than silently degrading.
+Bedrock/Vertex-style prefixed-model routing remains planned.
 
 ---
 

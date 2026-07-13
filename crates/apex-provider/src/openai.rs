@@ -11,7 +11,9 @@ use crate::embeddings::{EmbeddingRequest, EmbeddingResponse};
 use crate::image::{ImageGenRequest, ImageGenResponse};
 use crate::pricing::PriceBook;
 use crate::provider::{AIProvider, ChatStream, ChatStreamEvent};
-use crate::types::{ChatRequest, ChatResponse, Message, Role, ToolCall};
+use crate::types::{
+    ChatRequest, ChatResponse, Message, ResponseFormat, Role, ToolCall, ToolChoice,
+};
 use apex_common::{Error, Result, Usage};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -90,6 +92,26 @@ impl OpenAiProvider {
                     })
                     .collect(),
             );
+        }
+        // Tool-selection / output-shape constraints (RM-AIM-P2 PRV-202).
+        if let Some(tc) = &request.tool_choice {
+            body["tool_choice"] = match tc {
+                ToolChoice::Auto => json!("auto"),
+                ToolChoice::None => json!("none"),
+                ToolChoice::Required => json!("required"),
+                ToolChoice::Tool(name) => {
+                    json!({ "type": "function", "function": { "name": name } })
+                }
+            };
+        }
+        if let Some(rf) = &request.response_format {
+            body["response_format"] = match rf {
+                ResponseFormat::JsonObject => json!({ "type": "json_object" }),
+                ResponseFormat::JsonSchema { name, schema } => json!({
+                    "type": "json_schema",
+                    "json_schema": { "name": name, "schema": schema, "strict": true },
+                }),
+            };
         }
         body
     }
@@ -618,6 +640,57 @@ mod tests {
         assert!(v["content"].is_null());
         assert_eq!(v["tool_calls"][0]["type"], "function");
         assert_eq!(v["tool_calls"][0]["function"]["name"], "echo");
+    }
+
+    #[test]
+    fn encodes_tool_choice_variants() {
+        let mut req = ChatRequest::new("m", vec![Message::user("hi")]);
+        req.tool_choice = Some(ToolChoice::Auto);
+        assert_eq!(
+            OpenAiProvider::request_body(&req)["tool_choice"],
+            json!("auto")
+        );
+        req.tool_choice = Some(ToolChoice::None);
+        assert_eq!(
+            OpenAiProvider::request_body(&req)["tool_choice"],
+            json!("none")
+        );
+        req.tool_choice = Some(ToolChoice::Required);
+        assert_eq!(
+            OpenAiProvider::request_body(&req)["tool_choice"],
+            json!("required")
+        );
+        req.tool_choice = Some(ToolChoice::Tool("echo".to_string()));
+        assert_eq!(
+            OpenAiProvider::request_body(&req)["tool_choice"],
+            json!({ "type": "function", "function": { "name": "echo" } })
+        );
+    }
+
+    #[test]
+    fn encodes_response_format_variants() {
+        let mut req = ChatRequest::new("m", vec![Message::user("hi")]);
+        req.response_format = Some(ResponseFormat::JsonObject);
+        assert_eq!(
+            OpenAiProvider::request_body(&req)["response_format"],
+            json!({ "type": "json_object" })
+        );
+        req.response_format = Some(ResponseFormat::JsonSchema {
+            name: "answer".to_string(),
+            schema: json!({ "type": "object", "properties": { "n": { "type": "integer" } } }),
+        });
+        let body = OpenAiProvider::request_body(&req);
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["name"], "answer");
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+        assert!(body["response_format"]["json_schema"]["schema"]["properties"]["n"].is_object());
+    }
+
+    #[test]
+    fn unconstrained_request_omits_choice_and_format() {
+        let body = OpenAiProvider::request_body(&ChatRequest::new("m", vec![Message::user("hi")]));
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("response_format").is_none());
     }
 
     #[test]

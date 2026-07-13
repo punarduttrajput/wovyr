@@ -54,7 +54,13 @@ v1.0 "GA hardening" (PRD-003, complete) and v1.1 "AI Platform Maturity" Phase 1
   system-prompt hoisting, prompt caching with cache-rate-aware `cost_usd`, real SSE
   streaming; wired into `Gateway::from_env()` (`ANTHROPIC_API_KEY`), class-based model
   resolution (haiku/sonnet/opus), current Claude prices in the `PriceBook`, and
-  `apex agents run --local --provider anthropic`.
+  `apex agents run --local --provider anthropic`. Structured output + forced tool
+  (PRV-202): `ChatRequest` gained `tool_choice` (auto/none/required/named) and
+  `response_format` (`json_object`/`json_schema`), translated per provider
+  (OpenAI `response_format` + `strict`, Anthropic `output_config.format` +
+  `tool_choice`, mistral.rs `Constraint::JsonSchema` grammar + forced `Tool`);
+  unsupported combinations fail closed as `Invalid`, and both fields joined the
+  gateway's exact + semantic cache keys.
 
 ## [0.3.0] — 2026-07-03
 
