@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Deterministic, fixture-based AI evaluation harness (FUT-006 prototype spike) — not yet wired into CI, a CLI, or telemetry."
+description = "Deterministic, fixture-based AI evaluation harness with LLM-judge scoring, a quantified CI regression gate, and retrieval metrics (FUT-006 prototype spike)."
 
 [features]
 # A real, local, non-deterministic model (mistral.rs) as the comparison
@@ -27,3 +27,8 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+# The retrieval-metrics harness (EVL-203) is memory-agnostic behind the
+# RankedRetriever/ContextRetriever traits; the integration tests drive it
+# against the real memory engine, so the dep is dev-only and the library
+# spine stays memory-free (same stance as the CLI owning the engine adapter).
+apex-memory.workspace = true

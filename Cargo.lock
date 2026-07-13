@@ -245,6 +245,7 @@ version = "0.3.0"
 dependencies = [
  "apex-agent",
  "apex-common",
+ "apex-memory",
  "apex-provider",
  "apex-runtime",
  "apex-tools",

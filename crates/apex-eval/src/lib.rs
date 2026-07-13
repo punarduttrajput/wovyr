@@ -35,6 +35,16 @@
 //! `baselines/capital-facts.json` and writing report/variance/gate JSON
 //! artifacts when `APEX_EVAL_ARTIFACT_DIR` is set.
 //!
+//! **The RAG path and retrievers are evaluable too (RM-AIM-P2 EVL-203):**
+//! [`run_suite_with_memory`] drives [`apex_agent::run_agent_with_memory`], so
+//! a suite grades the retrieval-grounded agent a deployment actually runs
+//! (the manifest's `spec.max_steps` is honored on every runner path per
+//! AIC-103); the [`retrieval`] module grades the *retriever* itself —
+//! recall@k / nDCG@k / MRR over labeled [`RetrievalSuite`] fixtures through
+//! the [`RankedRetriever`] trait (driven against the real `apex-memory`
+//! engine in `tests/rag_eval.rs`, as a dev-dependency so the library spine
+//! stays memory-free).
+//!
 //! It deliberately does **not** attempt: measuring variance against a
 //! *non-deterministic* real judge (the tests script the judge — evaluating
 //! with a live one is the open problem the eventual ADR needs to address),
@@ -63,6 +73,7 @@ mod fixture;
 mod gate;
 mod judge;
 mod report;
+mod retrieval;
 mod runner;
 mod score;
 
@@ -71,5 +82,9 @@ pub use fixture::{EvalSuite, Expectation, Fixture, JudgeSpec, SimilarSpec};
 pub use gate::{Baseline, GateResult, VarianceReport, check, run_suite_repeated};
 pub use judge::{Judge, JudgeVerdict, LlmJudge, Scorer, SemanticScorer};
 pub use report::{CaseResult, EvalReport};
-pub use runner::{run_suite, run_suite_scored};
+pub use retrieval::{
+    RankedRetriever, RetrievalCase, RetrievalCaseResult, RetrievalReport, RetrievalSuite,
+    evaluate_retrieval, ndcg_at_k, recall_at_k, reciprocal_rank,
+};
+pub use runner::{run_suite, run_suite_scored, run_suite_with_memory};
 pub use score::{CaseOutcome, score};
