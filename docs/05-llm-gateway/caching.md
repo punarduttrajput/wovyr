@@ -7,10 +7,10 @@ Document ID: LLM-007
 
 **Document ID:** LLM-007  
 **File Path:** `docs/05-llm-gateway/caching.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Draft  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-13
 
 ---
 
@@ -80,12 +80,27 @@ semantic_cache:
   similarity_threshold: 0.95
   embedding_model: text-embedding-3-large
   max_candidates: 5
-  param_compatibility: strict   # model/temperature must match
+  param_compatibility: strict   # model/temperature/system prompt/tools must match
 ```
 
 Vectors are stored in Qdrant (see
 [C4 Container](../02-architecture/c4-container.md)); a higher threshold trades hit
 rate for safety. Semantic hits are flagged so callers can distinguish them.
+
+Two correctness rules the implementation enforces (RM-AIM-P2 RAG-203):
+
+- **Context compatibility.** The embedded canonical text is the user turns only
+  (the *similarity* signal); the system prompt and advertised tool set are part
+  of the param-compatibility key instead — enforced exactly, not by embedding
+  similarity — so the same user text under a different system prompt or tool
+  set never hits.
+- **One embedding space.** Every entry is stamped with the id of the embedding
+  model that produced its vector, and a lookup only compares against entries
+  from the same model. Vectors from different models live in different spaces
+  (or different dimensions entirely, where cosine silently reads 0.0), so
+  cross-model comparison is never meaningful. Entries from a retired embedding
+  model are skipped (they age out via TTL) rather than evicted, which stays
+  correct through a rolling deploy where a fleet briefly mixes models.
 
 ---
 
@@ -220,3 +235,4 @@ If the cache backend is unavailable, the Gateway bypasses caching and serves liv
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-06-27 | Initial LLM Gateway Caching specification |
+| 1.1.0 | 2026-07-13 | §4: semantic-cache context compatibility (system prompt + tools in the param key) and per-entry embedding-model stamping (RM-AIM-P2 RAG-203) |

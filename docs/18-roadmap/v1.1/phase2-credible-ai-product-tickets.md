@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.7.0
-**Status:** In progress — WS-B (PRV-201..205) fully done; RAG-201, RAG-202 done
+**Version:** 1.8.0
+**Status:** In progress — WS-B (PRV-201..205) fully done; RAG-201, RAG-202, RAG-203 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -450,7 +450,7 @@ JSON-schema constraint + numbered candidates. Not yet surfaced: the server's
 wiring an opt-in (e.g. `APEX_MEMORY_RERANK=llm`) is a follow-on slice, as is a
 real cross-encoder backend.
 
-## RAG-203 `[P1]` — Semantic-cache key + embedding-model id
+## RAG-203 `[P1]` — Semantic-cache key + embedding-model id — **DONE (2026-07-13)**
 
 **Problem.** The canonical text embedded for lookup is only the User turns
 (`crates/apex-provider/src/gateway.rs:589-597`); system prompt + tools are excluded and
@@ -469,6 +469,44 @@ hit; an entry from a different embedding model is not served.
 
 **Files.** `crates/apex-provider/src/{gateway.rs,resilience.rs}`. **Size.** M.
 **Depends on:** none.
+
+**Implementation notes (2026-07-13).** **Context compatibility:** the embedded
+canonical text deliberately stays *user turns only* (that's the similarity
+signal — what the user asked); the system prompt and the serialized tool specs
+joined `param_key` instead, where compatibility is enforced *exactly* rather
+than diluted into embedding similarity (a similarity threshold could never
+guarantee the acceptance criterion; a key comparison does). The system/tools
+text is embedded in the key verbatim, not hashed — exact, dependency-free, and
+stable across processes/builds, which a `DefaultHasher` digest is not
+guaranteed to be, and the Qdrant backend shares these keys across a fleet.
+**Embedding-model stamping:** `SemanticEntry` gained `embedding_model`, and
+the `SemanticCacheStore` trait's `lookup`/`store` both take the current
+embedding-model id — `Gateway::chat` resolves it once
+(`resolve_embedding_model`) and threads it through embed/lookup/store.
+`InMemorySemanticCache` **skips** (not evicts) mismatched entries — they age
+out via TTL, and skipping stays correct through a rolling deploy where a fleet
+briefly mixes models; `QdrantSemanticCache` filters server-side (an
+`embedding_model` payload field + a second `must` clause) and includes the
+model id in its deterministic point id. **Tests:** the pre-existing
+`semantic_cache_hits_on_meaning_match_after_exact_miss` actually *encoded the
+bug* (different system prompts → expected hit) — rewritten to vary
+`max_tokens` (the remaining exact-key field deliberately not part of param
+compatibility), and `semantic_cache_threshold_gates_hits` likewise (it would
+otherwise have passed for the wrong reason post-fix). New:
+`semantic_cache_does_not_cross_system_prompts` (acceptance half 1),
+`semantic_cache_does_not_cross_tool_specs`,
+`semantic_cache_is_not_shared_across_embedding_models` (acceptance half 2,
+end-to-end: two gateways sharing one store via a delegating wrapper, one
+provider renamed so it resolves a different embedding model — the mock
+embedder returns the identical vector for the identical text, so only the
+model stamp separates them, and the cross-lookup correctly misses), plus the
+store-level `resilience::tests::semantic_entry_from_a_different_embedding_model_is_not_served`.
+The capability-gated live Qdrant test
+(`tests/semantic_cache_qdrant.rs`) gained a cross-model assertion and the new
+signatures; `--features qdrant` clippy-clean. `docs/05-llm-gateway/caching.md`
+(→1.1.0) documents both rules in §4. Note: `cache_key` (exact cache) already
+serialized full messages + tools, so the exact cache never had this bug — this
+was purely a semantic-path fix.
 
 ## RAG-204 `[P2]` — BM25/TF-IDF keyword parity
 
@@ -746,3 +784,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.5.0 | 2026-07-13 | PRV-205 (retry jitter + `Retry-After`) implemented and marked DONE with implementation notes — all of WS-B (Providers) is now done |
 | 1.6.0 | 2026-07-13 | RAG-201 (document chunking with parent-document linkage) implemented and marked DONE with implementation notes |
 | 1.7.0 | 2026-07-13 | RAG-202 (re-ranking stage) implemented and marked DONE with implementation notes |
+| 1.8.0 | 2026-07-13 | RAG-203 (semantic-cache context compatibility + embedding-model stamping) implemented and marked DONE with implementation notes |

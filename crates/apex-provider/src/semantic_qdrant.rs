@@ -21,11 +21,12 @@ fn qd_err(context: &str, e: impl std::fmt::Display) -> Error {
     Error::provider(format!("qdrant semantic cache {context}: {e}"))
 }
 
-/// Deterministic point id from the param key + embedding, so re-storing the same
-/// request overwrites its entry rather than duplicating it.
-fn point_id(param_key: &str, embedding: &[f32]) -> u64 {
+/// Deterministic point id from the param key + embedding model + embedding, so
+/// re-storing the same request overwrites its entry rather than duplicating it.
+fn point_id(param_key: &str, embedding_model: &str, embedding: &[f32]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     param_key.hash(&mut hasher);
+    embedding_model.hash(&mut hasher);
     for v in embedding {
         v.to_bits().hash(&mut hasher);
     }
@@ -94,6 +95,7 @@ impl SemanticCacheStore for QdrantSemanticCache {
     async fn lookup(
         &self,
         param_key: &str,
+        embedding_model: &str,
         embedding: &[f32],
         threshold: f32,
         ttl_ms: u64,
@@ -103,7 +105,13 @@ impl SemanticCacheStore for QdrantSemanticCache {
             "vector": embedding,
             "limit": 1,
             "with_payload": true,
-            "filter": { "must": [{ "key": "param_key", "match": { "value": param_key } }] }
+            // Entries from a different embedding model are filtered out
+            // server-side (RM-AIM-P2 RAG-203): their vectors live in a
+            // different space, so a cosine score against them is meaningless.
+            "filter": { "must": [
+                { "key": "param_key", "match": { "value": param_key } },
+                { "key": "embedding_model", "match": { "value": embedding_model } }
+            ] }
         });
         let resp = self
             .client
@@ -154,6 +162,7 @@ impl SemanticCacheStore for QdrantSemanticCache {
     async fn store(
         &self,
         param_key: &str,
+        embedding_model: &str,
         embedding: &[f32],
         response: &ChatResponse,
         now_ms: u64,
@@ -163,10 +172,11 @@ impl SemanticCacheStore for QdrantSemanticCache {
             serde_json::to_value(response).map_err(|e| qd_err("encode response", e))?;
         let body = json!({
             "points": [{
-                "id": point_id(param_key, embedding),
+                "id": point_id(param_key, embedding_model, embedding),
                 "vector": embedding,
                 "payload": {
                     "param_key": param_key,
+                    "embedding_model": embedding_model,
                     "created_ms": now_ms,
                     "response": response_json
                 }

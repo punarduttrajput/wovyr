@@ -504,11 +504,17 @@ pub(crate) struct CacheEntry {
     pub created_ms: u64,
 }
 
-/// A semantic-cache entry: the response plus the request embedding and a
-/// param-compatibility key it may be served for ([caching §4](../../docs/05-llm-gateway/caching.md)).
+/// A semantic-cache entry: the response plus the request embedding, a
+/// param-compatibility key it may be served for, and the id of the embedding
+/// model that produced the vector ([caching §4](../../docs/05-llm-gateway/caching.md)).
 pub(crate) struct SemanticEntry {
     pub embedding: Vec<f32>,
     pub param_key: String,
+    /// Embedding-model id stamped at store time (RM-AIM-P2 RAG-203): vectors
+    /// from different embedding models live in different spaces (or different
+    /// dimensions entirely — where cosine silently reads 0.0), so a lookup
+    /// only ever compares against entries produced by the *same* model.
+    pub embedding_model: String,
     pub response: ChatResponse,
     pub created_ms: u64,
 }
@@ -520,19 +526,24 @@ pub(crate) struct SemanticEntry {
 #[async_trait]
 pub trait SemanticCacheStore: Send + Sync {
     /// Best param-compatible response whose embedding similarity to `embedding`
-    /// clears `threshold`, within `ttl_ms` of `now_ms`. `None` is a miss.
+    /// clears `threshold`, within `ttl_ms` of `now_ms`. Only entries stamped
+    /// with the same `embedding_model` are considered (RM-AIM-P2 RAG-203 —
+    /// vectors from different models must never be compared). `None` is a miss.
     async fn lookup(
         &self,
         param_key: &str,
+        embedding_model: &str,
         embedding: &[f32],
         threshold: f32,
         ttl_ms: u64,
         now_ms: u64,
     ) -> Result<Option<ChatResponse>>;
-    /// Index `response` under its request embedding and param-compatibility key.
+    /// Index `response` under its request embedding, param-compatibility key,
+    /// and the id of the embedding model that produced the vector.
     async fn store(
         &self,
         param_key: &str,
+        embedding_model: &str,
         embedding: &[f32],
         response: &ChatResponse,
         now_ms: u64,
@@ -557,6 +568,7 @@ impl SemanticCacheStore for InMemorySemanticCache {
     async fn lookup(
         &self,
         param_key: &str,
+        embedding_model: &str,
         embedding: &[f32],
         threshold: f32,
         ttl_ms: u64,
@@ -565,7 +577,13 @@ impl SemanticCacheStore for InMemorySemanticCache {
         let entries = self.entries.lock().expect("cache mutex poisoned");
         let mut best: Option<(f32, &SemanticEntry)> = None;
         for entry in entries.iter() {
-            if entry.param_key != param_key || now_ms.saturating_sub(entry.created_ms) > ttl_ms {
+            // Skip (not evict) entries from a different embedding model: they
+            // age out via TTL, and skipping stays correct through a rolling
+            // deploy where a fleet briefly mixes models.
+            if entry.param_key != param_key
+                || entry.embedding_model != embedding_model
+                || now_ms.saturating_sub(entry.created_ms) > ttl_ms
+            {
                 continue;
             }
             let sim = cosine_similarity(embedding, &entry.embedding);
@@ -579,6 +597,7 @@ impl SemanticCacheStore for InMemorySemanticCache {
     async fn store(
         &self,
         param_key: &str,
+        embedding_model: &str,
         embedding: &[f32],
         response: &ChatResponse,
         now_ms: u64,
@@ -589,6 +608,7 @@ impl SemanticCacheStore for InMemorySemanticCache {
             .push(SemanticEntry {
                 embedding: embedding.to_vec(),
                 param_key: param_key.to_string(),
+                embedding_model: embedding_model.to_string(),
                 response: response.clone(),
                 created_ms: now_ms,
             });
@@ -640,6 +660,43 @@ mod tests {
         for _ in 0..100 {
             assert!(j.jitter_ms(50) <= 50);
         }
+    }
+
+    /// RAG-203 acceptance (store half): an entry stored under one embedding
+    /// model is never served to a lookup using another — even for an
+    /// identical vector and param key.
+    #[tokio::test]
+    async fn semantic_entry_from_a_different_embedding_model_is_not_served() {
+        use crate::types::Message;
+
+        let cache = InMemorySemanticCache::new();
+        let response = crate::types::ChatResponse {
+            message: Message::assistant("cached"),
+            model: "m".to_string(),
+            usage: apex_common::Usage::new(1, 1, 0.01),
+            finish_reason: "stop".to_string(),
+        };
+        let vec = [1.0_f32, 0.0];
+        cache
+            .store("pk", "text-embedding-a", &vec, &response, 1_000)
+            .await
+            .unwrap();
+
+        let cross = cache
+            .lookup("pk", "text-embedding-b", &vec, 0.9, 60_000, 1_500)
+            .await
+            .unwrap();
+        assert!(cross.is_none(), "a different embedding model must not hit");
+
+        let same = cache
+            .lookup("pk", "text-embedding-a", &vec, 0.9, 60_000, 1_500)
+            .await
+            .unwrap();
+        assert_eq!(
+            same.and_then(|r| r.message.content).as_deref(),
+            Some("cached"),
+            "the same embedding model still hits"
+        );
     }
 
     #[test]

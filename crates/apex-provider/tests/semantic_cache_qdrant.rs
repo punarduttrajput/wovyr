@@ -49,6 +49,9 @@ fn response(text: &str) -> ChatResponse {
     }
 }
 
+/// The embedding-model id used by these fixtures (RM-AIM-P2 RAG-203).
+const EMB: &str = "it-embedding-model";
+
 #[tokio::test]
 async fn qdrant_semantic_cache_round_trip_and_gating() {
     let Some(cache) = cache() else { return };
@@ -56,7 +59,7 @@ async fn qdrant_semantic_cache_round_trip_and_gating() {
     let vec_a = vec![1.0_f32, 0.0, 0.0];
 
     // Miss before anything is stored.
-    let miss = cache.lookup(&pk, &vec_a, 0.95, 60_000, 1_000).await;
+    let miss = cache.lookup(&pk, EMB, &vec_a, 0.95, 60_000, 1_000).await;
     match miss {
         Ok(None) => {}
         Ok(Some(_)) => panic!("unexpected hit before store"),
@@ -68,11 +71,11 @@ async fn qdrant_semantic_cache_round_trip_and_gating() {
 
     // Store, then an identical-vector lookup is a hit returning the same response.
     cache
-        .store(&pk, &vec_a, &response("paris"), 1_000)
+        .store(&pk, EMB, &vec_a, &response("paris"), 1_000)
         .await
         .expect("store");
     let hit = cache
-        .lookup(&pk, &vec_a, 0.95, 60_000, 1_500)
+        .lookup(&pk, EMB, &vec_a, 0.95, 60_000, 1_500)
         .await
         .expect("lookup");
     assert_eq!(
@@ -84,21 +87,32 @@ async fn qdrant_semantic_cache_round_trip_and_gating() {
     // A different param_key (incompatible params) does not see the entry.
     let other_pk = format!("m|Some(0.7)|{}", nonce());
     let cross = cache
-        .lookup(&other_pk, &vec_a, 0.95, 60_000, 1_500)
+        .lookup(&other_pk, EMB, &vec_a, 0.95, 60_000, 1_500)
         .await
         .expect("lookup");
     assert!(cross.is_none(), "param-incompatible key must not hit");
 
+    // A different embedding model does not see the entry (RAG-203), even for
+    // the identical vector and param key.
+    let cross_model = cache
+        .lookup(&pk, "some-other-model", &vec_a, 0.95, 60_000, 1_500)
+        .await
+        .expect("lookup");
+    assert!(
+        cross_model.is_none(),
+        "an entry from a different embedding model must not be served"
+    );
+
     // An expired TTL (created at 1_000, now far later) is a miss.
     let expired = cache
-        .lookup(&pk, &vec_a, 0.95, 10, 1_000_000)
+        .lookup(&pk, EMB, &vec_a, 0.95, 10, 1_000_000)
         .await
         .expect("lookup");
     assert!(expired.is_none(), "entry past its TTL must not hit");
 
     // A dissimilar vector below threshold is a miss.
     let dissimilar = cache
-        .lookup(&pk, &[0.0, 1.0, 0.0], 0.95, 60_000, 1_500)
+        .lookup(&pk, EMB, &[0.0, 1.0, 0.0], 0.95, 60_000, 1_500)
         .await
         .expect("lookup");
     assert!(dissimilar.is_none(), "below-threshold similarity must miss");

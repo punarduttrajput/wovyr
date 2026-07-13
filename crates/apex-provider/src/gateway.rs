@@ -283,9 +283,13 @@ impl Gateway {
         }
 
         // 1b. Semantic lookup — embed the request once and reuse the vector to store
-        //     on a miss. Embedding failures degrade gracefully to a live call.
+        //     on a miss. Embedding failures degrade gracefully to a live call. The
+        //     resolved embedding-model id rides along on every lookup/store so an
+        //     entry is only ever compared against vectors from the same model
+        //     (RM-AIM-P2 RAG-203).
+        let embedding_model = self.resolve_embedding_model(None);
         let query_vec = if self.cache_cfg.mode == CacheMode::Semantic {
-            self.embed_canonical(&request).await
+            self.embed_canonical(&request, &embedding_model).await
         } else {
             None
         };
@@ -294,6 +298,7 @@ impl Gateway {
                 .semantic_cache
                 .lookup(
                     &param_key(&request),
+                    &embedding_model,
                     qv,
                     self.cache_cfg.similarity_threshold,
                     self.cache_cfg.ttl_ms,
@@ -325,7 +330,13 @@ impl Gateway {
         if let Some(qv) = &query_vec
             && let Err(e) = self
                 .semantic_cache
-                .store(&param_key(&request), qv, &response, self.now_ms())
+                .store(
+                    &param_key(&request),
+                    &embedding_model,
+                    qv,
+                    &response,
+                    self.now_ms(),
+                )
                 .await
         {
             tracing::warn!("semantic cache store failed: {e}");
@@ -564,15 +575,22 @@ impl Gateway {
 
     // --- semantic cache helpers --------------------------------------------
 
-    /// Embed the canonical request (its user turns) for semantic lookup/store.
-    /// Returns `None` when there is nothing to embed or embedding fails.
-    async fn embed_canonical(&self, request: &ChatRequest) -> Option<Vec<f32>> {
+    /// Embed the canonical request (its user turns) with `embedding_model` for
+    /// semantic lookup/store. Returns `None` when there is nothing to embed or
+    /// embedding fails.
+    async fn embed_canonical(
+        &self,
+        request: &ChatRequest,
+        embedding_model: &str,
+    ) -> Option<Vec<f32>> {
         let text = canonical_request(request);
         if text.is_empty() {
             return None;
         }
-        let model = self.resolve_embedding_model(None);
-        match self.embed(EmbeddingRequest::new(model, vec![text])).await {
+        match self
+            .embed(EmbeddingRequest::new(embedding_model, vec![text]))
+            .await
+        {
             Ok(resp) => resp.vectors.into_iter().next(),
             Err(e) => {
                 tracing::warn!("semantic cache: embedding failed, serving live: {e}");
@@ -615,7 +633,10 @@ impl Gateway {
 }
 
 /// The canonical text for semantic matching: the request's user turns concatenated
-/// ([caching §4](../../docs/05-llm-gateway/caching.md)).
+/// ([caching §4](../../docs/05-llm-gateway/caching.md)). Deliberately user turns
+/// only — the *similarity* signal is what the user asked; the system prompt and
+/// tool set are compatibility constraints, enforced exactly via [`param_key`]
+/// rather than diluted into the embedding (RM-AIM-P2 RAG-203).
 fn canonical_request(request: &ChatRequest) -> String {
     request
         .messages
@@ -627,13 +648,27 @@ fn canonical_request(request: &ChatRequest) -> String {
 }
 
 /// Parameter-compatibility key: a semantic entry may only be served for a request
-/// with the same model, temperature, and output-shaping constraints
-/// ([caching §4](../../docs/05-llm-gateway/caching.md)) — a response produced
-/// under a different `tool_choice`/`response_format` (PRV-202) has a different
-/// shape and must never be served for this request.
+/// with the same model, temperature, output-shaping constraints, **system
+/// prompt, and tool set** ([caching §4](../../docs/05-llm-gateway/caching.md)).
+/// A response produced under a different `tool_choice`/`response_format`
+/// (PRV-202) has a different shape, and one produced under a different system
+/// prompt or tool set answers a different *context* (RM-AIM-P2 RAG-203 — the
+/// same user text with a different system prompt used to wrongly hit). The
+/// system/tools text is embedded verbatim rather than hashed: exact,
+/// dependency-free, and stable across processes/builds — which a
+/// `DefaultHasher` digest is not guaranteed to be, and the Qdrant backend
+/// shares these keys across a fleet.
 fn param_key(request: &ChatRequest) -> String {
+    let system = request
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .filter_map(|m| m.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tools = serde_json::to_string(&request.tools).unwrap_or_default();
     format!(
-        "{}|{:?}|{:?}|{:?}",
+        "{}|{:?}|{:?}|{:?}|sys:{system}|tools:{tools}",
         request.model, request.temperature, request.tool_choice, request.response_format
     )
 }
@@ -1010,15 +1045,21 @@ mod tests {
             .with_cost_observer(observer)
     }
 
-    /// Same user turn but a different system prompt: the exact key differs (a miss)
-    /// while the canonical text matches → a semantic hit serving the first response.
+    /// Same user turn and system prompt but a different `max_tokens`: the exact
+    /// key differs (a miss) while the canonical text and param key match → a
+    /// semantic hit serving the first response. (This test used to vary the
+    /// *system prompt* instead — exactly the wrong-context hit RAG-203 closed;
+    /// `max_tokens` is the remaining exact-key field that is deliberately not
+    /// part of param compatibility.)
     #[tokio::test]
     async fn semantic_cache_hits_on_meaning_match_after_exact_miss() {
         let collector = Arc::new(Collector(Mutex::new(Vec::new())));
         let gw = semantic_gw(0.9, collector.clone());
 
-        let a = ChatRequest::new("m", vec![Message::system("you are A"), Message::user("hi")]);
-        let b = ChatRequest::new("m", vec![Message::system("you are B"), Message::user("hi")]);
+        let mut a = ChatRequest::new("m", vec![Message::system("you are A"), Message::user("hi")]);
+        a.max_tokens = Some(100);
+        let mut b = ChatRequest::new("m", vec![Message::system("you are A"), Message::user("hi")]);
+        b.max_tokens = Some(200);
 
         let first = gw.chat(a).await.unwrap();
         assert!(first.usage.cost_usd > 0.0, "live call has cost");
@@ -1034,6 +1075,156 @@ mod tests {
         assert_eq!(events[0].cache, None, "first is a live call");
         assert_eq!(events[1].cache.as_deref(), Some("semantic"));
         assert!(events[1].estimated_savings_usd > 0.0);
+    }
+
+    /// RAG-203 acceptance (context half): the same user text under a different
+    /// system prompt must NOT hit — it answers a different context.
+    #[tokio::test]
+    async fn semantic_cache_does_not_cross_system_prompts() {
+        let collector = Arc::new(Collector(Mutex::new(Vec::new())));
+        let gw = semantic_gw(0.9, collector.clone());
+
+        let a = ChatRequest::new(
+            "m",
+            vec![Message::system("answer in French"), Message::user("hi")],
+        );
+        let b = ChatRequest::new(
+            "m",
+            vec![Message::system("answer in German"), Message::user("hi")],
+        );
+
+        gw.chat(a).await.unwrap();
+        let second = gw.chat(b).await.unwrap();
+        assert!(
+            second.usage.cost_usd > 0.0,
+            "a different system prompt must be a live call, not a cache hit"
+        );
+    }
+
+    /// Same user text but a different advertised tool set: not compatible.
+    #[tokio::test]
+    async fn semantic_cache_does_not_cross_tool_specs() {
+        use crate::types::ToolSpec;
+
+        let collector = Arc::new(Collector(Mutex::new(Vec::new())));
+        let gw = semantic_gw(0.9, collector.clone());
+
+        let tool = |name: &str| ToolSpec {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: false,
+        };
+        let mut a = ChatRequest::new("m", vec![Message::user("hi")]);
+        a.tools = vec![tool("search")];
+        let mut b = ChatRequest::new("m", vec![Message::user("hi")]);
+        b.tools = vec![tool("calculator")];
+
+        gw.chat(a).await.unwrap();
+        let second = gw.chat(b).await.unwrap();
+        assert!(
+            second.usage.cost_usd > 0.0,
+            "a different tool set must be a live call, not a cache hit"
+        );
+    }
+
+    /// RAG-203 acceptance (embedding-model half), end to end through the
+    /// gateway: two gateways sharing one semantic store but resolving
+    /// different embedding models never serve each other's entries — even
+    /// though the mock embedder produces the identical vector for the
+    /// identical canonical text.
+    #[tokio::test]
+    async fn semantic_cache_is_not_shared_across_embedding_models() {
+        use crate::resilience::SemanticCacheStore;
+
+        /// Delegates to [`MockProvider`] under a different provider name, so
+        /// `resolve_embedding_model` yields a different embedding-model id.
+        struct RenamedMock(MockProvider);
+        #[async_trait]
+        impl AIProvider for RenamedMock {
+            fn name(&self) -> &str {
+                "othermock"
+            }
+            async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+                self.0.chat(request).await
+            }
+            async fn embed(
+                &self,
+                request: crate::EmbeddingRequest,
+            ) -> Result<crate::EmbeddingResponse> {
+                self.0.embed(request).await
+            }
+        }
+
+        /// Shares one [`InMemorySemanticCache`] between two gateways.
+        struct SharedCache(Arc<InMemorySemanticCache>);
+        #[async_trait]
+        impl SemanticCacheStore for SharedCache {
+            async fn lookup(
+                &self,
+                param_key: &str,
+                embedding_model: &str,
+                embedding: &[f32],
+                threshold: f32,
+                ttl_ms: u64,
+                now_ms: u64,
+            ) -> Result<Option<ChatResponse>> {
+                self.0
+                    .lookup(
+                        param_key,
+                        embedding_model,
+                        embedding,
+                        threshold,
+                        ttl_ms,
+                        now_ms,
+                    )
+                    .await
+            }
+            async fn store(
+                &self,
+                param_key: &str,
+                embedding_model: &str,
+                embedding: &[f32],
+                response: &ChatResponse,
+                now_ms: u64,
+            ) -> Result<()> {
+                self.0
+                    .store(param_key, embedding_model, embedding, response, now_ms)
+                    .await
+            }
+        }
+
+        let shared = Arc::new(InMemorySemanticCache::new());
+        let cache_cfg = CacheConfig {
+            mode: CacheMode::Semantic,
+            ttl_ms: 60_000,
+            similarity_threshold: 0.9,
+        };
+        let gw_a = Gateway::with_providers(vec![Box::new(MockProvider::new())])
+            .with_cache(cache_cfg)
+            .with_semantic_store(Box::new(SharedCache(shared.clone())));
+        let gw_b = Gateway::with_providers(vec![Box::new(RenamedMock(MockProvider::new()))])
+            .with_cache(cache_cfg)
+            .with_semantic_store(Box::new(SharedCache(shared)));
+        assert_ne!(
+            gw_a.resolve_embedding_model(None),
+            gw_b.resolve_embedding_model(None),
+            "test premise: the two gateways resolve different embedding models"
+        );
+
+        // Same model id + params on the wire, so the param keys agree; only
+        // the embedding-model stamp differs.
+        gw_a.chat(ChatRequest::new("m", vec![Message::user("hi")]))
+            .await
+            .unwrap();
+        let cross = gw_b
+            .chat(ChatRequest::new("m", vec![Message::user("hi")]))
+            .await
+            .unwrap();
+        assert!(
+            cross.usage.cost_usd > 0.0,
+            "an entry embedded by another model must not be served"
+        );
     }
 
     /// A matching meaning but incompatible params (different temperature) is a miss.
@@ -1056,14 +1247,18 @@ mod tests {
     }
 
     /// The threshold gates hits: an unreachable threshold (>1.0) misses even an
-    /// identical-meaning request.
+    /// identical-meaning, fully param-compatible request. (Uses `max_tokens` to
+    /// dodge the exact cache — a differing system prompt would make the miss
+    /// about param compatibility instead of the threshold since RAG-203.)
     #[tokio::test]
     async fn semantic_cache_threshold_gates_hits() {
         let collector = Arc::new(Collector(Mutex::new(Vec::new())));
         let gw = semantic_gw(1.01, collector.clone());
 
-        let a = ChatRequest::new("m", vec![Message::system("x"), Message::user("hi")]);
-        let b = ChatRequest::new("m", vec![Message::system("y"), Message::user("hi")]);
+        let mut a = ChatRequest::new("m", vec![Message::system("x"), Message::user("hi")]);
+        a.max_tokens = Some(100);
+        let mut b = ChatRequest::new("m", vec![Message::system("x"), Message::user("hi")]);
+        b.max_tokens = Some(200);
 
         gw.chat(a).await.unwrap();
         let second = gw.chat(b).await.unwrap();
