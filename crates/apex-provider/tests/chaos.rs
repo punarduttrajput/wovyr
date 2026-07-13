@@ -218,5 +218,5 @@ async fn total_outage_returns_a_clear_transient_error() {
         .with_max_failovers(5);
 
     let err = gw.chat(req()).await.unwrap_err();
-    assert!(matches!(err, Error::Provider(_)), "got {err:?}");
+    assert!(matches!(err, Error::Provider { .. }), "got {err:?}");
 }

@@ -24,7 +24,8 @@ use crate::openai::OpenAiProvider;
 use crate::provider::AIProvider;
 use crate::resilience::{
     BreakerConfig, CacheConfig, CacheEntry, CacheMode, CircuitBreaker, CostEvent, CostObserver,
-    HedgeConfig, InMemorySemanticCache, LocalCircuitBreaker, RetryConfig, SemanticCacheStore,
+    HedgeConfig, InMemorySemanticCache, Jitter, LocalCircuitBreaker, RandomJitter, RetryConfig,
+    SemanticCacheStore,
 };
 use crate::types::{ChatRequest, ChatResponse, Role};
 use apex_common::{Error, Result};
@@ -74,6 +75,10 @@ pub struct Gateway {
     hedge_cfg: HedgeConfig,
     cost: Option<Arc<dyn CostObserver>>,
     start: Instant,
+    /// Jitter source for retry backoff (RM-AIM-P2 PRV-205); defaults to
+    /// [`RandomJitter`], overridable via [`with_jitter`](Self::with_jitter) for
+    /// deterministic tests.
+    jitter: Arc<dyn Jitter>,
 }
 
 impl Gateway {
@@ -102,6 +107,7 @@ impl Gateway {
             hedge_cfg: HedgeConfig::default(),
             cost: None,
             start: Instant::now(),
+            jitter: Arc::new(RandomJitter),
         }
     }
 
@@ -128,6 +134,14 @@ impl Gateway {
     /// Override the retry policy.
     pub fn with_retry(mut self, retry: RetryConfig) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Override the retry-backoff jitter source (RM-AIM-P2 PRV-205). Tests use
+    /// this to make backoff delays deterministic; production leaves the default
+    /// [`RandomJitter`].
+    pub fn with_jitter(mut self, jitter: impl Jitter + 'static) -> Self {
+        self.jitter = Arc::new(jitter);
         self
     }
 
@@ -485,7 +499,13 @@ impl Gateway {
                     }
                     self.breakers[index].on_failure(self.now_ms()).await;
                     if attempt < self.retry.max_attempts {
-                        tokio::time::sleep(self.retry.backoff(attempt)).await;
+                        // A server-specified Retry-After overrides our own backoff
+                        // entirely (RM-AIM-P2 PRV-205 / resilience §4); otherwise
+                        // fall back to jittered exponential backoff.
+                        let delay = retry_after(&err).unwrap_or_else(|| {
+                            self.retry.backoff_with_jitter(attempt, &*self.jitter)
+                        });
+                        tokio::time::sleep(delay).await;
                         continue;
                     }
                     return Err((err, true));
@@ -621,7 +641,19 @@ fn param_key(request: &ChatRequest) -> String {
 /// Whether an error is a transient provider failure (retry + failover) versus a
 /// permanent client error ([resilience §8](../../docs/05-llm-gateway/resilience.md)).
 fn is_transient(err: &Error) -> bool {
-    matches!(err, Error::Provider(_))
+    matches!(err, Error::Provider { .. })
+}
+
+/// A server-specified retry delay carried on the error (RM-AIM-P2 PRV-205 — e.g.
+/// parsed from a `Retry-After` header on an HTTP 429/503), if any.
+fn retry_after(err: &Error) -> Option<Duration> {
+    match err {
+        Error::Provider {
+            retry_after_ms: Some(ms),
+            ..
+        } => Some(Duration::from_millis(*ms)),
+        _ => None,
+    }
 }
 
 /// Return a clone of `response` with cost zeroed (used for cache hits).
@@ -753,6 +785,81 @@ mod tests {
             .with_retry(fast_retry());
         let resp = gw.chat(req()).await.unwrap();
         assert_eq!(resp.message.content.as_deref(), Some("ok from p"));
+    }
+
+    /// RM-AIM-P2 PRV-205 acceptance: retry backoff is jittered, not raw
+    /// exponential. A huge retry config would sleep seconds if the exponential
+    /// cap were honored directly; with an injected [`crate::resilience::FixedJitter`]
+    /// the gateway sleeps for exactly the fixed value instead.
+    #[tokio::test(start_paused = true)]
+    async fn retry_backoff_uses_the_injected_jitter_source() {
+        let gw = Gateway::with_providers(vec![Box::new(FlakyProvider::new("p", 1, false))])
+            .with_retry(RetryConfig {
+                max_attempts: 2,
+                base_delay_ms: 10_000,
+                max_delay_ms: 10_000,
+            })
+            .with_jitter(crate::resilience::FixedJitter(37));
+
+        let start = tokio::time::Instant::now();
+        let resp = gw.chat(req()).await.unwrap();
+        assert_eq!(resp.message.content.as_deref(), Some("ok from p"));
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(37)
+        );
+    }
+
+    /// A provider whose one failure carries a `Retry-After` hint (RM-AIM-P2 PRV-205).
+    struct RetryAfterOnceProvider {
+        retry_after_ms: u64,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AIProvider for RetryAfterOnceProvider {
+        fn name(&self) -> &str {
+            "p"
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(Error::provider_with_retry_after(
+                    "429 rate limited",
+                    self.retry_after_ms,
+                ));
+            }
+            Ok(ChatResponse {
+                message: Message::assistant("ok"),
+                model: request.model,
+                usage: Usage::new(3, 2, 0.01),
+                finish_reason: "stop".to_string(),
+            })
+        }
+    }
+
+    /// RM-AIM-P2 PRV-205 acceptance: a server-specified `Retry-After` overrides
+    /// the gateway's own backoff entirely. The retry config's exponential cap is
+    /// huge (10s); if it were honored the request would take seconds — instead
+    /// the gateway sleeps for exactly the hinted 50ms.
+    #[tokio::test(start_paused = true)]
+    async fn retry_after_hint_overrides_backoff() {
+        let provider = RetryAfterOnceProvider {
+            retry_after_ms: 50,
+            calls: AtomicUsize::new(0),
+        };
+        let gw = Gateway::with_providers(vec![Box::new(provider)]).with_retry(RetryConfig {
+            max_attempts: 2,
+            base_delay_ms: 10_000,
+            max_delay_ms: 10_000,
+        });
+
+        let start = tokio::time::Instant::now();
+        let resp = gw.chat(req()).await.unwrap();
+        assert_eq!(resp.message.content.as_deref(), Some("ok"));
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(50)
+        );
     }
 
     #[tokio::test]

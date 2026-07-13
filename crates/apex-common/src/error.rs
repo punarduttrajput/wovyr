@@ -38,8 +38,17 @@ pub enum Error {
     QuotaExceeded(String),
 
     /// An LLM provider/gateway call failed.
-    #[error("provider error: {0}")]
-    Provider(String),
+    #[error("provider error: {message}")]
+    Provider {
+        /// Human-readable detail.
+        message: String,
+        /// Milliseconds to wait before retrying, when the provider specified
+        /// one (RM-AIM-P2 PRV-205 — e.g. a `Retry-After` header on an HTTP
+        /// 429/503). `None` when no hint was given, or the failure wasn't
+        /// HTTP-shaped (e.g. a connection error); the resilience layer falls
+        /// back to jittered exponential backoff in that case.
+        retry_after_ms: Option<u64>,
+    },
 
     /// A tool invocation failed.
     #[error("tool error: {0}")]
@@ -69,9 +78,23 @@ impl Error {
         Error::Invalid(msg.into())
     }
 
-    /// Construct a [`Error::Provider`] from anything string-like.
+    /// Construct a [`Error::Provider`] from anything string-like, with no
+    /// server-specified retry hint.
     pub fn provider(msg: impl Into<String>) -> Self {
-        Error::Provider(msg.into())
+        Error::Provider {
+            message: msg.into(),
+            retry_after_ms: None,
+        }
+    }
+
+    /// Construct a [`Error::Provider`] carrying a server-specified retry delay
+    /// (RM-AIM-P2 PRV-205 — e.g. parsed from a `Retry-After` header), which the
+    /// gateway's retry loop honors in place of its own jittered backoff.
+    pub fn provider_with_retry_after(msg: impl Into<String>, retry_after_ms: u64) -> Self {
+        Error::Provider {
+            message: msg.into(),
+            retry_after_ms: Some(retry_after_ms),
+        }
     }
 
     /// Construct a [`Error::Forbidden`] from anything string-like.

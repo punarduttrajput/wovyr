@@ -198,6 +198,7 @@ impl AIProvider for AnthropicProvider {
         let resp = self.post_messages(&body).await?;
 
         let status = resp.status();
+        let retry_after_ms = crate::resilience::parse_retry_after_ms(resp.headers());
         let payload: Value = resp
             .json()
             .await
@@ -208,7 +209,7 @@ impl AIProvider for AnthropicProvider {
                 .pointer("/error/message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            return Err(classify_http_error(status.as_u16(), msg));
+            return Err(classify_http_error(status.as_u16(), msg, retry_after_ms));
         }
 
         parse_response(&payload, &request.model, &self.prices)
@@ -222,9 +223,10 @@ impl AIProvider for AnthropicProvider {
         let resp = self.post_messages(&body).await?;
 
         let status = resp.status();
+        let retry_after_ms = crate::resilience::parse_retry_after_ms(resp.headers());
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(classify_http_error(status.as_u16(), &text));
+            return Err(classify_http_error(status.as_u16(), &text, retry_after_ms));
         }
 
         let prices = self.prices.clone();
@@ -388,10 +390,17 @@ fn parse_arguments(arguments: &str) -> Value {
 /// Map an HTTP error status to the right error kind for the resilience layer:
 /// 429 and 5xx (incl. Anthropic's 529 `overloaded_error`) are transient
 /// ([`Error::Provider`], retry/failover); other 4xx are permanent client errors
-/// ([`Error::Invalid`]) ([resilience §8](../../docs/05-llm-gateway/resilience.md)).
-fn classify_http_error(status: u16, msg: &str) -> Error {
+/// ([`Error::Invalid`]) ([resilience §8](../../docs/05-llm-gateway/resilience.md)). A
+/// parsed `Retry-After` (RM-AIM-P2 PRV-205) rides along on the transient case so
+/// the gateway's retry loop can honor it in place of its own backoff.
+fn classify_http_error(status: u16, msg: &str, retry_after_ms: Option<u64>) -> Error {
     if status == 429 || status >= 500 {
-        Error::provider(format!("provider returned {status}: {msg}"))
+        match retry_after_ms {
+            Some(ms) => {
+                Error::provider_with_retry_after(format!("provider returned {status}: {msg}"), ms)
+            }
+            None => Error::provider(format!("provider returned {status}: {msg}")),
+        }
     } else {
         Error::invalid(format!("provider returned {status}: {msg}"))
     }
@@ -760,7 +769,10 @@ mod tests {
             .with_part(ContentPart::text("be brief"));
         let msgs = encode_messages(&[msg]).unwrap();
         let blocks = msgs[0]["content"].as_array().unwrap();
-        assert_eq!(blocks[0], json!({ "type": "text", "text": "what is this?" }));
+        assert_eq!(
+            blocks[0],
+            json!({ "type": "text", "text": "what is this?" })
+        );
         assert_eq!(
             blocks[1],
             json!({ "type": "image",

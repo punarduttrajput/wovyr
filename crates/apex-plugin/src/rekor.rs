@@ -138,13 +138,13 @@ impl TransparencyLog for RekorLog {
             .post(format!("{}/api/v1/log/entries", self.base_url))
             .json(&entry)
             .send()
-            .map_err(|e| Error::Provider(format!("rekor unreachable: {e}")))?;
+            .map_err(|e| Error::provider(format!("rekor unreachable: {e}")))?;
         let status = resp.status();
         let body: Value = resp
             .json()
-            .map_err(|e| Error::Provider(format!("rekor returned non-JSON: {e}")))?;
+            .map_err(|e| Error::provider(format!("rekor returned non-JSON: {e}")))?;
         if status.as_u16() != 201 {
-            return Err(Error::Provider(format!(
+            return Err(Error::provider(format!(
                 "rekor rejected the entry ({status}): {body}"
             )));
         }
@@ -154,7 +154,7 @@ impl TransparencyLog for RekorLog {
         let (uuid, e) = body
             .as_object()
             .and_then(|o| o.iter().next())
-            .ok_or_else(|| Error::Provider("rekor response has no entry".into()))?;
+            .ok_or_else(|| Error::provider("rekor response has no entry"))?;
         let set_b64 = e["verification"]["signedEntryTimestamp"]
             .as_str()
             .unwrap_or_default();
@@ -188,14 +188,14 @@ impl RekorLog {
             .send()
             .and_then(|r| r.error_for_status())
             .and_then(|r| r.text())
-            .map_err(|e| Error::Provider(format!("rekor public key fetch failed: {e}")))?;
+            .map_err(|e| Error::provider(format!("rekor public key fetch failed: {e}")))?;
         let der_b64: String = pem
             .lines()
             .filter(|l| !l.starts_with("-----"))
             .collect::<Vec<_>>()
             .join("");
         let der = base64::decode(&der_b64)
-            .ok_or_else(|| Error::Provider("rekor public key PEM is not valid base64".into()))?;
+            .ok_or_else(|| Error::provider("rekor public key PEM is not valid base64"))?;
         Ok(hex::encode(der))
     }
 }

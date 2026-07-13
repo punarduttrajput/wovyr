@@ -226,6 +226,7 @@ impl AIProvider for OpenAiProvider {
             .map_err(|e| Error::provider(format!("request to {url} failed: {e}")))?;
 
         let status = resp.status();
+        let retry_after_ms = crate::resilience::parse_retry_after_ms(resp.headers());
         let payload: Value = resp
             .json()
             .await
@@ -236,7 +237,7 @@ impl AIProvider for OpenAiProvider {
                 .pointer("/error/message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            return Err(classify_http_error(status.as_u16(), msg));
+            return Err(classify_http_error(status.as_u16(), msg, retry_after_ms));
         }
 
         parse_response(&payload, &request.model, &self.prices)
@@ -260,9 +261,10 @@ impl AIProvider for OpenAiProvider {
             .map_err(|e| Error::provider(format!("request to {url} failed: {e}")))?;
 
         let status = resp.status();
+        let retry_after_ms = crate::resilience::parse_retry_after_ms(resp.headers());
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(classify_http_error(status.as_u16(), &text));
+            return Err(classify_http_error(status.as_u16(), &text, retry_after_ms));
         }
 
         let prices = self.prices.clone();
@@ -325,7 +327,9 @@ impl AIProvider for OpenAiProvider {
                 .pointer("/error/message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            return Err(classify_http_error(status.as_u16(), msg));
+            // Not part of the retry loop (embed has no retry/failover pipeline),
+            // so there's no Retry-After hint to thread through.
+            return Err(classify_http_error(status.as_u16(), msg, None));
         }
 
         parse_embeddings(&payload, &request.model)
@@ -353,7 +357,9 @@ impl AIProvider for OpenAiProvider {
                 .pointer("/error/message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            return Err(classify_http_error(status.as_u16(), msg));
+            // Not part of the retry loop (generate_image has no retry/failover
+            // pipeline), so there's no Retry-After hint to thread through.
+            return Err(classify_http_error(status.as_u16(), msg, None));
         }
 
         let images = payload
@@ -368,10 +374,17 @@ impl AIProvider for OpenAiProvider {
 /// Map an HTTP error status to the right error kind for the resilience layer:
 /// 429 and 5xx are transient ([`Error::Provider`], retry/failover); other 4xx are
 /// permanent client errors ([`Error::Invalid`])
-/// ([resilience §8](../../docs/05-llm-gateway/resilience.md)).
-fn classify_http_error(status: u16, msg: &str) -> Error {
+/// ([resilience §8](../../docs/05-llm-gateway/resilience.md)). A parsed
+/// `Retry-After` (RM-AIM-P2 PRV-205) rides along on the transient case so the
+/// gateway's retry loop can honor it in place of its own backoff.
+fn classify_http_error(status: u16, msg: &str, retry_after_ms: Option<u64>) -> Error {
     if status == 429 || status >= 500 {
-        Error::provider(format!("provider returned {status}: {msg}"))
+        match retry_after_ms {
+            Some(ms) => {
+                Error::provider_with_retry_after(format!("provider returned {status}: {msg}"), ms)
+            }
+            None => Error::provider(format!("provider returned {status}: {msg}")),
+        }
     } else {
         Error::invalid(format!("provider returned {status}: {msg}"))
     }
@@ -705,7 +718,10 @@ mod tests {
         let v = OpenAiProvider::encode_message(&msg);
         let blocks = v["content"].as_array().unwrap();
         // `content` text leads, then the parts in order.
-        assert_eq!(blocks[0], json!({ "type": "text", "text": "what is this?" }));
+        assert_eq!(
+            blocks[0],
+            json!({ "type": "text", "text": "what is this?" })
+        );
         assert_eq!(
             blocks[1],
             json!({ "type": "image_url", "image_url": { "url": "https://x/img.png" } })
@@ -811,8 +827,8 @@ mod tests {
 
     #[test]
     fn unconstrained_request_omits_choice_and_format() {
-        let body =
-            OpenAiProvider::request_body(&ChatRequest::new("m", vec![Message::user("hi")])).unwrap();
+        let body = OpenAiProvider::request_body(&ChatRequest::new("m", vec![Message::user("hi")]))
+            .unwrap();
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("response_format").is_none());
     }

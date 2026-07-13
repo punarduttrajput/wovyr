@@ -42,11 +42,76 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    /// Exponential backoff before the given 1-based `attempt`, capped at `max_delay_ms`.
-    pub fn backoff(&self, attempt: u32) -> Duration {
+    /// The exponential delay before the given 1-based `attempt`, capped at
+    /// `max_delay_ms`, before jitter is applied.
+    fn exp_cap_ms(&self, attempt: u32) -> u64 {
         let exp = self.base_delay_ms as f64 * 2f64.powi(attempt.saturating_sub(1) as i32);
-        Duration::from_millis(exp.min(self.max_delay_ms as f64) as u64)
+        exp.min(self.max_delay_ms as f64) as u64
     }
+
+    /// Exponential backoff before the given 1-based `attempt`, capped at
+    /// `max_delay_ms`. Deterministic — no jitter; see
+    /// [`backoff_with_jitter`](Self::backoff_with_jitter) for the jittered form
+    /// the gateway actually sleeps for (RM-AIM-P2 PRV-205).
+    pub fn backoff(&self, attempt: u32) -> Duration {
+        Duration::from_millis(self.exp_cap_ms(attempt))
+    }
+
+    /// "Full jitter" backoff ([resilience §4](../../docs/05-llm-gateway/resilience.md):
+    /// `jitter: full`) — a uniformly random delay in `[0, backoff(attempt)]`, so a
+    /// fleet of retrying callers doesn't retry in lockstep. The jitter source is
+    /// injected so this stays deterministic in tests (see [`FixedJitter`)]; the
+    /// gateway defaults to [`RandomJitter`].
+    pub fn backoff_with_jitter(&self, attempt: u32, jitter: &dyn Jitter) -> Duration {
+        Duration::from_millis(jitter.jitter_ms(self.exp_cap_ms(attempt)))
+    }
+}
+
+/// Source of jitter for retry backoff ([resilience §4](../../docs/05-llm-gateway/resilience.md)).
+///
+/// Injectable so retry delay stays deterministic in tests — the default
+/// [`RandomJitter`] draws from the process RNG, which "no ambient randomness in
+/// core logic" ([coding standards §7](../../docs/19-implementation-guide/coding-standards.md))
+/// would otherwise forbid.
+pub trait Jitter: Send + Sync {
+    /// A pseudo-random delay in `[0, bound_ms]` (`bound_ms == 0` always returns 0).
+    fn jitter_ms(&self, bound_ms: u64) -> u64;
+}
+
+/// The default jitter source: a uniform draw from the process-wide RNG.
+#[derive(Default)]
+pub struct RandomJitter;
+
+impl Jitter for RandomJitter {
+    fn jitter_ms(&self, bound_ms: u64) -> u64 {
+        if bound_ms == 0 {
+            return 0;
+        }
+        rand::Rng::gen_range(&mut rand::thread_rng(), 0..=bound_ms)
+    }
+}
+
+/// A fixed jitter source for deterministic tests: always returns
+/// `bound_ms.min(self.0)`.
+pub struct FixedJitter(pub u64);
+
+impl Jitter for FixedJitter {
+    fn jitter_ms(&self, bound_ms: u64) -> u64 {
+        bound_ms.min(self.0)
+    }
+}
+
+/// Parse a `Retry-After` header value as milliseconds (RM-AIM-P2 PRV-205).
+///
+/// Only the delay-seconds form (`Retry-After: 30`) is supported — the form every
+/// real LLM provider rate-limit response uses; the HTTP-date form is out of scope
+/// and is treated as absent (falls back to the gateway's own jittered backoff).
+pub fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|secs| secs.saturating_mul(1000))
 }
 
 /// Response cache mode ([caching §2](../../docs/05-llm-gateway/caching.md)).
@@ -546,6 +611,58 @@ mod tests {
         assert_eq!(r.backoff(2), Duration::from_millis(200));
         assert_eq!(r.backoff(3), Duration::from_millis(400));
         assert_eq!(r.backoff(4), Duration::from_millis(500)); // capped
+    }
+
+    #[test]
+    fn jittered_backoff_is_deterministic_under_a_fixed_source() {
+        let r = RetryConfig {
+            max_attempts: 5,
+            base_delay_ms: 100,
+            max_delay_ms: 500,
+        };
+        // FixedJitter(30) always returns min(bound, 30); attempt 1's cap is 100ms.
+        let j = FixedJitter(30);
+        assert_eq!(r.backoff_with_jitter(1, &j), Duration::from_millis(30));
+        // A fixed jitter larger than the (small) cap saturates at the cap, not
+        // the fixed value — jitter never exceeds the un-jittered backoff.
+        let tiny = RetryConfig {
+            max_attempts: 5,
+            base_delay_ms: 1,
+            max_delay_ms: 1,
+        };
+        assert_eq!(tiny.backoff_with_jitter(1, &j), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn random_jitter_stays_within_bounds() {
+        let j = RandomJitter;
+        assert_eq!(j.jitter_ms(0), 0);
+        for _ in 0..100 {
+            assert!(j.jitter_ms(50) <= 50);
+        }
+    }
+
+    #[test]
+    fn retry_after_header_parses_as_milliseconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "30".parse().unwrap());
+        assert_eq!(parse_retry_after_ms(&headers), Some(30_000));
+    }
+
+    #[test]
+    fn missing_or_non_numeric_retry_after_is_none() {
+        assert_eq!(
+            parse_retry_after_ms(&reqwest::header::HeaderMap::new()),
+            None
+        );
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        // The HTTP-date form is out of scope — treated as absent.
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after_ms(&headers), None);
     }
 
     #[tokio::test]

@@ -42,8 +42,8 @@ pub use provider::{AIProvider, ChatStream, ChatStreamEvent};
 pub use redis_breaker::RedisKv;
 pub use resilience::{
     BreakerConfig, BreakerKv, CacheConfig, CacheMode, CircuitBreaker, CostEvent, CostObserver,
-    HedgeConfig, InMemoryKv, InMemorySemanticCache, LocalCircuitBreaker, RetryConfig,
-    SemanticCacheStore, SharedCircuitBreaker,
+    FixedJitter, HedgeConfig, InMemoryKv, InMemorySemanticCache, Jitter, LocalCircuitBreaker,
+    RandomJitter, RetryConfig, SemanticCacheStore, SharedCircuitBreaker,
 };
 #[cfg(feature = "qdrant")]
 pub use semantic_qdrant::QdrantSemanticCache;

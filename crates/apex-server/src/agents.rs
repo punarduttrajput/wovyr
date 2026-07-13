@@ -701,7 +701,9 @@ impl From<Error> for ApiError {
             Error::QuotaExceeded(m) => {
                 ApiError::new(StatusCode::TOO_MANY_REQUESTS, "quota_exceeded", m)
             }
-            Error::Provider(m) => ApiError::new(StatusCode::BAD_GATEWAY, "provider_error", m),
+            Error::Provider { message, .. } => {
+                ApiError::new(StatusCode::BAD_GATEWAY, "provider_error", message)
+            }
             other => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",

@@ -38,6 +38,9 @@ reqwest.workspace = true
 # code doesn't need it itself).
 tokio = { workspace = true, features = ["macros", "time"] }
 tracing.workspace = true
+# Retry-jitter source (RM-AIM-P2 PRV-205) — injected behind the `Jitter` trait so
+# core retry logic stays deterministic in tests; only `RandomJitter` touches this.
+rand = "0.8"
 redis = { version = "0.24", default-features = false, features = ["tokio-comp"], optional = true }
 # Pure-Rust default features (no CUDA/Metal/MKL, no C compiler needed) — chosen
 # deliberately for portability over this backend's max performance.

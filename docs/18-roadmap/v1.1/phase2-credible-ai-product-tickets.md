@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.4.0
-**Status:** In progress — PRV-201, PRV-202, PRV-203, PRV-204 done
+**Version:** 1.5.0
+**Status:** In progress — WS-B (PRV-201..205) fully done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -273,7 +273,7 @@ tests) pass. Not yet surfaced in the agent manifest YAML DSL or the CLI — call
 attach parts programmatically; manifest wiring (e.g. `--image <path>`) can ride a
 later slice once a consumer needs it.
 
-## PRV-205 `[P3]` — Retry jitter + `Retry-After`
+## PRV-205 `[P3]` — Retry jitter + `Retry-After` — **DONE (2026-07-13)**
 
 **Problem.** Backoff is pure exponential, no jitter
 (`crates/apex-provider/src/resilience.rs:46-49`); `is_transient` keys only on the
@@ -287,6 +287,46 @@ is respected.
 
 **Files.** `crates/apex-provider/src/{resilience.rs,gateway.rs}`. **Size.** S.
 **Depends on:** none.
+
+**Implementation notes (2026-07-13).** `Error::Provider(String)` became a struct
+variant `Provider { message: String, retry_after_ms: Option<u64> }` — `Error::provider(msg)`
+keeps its old signature (`retry_after_ms: None`, so all ~14 existing call sites across
+the workspace are untouched) and a new `Error::provider_with_retry_after(msg, ms)`
+carries a server-specified delay. **Jitter:** a new `Jitter` trait (`jitter_ms(bound_ms)
+-> u64`) is injected into `Gateway` (`with_jitter`, default `RandomJitter` — the one
+place in this crate that reads the process RNG, kept behind the trait so "no ambient
+randomness in core logic" still holds for everything else); `RetryConfig::backoff`
+stays pure/deterministic (unchanged, existing test intact), and a new
+`backoff_with_jitter(attempt, jitter)` implements AWS-style "full jitter" — a uniform
+draw in `[0, backoff(attempt)]` — which `Gateway::try_provider`'s retry loop now
+actually sleeps on instead of the raw exponential value. `FixedJitter(ms)` is the
+deterministic test double. **Retry-After:** `resilience::parse_retry_after_ms` parses
+the delay-seconds form of the header (the form every real LLM rate-limit response
+uses; the HTTP-date form is explicitly out of scope, treated as absent) into
+milliseconds; both `OpenAiProvider` and `AnthropicProvider` capture it from the
+response headers *before* consuming the body and thread it through
+`classify_http_error` (now 3-arg), which attaches it to the `Error::Provider` it
+returns for a 429/5xx. `Gateway::try_provider` checks for this hint first and, when
+present, sleeps for exactly that duration in place of its own jittered backoff
+(resilience §4: "a server-specified Retry-After overrides backoff entirely");
+`embed`/`generate_image` (which have no retry/failover pipeline in the first place)
+pass `None` since there's nothing downstream to honor it. **Acceptance:**
+`gateway::tests::retry_backoff_uses_the_injected_jitter_source` and
+`retry_after_hint_overrides_backoff` (both `#[tokio::test(start_paused = true)]`,
+asserting exact elapsed virtual time against a retry config whose raw exponential
+cap is deliberately huge — 10s — so the test would time out/mismatch if either
+mechanism weren't actually wired in) plus `resilience::tests::
+jittered_backoff_is_deterministic_under_a_fixed_source`/`random_jitter_stays_within_bounds`/
+`retry_after_header_parses_as_milliseconds`/`missing_or_non_numeric_retry_after_is_none`.
+Changing the `Provider` variant's shape touched 7 files total (`apex-common/error.rs`,
+`apex-provider/{gateway,openai,anthropic}.rs`, `apex-provider/tests/chaos.rs`,
+`apex-server/agents.rs`'s error-envelope mapping, `apex-plugin/rekor.rs`'s direct
+tuple constructions switched to the `Error::provider(...)` helper) — full workspace
+build/test/clippy/fmt all pass. 429-vs-5xx classification itself was already correct
+pre-existing behavior (`classify_http_error` already routed both to `Error::Provider`
+and other 4xx to `Error::Invalid`); this ticket's classification gap was really about
+capturing the Retry-After hint at the point that classification happens, which is
+now done.
 
 ---
 
@@ -616,3 +656,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.2.0 | 2026-07-13 | PRV-202 (structured output / forced tool) implemented and marked DONE with implementation notes |
 | 1.3.0 | 2026-07-13 | PRV-203 (tool-schema normalization + surfaced arg-parse errors) implemented and marked DONE with implementation notes |
 | 1.4.0 | 2026-07-13 | PRV-204 (multimodal content parts) implemented and marked DONE with implementation notes |
+| 1.5.0 | 2026-07-13 | PRV-205 (retry jitter + `Retry-After`) implemented and marked DONE with implementation notes — all of WS-B (Providers) is now done |
