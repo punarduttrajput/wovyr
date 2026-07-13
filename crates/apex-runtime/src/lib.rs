@@ -103,6 +103,23 @@ pub trait AgentResolver: Send + Sync {
     fn record(&self, _ctx: &ActivityContext, _cost_usd: f64) {}
 }
 
+/// Map a gateway/agent-run failure onto workflow retry semantics (RM-AIM-P2
+/// RUN-201): transient provider failures and quota rejections are worth retrying
+/// (the provider may recover, the budget window may reset); everything else —
+/// validation/bad-request (`Invalid`), configuration, an exhausted step budget —
+/// is deterministic and fails the activity permanently instead of burning the
+/// workflow's retry budget on an error that can't change. Previously every
+/// failure was classified `Retryable`, so a permanently malformed `ai` step
+/// retried until the policy gave up.
+fn classify_gateway_error(e: apex_common::Error) -> ActivityError {
+    match e {
+        apex_common::Error::Provider { .. } | apex_common::Error::QuotaExceeded(_) => {
+            ActivityError::Retryable(e.to_string())
+        }
+        other => ActivityError::Permanent(other.to_string()),
+    }
+}
+
 /// The shared dispatch body: `tool`/`function` via the [`ToolRegistry`], `ai` via
 /// the [`Gateway`], `agent` via [`run_agent`] (resolved through an
 /// [`AgentResolver`]), and `human` as a durable suspend/resume point. Anything
@@ -194,6 +211,9 @@ impl ActivityExecutor for PlatformActivityExecutor {
             // is the system instruction, `inputs.message`/`inputs.text` the user
             // turn (falling back to the whole inputs JSON so a caller that puts
             // free-form content under neither key still gets *something* sent).
+            // `inputs.model`/`temperature`/`max_tokens`/`response_format` pin the
+            // model and constrain the call (RM-AIM-P2 RUN-201) — previously all
+            // ignored, every `ai` step silently ran the default fast model.
             "ai" => {
                 let system = inputs
                     .get("prompt")
@@ -208,12 +228,33 @@ impl ActivityExecutor for PlatformActivityExecutor {
                     None if inputs.is_null() => String::new(),
                     None => inputs.to_string(),
                 };
-                let model = self.gateway.resolve_model(None, &ModelSelector::default());
-                let request =
+                let pinned = inputs.get("model").and_then(Value::as_str);
+                let model = self
+                    .gateway
+                    .resolve_model(pinned, &ModelSelector::default());
+                let mut request =
                     ChatRequest::new(model, vec![Message::system(system), Message::user(user)]);
+                if let Some(t) = inputs.get("temperature").and_then(Value::as_f64) {
+                    request.temperature = Some(t as f32);
+                }
+                if let Some(m) = inputs.get("max_tokens").and_then(Value::as_u64) {
+                    request.max_tokens = Some(m as u32);
+                }
+                if let Some(rf) = inputs.get("response_format") {
+                    // The PRV-202 wire shape verbatim (`json_object`, or
+                    // `{json_schema: {name, schema}}`); a malformed constraint is
+                    // a definition bug — permanent, not worth retrying.
+                    let parsed = serde_json::from_value(rf.clone()).map_err(|e| {
+                        ActivityError::Permanent(format!(
+                            "activity `{}`: invalid response_format ({e})",
+                            ctx.id
+                        ))
+                    })?;
+                    request.response_format = Some(parsed);
+                }
                 match self.gateway.chat(request).await {
                     Ok(resp) => Ok(json!({ "message": resp.message.content.unwrap_or_default() })),
-                    Err(e) => Err(ActivityError::Retryable(e.to_string())),
+                    Err(e) => Err(classify_gateway_error(e)),
                 }
             }
 
@@ -253,7 +294,7 @@ impl ActivityExecutor for PlatformActivityExecutor {
                 let mut sink = NullSink;
                 let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
                     .await
-                    .map_err(|e| ActivityError::Retryable(e.to_string()))?;
+                    .map_err(classify_gateway_error)?;
                 self.agents.record(ctx, output.usage.cost_usd);
                 Ok(json!({ "message": output.text, "steps": output.steps }))
             }
@@ -449,6 +490,160 @@ mod tests {
         assert!(
             matches!(err, ActivityError::Retryable(_)),
             "a quota/admission rejection must be retryable (the slot may free up), got {err:?}"
+        );
+    }
+
+    // --- RUN-201: `ai` steps honor model/params, and failures classify by
+    // error kind instead of blanket-retrying. ---
+
+    /// A provider that records every [`ChatRequest`] it receives and answers from
+    /// a script: `Ok(text)` or a specific error, counted per call.
+    struct RecordingProvider {
+        seen: Arc<Mutex<Vec<ChatRequest>>>,
+        reply: fn() -> Result<String, apex_common::Error>,
+    }
+
+    #[async_trait]
+    impl apex_provider::AIProvider for RecordingProvider {
+        fn name(&self) -> &str {
+            "recording"
+        }
+
+        async fn chat(
+            &self,
+            request: ChatRequest,
+        ) -> apex_common::Result<apex_provider::ChatResponse> {
+            self.seen.lock().unwrap().push(request.clone());
+            let text = (self.reply)()?;
+            Ok(apex_provider::ChatResponse {
+                message: apex_provider::Message::assistant(text),
+                model: request.model,
+                usage: apex_common::Usage::new(1, 1, 0.0),
+                finish_reason: "stop".into(),
+            })
+        }
+    }
+
+    fn recording_executor(
+        reply: fn() -> Result<String, apex_common::Error>,
+    ) -> (PlatformActivityExecutor, Arc<Mutex<Vec<ChatRequest>>>) {
+        struct NoAgents;
+        #[async_trait]
+        impl AgentResolver for NoAgents {
+            async fn resolve(
+                &self,
+                _ctx: &ActivityContext,
+                id: &str,
+            ) -> Result<AgentDefinition, String> {
+                Err(format!("no agent `{id}`"))
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let exec = PlatformActivityExecutor::new(
+            ToolRegistry::with_builtins(),
+            Arc::new(Gateway::new(Box::new(RecordingProvider {
+                seen: seen.clone(),
+                reply,
+            }))),
+            Arc::new(NoAgents),
+        );
+        (exec, seen)
+    }
+
+    #[tokio::test]
+    async fn ai_activity_honors_pinned_model_params_and_response_format() {
+        let (exec, seen) = recording_executor(|| Ok("42".to_string()));
+        let out = exec
+            .execute(&ctx(
+                "ai",
+                None,
+                json!({
+                    "prompt": "Answer tersely.",
+                    "message": "what is 6*7?",
+                    "model": "pinned-model-x",
+                    "temperature": 0.2,
+                    "max_tokens": 128,
+                    "response_format": { "json_schema": {
+                        "name": "answer",
+                        "schema": { "type": "object" }
+                    }},
+                }),
+            ))
+            .await
+            .expect("ai step should succeed");
+        assert_eq!(out, json!({ "message": "42" }));
+
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+        assert_eq!(req.model, "pinned-model-x", "the pinned model wins");
+        assert_eq!(req.temperature, Some(0.2));
+        assert_eq!(req.max_tokens, Some(128));
+        assert!(
+            matches!(&req.response_format, Some(apex_provider::ResponseFormat::JsonSchema { name, .. }) if name == "answer"),
+            "response_format must reach the request: {:?}",
+            req.response_format
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_activity_without_params_keeps_the_resolved_default_model() {
+        let (exec, seen) = recording_executor(|| Ok("ok".to_string()));
+        exec.execute(&ctx("ai", None, json!({ "message": "hi" })))
+            .await
+            .expect("ai step should succeed");
+        let requests = seen.lock().unwrap();
+        assert_ne!(requests[0].model, "", "a default model is resolved");
+        assert_eq!(requests[0].temperature, None);
+        assert_eq!(requests[0].max_tokens, None);
+        assert_eq!(requests[0].response_format, None);
+    }
+
+    #[tokio::test]
+    async fn ai_activity_validation_error_is_permanent_not_retried() {
+        let (exec, seen) =
+            recording_executor(|| Err(apex_common::Error::invalid("malformed request")));
+        let err = exec
+            .execute(&ctx("ai", None, json!({ "message": "hi" })))
+            .await
+            .expect_err("validation failure should error");
+        assert!(
+            matches!(err, ActivityError::Permanent(_)),
+            "a bad-request error must be permanent, got {err:?}"
+        );
+        // Permanent end to end: the gateway didn't retry/failover it either.
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ai_activity_transient_provider_error_stays_retryable() {
+        let (exec, _seen) =
+            recording_executor(|| Err(apex_common::Error::provider("upstream 503")));
+        let err = exec
+            .execute(&ctx("ai", None, json!({ "message": "hi" })))
+            .await
+            .expect_err("provider failure should error");
+        assert!(
+            matches!(err, ActivityError::Retryable(_)),
+            "a transient provider error must stay retryable, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_activity_malformed_response_format_is_permanent() {
+        let (exec, seen) = recording_executor(|| Ok("unreachable".to_string()));
+        let err = exec
+            .execute(&ctx(
+                "ai",
+                None,
+                json!({ "message": "hi", "response_format": { "not_a_format": true } }),
+            ))
+            .await
+            .expect_err("malformed response_format should fail");
+        assert!(matches!(err, ActivityError::Permanent(_)));
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the model must never be called with an invalid constraint"
         );
     }
 

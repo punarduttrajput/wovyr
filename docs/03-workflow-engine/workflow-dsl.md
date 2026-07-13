@@ -1,10 +1,10 @@
 # Workflow DSL Specification
 
 **Document ID:** WF-003
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Status:** Draft
 **Owner:** Workflow Engine Team
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-13
 
 ---
 
@@ -282,6 +282,30 @@ Optional fields:
 * fallbackModel
 * timeout
 
+**Implemented shape (RM-AIM-P2 RUN-201).** The activity schema that actually ships
+carries everything under `inputs` (the `ActivityDef` struct has no top-level
+`model`/`temperature` fields), and the shared executor
+(`apex_runtime::PlatformActivityExecutor`) reads:
+
+```yaml
+- id: summarize
+  type: ai
+  inputs:
+    prompt: "You are a terse summarizer."   # system instruction
+    message: "${fetch.body}"                 # user turn (or `text`)
+    model: claude-sonnet-5                   # optional pin; else the gateway default
+    temperature: 0.2                         # optional
+    max_tokens: 2048                         # optional
+    response_format:                         # optional, PRV-202's wire shape:
+      json_schema: { name: summary, schema: { type: object } }
+```
+
+A malformed `response_format` fails the activity permanently (a definition bug is
+not worth retrying); a transient provider error or quota rejection is retryable,
+while validation/bad-request errors fail permanently. The aspirational top-level
+fields above (`provider`, `costLimit`, `fallbackModel`, `timeout`, named-prompt
+references) are not yet implemented.
+
 ---
 
 # 14a. Agent Activity
@@ -541,3 +565,4 @@ Extensions must declare schemas and validation rules.
 | Version | Date       | Description                        |
 | ------- | ---------- | ---------------------------------- |
 | 1.0.0   | 2026-06-26 | Initial Workflow DSL Specification |
+| 1.1.0   | 2026-07-13 | §14: implemented `ai`-activity input shape — model pin, temperature/max_tokens, response_format, error classification (RM-AIM-P2 RUN-201) |

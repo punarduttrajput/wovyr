@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.15.0
-**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), and WS-D (EVL-201..203) fully done; AIC-201/202 done
+**Version:** 1.16.0
+**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), and WS-D (EVL-201..203) fully done; AIC-201/202 and RUN-201 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -950,7 +950,7 @@ the default chat-wrapping shim — real mistral.rs token streaming is its own
 slice (the ticket's Files list never included it, and the crate is excluded
 from CI as too heavy a compile).
 
-## RUN-201 `[P2]` — `ai` activity: honor model/params + correct error class
+## RUN-201 `[P2]` — `ai` activity: honor model/params + correct error class — **DONE (2026-07-13)**
 
 **Problem.** The shared executor's `ai` activity ignores temperature/max_tokens/tools
 and always uses the default fast model, and classifies every failure `Retryable`
@@ -964,6 +964,38 @@ classify permanent (validation/bad-request) errors as non-retryable.
 validation error is not retried.
 
 **Files.** `crates/apex-runtime/src/lib.rs`. **Size.** M. **Depends on:** PRV-202.
+
+**Implementation notes (2026-07-13).** The `ai` branch of
+`PlatformActivityExecutor::execute` now reads `inputs.model` (pinned via
+`Gateway::resolve_model(Some(..))` — a pin always wins; absent, the resolved
+default is unchanged), `inputs.temperature`, `inputs.max_tokens`, and
+`inputs.response_format` — the last deserialized directly into PRV-202's
+`ResponseFormat` wire shape (`json_object`, or `{json_schema: {name, schema}}`),
+with a malformed value failing **permanently before the model is ever called**
+(a definition bug can't succeed on retry). Everything rides under `inputs`
+because the implemented `ActivityDef` has no top-level model/param fields —
+`workflow-dsl.md` §14 now documents this implemented shape alongside its
+aspirational one. **Error classification** is a shared
+`classify_gateway_error` helper: `Error::Provider`/`QuotaExceeded` →
+`Retryable` (the provider may recover; a budget window may reset), everything
+else (`Invalid`, `Config`, `Runtime`, …) → `Permanent` — previously every
+failure blanket-classified `Retryable`, so a permanently malformed step burned
+the workflow's whole retry budget. The helper is deliberately also applied to
+the `agent` branch's `run_agent` failure (same defect shape, one line — an
+agent manifest referencing an unknown tool is `Error::Config` and now fails
+its activity permanently instead of retrying into the same config error;
+admission rejections stay `Retryable` exactly as before, per the existing
+`AgentResolver::admit` contract and its test). Proven by five new
+`apex-runtime` tests against a request-recording provider:
+`ai_activity_honors_pinned_model_params_and_response_format` (all four fields
+asserted on the wire request),
+`ai_activity_without_params_keeps_the_resolved_default_model` (back-compat),
+`ai_activity_validation_error_is_permanent_not_retried` (also asserts exactly
+one provider call end to end — the gateway doesn't failover a permanent error
+either), `ai_activity_transient_provider_error_stays_retryable`, and
+`ai_activity_malformed_response_format_is_permanent` (model never called).
+Not addressed (matches the ticket's own scope): `ai` steps still can't
+advertise *tools* — a tool-using step is what `agent` activities are for.
 
 ## RUN-202 `[P2]` — Sub-agent run observability + real cost
 
@@ -1068,3 +1100,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.13.0 | 2026-07-13 | EVL-203 (RAG-path eval + retrieval metrics) implemented and marked DONE with implementation notes — all of WS-D (Evaluation) is now done (row added retroactively in 1.14.0; the version bump itself happened with EVL-203) |
 | 1.14.0 | 2026-07-13 | AIC-201 (step-error recovery + forced final answer) implemented and marked DONE with implementation notes |
 | 1.15.0 | 2026-07-13 | AIC-202 (richer streaming events: tool-call-argument + reasoning deltas, wire → sink → CLI/SSE/dashboard) implemented and marked DONE with implementation notes |
+| 1.16.0 | 2026-07-13 | RUN-201 (`ai` activity honors model/temperature/max_tokens/response_format; gateway errors classify Retryable-vs-Permanent by kind) implemented and marked DONE with implementation notes |
