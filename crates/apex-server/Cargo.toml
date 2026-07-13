@@ -23,6 +23,11 @@ postgres = ["apex-marketplace/postgres"]
 # this feature, `APEX_PROVIDER=mistralrs` logs a warning and falls back to
 # `Gateway::from_env()`.
 mistralrs = ["apex-provider/mistralrs"]
+# Redis-shared rate limiting (RM-AIM-P2 SRV-201): with `APEX_RATE_LIMIT_REDIS_URL`
+# set, a fleet of server nodes enforces one combined per-key request budget instead
+# of N independent ones (degrading to per-node limits when Redis is unreachable).
+# Off by default (pulls the redis client).
+redis = ["dep:redis"]
 
 [dependencies]
 apex-common.workspace = true
@@ -46,7 +51,8 @@ axum.workspace = true
 # marketplace registry's `spawn_blocking`; `time` for their sleeps; `net` for
 # `serve()`'s listener (RM-GA-P4 HLTH-904); `signal` + `macros` for graceful-shutdown
 # signal handling (SIGINT/SIGTERM via `tokio::select!`, RM-AIM-P1 SRV-101).
-tokio = { workspace = true, features = ["rt", "time", "net", "signal", "macros"] }
+# (`sync` for the rate limiter's lazily-dialed shared-Redis connection slot, SRV-201.)
+tokio = { workspace = true, features = ["rt", "time", "net", "signal", "macros", "sync"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -68,6 +74,9 @@ tower-http = { version = "0.6", features = ["timeout", "limit", "cors"] }
 # explicitly via the `rustls` dependency below before any TLS connection is accepted.
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Same version/feature shape as apex-provider's redis dependency, plus `script` for
+# the rate limiter's atomic Lua token bucket (SRV-201).
+redis = { version = "0.24", default-features = false, features = ["tokio-comp", "script"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "sync"] }

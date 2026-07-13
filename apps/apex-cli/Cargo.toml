@@ -36,6 +36,10 @@ postgres = ["apex-marketplace/postgres", "apex-server/postgres", "apex-workflow/
 # See apex-provider's mistralrs_provider module for the model/env-var configuration
 # this forwards to.
 mistralrs = ["apex-provider/mistralrs", "apex-server/mistralrs"]
+# Redis-shared rate limiting for the embedded `apex dev` server (RM-AIM-P2 SRV-201):
+# with APEX_RATE_LIMIT_REDIS_URL set, a fleet of nodes enforces one combined per-key
+# budget instead of N independent ones. Off by default (pulls the redis client).
+redis = ["apex-server/redis"]
 
 [dependencies]
 apex-common.workspace = true

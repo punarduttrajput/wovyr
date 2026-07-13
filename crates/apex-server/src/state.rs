@@ -538,11 +538,15 @@ impl AppState {
             anonymous_allowed: auth::resolve_anonymous_allowed(),
             auth_mode: auth::AuthMode::from_env(),
             http_limits: crate::config::HttpLimits::from_env(),
-            rate_limiter_standard: Arc::new(rate_limit::RateLimiter::new(
+            // Redis-shared when built with `--features redis` and
+            // `APEX_RATE_LIMIT_REDIS_URL` is set (SRV-201); per-node otherwise.
+            rate_limiter_standard: Arc::new(rate_limit::RateLimiter::from_env(
+                "standard",
                 crate::config::env_u64("APEX_RATE_LIMIT_STANDARD_PER_MIN", 300) as u32,
                 crate::config::env_u64("APEX_RATE_LIMIT_STANDARD_PER_MIN", 300) as u32,
             )),
-            rate_limiter_sensitive: Arc::new(rate_limit::RateLimiter::new(
+            rate_limiter_sensitive: Arc::new(rate_limit::RateLimiter::from_env(
+                "sensitive",
                 crate::config::env_u64("APEX_RATE_LIMIT_SENSITIVE_PER_MIN", 30) as u32,
                 crate::config::env_u64("APEX_RATE_LIMIT_SENSITIVE_PER_MIN", 30) as u32,
             )),

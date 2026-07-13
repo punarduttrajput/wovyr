@@ -413,6 +413,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.6",
  "rcgen",
+ "redis",
  "reqwest 0.12.28",
  "rustls",
  "semver",
@@ -5391,6 +5392,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "ryu",
+ "sha1_smol",
  "tokio",
  "tokio-util",
  "url",
@@ -6249,6 +6251,12 @@ dependencies = [
  "cpufeatures 0.2.17",
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"

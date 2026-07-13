@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.17.0
-**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), WS-D (EVL-201..203), and WS-A/runtime (AIC-201/202, RUN-201/202) fully done
+**Version:** 1.18.0
+**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), WS-D (EVL-201..203), and WS-A/runtime (AIC-201/202, RUN-201/202) fully done; SRV-201 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -783,7 +783,7 @@ wired into CI" framing EVL-201/202 had already made untrue. This closes out
 
 # WS-G — Multi-Node Quotas
 
-## SRV-201 `[P1]` — Distributed rate limiting
+## SRV-201 `[P1]` — Distributed rate limiting — **DONE (2026-07-14)**
 
 **Problem.** Token buckets live in a `Mutex<HashMap>` in `AppState`
 (`crates/apex-server/src/rate_limit.rs:29-34,57-81`); N nodes each grant the full
@@ -797,6 +797,41 @@ single-node.
 store enforce a combined budget, not 2×.
 
 **Files.** `crates/apex-server/src/rate_limit.rs`. **Size.** M. **Depends on:** none.
+
+**Implementation notes (2026-07-14).** `RateLimiter` now holds the in-process
+`LocalBuckets` (today's logic, unchanged) *plus* an optional Redis-shared
+backend behind a new `apex-server` `redis` cargo feature (same version/shape as
+`apex-provider`'s; `apex-cli` forwards it so the embedded `apex dev` picks it
+up), selected at runtime by `APEX_RATE_LIMIT_REDIS_URL` via
+`RateLimiter::from_env` — a dedicated variable rather than reusing
+`APEX_REDIS_URL`, so CI's service-container job (which sets the latter for the
+breaker tests) doesn't silently flip every server test onto shared limiting.
+The shared path keeps **token-bucket semantics identical to the local one**
+(not a fixed-window approximation): the refill-then-take runs as one atomic
+Lua `EVAL` inside Redis (state = a per-key hash `{t, ts}`; `ts` never moves
+backwards, so a fleet node with a slower clock can't rewind a bucket into
+double refill; token counts travel as strings because Lua→Redis integer
+replies truncate fractions), keys are namespaced per tier
+(`apex:rl:{standard|sensitive}:{key}`) so the two tiers never share a bucket,
+and every touch re-arms a `PEXPIRE` at worst-case-full-refill + slack — the
+shared-store equivalent of the local sweep. **Failure mode: degrade to
+per-node limiting, never to unlimited** — the connection is dialed lazily,
+cached, wrapped in a 1 s budget (a rate-limit check sits on every request; a
+slow Redis must not become a global stall), and dropped on any error so the
+next check re-dials; while Redis is unreachable every check falls back to the
+in-process bucket with a warning. Setting the env var on a binary built
+without the feature logs a loud error instead of silently running per-node.
+Proven three ways: offline unit tests (existing bucket tests now async, plus
+`unreachable_redis_degrades_to_local_limiting_not_unlimited`, which needs no
+live Redis); capability-gated integration tests inline in `rate_limit.rs`
+(`RateLimiter` is deliberately `pub(crate)`, so they can't live under
+`tests/` — same reasoning as `lib.rs`'s inline suite) covering the acceptance
+criterion (`two_limiter_instances_enforce_one_combined_budget`: 4 admits
+alternating across two limiter instances over one prefix, 5th rejected on
+*both* — one budget, not 2×), per-key/per-tier isolation, and continuous
+refill; and the full 129-test server suite run `--features redis` against a
+real Redis 7 container locally — all green. CI's service-container job gained
+`run_gated cargo test -p apex-server --features redis --lib rate_limit`.
 
 ## SRV-202 `[P1]` — Per-tenant token quotas; enforce/remove dead dimensions
 
@@ -1125,3 +1160,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.15.0 | 2026-07-13 | AIC-202 (richer streaming events: tool-call-argument + reasoning deltas, wire → sink → CLI/SSE/dashboard) implemented and marked DONE with implementation notes |
 | 1.16.0 | 2026-07-13 | RUN-201 (`ai` activity honors model/temperature/max_tokens/response_format; gateway errors classify Retryable-vs-Permanent by kind) implemented and marked DONE with implementation notes |
 | 1.17.0 | 2026-07-13 | RUN-202 (sub-agent runs get a TracingSink instead of NullSink; non-zero run cost proven to reach the project's daily accumulator end to end) implemented and marked DONE with implementation notes — all of WS-A / WS-runtime is now done |
+| 1.18.0 | 2026-07-14 | SRV-201 (Redis-shared rate limiting: atomic Lua token bucket, per-tier prefixes, degrade-to-per-node on Redis failure, `APEX_RATE_LIMIT_REDIS_URL` + `redis` feature, gated combined-budget test wired into CI) implemented and marked DONE with implementation notes |

@@ -310,6 +310,9 @@ jobs:
           run_gated cargo test -p apex-memory --features tiered --test tiered_backend
           run_gated cargo test -p apex-provider --features qdrant --test semantic_cache_qdrant
           run_gated cargo test -p apex-provider --features redis --test redis_breaker
+          # SRV-201: shared rate limiting — inline (RateLimiter is pub(crate)), so
+          # filter the lib suite to the rate_limit module rather than a tests/ file.
+          run_gated cargo test -p apex-server --features redis --lib rate_limit
 
   # RM-GA-P4 API-704: the API contract gate (PRD-003 R-7.4). Boots a real `apex
   # dev` server from this PR's code, then runs `redocly lint` and both SDKs'
