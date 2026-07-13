@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.10.0
-**Status:** In progress — WS-B (PRV-201..205) and WS-C (RAG-201..205) fully done
+**Version:** 1.11.0
+**Status:** In progress — WS-B (PRV-201..205) and WS-C (RAG-201..205) fully done; EVL-201 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -613,7 +613,7 @@ is a follow-on, consistent with the rest of WS-C. **This closes WS-C
 
 # WS-D — Evaluation
 
-## EVL-201 `[P1]` — LLM-as-judge + semantic scoring
+## EVL-201 `[P1]` — LLM-as-judge + semantic scoring — **DONE (2026-07-13)**
 
 **Problem.** `score` supports only `contains`/`contains_all`/`equals`
 (`crates/apex-eval/src/score.rs:24-72`); no LLM-as-judge, semantic similarity, or
@@ -629,6 +629,46 @@ semantically-correct-but-non-substring answer as passing where `contains` would 
 
 **Files.** `crates/apex-eval/src/score.rs` + new `judge.rs`. **Size.** M.
 **Depends on:** none.
+
+**Implementation notes (2026-07-13).** **Expectations:** the `Expectation` one-of
+struct gained two model-backed variants alongside the three exact matchers —
+`judge: { rubric, min_score }` (default 0.7) and `similar_to: { text, threshold }`
+(default 0.8) — validated at load time like the rest (non-empty rubric/text,
+scores in `[0,1]`, still exactly-one-of-five); the `Eq` derives on
+`Expectation`/`Fixture`/`EvalSuite`/the compare types dropped to `PartialEq`
+(the new specs carry `f32`). **New `judge.rs`:** a `Judge` trait
+(`grade(input, rubric, actual) -> JudgeVerdict { score, reasoning }`) with
+`LlmJudge` — one gateway chat call, PRV-202 JSON-schema-constrained to
+`{"score", "reasoning"}`, leniently parsed (fenced/prose-wrapped JSON accepted;
+a missing/non-numeric score is a clear error, out-of-range clamps) — plus
+`SemanticScorer` (one batched embed call → embedding cosine vs threshold), and
+the **`Scorer` dispatcher**: exact matchers still route through the pure
+`score()` (its determinism guarantee untouched), `judge`/`similar_to` call out.
+**Fail-closed throughout**, deliberately *unlike* the memory reranker's
+degrade-to-fused-order: a grading failure (judge unreachable, unparseable
+verdict, or no judge/embeddings configured on the scorer) fails the case with
+a clear detail — there is no "previous order" to fall back to when the score
+*is* the product. **Runner:** `run_suite_scored(…, &Scorer)` is the opt-in;
+plain `run_suite` delegates with `Scorer::exact_only()`, so a judge call —
+which costs real tokens — is always an explicit choice, never a silent side
+effect of running a suite. **Acceptance:**
+`tests/llm_judge_scoring.rs::judge_passes_a_paraphrased_answer_that_contains_would_fail`
+— end to end through the real `run_agent` loop, an agent answering "a full
+month" fails `contains: 30 days` (pass rate 0.0) and passes the rubric-judged
+suite (1.0) via a **scripted judge provider on its own separate gateway**
+(judging with the model that produced the answers is a known bias, noted on
+`LlmJudge::new`); the scripted judge keys off the answer text embedded in the
+judge prompt, so a wrong answer would genuinely fail. Plus
+`plain_run_suite_fails_judged_cases_closed`,
+`judged_scoring_is_reproducible_against_a_deterministic_judge` (the
+byte-identical-report claim extends to model-backed scoring when the judge is
+deterministic — a *live* judge's variance stays FUT-006's open ADR question,
+stated in `judge.rs`'s module docs), and 8 `judge::tests` unit tests
+(min_score gating, wire shape carrying rubric/input/answer + the JSON-schema
+constraint, lenient-but-never-silent verdict parsing, orthogonal-vs-close
+similarity via a scripted embedder, both missing-configuration paths) + 4 new
+`fixture::tests`. Not yet: wiring a judge into the CI eval gate's suites
+(EVL-202's territory) or the CLI.
 
 ## EVL-202 `[P1]` — Turn `apex-eval` into a regression gate
 
@@ -858,3 +898,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.8.0 | 2026-07-13 | RAG-203 (semantic-cache context compatibility + embedding-model stamping) implemented and marked DONE with implementation notes |
 | 1.9.0 | 2026-07-13 | RAG-204 (BM25 + light stemming for the in-process keyword branch) implemented and marked DONE with implementation notes |
 | 1.10.0 | 2026-07-13 | RAG-205 (real timestamps + range/time metadata filters) implemented and marked DONE with implementation notes — all of WS-C (Memory & RAG) is now done |
+| 1.11.0 | 2026-07-13 | EVL-201 (LLM-as-judge + semantic scoring) implemented and marked DONE with implementation notes |

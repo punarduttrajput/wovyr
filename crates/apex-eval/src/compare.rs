@@ -1,24 +1,24 @@
-//! Compare a single agent against a workflow on the same fixtures — the
+﻿//! Compare a single agent against a workflow on the same fixtures â€” the
 //! evidence [FUT-001](../../../docs/18-roadmap/future/B1-multi-agent-systems.md)'s
 //! graduation gate asks for ("measurably outperforms a single agent on a real
 //! benchmark").
 //!
 //! **Honesty note, carried over from this crate's own limitations
-//! ([lib.rs](crate) / [FUT-006 §8](../../../docs/18-roadmap/future/B6-trust-evaluation.md#8-prototype-spike-2026-07-05)):**
+//! ([lib.rs](crate) / [FUT-006 Â§8](../../../docs/18-roadmap/future/B6-trust-evaluation.md#8-prototype-spike-2026-07-05)):**
 //! `MockProvider` cannot drive this (it always echoes a fixed template, not a
 //! per-fixture answer), and there is no real, non-deterministic provider run
 //! wired up yet. So [`run_comparison`] necessarily runs both paths against a
 //! purpose-built deterministic "scripted" provider (mirroring
 //! `tests/regression_detection.rs`'s `CorrectProvider`/`RegressedProvider`).
 //! That makes this module's own tests an **illustrative, reproducible
-//! demonstration that the comparison mechanism works correctly — not yet the
+//! demonstration that the comparison mechanism works correctly â€” not yet the
 //! "real benchmark" evidence the graduation gate needs.** A real benchmark
 //! needs a real, non-deterministic model in the loop, which remains FUT-006's
 //! open gap (`apex-provider`'s `mistralrs` feature exists but isn't pointed at
 //! this harness).
 //!
 //! The workflow side is driven by the shared
-//! [`apex_runtime::PlatformActivityExecutor`] (RM-GA-P4 HLTH-901 — the same
+//! [`apex_runtime::PlatformActivityExecutor`] (RM-GA-P4 HLTH-901 â€” the same
 //! dispatch body the CLI's local runner and the server use), parameterized here
 //! by [`MapAgentResolver`], which resolves an activity's `name` against an
 //! in-memory map of [`AgentDefinition`]s, since this harness has neither a
@@ -41,11 +41,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// One comparison case: an input run both ways, scored by the same [`Expectation`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ComparisonCase {
     /// Stable case id, unique within its suite.
     pub id: String,
-    /// The input text — becomes the single agent's user turn and the
+    /// The input text â€” becomes the single agent's user turn and the
     /// workflow's `input.topic` (matching `research-team.yaml`'s convention).
     pub input: String,
     /// The check both paths' final answers are scored against.
@@ -54,11 +54,11 @@ pub struct ComparisonCase {
 
 /// A named set of [`ComparisonCase`]s, loadable from YAML. Mirrors
 /// [`EvalSuite::from_yaml`]'s validate-on-load shape exactly.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ComparisonSuite {
     pub name: String,
     /// The workflow activity id whose output is the "final answer" to score
-    /// (e.g. `synthesize` for `research-team.yaml`) — explicit rather than
+    /// (e.g. `synthesize` for `research-team.yaml`) â€” explicit rather than
     /// inferred from the DAG, since this harness only needs to support
     /// whatever shape the caller points it at.
     pub final_activity: String,
@@ -66,7 +66,7 @@ pub struct ComparisonSuite {
 }
 
 impl ComparisonSuite {
-    /// Parse a suite from YAML, failing closed on anything malformed — same
+    /// Parse a suite from YAML, failing closed on anything malformed â€” same
     /// checks as [`EvalSuite::from_yaml`], plus a non-empty `final_activity`.
     pub fn from_yaml(yaml: &str) -> Result<Self> {
         let suite: ComparisonSuite = serde_yaml::from_str(yaml)
@@ -111,7 +111,7 @@ pub struct ComparisonReport {
 
 impl ComparisonReport {
     /// Whether the workflow path passed strictly more cases than the single
-    /// agent — the "measurably outperforms" claim, reduced to a pass-rate
+    /// agent â€” the "measurably outperforms" claim, reduced to a pass-rate
     /// comparison over the same fixtures.
     pub fn workflow_wins(&self) -> bool {
         self.workflow.pass_rate > self.single_agent.pass_rate
@@ -119,7 +119,7 @@ impl ComparisonReport {
 }
 
 /// Resolves `agent`-typed activities against an in-memory map instead of a file
-/// path (the CLI) or a stored-agent id (the server) — eval has neither. No
+/// path (the CLI) or a stored-agent id (the server) â€” eval has neither. No
 /// tenant, unhosted, no admission gate (the [`AgentResolver`] trait's default
 /// methods already model exactly this, so this impl only needs `resolve`).
 struct MapAgentResolver {
@@ -147,7 +147,7 @@ impl AgentResolver for MapAgentResolver {
 /// [`Engine`]/[`PlatformActivityExecutor`] per case, so cases can't leak state
 /// into each other), scoring both paths' final answers with the same
 /// [`Expectation`]. Known gap: the workflow side's [`EvalReport::usage`] is
-/// always zero — a workflow activity's output is a bare `{message, steps}`
+/// always zero â€” a workflow activity's output is a bare `{message, steps}`
 /// JSON value, not a [`Usage`]-carrying struct, so per-case cost isn't
 /// surfaced through [`apex_workflow::ExecutionState`] today.
 pub async fn run_comparison(

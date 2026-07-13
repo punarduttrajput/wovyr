@@ -67,7 +67,9 @@ pub fn score(actual: &str, expect: &Expectation) -> CaseOutcome {
     }
     CaseOutcome {
         passed: false,
-        detail: "expectation has no check set".to_string(),
+        detail: "expectation has no exact-match check set (judge/similar_to \
+                 require a Scorer — see crate::judge)"
+            .to_string(),
     }
 }
 

@@ -16,12 +16,18 @@
 //!    against a correct provider and fails against a regressed one (see
 //!    `tests/regression_detection.rs`).
 //!
-//! It deliberately does **not** attempt: LLM-as-judge scoring, a CI regression
-//! gate, measuring variance against a *non-deterministic* real provider (every
-//! provider in this crate's own tests is deterministic, so variance is
-//! trivially zero — evaluating a real model is the open problem the eventual
-//! ADR needs to address), telemetry, or a CLI surface. [`score::score`] is a
-//! pure function with no ambient clock/randomness
+//! **LLM-as-judge + semantic scoring exist now (RM-AIM-P2 EVL-201):** a
+//! [`Scorer`] dispatches `judge:` expectations (rubric → graded score, via the
+//! [`Judge`] trait / [`LlmJudge`]) and `similar_to:` expectations
+//! (embedding-cosine, [`SemanticScorer`]) alongside the exact matchers —
+//! opt-in via [`run_suite_scored`]; plain [`run_suite`] stays exact-only and
+//! fails model-backed cases with a clear detail rather than silently spending
+//! judge tokens. It deliberately does **not** attempt: a quantified
+//! baseline/threshold system for the CI gate, measuring variance against a
+//! *non-deterministic* real judge (the tests script the judge — evaluating
+//! with a live one is the open problem the eventual ADR needs to address),
+//! telemetry, or a CLI surface. [`score::score`] is a pure function with no
+//! ambient clock/randomness
 //! ([coding-standards §7](../../docs/19-implementation-guide/coding-standards.md)),
 //! matching the same determinism discipline as the rest of the platform.
 //!
@@ -42,12 +48,14 @@
 
 mod compare;
 mod fixture;
+mod judge;
 mod report;
 mod runner;
 mod score;
 
 pub use compare::{ComparisonCase, ComparisonReport, ComparisonSuite, run_comparison};
-pub use fixture::{EvalSuite, Expectation, Fixture};
+pub use fixture::{EvalSuite, Expectation, Fixture, JudgeSpec, SimilarSpec};
+pub use judge::{Judge, JudgeVerdict, LlmJudge, Scorer, SemanticScorer};
 pub use report::{CaseResult, EvalReport};
-pub use runner::run_suite;
+pub use runner::{run_suite, run_suite_scored};
 pub use score::{CaseOutcome, score};

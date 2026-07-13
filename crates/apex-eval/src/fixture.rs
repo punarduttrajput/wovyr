@@ -17,11 +17,13 @@ use serde::{Deserialize, Serialize};
 
 /// What a case's actual answer is checked against — exactly one field must be
 /// set (checked by [`EvalSuite::from_yaml`]'s validation, not by [`score`]).
-/// Deliberately just string matching — no regex dependency — to keep this
-/// spike's surface minimal.
+///
+/// `contains`/`contains_all`/`equals` are the pure string matchers;
+/// `judge`/`similar_to` (RM-AIM-P2 EVL-201) are **model-backed** checks graded
+/// through a [`Scorer`](crate::Scorer) — [`score`] alone cannot evaluate them.
 ///
 /// [`score`]: crate::score::score
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Expectation {
     /// The answer must contain this substring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,6 +34,45 @@ pub struct Expectation {
     /// The answer must equal this string exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equals: Option<String>,
+    /// An LLM judge must grade the answer at or above `min_score` against a
+    /// rubric (RM-AIM-P2 EVL-201).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeSpec>,
+    /// The answer's embedding must be cosine-similar to a reference text at or
+    /// above `threshold` (RM-AIM-P2 EVL-201).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar_to: Option<SimilarSpec>,
+}
+
+/// A rubric-graded expectation: an LLM judge scores the answer in `[0,1]`
+/// against `rubric`; the case passes at `score >= min_score`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JudgeSpec {
+    /// What a correct answer looks like, in plain language — the grading
+    /// instructions handed to the judge model.
+    pub rubric: String,
+    /// Minimum passing score in `[0,1]` (default 0.7).
+    #[serde(default = "default_min_score")]
+    pub min_score: f32,
+}
+
+fn default_min_score() -> f32 {
+    0.7
+}
+
+/// A semantic-similarity expectation: the answer passes when its embedding's
+/// cosine similarity to `text` reaches `threshold`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SimilarSpec {
+    /// The reference text the answer should be semantically close to.
+    pub text: String,
+    /// Minimum cosine similarity in `[0,1]` (default 0.8).
+    #[serde(default = "default_threshold")]
+    pub threshold: f32,
+}
+
+fn default_threshold() -> f32 {
+    0.8
 }
 
 impl Expectation {
@@ -56,6 +97,28 @@ impl Expectation {
         }
     }
 
+    /// A rubric-judged expectation with the default passing score.
+    pub fn judged(rubric: impl Into<String>) -> Self {
+        Self {
+            judge: Some(JudgeSpec {
+                rubric: rubric.into(),
+                min_score: default_min_score(),
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// A semantic-similarity expectation with the default threshold.
+    pub fn similar_to(text: impl Into<String>) -> Self {
+        Self {
+            similar_to: Some(SimilarSpec {
+                text: text.into(),
+                threshold: default_threshold(),
+            }),
+            ..Self::default()
+        }
+    }
+
     /// How many of the one-of fields are set — must be exactly 1 on a valid
     /// [`Expectation`].
     fn set_count(&self) -> usize {
@@ -63,6 +126,8 @@ impl Expectation {
             self.contains.is_some(),
             self.contains_all.is_some(),
             self.equals.is_some(),
+            self.judge.is_some(),
+            self.similar_to.is_some(),
         ]
         .into_iter()
         .filter(|set| *set)
@@ -71,7 +136,7 @@ impl Expectation {
 }
 
 /// One evaluation case: an input and the check its answer must pass.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Fixture {
     /// Stable case id, unique within its suite.
     pub id: String,
@@ -82,7 +147,7 @@ pub struct Fixture {
 }
 
 /// A named set of fixtures, loadable from YAML.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EvalSuite {
     pub name: String,
     pub cases: Vec<Fixture>,
@@ -120,9 +185,37 @@ impl EvalSuite {
             let set = case.expect.set_count();
             if set != 1 {
                 return Err(Error::invalid(format!(
-                    "case `{}` must set exactly one of contains/contains_all/equals, found {set}",
+                    "case `{}` must set exactly one of contains/contains_all/equals/judge/similar_to, found {set}",
                     case.id
                 )));
+            }
+            if let Some(judge) = &case.expect.judge {
+                if judge.rubric.trim().is_empty() {
+                    return Err(Error::invalid(format!(
+                        "case `{}` has a judge check with an empty rubric",
+                        case.id
+                    )));
+                }
+                if !(0.0..=1.0).contains(&judge.min_score) {
+                    return Err(Error::invalid(format!(
+                        "case `{}` has a judge min_score outside [0,1]: {}",
+                        case.id, judge.min_score
+                    )));
+                }
+            }
+            if let Some(similar) = &case.expect.similar_to {
+                if similar.text.trim().is_empty() {
+                    return Err(Error::invalid(format!(
+                        "case `{}` has a similar_to check with an empty text",
+                        case.id
+                    )));
+                }
+                if !(0.0..=1.0).contains(&similar.threshold) {
+                    return Err(Error::invalid(format!(
+                        "case `{}` has a similar_to threshold outside [0,1]: {}",
+                        case.id, similar.threshold
+                    )));
+                }
             }
         }
         Ok(())
@@ -232,5 +325,55 @@ cases:
             EvalSuite::from_yaml(yaml).unwrap_err(),
             Error::Invalid(_)
         ));
+    }
+
+    // --- judge / similar_to expectations (RM-AIM-P2 EVL-201) ------------------
+
+    #[test]
+    fn parses_judge_and_similar_to_variants_with_defaults() {
+        let yaml = "
+name: judged
+cases:
+  - id: j1
+    input: what is the refund window
+    expect:
+      judge:
+        rubric: States the refund window is 30 days.
+  - id: s1
+    input: hi
+    expect:
+      similar_to:
+        text: a friendly greeting
+        threshold: 0.9
+";
+        let suite = EvalSuite::from_yaml(yaml).unwrap();
+        let judge = suite.cases[0].expect.judge.as_ref().unwrap();
+        assert_eq!(judge.rubric, "States the refund window is 30 days.");
+        assert_eq!(judge.min_score, 0.7, "min_score defaults to 0.7");
+        let similar = suite.cases[1].expect.similar_to.as_ref().unwrap();
+        assert_eq!(similar.text, "a friendly greeting");
+        assert_eq!(similar.threshold, 0.9);
+    }
+
+    #[test]
+    fn rejects_judge_with_empty_rubric_or_out_of_range_score() {
+        let empty = "name: s\ncases:\n  - id: c1\n    input: hi\n    expect:\n      judge:\n        rubric: \"\"\n";
+        assert!(EvalSuite::from_yaml(empty).is_err());
+        let range = "name: s\ncases:\n  - id: c1\n    input: hi\n    expect:\n      judge:\n        rubric: ok\n        min_score: 1.5\n";
+        assert!(EvalSuite::from_yaml(range).is_err());
+    }
+
+    #[test]
+    fn rejects_similar_to_with_empty_text_or_out_of_range_threshold() {
+        let empty = "name: s\ncases:\n  - id: c1\n    input: hi\n    expect:\n      similar_to:\n        text: \"\"\n";
+        assert!(EvalSuite::from_yaml(empty).is_err());
+        let range = "name: s\ncases:\n  - id: c1\n    input: hi\n    expect:\n      similar_to:\n        text: ok\n        threshold: -0.1\n";
+        assert!(EvalSuite::from_yaml(range).is_err());
+    }
+
+    #[test]
+    fn judge_plus_exact_check_is_still_rejected_as_ambiguous() {
+        let yaml = "name: s\ncases:\n  - id: c1\n    input: hi\n    expect:\n      contains: a\n      judge:\n        rubric: ok\n";
+        assert!(EvalSuite::from_yaml(yaml).is_err());
     }
 }
