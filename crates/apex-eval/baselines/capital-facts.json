@@ -1,0 +1,9 @@
+{
+  "suite": "capital-facts",
+  "min_pass_rate": 1.0,
+  "cases": {
+    "france": true,
+    "japan": true,
+    "refund-paraphrase": true
+  }
+}

@@ -22,8 +22,20 @@
 //! (embedding-cosine, [`SemanticScorer`]) alongside the exact matchers —
 //! opt-in via [`run_suite_scored`]; plain [`run_suite`] stays exact-only and
 //! fails model-backed cases with a clear detail rather than silently spending
-//! judge tokens. It deliberately does **not** attempt: a quantified
-//! baseline/threshold system for the CI gate, measuring variance against a
+//! judge tokens.
+//!
+//! **The regression gate is quantified now (RM-AIM-P2 EVL-202):** a committed
+//! golden [`Baseline`] (suite + `min_pass_rate` + per-case expected outcomes)
+//! is [`check`]ed against a fresh report — pure, fail-closed: a dropped rate,
+//! a regressed case, or a vanished case fails the gate; improvements and new
+//! cases are notes prompting a baseline refresh. [`run_suite_repeated`] +
+//! [`VarianceReport`] report repeat-N variance (distinct-report count makes
+//! any nondeterminism visible instead of a flake). `tests/regression_gate.rs`
+//! is the CI-runnable command, gating `suites/capital-facts.yaml` against
+//! `baselines/capital-facts.json` and writing report/variance/gate JSON
+//! artifacts when `APEX_EVAL_ARTIFACT_DIR` is set.
+//!
+//! It deliberately does **not** attempt: measuring variance against a
 //! *non-deterministic* real judge (the tests script the judge — evaluating
 //! with a live one is the open problem the eventual ADR needs to address),
 //! telemetry, or a CLI surface. [`score::score`] is a pure function with no
@@ -48,6 +60,7 @@
 
 mod compare;
 mod fixture;
+mod gate;
 mod judge;
 mod report;
 mod runner;
@@ -55,6 +68,7 @@ mod score;
 
 pub use compare::{ComparisonCase, ComparisonReport, ComparisonSuite, run_comparison};
 pub use fixture::{EvalSuite, Expectation, Fixture, JudgeSpec, SimilarSpec};
+pub use gate::{Baseline, GateResult, VarianceReport, check, run_suite_repeated};
 pub use judge::{Judge, JudgeVerdict, LlmJudge, Scorer, SemanticScorer};
 pub use report::{CaseResult, EvalReport};
 pub use runner::{run_suite, run_suite_scored};

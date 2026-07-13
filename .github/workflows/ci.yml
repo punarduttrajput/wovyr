@@ -84,10 +84,29 @@ jobs:
       # optional/expensive feature-gated test in this workspace (Redis,
       # Qdrant, Postgres): it needs network access to download model weights
       # and real CPU inference time neither is guaranteed here.
-      - name: Eval regression gate (FUT-006)
+      # RM-AIM-P2 EVL-202 makes the gate *quantified*: regression_gate runs the
+      # committed suite (crates/apex-eval/suites/) against the committed golden
+      # baseline (crates/apex-eval/baselines/), fails on a dropped pass rate or
+      # any per-case regression, reports variance over N repeated runs, and
+      # writes report/variance/gate JSON into APEX_EVAL_ARTIFACT_DIR — uploaded
+      # below so every CI run's eval scores persist as an inspectable artifact.
+      # To refresh the baseline after an intentional change:
+      # APEX_EVAL_UPDATE_BASELINE=1 cargo test -p apex-eval --test regression_gate
+      - name: Eval regression gate (FUT-006 / EVL-202)
+        env:
+          APEX_EVAL_ARTIFACT_DIR: ${{ github.workspace }}/eval-artifacts
         run: |
+          cargo test -p apex-eval --test regression_gate -- --nocapture
           cargo test -p apex-eval --test regression_detection -- --nocapture
           cargo test -p apex-eval --test multi_agent_vs_single_agent -- --nocapture
+          cargo test -p apex-eval --test llm_judge_scoring -- --nocapture
+      - name: Upload eval artifacts (EVL-202)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval-artifacts/
+          if-no-files-found: warn
 
   # RM-AIM-P1 DX-103 (Windows leg): every runner above is ubuntu-latest, but the
   # platform is developed on (and ships for) Windows too — and Windows-specific

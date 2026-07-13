@@ -1,0 +1,20 @@
+# The committed suite the CI regression gate runs (RM-AIM-P2 EVL-202) —
+# tests/regression_gate.rs drives it against a deterministic scripted provider
+# and gates the result with baselines/capital-facts.json. Editing this file
+# without refreshing the baseline fails the gate by design (a vanished case is
+# a violation; a new case is flagged ungated).
+name: capital-facts
+cases:
+  - id: france
+    input: What is the capital of France?
+    expect:
+      contains: Paris
+  - id: japan
+    input: What is the capital of Japan?
+    expect:
+      contains: Tokyo
+  - id: refund-paraphrase
+    input: How long is the refund window?
+    expect:
+      judge:
+        rubric: States that the refund window is 30 days (one month).

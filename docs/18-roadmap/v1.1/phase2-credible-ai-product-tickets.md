@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.11.0
-**Status:** In progress — WS-B (PRV-201..205) and WS-C (RAG-201..205) fully done; EVL-201 done
+**Version:** 1.12.0
+**Status:** In progress — WS-B (PRV-201..205) and WS-C (RAG-201..205) fully done; EVL-201, EVL-202 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -670,7 +670,7 @@ similarity via a scripted embedder, both missing-configuration paths) + 4 new
 `fixture::tests`. Not yet: wiring a judge into the CI eval gate's suites
 (EVL-202's territory) or the CLI.
 
-## EVL-202 `[P1]` — Turn `apex-eval` into a regression gate
+## EVL-202 `[P1]` — Turn `apex-eval` into a regression gate — **DONE (2026-07-13)**
 
 **Problem.** No baselines, thresholds, variance measurement, telemetry, or trend
 comparison — explicitly a prototype (`crates/apex-eval/src/lib.rs:19-26`). (PRD-004
@@ -685,6 +685,52 @@ baseline threshold and passes when it meets it; variance-over-N is reported.
 
 **Files.** `crates/apex-eval/src/*`, `.github/workflows/ci.yml`. **Size.** L.
 **Depends on:** PRV-101 (cost in reports), EVL-201.
+
+**Implementation notes (2026-07-13).** New `gate.rs`. **Golden baselines:**
+`Baseline { suite, min_pass_rate, cases: BTreeMap<id, bool> }` — a committed
+JSON golden file (`BTreeMap` so it serializes stably and diffs cleanly), with
+`from_report` (snapshot), `load`/`save`/`from_json` (fail-closed on malformed
+JSON or an out-of-range threshold). **The gate:** `check(report, baseline) ->
+GateResult { passed, violations, notes }` — pure. Violations (each one fails):
+wrong-suite baseline, pass rate below threshold, a baseline-passing case now
+failing (**regression**, named with its detail), or a baseline case missing
+from the report (a deleted fixture must not silently shrink coverage).
+Notes (never a failure): an improved case or a new ungated case — both
+prompting a baseline refresh. Notably, a per-case regression fails the gate
+*even when the aggregate rate still meets the threshold* (proven by
+`a_per_case_regression_fails_even_when_the_rate_threshold_is_met` — one case
+flipping each way leaves the rate unchanged; the old rate-only idea would have
+passed it). **Variance:** `run_suite_repeated(n, …)` + `VarianceReport`
+(per-run pass rates, mean/min/max, and `distinct_reports` — the count of
+byte-distinct serialized reports, so *any* nondeterminism is a visible number,
+not an invisible flake). **Committed fixtures:** `suites/capital-facts.yaml`
+(3 cases, one a judge-graded paraphrase so the gate exercises EVL-201's path
+end to end) + `baselines/capital-facts.json` (min_pass_rate 1.0). **The
+CI-runnable command:** `cargo test -p apex-eval --test regression_gate` —
+`committed_suite_meets_the_committed_baseline_with_zero_variance` (pass
+direction + variance-over-3 asserting `distinct_reports == 1`) and
+`the_gate_fails_a_regressed_run_against_the_same_baseline` (fail direction:
+the identical gate against a provider regressed on one case fails, naming
+both the rate violation and "`japan` regressed") — so a green CI run proves
+the gate *mechanism* is alive in both directions, not merely that nothing
+changed; plus `committed_baseline_and_suite_agree_on_the_case_set` (a drift
+tripwire between the two committed files). **Artifact persistence:** the gate
+test writes `report.json`/`variance.json`/`gate.json` into
+`APEX_EVAL_ARTIFACT_DIR` when set; CI's eval step (renamed "Eval regression
+gate (FUT-006 / EVL-202)") sets it and a new `actions/upload-artifact` step
+(`if: always()`) publishes the directory as the `eval-report` artifact —
+verified locally by running the test with the env var set and inspecting the
+three JSON files. **Refresh flow:** `APEX_EVAL_UPDATE_BASELINE=1 cargo test
+-p apex-eval --test regression_gate` rewrites the committed golden file from
+the current run (then still gates against it — a fresh snapshot must gate
+clean). The CI step also now runs `llm_judge_scoring.rs` explicitly alongside
+the pre-existing suites. 9 `gate::tests` unit tests cover both directions,
+the vanished/new/improved cases, wrong-suite rejection, JSON round-trip +
+fail-closed parsing, and zero-vs-flaky variance. Cost rides in every
+persisted report via `CaseResult.usage`/`EvalReport.usage` (PRV-101's
+accounting — already present, now persisted per CI run). Deferred: trend
+comparison across historical artifacts (needs storage beyond per-run
+artifacts) and telemetry — EVL-203 covers the RAG/max_steps eval path next.
 
 ## EVL-203 `[P2]` — Evaluate the RAG path + `max_steps` + retrieval metrics
 
@@ -899,3 +945,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.9.0 | 2026-07-13 | RAG-204 (BM25 + light stemming for the in-process keyword branch) implemented and marked DONE with implementation notes |
 | 1.10.0 | 2026-07-13 | RAG-205 (real timestamps + range/time metadata filters) implemented and marked DONE with implementation notes — all of WS-C (Memory & RAG) is now done |
 | 1.11.0 | 2026-07-13 | EVL-201 (LLM-as-judge + semantic scoring) implemented and marked DONE with implementation notes |
+| 1.12.0 | 2026-07-13 | EVL-202 (quantified regression gate: golden baselines, thresholds, repeat-N variance, CI artifact persistence) implemented and marked DONE with implementation notes |
