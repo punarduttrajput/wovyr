@@ -243,6 +243,9 @@ async fn run_tenant_is_threaded_to_tool_context() {
 #[tokio::test]
 async fn run_loop_terminates_on_step_budget() {
     // A provider that always asks for a tool would loop forever without the budget.
+    // Since AIC-201 the last budgeted step advertises no tools to force a final
+    // answer — this provider returns a tool call anyway (a pathological model), so
+    // the run still ends in the hard budget error rather than hanging.
     struct AlwaysToolProvider;
     #[async_trait]
     impl AIProvider for AlwaysToolProvider {

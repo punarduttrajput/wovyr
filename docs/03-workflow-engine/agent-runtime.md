@@ -7,10 +7,10 @@ Document ID: WF-013
 
 **Document ID:** WF-013  
 **File Path:** `docs/03-workflow-engine/agent-runtime.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Draft  
 **Owner:** Workflow Engine Team  
-**Last Updated:** 2026-06-26
+**Last Updated:** 2026-07-13
 
 ---
 
@@ -241,6 +241,21 @@ Persist State
 
 Return Result
 ```
+
+**Loop recovery (AIC-201).** The run loop bounds model/tool iterations by a step
+budget (`RunOptions::max_steps` → manifest `spec.max_steps` → built-in default) and
+always tries to end with an answer rather than an error:
+
+- A **transient** model-step failure (`Error::Provider` — e.g. a stream that errors
+  or truncates mid-flight, which the gateway's per-call retry cannot cover) re-issues
+  the step up to `RunOptions::step_retries` times (default 2). Each re-issue passes
+  back through the gateway's full retry/failover/circuit-breaker pipeline, which owns
+  backoff pacing. Permanent errors (`Invalid`/`Config`/…) abort immediately.
+- The **last budgeted step** advertises no tools and injects a system instruction to
+  answer from the information already gathered — so a run that spent its budget on
+  tool calls returns a final answer within `max_steps` model calls instead of a
+  `Runtime` error. A zero budget, or a provider that returns tool calls despite none
+  being advertised, still fails with the budget error.
 
 ---
 
@@ -723,3 +738,4 @@ This module depends on:
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-06-26 | Initial Agent Runtime Specification |
+| 1.1.0 | 2026-07-13 | §9: loop recovery — transient step-error retry + forced final answer on the last budgeted step (RM-AIM-P2 AIC-201) |

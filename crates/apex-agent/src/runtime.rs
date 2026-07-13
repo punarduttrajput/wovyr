@@ -4,7 +4,9 @@
 //! [Agent Runtime spec §14](../../docs/03-workflow-engine/agent-runtime.md):
 //! the model is called; if it requests tools, they are executed and their results
 //! fed back; this repeats until the model returns a final answer or a step budget
-//! is exhausted.
+//! is exhausted. A transient model-step error is re-issued rather than aborting the
+//! run, and the last budgeted step advertises no tools so the model answers from
+//! what it has instead of the run hard-erroring (AIC-201).
 
 use crate::context::{ContextPolicy, compact};
 use crate::definition::AgentDefinition;
@@ -19,6 +21,19 @@ use serde_json::Value;
 
 /// Default cap on model/tool iterations to prevent runaway loops.
 const DEFAULT_MAX_STEPS: usize = 8;
+
+/// Default number of times a single model step is re-issued after a transient
+/// provider error (AIC-201). Each re-issue passes back through the gateway's own
+/// retry/failover/circuit-breaker stack, so this bounds *step* attempts, not HTTP
+/// attempts.
+const DEFAULT_STEP_RETRIES: usize = 2;
+
+/// The instruction injected on the final budgeted step when tools are stripped
+/// (AIC-201): the model must answer from what it has instead of requesting more work
+/// it has no budget left to receive.
+const FORCED_FINAL_ANSWER_NOTE: &str = "The step budget for this run is exhausted and \
+     tools are no longer available. Provide your best final answer now, using only \
+     the information already gathered.";
 
 /// Options for a single agent run.
 #[derive(Debug, Clone)]
@@ -55,6 +70,12 @@ pub struct RunOptions {
     /// oldest tool rounds first. The default budget is generous, so short runs are
     /// never touched.
     pub context: ContextPolicy,
+    /// How many times a single model step is re-issued after a *transient* provider
+    /// error before the run fails (AIC-201). Covers the failures the gateway's own
+    /// resilience stack can't absorb — a stream that errors or truncates *mid-flight*
+    /// (per-call retry doesn't apply to streams) — as well as a step whose gateway
+    /// retries were exhausted. Permanent errors (`Invalid`/`Config`/…) never retry.
+    pub step_retries: usize,
 }
 
 impl RunOptions {
@@ -68,6 +89,7 @@ impl RunOptions {
             egress_allowlist: None,
             trust_class: TrustClass::FirstParty,
             context: ContextPolicy::default(),
+            step_retries: DEFAULT_STEP_RETRIES,
         }
     }
 
@@ -110,6 +132,13 @@ impl RunOptions {
     /// Override the context-window policy (AIC-101).
     pub fn with_context_policy(mut self, context: ContextPolicy) -> Self {
         self.context = context;
+        self
+    }
+
+    /// Override how many times a transient model-step error is retried (AIC-201).
+    /// `0` restores the old abort-on-first-error behavior.
+    pub fn with_step_retries(mut self, step_retries: usize) -> Self {
+        self.step_retries = step_retries;
         self
     }
 }
@@ -299,11 +328,51 @@ async fn run_agent_inner(
         let mut request = ChatRequest::new(model.clone(), messages.clone());
         request.temperature = def.spec.temperature;
         request.max_tokens = def.spec.max_tokens;
-        request.tools = tools.clone();
+
+        // Forced final answer (AIC-201): on the last budgeted step, advertise no
+        // tools — the model can't request work there's no budget left to execute, so
+        // it must answer from what it has instead of the run hard-erroring with the
+        // gathered context thrown away. Total model calls stay within `max_steps`.
+        // Only the request copy is touched; the persistent history is unchanged.
+        let last_step = step + 1 == max_steps;
+        if last_step && !tools.is_empty() {
+            request
+                .messages
+                .push(Message::system(FORCED_FINAL_ANSWER_NOTE));
+        } else {
+            request.tools = tools.clone();
+        }
 
         // Stream the model call, emitting deltas as content arrives, and use the
-        // completed response to decide whether to call tools or finish.
-        let response = stream_chat(gateway, request, sink).await?;
+        // completed response to decide whether to call tools or finish. A transient
+        // provider error re-issues the step (AIC-201) — this catches what the
+        // gateway's resilience stack can't: a stream that errors or truncates
+        // mid-flight (per-call retry doesn't apply to streams). No backoff here: the
+        // re-issued call passes back through the gateway's own jittered
+        // retry/failover/breaker pipeline, which owns pacing. Deltas already emitted
+        // before a mid-stream failure may be re-emitted by the retried attempt —
+        // display-only; the history fed back comes from the terminal `Done`.
+        let response = {
+            let mut attempt = 0usize;
+            loop {
+                match stream_chat(gateway, request.clone(), sink).await {
+                    Ok(response) => break response,
+                    Err(err)
+                        if matches!(err, Error::Provider { .. }) && attempt < opts.step_retries =>
+                    {
+                        attempt += 1;
+                        tracing::warn!(
+                            target: "apex.agent",
+                            error = %err,
+                            attempt,
+                            max_attempts = opts.step_retries + 1,
+                            "transient model-step error; re-issuing the step"
+                        );
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        };
         usage.add(response.usage);
         steps += 1;
 
@@ -352,6 +421,10 @@ async fn run_agent_inner(
         }
     }
 
+    // With the forced final answer above, reaching here empty-handed takes either a
+    // zero-step budget (no model call is allowed at all, so there's nothing to force)
+    // or a pathological provider that returned tool calls despite none being
+    // advertised — both stay a hard error (AIC-201 changes neither).
     if steps == max_steps && final_text.is_empty() {
         return Err(Error::Runtime(format!(
             "agent did not finish within {max_steps} steps"
@@ -856,6 +929,231 @@ mod tests {
             vec!["slow".to_string(), "fast".to_string()],
             "tool results must be ordered by call, regardless of which finished first"
         );
+    }
+
+    // ---- step-error recovery + forced final answer (AIC-201) ------------------
+
+    /// A provider whose stream fails mid-flight (after a delta) for the first
+    /// `failures` calls, then streams a normal answer. Establishment succeeds every
+    /// time, so the failure is invisible to the gateway's establishment
+    /// retry/failover — exactly the class of error only the agent loop can recover.
+    struct MidStreamFlaky {
+        failures: usize,
+        error: fn() -> Error,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl apex_provider::AIProvider for MidStreamFlaky {
+        fn name(&self) -> &str {
+            "mid-stream-flaky"
+        }
+
+        async fn chat(
+            &self,
+            _request: apex_provider::ChatRequest,
+        ) -> Result<apex_provider::ChatResponse> {
+            unreachable!("the agent loop streams; chat is never called")
+        }
+
+        async fn chat_stream(
+            &self,
+            request: apex_provider::ChatRequest,
+        ) -> Result<apex_provider::ChatStream> {
+            use apex_provider::ChatStreamEvent;
+            use std::sync::atomic::Ordering;
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events: Vec<Result<ChatStreamEvent>> = if n < self.failures {
+                vec![
+                    Ok(ChatStreamEvent::Delta("partial…".into())),
+                    Err((self.error)()),
+                ]
+            } else {
+                vec![
+                    Ok(ChatStreamEvent::Delta("recovered answer".into())),
+                    Ok(ChatStreamEvent::Done(apex_provider::ChatResponse {
+                        message: apex_provider::Message::assistant("recovered answer"),
+                        model: request.model,
+                        usage: Usage::new(1, 1, 0.0),
+                        finish_reason: "stop".into(),
+                    })),
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_mid_stream_error_is_retried_and_the_run_completes() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gw = Gateway::new(Box::new(MidStreamFlaky {
+            failures: 2, // exactly the default retry budget: 2 failures, 3rd attempt succeeds
+            error: || Error::provider("connection reset mid-stream"),
+            calls: calls.clone(),
+        }));
+        let reg = ToolRegistry::with_builtins();
+
+        let out = run_agent(
+            &hello_def(),
+            &gw,
+            &reg,
+            RunOptions::new(json!({"message": "hi"})),
+            &mut NullSink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.text, "recovered answer");
+        assert_eq!(out.steps, 1, "retries are attempts within one step");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "two failures + one success"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_retries_zero_restores_abort_on_first_error() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gw = Gateway::new(Box::new(MidStreamFlaky {
+            failures: 1,
+            error: || Error::provider("connection reset mid-stream"),
+            calls: calls.clone(),
+        }));
+        let reg = ToolRegistry::with_builtins();
+
+        let err = run_agent(
+            &hello_def(),
+            &gw,
+            &reg,
+            RunOptions::new(json!({"message": "hi"})).with_step_retries(0),
+            &mut NullSink,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Provider { .. }), "{err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn permanent_mid_stream_error_is_not_retried() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gw = Gateway::new(Box::new(MidStreamFlaky {
+            failures: 1,
+            error: || Error::Invalid("malformed request".into()),
+            calls: calls.clone(),
+        }));
+        let reg = ToolRegistry::with_builtins();
+
+        let err = run_agent(
+            &hello_def(),
+            &gw,
+            &reg,
+            RunOptions::new(json!({"message": "hi"})),
+            &mut NullSink,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Invalid(_)), "{err}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "permanent errors never retry"
+        );
+    }
+
+    /// A provider that keeps requesting tools for as long as any are advertised, and
+    /// answers with text the moment the request carries none — a well-behaved model
+    /// under the forced-final-answer contract. Records the last request it saw.
+    struct ToolHungry {
+        last_request: std::sync::Arc<std::sync::Mutex<Option<apex_provider::ChatRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl apex_provider::AIProvider for ToolHungry {
+        fn name(&self) -> &str {
+            "tool-hungry"
+        }
+
+        async fn chat(
+            &self,
+            request: apex_provider::ChatRequest,
+        ) -> Result<apex_provider::ChatResponse> {
+            let message = if request.tools.is_empty() {
+                apex_provider::Message::assistant("forced final answer")
+            } else {
+                apex_provider::Message {
+                    role: apex_provider::Role::Assistant,
+                    content: None,
+                    parts: Vec::new(),
+                    tool_calls: vec![apex_provider::ToolCall {
+                        id: "c".into(),
+                        name: "echo".into(),
+                        arguments: "{}".into(),
+                    }],
+                    tool_call_id: None,
+                    name: None,
+                }
+            };
+            *self.last_request.lock().unwrap() = Some(request.clone());
+            Ok(apex_provider::ChatResponse {
+                message,
+                model: request.model,
+                usage: Usage::new(1, 1, 0.0),
+                finish_reason: "stop".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn run_at_the_step_cap_returns_a_forced_final_answer() {
+        use std::sync::{Arc, Mutex};
+
+        let def = AgentDefinition::from_yaml(
+            "metadata:\n  name: hungry\nspec:\n  instructions: Use tools.\n  tools: [echo]\n",
+        )
+        .unwrap();
+        let last_request = Arc::new(Mutex::new(None));
+        let gw = Gateway::new(Box::new(ToolHungry {
+            last_request: last_request.clone(),
+        }));
+        let reg = ToolRegistry::with_builtins();
+
+        // Would loop forever on tools without the budget; before AIC-201 this was
+        // `Error::Runtime("agent did not finish within 3 steps")`.
+        let opts = RunOptions::new(json!({"message": "research this"})).with_max_steps(3);
+        let out = run_agent(&def, &gw, &reg, opts, &mut NullSink)
+            .await
+            .unwrap();
+
+        assert_eq!(out.text, "forced final answer");
+        assert_eq!(
+            out.steps, 3,
+            "the forced call is the last budgeted step, not an extra one"
+        );
+
+        // The final request advertised no tools and carried the injected instruction.
+        let last = last_request.lock().unwrap().clone().unwrap();
+        assert!(last.tools.is_empty());
+        let note = last
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == apex_provider::Role::System)
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+        assert!(note.contains("step budget"), "note: {note}");
     }
 
     #[tokio::test]

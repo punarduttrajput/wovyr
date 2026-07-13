@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.13.0
-**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), and WS-D (EVL-201..203) fully done
+**Version:** 1.14.0
+**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), and WS-D (EVL-201..203) fully done; AIC-201 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -833,7 +833,7 @@ local midnight.
 
 # WS-A / WS-runtime — Loop recovery, streaming, `ai` activity
 
-## AIC-201 `[P1]` — Step-error recovery + forced final answer
+## AIC-201 `[P1]` — Step-error recovery + forced final answer — **DONE (2026-07-13)**
 
 **Problem.** A provider/stream error aborts the whole run via `?`
 (`crates/apex-agent/src/runtime.rs:247`); on budget exhaustion with pending tool
@@ -846,6 +846,46 @@ with tools disabled to force a final answer instead of erroring.
 the step cap returns a tool-less final answer, not `Error::Runtime`.
 
 **Files.** `crates/apex-agent/src/runtime.rs`. **Size.** M. **Depends on:** none.
+
+**Implementation notes (2026-07-13).** Both halves live in `run_agent_inner`
+(`crates/apex-agent/src/runtime.rs`), nothing else on the spine changed.
+**Step retry:** the `stream_chat` call is wrapped in a bounded re-issue loop —
+a step that fails with `Error::Provider { .. }` (the same transient
+classification the gateway's own `is_transient` uses) is re-issued up to
+`RunOptions::step_retries` times (`with_step_retries`, default 2; `0`
+restores the old abort-on-first-error behavior); any other error class
+(`Invalid`/`Config`/…) still aborts immediately. This deliberately targets
+the failure the gateway's resilience stack *can't* absorb — a stream that
+errors or truncates **mid-flight** (per-call retry doesn't apply to streams;
+establishment failures were already covered by gateway failover/breaker) —
+and there is **no backoff at this layer**: each re-issue passes back through
+the gateway's full jittered-retry/failover/breaker pipeline (PRV-205), which
+owns pacing, so sleeping here would double-sleep. Deltas emitted before a
+mid-stream failure may be re-emitted by the retried attempt (display-only;
+the history fed back comes from the terminal `Done`). **Forced final
+answer:** the *last budgeted* step (`step + 1 == max_steps`, when the agent
+has tools) advertises **no tools** and appends a one-line system instruction
+("step budget exhausted… answer from what you have") to the request copy
+only — the model can't request work there's no budget left to execute, so a
+well-behaved model answers and the run returns `Ok` with the gathered
+context intact, within `max_steps` model calls (interpretation (a): the
+forced call *is* the last step, not an extra one, so a `max_steps` budget
+still means exactly that many model calls). `max_steps == 0` (no call
+allowed at all — nothing to force) and a pathological provider that returns
+tool calls despite none being advertised both still end in the pre-existing
+`Error::Runtime("did not finish within N steps")`, so the budget guard
+holds. Proven by four new `runtime.rs` tests —
+`transient_mid_stream_error_is_retried_and_the_run_completes` (a scripted
+provider whose stream yields a delta then an `Err` for exactly the default
+retry budget, invisible to gateway establishment retry; 3 calls, 1 step),
+`step_retries_zero_restores_abort_on_first_error`,
+`permanent_mid_stream_error_is_not_retried` (an `Error::Invalid` mid-stream
+fails after exactly 1 call), and
+`run_at_the_step_cap_returns_a_forced_final_answer` (a tool-hungry provider
+capped at 3 steps returns the forced answer with `steps == 3`, and the last
+request it saw is asserted tool-less and carrying the injected note) — plus
+an updated comment on `tool_loop.rs::run_loop_terminates_on_step_budget`,
+which now documents that it exercises the pathological-provider fallback.
 
 ## AIC-202 `[P2]` — Richer streaming events
 
@@ -977,3 +1017,5 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.10.0 | 2026-07-13 | RAG-205 (real timestamps + range/time metadata filters) implemented and marked DONE with implementation notes — all of WS-C (Memory & RAG) is now done |
 | 1.11.0 | 2026-07-13 | EVL-201 (LLM-as-judge + semantic scoring) implemented and marked DONE with implementation notes |
 | 1.12.0 | 2026-07-13 | EVL-202 (quantified regression gate: golden baselines, thresholds, repeat-N variance, CI artifact persistence) implemented and marked DONE with implementation notes |
+| 1.13.0 | 2026-07-13 | EVL-203 (RAG-path eval + retrieval metrics) implemented and marked DONE with implementation notes — all of WS-D (Evaluation) is now done (row added retroactively in 1.14.0; the version bump itself happened with EVL-203) |
+| 1.14.0 | 2026-07-13 | AIC-201 (step-error recovery + forced final answer) implemented and marked DONE with implementation notes |
