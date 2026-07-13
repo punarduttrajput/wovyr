@@ -19,6 +19,7 @@
 #[cfg(feature = "tiered")]
 mod backends;
 mod chunk;
+mod clock;
 mod encrypting_store;
 mod engine;
 mod record;
@@ -28,6 +29,7 @@ mod store;
 #[cfg(feature = "tiered")]
 pub use backends::{PostgresStore, QdrantStore, TieredStore};
 pub use chunk::{ChunkPolicy, split};
+pub use clock::{Clock, ManualClock, SystemClock};
 pub use encrypting_store::EncryptingMemoryStore;
 pub use engine::MemoryEngine;
 pub use record::{

@@ -7,10 +7,10 @@ Document ID: MEM-005
 
 **Document ID:** MEM-005  
 **File Path:** `docs/06-memory-engine/ranking.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Draft  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-13
 
 ---
 
@@ -84,6 +84,16 @@ memory goes stale:
 | Semantic / Organizational | ∞ (no decay) |
 
 Semantic facts (policies, docs) intentionally do not decay.
+
+Implementation note (RM-AIM-P2 RAG-205): `age` is real wall-clock age against
+the record's `created_ms`, stamped at ingestion from a `Clock` injected at the
+engine boundary (`SystemClock` in production, `ManualClock` in tests — the
+core stays clock-free). Before RAG-205 the implementation used insertion-
+sequence distance as a deterministic age *proxy* with these same numbers as
+"sequence units"; that proxy remains only as the fallback for legacy records
+stored without a timestamp (`created_ms == 0`), which are also excluded from
+any time-range-filtered query (an unknown creation time cannot be placed in a
+window — fail-closed).
 
 ---
 
@@ -191,3 +201,4 @@ historical ordering.
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-06-27 | Initial Memory Engine Ranking specification |
+| 1.1.0 | 2026-07-13 | §4: recency now uses real wall-clock age via `created_ms` (RM-AIM-P2 RAG-205); the seq-distance proxy documented as the legacy fallback |

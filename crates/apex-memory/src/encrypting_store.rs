@@ -133,6 +133,7 @@ mod tests {
             sensitive,
             parent_id: None,
             is_parent: false,
+            created_ms: 0,
             seq: 0,
         }
     }

@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.9.0
-**Status:** In progress — WS-B (PRV-201..205) fully done; RAG-201..204 done
+**Version:** 1.10.0
+**Status:** In progress — WS-B (PRV-201..205) and WS-C (RAG-201..205) fully done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -553,7 +553,7 @@ terms, so FTS also drops the partial-match doc entirely; top-1 agreement is the
 deliberately scoped claim). All pre-existing keyword/hybrid tests
 (engine, chunking acceptance, RAG-bench) pass unchanged on BM25 scoring.
 
-## RAG-205 `[P2]` — Real timestamps + range/time metadata filters
+## RAG-205 `[P2]` — Real timestamps + range/time metadata filters — **DONE (2026-07-13)**
 
 **Problem.** `seq` is an insertion counter, not a timestamp
 (`crates/apex-memory/src/record.rs:66-68`), so "recency" (`engine.rs:459-465`) shifts
@@ -568,6 +568,46 @@ filter excludes out-of-window records.
 
 **Files.** `crates/apex-memory/src/{record.rs,engine.rs}`. **Size.** M.
 **Depends on:** none.
+
+**Implementation notes (2026-07-13).** **Timestamps:** `MemoryRecord` gained
+`created_ms: u64` (`#[serde(default)]` → 0 for legacy records), stamped at
+ingestion by the engine from a new injected `Clock` trait (`clock.rs`:
+`SystemClock` default, `ManualClock` for deterministic tests,
+`MemoryEngine::with_clock` — the same boundary-injection pattern as
+`apex-workflow`'s clock, so core ranking stays a pure function of its inputs;
+`remember_document` reads the clock once so a parent and all its chunks share
+one creation instant). **Recency:** ranking now decays by real wall-clock age
+— `exp(-age_ms / half_life_ms)` with `MemoryType::half_life_ms()` finally
+implementing [ranking §4](../../06-memory-engine/ranking.md)'s actual table
+(Conversation 2 *days*, Workflow 14, Episodic 90; the old code had repurposed
+those numbers as "sequence units"). The seq-distance proxy survives only as
+the fallback for legacy records with `created_ms == 0`, so a pre-existing
+store keeps ranking sensibly instead of every old record decaying to ~0;
+`rank()` takes `now_ms`, read once per query at the boundary. **Filters:**
+`MemoryQuery` gained `created_after`/`created_before` (epoch ms, both
+inclusive) and `max_importance` (completing the numeric range on the record's
+one numeric metadata field — records carry no arbitrary numeric metadata map,
+so "numeric-range" is deliberately scoped to importance). A legacy record is
+excluded whenever either time bound is set: an unknown creation time cannot be
+placed inside a window (fail-closed), documented on the field. **Tiered
+backend:** migration `V3__created_ms.sql` (+ `put`/`row_to_record` column
+wiring). **Acceptance:**
+`engine::tests::recency_uses_wall_clock_age` (a `ManualClock` advanced exactly
+one half-life → `breakdown.recency ≈ e⁻¹`, where the old seq proxy would read
+1.0 since the sole record is also the newest; advancing another half-life
+decays the *same* record to `e⁻²` — recency is a function of query-time clock,
+not insertions) and `time_range_filter_excludes_out_of_window_records`
+(records at t=1000/2000/3000 + a timestamp-less legacy record: a window keeps
+exactly the middle one, a lower bound alone keeps two and never the legacy
+record, bounds are inclusive), plus
+`legacy_records_fall_back_to_sequence_decay` and
+`max_importance_completes_the_numeric_range_filter` (incl. an empty
+min>max band matching nothing). `ranking.md` →1.1.0 records that §4 is now
+implemented as written. Not yet surfaced: the server's `memory:query`
+route/CLI don't expose the new filters (`MemoryQuery` fields are
+engine-level), and `record_json` doesn't return `created_ms` — API/SDK wiring
+is a follow-on, consistent with the rest of WS-C. **This closes WS-C
+(RAG-201..205) entirely.**
 
 ---
 
@@ -817,3 +857,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.7.0 | 2026-07-13 | RAG-202 (re-ranking stage) implemented and marked DONE with implementation notes |
 | 1.8.0 | 2026-07-13 | RAG-203 (semantic-cache context compatibility + embedding-model stamping) implemented and marked DONE with implementation notes |
 | 1.9.0 | 2026-07-13 | RAG-204 (BM25 + light stemming for the in-process keyword branch) implemented and marked DONE with implementation notes |
+| 1.10.0 | 2026-07-13 | RAG-205 (real timestamps + range/time metadata filters) implemented and marked DONE with implementation notes — all of WS-C (Memory & RAG) is now done |

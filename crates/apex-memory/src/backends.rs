@@ -155,6 +155,7 @@ impl PostgresStore {
             sensitive: row.get("sensitive"),
             parent_id: row.get("parent_id"),
             is_parent: row.get("is_parent"),
+            created_ms: row.get::<_, i64>("created_ms") as u64,
             seq: row.get::<_, i64>("seq") as u64,
         }
     }
@@ -173,8 +174,8 @@ impl MemoryStore for PostgresStore {
         self.client
             .execute(
                 "INSERT INTO memory_records
-                   (id, namespace, content, embedding, memory_type, importance, tags, required_scopes, sensitive, parent_id, is_parent, seq)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                   (id, namespace, content, embedding, memory_type, importance, tags, required_scopes, sensitive, parent_id, is_parent, created_ms, seq)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 &[
                     &id,
                     &record.namespace,
@@ -187,6 +188,7 @@ impl MemoryStore for PostgresStore {
                     &record.sensitive,
                     &record.parent_id,
                     &record.is_parent,
+                    &(record.created_ms as i64),
                     &seq,
                 ],
             )

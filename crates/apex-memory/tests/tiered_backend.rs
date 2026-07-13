@@ -93,6 +93,7 @@ fn rec(ns: &str, content: &str, embedding: Vec<f32>) -> MemoryRecord {
         sensitive: false,
         parent_id: None,
         is_parent: false,
+        created_ms: 0,
         seq: 0,
     }
 }

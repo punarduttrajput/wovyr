@@ -1,6 +1,7 @@
 //! The memory engine: ingestion, hybrid retrieval, and ranking.
 
 use crate::chunk::ChunkPolicy;
+use crate::clock::{Clock, SystemClock};
 use crate::record::{
     CompactionOutcome, CompactionPolicy, DocumentIngest, MemoryQuery, MemoryRecord, MemoryType,
     RetrievalStrategy, ScoreBreakdown, ScoredMemory,
@@ -34,6 +35,10 @@ pub struct MemoryEngine {
     rerank_top_n: usize,
     /// RRF smoothing constant used by hybrid fusion.
     rrf_k: f32,
+    /// Wall-clock source (RM-AIM-P2 RAG-205), read only at the boundaries:
+    /// ingestion stamps `created_ms`, a query reads "now" once for recency +
+    /// time filters. [`SystemClock`] by default; injectable for tests.
+    clock: Arc<dyn Clock>,
 }
 
 impl MemoryEngine {
@@ -45,7 +50,16 @@ impl MemoryEngine {
             reranker: None,
             rerank_top_n: DEFAULT_RERANK_TOP_N,
             rrf_k: DEFAULT_RRF_K,
+            clock: Arc::new(SystemClock),
         }
+    }
+
+    /// Inject a wall-clock source (RM-AIM-P2 RAG-205); tests use
+    /// [`ManualClock`](crate::ManualClock) for deterministic timestamps and
+    /// recency.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Attach a second-stage [`Reranker`] (RM-AIM-P2 RAG-202) applied to the
@@ -148,6 +162,7 @@ impl MemoryEngine {
             sensitive,
             parent_id: None,
             is_parent: false,
+            created_ms: self.clock.now_ms(),
             seq: 0,
         };
         self.store.put(record).await
@@ -202,6 +217,9 @@ impl MemoryEngine {
         }
 
         let importance = importance.clamp(0.0, 1.0);
+        // One clock read for the whole document: the parent and every chunk
+        // share a single creation instant.
+        let created_ms = self.clock.now_ms();
         // The parent holds the verbatim document with no embedding: it is
         // excluded from retrieval by construction, so indexing its diluted
         // one-vector representation would only waste space (the tiered
@@ -220,6 +238,7 @@ impl MemoryEngine {
                 sensitive,
                 parent_id: None,
                 is_parent: true,
+                created_ms,
                 seq: 0,
             })
             .await?;
@@ -241,6 +260,7 @@ impl MemoryEngine {
                     sensitive,
                     parent_id: Some(parent_id.clone()),
                     is_parent: false,
+                    created_ms,
                     seq: 0,
                 })
                 .await?;
@@ -358,7 +378,8 @@ impl MemoryEngine {
             self.apply_rerank(q, &records, &mut relevance).await;
         }
         // Stage 3: weighted ranking (+ optional MMR), then parent expansion.
-        let mut results = rank(records, &relevance, q);
+        // One clock read for the whole ranking pass (RAG-205).
+        let mut results = rank(records, &relevance, q, self.clock.now_ms());
         if q.expand_parents {
             self.attach_parents(&mut results, q).await?;
         }
@@ -665,13 +686,25 @@ fn reciprocal_rank_fusion(lists: &[Vec<String>], k: f32) -> HashMap<String, f32>
     fused
 }
 
-/// Whether a record passes the query's metadata filters (importance + tags) and the
-/// ABAC access policy. Parent-document records (RAG-201) never pass: they exist
-/// only for [`MemoryQuery::expand_parents`] expansion — their chunks are the
-/// retrieval units.
+/// Whether a record passes the query's metadata filters (importance range +
+/// tags + creation-time window, RM-AIM-P2 RAG-205) and the ABAC access policy.
+/// Parent-document records (RAG-201) never pass: they exist only for
+/// [`MemoryQuery::expand_parents`] expansion — their chunks are the retrieval
+/// units. A legacy record without a timestamp (`created_ms == 0`) is excluded
+/// whenever either time bound is set: an unknown creation time cannot be
+/// placed inside a window (fail-closed).
 fn passes_filters(r: &MemoryRecord, q: &MemoryQuery) -> bool {
+    let in_time_window = if q.created_after.is_some() || q.created_before.is_some() {
+        r.created_ms > 0
+            && q.created_after.is_none_or(|t| r.created_ms >= t)
+            && q.created_before.is_none_or(|t| r.created_ms <= t)
+    } else {
+        true
+    };
     !r.is_parent
         && r.importance >= q.min_importance
+        && q.max_importance.is_none_or(|m| r.importance <= m)
+        && in_time_window
         && (q.tags.is_empty() || q.tags.iter().any(|t| r.tags.contains(t)))
         && abac_allows(r, q)
 }
@@ -696,17 +729,19 @@ fn abac_allows(r: &MemoryRecord, q: &MemoryQuery) -> bool {
 /// Apply the weighted ranker (relevance + recency + importance) to `records` and
 /// return them best-first, truncated to the query limit. When `q.diversity > 0`,
 /// the final selection is diversified with MMR ([ranking §7](../../docs/06-memory-engine/ranking.md)).
+/// `now_ms` is the query-boundary clock reading recency ages against (RAG-205).
 fn rank(
     records: Vec<MemoryRecord>,
     relevance: &HashMap<String, f32>,
     q: &MemoryQuery,
+    now_ms: u64,
 ) -> Vec<ScoredMemory> {
     let max_seq = records.iter().map(|r| r.seq).max().unwrap_or(0);
     let mut scored: Vec<ScoredMemory> = records
         .into_iter()
         .map(|r| {
             let rel = relevance.get(&r.id).copied().unwrap_or(0.0);
-            let rec = recency_decay(max_seq.saturating_sub(r.seq), r.memory_type);
+            let rec = recency(&r, max_seq, now_ms);
             let imp = r.importance;
             let total =
                 q.weights.relevance * rel + q.weights.recency * rec + q.weights.importance * imp;
@@ -781,8 +816,32 @@ fn normalize(hits: Vec<(String, f32)>) -> HashMap<String, f32> {
         .collect()
 }
 
-/// Exponential recency decay using sequence distance as a deterministic age proxy.
-fn recency_decay(age: u64, memory_type: MemoryType) -> f32 {
+/// Recency factor for a record (RM-AIM-P2 RAG-205): **wall-clock age** against
+/// `now_ms` for records carrying a real `created_ms`, with the pre-RAG-205
+/// sequence-distance proxy as the fallback for legacy records stored before
+/// timestamps existed (`created_ms == 0`) — so an old store keeps ranking
+/// sensibly instead of every legacy record decaying to ~0.
+fn recency(r: &MemoryRecord, max_seq: u64, now_ms: u64) -> f32 {
+    if r.created_ms > 0 {
+        recency_decay_ms(now_ms.saturating_sub(r.created_ms), r.memory_type)
+    } else {
+        recency_decay_seq(max_seq.saturating_sub(r.seq), r.memory_type)
+    }
+}
+
+/// Exponential recency decay over wall-clock age
+/// ([ranking §4](../../docs/06-memory-engine/ranking.md): `exp(-age / half_life)`,
+/// half-lives of 2/14/90 days by memory type).
+fn recency_decay_ms(age_ms: u64, memory_type: MemoryType) -> f32 {
+    match memory_type.half_life_ms() {
+        None => 1.0, // semantic facts do not decay
+        Some(half_life) => (-(age_ms as f32) / half_life).exp(),
+    }
+}
+
+/// Exponential recency decay using sequence distance as the age proxy — the
+/// legacy path for records without a creation timestamp.
+fn recency_decay_seq(age: u64, memory_type: MemoryType) -> f32 {
     match memory_type.half_life() {
         None => 1.0, // semantic facts do not decay
         Some(half_life) => (-(age as f32) / half_life).exp(),
@@ -940,13 +999,14 @@ mod tests {
             namespace: "kb".to_string(),
             content: id.to_string(),
             embedding,
-            memory_type: MemoryType::Semantic, // recency_decay == 1.0 (no decay)
+            memory_type: MemoryType::Semantic, // recency == 1.0 (no decay)
             importance: 0.0,
             tags: Vec::new(),
             required_scopes: Vec::new(),
             sensitive: false,
             parent_id: None,
             is_parent: false,
+            created_ms: 0,
             seq: 0,
         }
     }
@@ -1020,12 +1080,12 @@ mod tests {
         };
 
         // Default (diversity 0): pure relevance keeps the near-duplicate b.
-        let base = rank(records.clone(), &relevance, &q);
+        let base = rank(records.clone(), &relevance, &q, 0);
         assert_eq!(ids(&base), vec!["a", "b"]);
 
         // Diversity on: the orthogonal c displaces the near-duplicate b.
         q.diversity = 0.6;
-        let diversified = rank(records, &relevance, &q);
+        let diversified = rank(records, &relevance, &q, 0);
         assert_eq!(ids(&diversified), vec!["a", "c"]);
     }
 
@@ -1320,6 +1380,147 @@ mod tests {
             outcome.compacted, 0,
             "parents and chunks must be excluded from compaction"
         );
+    }
+
+    // --- Wall-clock recency + time/range filters (RM-AIM-P2 RAG-205) -----------
+
+    use crate::clock::ManualClock;
+
+    fn clocked_engine(clock: Arc<ManualClock>) -> MemoryEngine {
+        let gateway = Gateway::new(Box::new(MockProvider::new()));
+        MemoryEngine::new(gateway, Arc::new(InMemoryStore::new())).with_clock(clock)
+    }
+
+    /// RAG-205 acceptance (recency half): recency decays by **wall-clock age**,
+    /// not sequence distance. One conversation record, queried exactly one
+    /// half-life (2 days) after creation: wall-clock decay gives e⁻¹ ≈ 0.368,
+    /// while the old seq proxy would give exp(0) = 1.0 (it is the only — and
+    /// therefore newest — record).
+    #[tokio::test]
+    async fn recency_uses_wall_clock_age() {
+        let clock = Arc::new(ManualClock::new(1_000_000));
+        let eng = clocked_engine(clock.clone());
+        eng.remember("kb", "meeting note", MemoryType::Conversation, 0.5, vec![])
+            .await
+            .unwrap();
+
+        const TWO_DAYS_MS: u64 = 2 * 86_400_000;
+        clock.advance(TWO_DAYS_MS);
+
+        let mut q = MemoryQuery::new("meeting note");
+        q.namespace = Some("kb".into());
+        let results = eng.query(&q).await.unwrap();
+        let rec = results[0].breakdown.recency;
+        assert!(
+            (rec - (-1.0_f32).exp()).abs() < 1e-3,
+            "one half-life of wall-clock age must decay to e^-1 ≈ 0.368, got {rec}"
+        );
+
+        // A fresh query instant later: the same record decays further —
+        // recency is a function of the query-time clock, not of insertions.
+        clock.advance(TWO_DAYS_MS);
+        let older = eng.query(&q).await.unwrap()[0].breakdown.recency;
+        assert!(
+            (older - (-2.0_f32).exp()).abs() < 1e-3,
+            "two half-lives must decay to e^-2, got {older}"
+        );
+    }
+
+    /// Legacy records without a timestamp keep the old sequence-distance decay
+    /// instead of collapsing to ~0 wall-clock recency.
+    #[test]
+    fn legacy_records_fall_back_to_sequence_decay() {
+        let mut legacy = rec("old", vec![1.0]);
+        legacy.memory_type = MemoryType::Conversation;
+        legacy.seq = 3; // max_seq 5 → age 2 seq units = one half-life
+        assert!(
+            (recency(&legacy, 5, u64::MAX) - (-1.0_f32).exp()).abs() < 1e-6,
+            "created_ms == 0 must use the seq proxy regardless of the clock"
+        );
+
+        let mut stamped = legacy.clone();
+        stamped.created_ms = 1_000;
+        assert!(
+            recency(&stamped, 5, 1_000) > 0.999,
+            "a just-created stamped record is fully recent"
+        );
+    }
+
+    /// RAG-205 acceptance (filter half): a time-range filter excludes
+    /// out-of-window records, and a legacy record (unknown creation time) is
+    /// excluded whenever a bound is set.
+    #[tokio::test]
+    async fn time_range_filter_excludes_out_of_window_records() {
+        let clock = Arc::new(ManualClock::new(1_000));
+        let eng = clocked_engine(clock.clone());
+        eng.remember("kb", "early note", MemoryType::Semantic, 0.5, vec![])
+            .await
+            .unwrap();
+        clock.set(2_000);
+        eng.remember("kb", "middle note", MemoryType::Semantic, 0.5, vec![])
+            .await
+            .unwrap();
+        clock.set(3_000);
+        eng.remember("kb", "late note", MemoryType::Semantic, 0.5, vec![])
+            .await
+            .unwrap();
+        // A legacy record with no timestamp, written around the store directly.
+        let mut legacy = rec("ignored", vec![1.0]);
+        legacy.content = "legacy note".into();
+        eng.store.put(legacy).await.unwrap();
+
+        let mut q = MemoryQuery::new("note");
+        q.namespace = Some("kb".into());
+
+        // No bounds: everything (incl. the legacy record) is retrievable.
+        assert_eq!(eng.query(&q).await.unwrap().len(), 4);
+
+        // A window around t=2000 keeps exactly the middle record.
+        q.created_after = Some(1_500);
+        q.created_before = Some(2_500);
+        let windowed = eng.query(&q).await.unwrap();
+        assert_eq!(windowed.len(), 1);
+        assert_eq!(windowed[0].record.content, "middle note");
+
+        // A lower bound alone: middle + late, never the legacy unknown.
+        q.created_before = None;
+        let after: Vec<String> = eng
+            .query(&q)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.record.content)
+            .collect();
+        assert_eq!(after.len(), 2);
+        assert!(after.contains(&"middle note".to_string()));
+        assert!(after.contains(&"late note".to_string()));
+
+        // Bounds are inclusive on both ends.
+        q.created_after = Some(2_000);
+        q.created_before = Some(2_000);
+        assert_eq!(eng.query(&q).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn max_importance_completes_the_numeric_range_filter() {
+        let eng = engine();
+        eng.remember("kb", "minor trivia", MemoryType::Semantic, 0.2, vec![])
+            .await
+            .unwrap();
+        eng.remember("kb", "major policy", MemoryType::Semantic, 0.9, vec![])
+            .await
+            .unwrap();
+
+        let mut q = MemoryQuery::new("note");
+        q.namespace = Some("kb".into());
+        q.max_importance = Some(0.5);
+        let results = eng.query(&q).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].record.content, "minor trivia");
+
+        // Combined with the existing lower bound: an empty band matches nothing.
+        q.min_importance = 0.3;
+        assert!(eng.query(&q).await.unwrap().is_empty());
     }
 
     // --- BM25 keyword relevance (RM-AIM-P2 RAG-204) ----------------------------

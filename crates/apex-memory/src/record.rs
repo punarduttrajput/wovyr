@@ -19,9 +19,24 @@ pub enum MemoryType {
 }
 
 impl MemoryType {
+    /// Recency half-life in **wall-clock milliseconds** per
+    /// [ranking §4](../../docs/06-memory-engine/ranking.md)'s table
+    /// (Conversation 2 days, Workflow 14 days, Episodic 90 days); `None`
+    /// means no decay (semantic). Used for records carrying a real
+    /// [`MemoryRecord::created_ms`] (RM-AIM-P2 RAG-205).
+    pub fn half_life_ms(self) -> Option<f32> {
+        const DAY_MS: f32 = 86_400_000.0;
+        match self {
+            MemoryType::Conversation => Some(2.0 * DAY_MS),
+            MemoryType::Workflow => Some(14.0 * DAY_MS),
+            MemoryType::Episodic => Some(90.0 * DAY_MS),
+            MemoryType::Semantic => None,
+        }
+    }
+
     /// Recency half-life in sequence units; `None` means no decay (semantic).
-    /// Sequence distance is used as a deterministic proxy for age
-    /// ([determinism §11](../../docs/06-memory-engine/retrieval.md)).
+    /// The pre-RAG-205 age proxy, kept as the fallback for legacy records
+    /// stored without a creation timestamp (`created_ms == 0`).
     pub fn half_life(self) -> Option<f32> {
         match self {
             MemoryType::Conversation => Some(2.0),
@@ -73,7 +88,17 @@ pub struct MemoryRecord {
     /// exactly the diluted representation chunking exists to avoid).
     #[serde(default)]
     pub is_parent: bool,
-    /// Monotonic insertion sequence (assigned by the store; used for recency).
+    /// Creation time in epoch milliseconds (RM-AIM-P2 RAG-205), stamped by the
+    /// engine at ingestion from its injected [`Clock`](crate::Clock) — the
+    /// clock-free-core rule: time is read at the boundary, never ambiently.
+    /// `0` marks a legacy record written before timestamps existed: recency
+    /// falls back to sequence distance for it, and it is excluded from any
+    /// time-range-filtered query (an unknown time can't be placed in a
+    /// window — fail-closed).
+    #[serde(default)]
+    pub created_ms: u64,
+    /// Monotonic insertion sequence (assigned by the store; used as the
+    /// recency fallback for legacy records without `created_ms`).
     #[serde(default)]
     pub seq: u64,
 }
@@ -144,6 +169,17 @@ pub struct MemoryQuery {
     pub tags: Vec<String>,
     /// Minimum importance.
     pub min_importance: f32,
+    /// Maximum importance (inclusive; no upper bound if `None`) — completes
+    /// the numeric range on the record's one numeric metadata field
+    /// (RM-AIM-P2 RAG-205).
+    pub max_importance: Option<f32>,
+    /// Only records created at or after this epoch-milliseconds instant
+    /// (inclusive). Legacy records without a timestamp (`created_ms == 0`)
+    /// are excluded whenever either time bound is set.
+    pub created_after: Option<u64>,
+    /// Only records created at or before this epoch-milliseconds instant
+    /// (inclusive). Same legacy-record exclusion as [`Self::created_after`].
+    pub created_before: Option<u64>,
     /// Ranking weights.
     pub weights: RankingWeights,
     /// Result diversification in `[0,1]` via MMR ([ranking §7](../../docs/06-memory-engine/ranking.md)):
@@ -172,6 +208,9 @@ impl MemoryQuery {
             limit: 5,
             tags: Vec::new(),
             min_importance: 0.0,
+            max_importance: None,
+            created_after: None,
+            created_before: None,
             weights: RankingWeights::default(),
             diversity: 0.0,
             access: None,
