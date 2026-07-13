@@ -100,6 +100,7 @@ jobs:
           cargo test -p apex-eval --test regression_detection -- --nocapture
           cargo test -p apex-eval --test multi_agent_vs_single_agent -- --nocapture
           cargo test -p apex-eval --test llm_judge_scoring -- --nocapture
+          cargo test -p apex-eval --test rag_eval -- --nocapture
       - name: Upload eval artifacts (EVL-202)
         if: always()
         uses: actions/upload-artifact@v4

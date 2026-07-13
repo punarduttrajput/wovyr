@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.12.0
-**Status:** In progress — WS-B (PRV-201..205) and WS-C (RAG-201..205) fully done; EVL-201, EVL-202 done
+**Version:** 1.13.0
+**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), and WS-D (EVL-201..203) fully done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -730,9 +730,9 @@ fail-closed parsing, and zero-vs-flaky variance. Cost rides in every
 persisted report via `CaseResult.usage`/`EvalReport.usage` (PRV-101's
 accounting — already present, now persisted per CI run). Deferred: trend
 comparison across historical artifacts (needs storage beyond per-run
-artifacts) and telemetry — EVL-203 covers the RAG/max_steps eval path next.
+artifacts) and telemetry — EVL-203 (below) covers the RAG/max_steps eval path.
 
-## EVL-203 `[P2]` — Evaluate the RAG path + `max_steps` + retrieval metrics
+## EVL-203 `[P2]` — Evaluate the RAG path + `max_steps` + retrieval metrics — **DONE (2026-07-13)**
 
 **Problem.** `run_suite` calls `run_agent` with a bare `RunOptions::new`, ignoring
 memory grounding and `spec.max_steps` (`crates/apex-eval/src/runner.rs:27-29`); no
@@ -747,6 +747,37 @@ labeled relevant set.
 
 **Files.** `crates/apex-eval/src/runner.rs` + new retrieval-eval module. **Size.** M.
 **Depends on:** AIC-103, RAG-201.
+
+**Implementation notes (2026-07-13).** `run_suite_with_memory` (new, `runner.rs`)
+drives `apex_agent::run_agent_with_memory` instead of the bare `run_agent`, so a
+suite grades the retrieval-grounded agent a deployment actually runs; both
+entry points now funnel through a shared `run_cases` so `spec.max_steps` is
+honored on every runner path (AIC-103 already applies it inside the loop
+itself — this just proves it end to end at the harness level, via
+`the_eval_runner_honors_the_manifest_step_budget`, a tool-hungry scripted
+provider capped at 2 steps). New `retrieval.rs` module: `RankedRetriever`
+trait (`rank(query) -> Vec<id>`), a labeled `RetrievalSuite`/`RetrievalCase`
+YAML fixture (`relevant: [ids]`, per-suite `k`), and pure metric functions
+(`recall_at_k`, `reciprocal_rank`, `ndcg_at_k` with an ideal-DCG normalizer
+that accounts for `k` smaller than the relevant set) aggregated by
+`evaluate_retrieval` into a `RetrievalReport` (per-case + mean recall/MRR).
+Proven against the **real** `apex-memory` engine (not a mock), via a
+dev-only dependency on `apex-memory` (the library spine stays memory-free —
+same stance as the CLI owning its own engine adapter): `tests/rag_eval.rs`
+seeds a real `MemoryEngine`/`InMemoryStore` with two refund facts + two
+distractors, and drives both halves — `memory_grounded_suite_passes_where_
+the_memoryless_run_fails` (the memoryless path scores 0%, the
+`EngineRetriever`-grounded RAG path scores 100%, over a `GroundedProvider`
+that only answers correctly when its prompt actually contains the retrieved
+fact) and `retrieval_metrics_grade_the_real_engine_against_labeled_fixtures`
+(BM25 puts both refund docs in the top 2, so recall@2/MRR/nDCG are all
+exact 1.0; a harder single-relevant-doc case proves a doc found-but-not-
+ranked-first case yields `0 < MRR < 1` and `0 < nDCG < 1`, not a degenerate
+0/1). All 3 `rag_eval.rs` tests + 5 new `retrieval::tests` unit tests pass;
+CI's eval step now also runs `rag_eval.rs` explicitly (`ci.yml`), and
+`Cargo.toml`'s crate description was updated to drop the stale "not yet
+wired into CI" framing EVL-201/202 had already made untrue. This closes out
+**WS-D (Evaluation) entirely** — EVL-201/202/203 all done.
 
 ---
 
