@@ -81,14 +81,20 @@ impl OpenAiProvider {
                     .tools
                     .iter()
                     .map(|t| {
-                        json!({
-                            "type": "function",
-                            "function": {
-                                "name": t.name,
-                                "description": t.description,
-                                "parameters": t.parameters,
-                            },
-                        })
+                        // A strict tool gets the normalized schema subset +
+                        // the vendor strict flag (PRV-203); a non-strict one
+                        // is forwarded verbatim so real constraints
+                        // (`minimum`, `format`, …) aren't discarded.
+                        let mut function = json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        });
+                        if t.strict {
+                            function["parameters"] = crate::schema::normalize_strict(&t.parameters);
+                            function["strict"] = json!(true);
+                        }
+                        json!({ "type": "function", "function": function })
                     })
                     .collect(),
             );
@@ -640,6 +646,40 @@ mod tests {
         assert!(v["content"].is_null());
         assert_eq!(v["tool_calls"][0]["type"], "function");
         assert_eq!(v["tool_calls"][0]["function"]["name"], "echo");
+    }
+
+    #[test]
+    fn strict_tool_emits_strict_flag_and_normalized_schema() {
+        use crate::types::ToolSpec;
+        let mut req = ChatRequest::new("m", vec![Message::user("hi")]);
+        req.tools = vec![ToolSpec {
+            name: "calc".to_string(),
+            description: "arithmetic".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": { "n": { "type": "integer", "minimum": 0 } }
+            }),
+            strict: true,
+        }];
+        let body = OpenAiProvider::request_body(&req);
+        let function = &body["tools"][0]["function"];
+        assert_eq!(function["strict"], json!(true));
+        assert_eq!(
+            function["parameters"]["properties"]["n"],
+            json!({ "type": "integer" })
+        );
+        assert_eq!(function["parameters"]["additionalProperties"], json!(false));
+        assert_eq!(function["parameters"]["required"], json!(["n"]));
+
+        // Non-strict: schema forwarded verbatim, no strict flag.
+        req.tools[0].strict = false;
+        let body = OpenAiProvider::request_body(&req);
+        let function = &body["tools"][0]["function"];
+        assert!(function.get("strict").is_none());
+        assert_eq!(
+            function["parameters"]["properties"]["n"]["minimum"],
+            json!(0)
+        );
     }
 
     #[test]

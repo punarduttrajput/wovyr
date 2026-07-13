@@ -489,3 +489,149 @@ async fn unrestricted_tools_escape_hatch_restores_old_behavior_for_hosted_runs()
         capture.events
     );
 }
+
+/// A tool that records every parameters value it is invoked with, so tests can
+/// assert exactly what (if anything) reached it.
+struct ArgsRecordingTool {
+    invocations: Arc<Mutex<Vec<Value>>>,
+}
+
+#[async_trait]
+impl Tool for ArgsRecordingTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new("argrec", "1.0.0", "test", "records its arguments")
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &ToolContext,
+        request: ToolRequest,
+    ) -> std::result::Result<ToolResponse, ToolError> {
+        self.invocations.lock().unwrap().push(request.parameters);
+        Ok(ToolResponse::success(json!({ "ok": true })))
+    }
+}
+
+/// A provider whose first turn calls `argrec` with the given argument string,
+/// then answers with whatever the tool result said (so tests can observe the
+/// exact text the model was shown).
+struct FixedArgsProvider {
+    arguments: &'static str,
+}
+
+#[async_trait]
+impl AIProvider for FixedArgsProvider {
+    fn name(&self) -> &str {
+        "scripted"
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+        if let Some(tool_msg) = request.messages.iter().rev().find(|m| m.role == Role::Tool) {
+            let observed = tool_msg.content.clone().unwrap_or_default();
+            return Ok(ChatResponse {
+                message: Message::assistant(format!("model saw: {observed}")),
+                model: request.model,
+                usage: Usage::new(1, 1, 0.0),
+                finish_reason: "stop".to_string(),
+            });
+        }
+        Ok(ChatResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "argrec".to_string(),
+                    arguments: self.arguments.to_string(),
+                }],
+                tool_call_id: None,
+                name: None,
+            },
+            model: request.model,
+            usage: Usage::new(1, 0, 0.0),
+            finish_reason: "tool_calls".to_string(),
+        })
+    }
+}
+
+fn argrec_agent() -> AgentDefinition {
+    AgentDefinition::from_yaml(
+        "metadata:\n  name: tooler\nspec:\n  instructions: Use tools.\n  tools: [argrec]\n",
+    )
+    .unwrap()
+}
+
+/// PRV-203 acceptance: malformed tool arguments produce a model-visible error
+/// turn — the tool is never invoked (previously it silently received `null`).
+#[tokio::test]
+async fn malformed_tool_arguments_surface_as_a_model_visible_error_turn() {
+    let invocations = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ArgsRecordingTool {
+        invocations: invocations.clone(),
+    }));
+    let gateway = Gateway::new(Box::new(FixedArgsProvider {
+        arguments: "{\"ping\": pong", // not JSON
+    }));
+
+    let mut capture = Capture::default();
+    let out = run_agent(
+        &argrec_agent(),
+        &gateway,
+        &registry,
+        RunOptions::new(json!({})),
+        &mut capture,
+    )
+    .await
+    .unwrap();
+
+    // The tool never executed — no null-arg (or any) invocation happened.
+    assert!(
+        invocations.lock().unwrap().is_empty(),
+        "tool must not run on malformed arguments"
+    );
+    // The parse failure was fed back to the model as the tool-result turn, and
+    // the model (scripted to echo what it saw) demonstrably read it.
+    assert!(
+        out.text.contains("not valid JSON"),
+        "model must see the arg-parse error, got: {}",
+        out.text
+    );
+    assert!(
+        capture
+            .events
+            .iter()
+            .any(|e| e == "toolresult:argrec:false"),
+        "the error turn surfaces as a failed tool result: {:?}",
+        capture.events
+    );
+}
+
+/// Companion guard: an *empty* argument string is the conventional no-arg call
+/// — it still invokes the tool, with `{}`, not an error and not `null`.
+#[tokio::test]
+async fn empty_tool_arguments_invoke_with_an_empty_object() {
+    let invocations = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ArgsRecordingTool {
+        invocations: invocations.clone(),
+    }));
+    let gateway = Gateway::new(Box::new(FixedArgsProvider { arguments: "" }));
+
+    let out = run_agent(
+        &argrec_agent(),
+        &gateway,
+        &registry,
+        RunOptions::new(json!({})),
+        &mut Capture::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*invocations.lock().unwrap(), vec![json!({})]);
+    assert!(out.text.starts_with("model saw:"));
+}

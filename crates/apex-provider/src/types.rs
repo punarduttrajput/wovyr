@@ -102,6 +102,13 @@ pub struct ToolSpec {
     pub description: String,
     /// JSON Schema for the tool's parameters.
     pub parameters: serde_json::Value,
+    /// Request vendor strict/guaranteed argument validation (RM-AIM-P2
+    /// PRV-203). When set, providers normalize `parameters` into the
+    /// strict-mode schema subset (unsupported keywords stripped, objects
+    /// closed, every property required) and flag the tool `strict` on the
+    /// wire; when unset (the default) the schema is forwarded verbatim.
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// Constraint on the model's tool selection for a turn (RM-AIM-P2 PRV-202).

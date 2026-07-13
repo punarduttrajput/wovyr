@@ -123,11 +123,19 @@ impl AnthropicProvider {
                 .tools
                 .iter()
                 .map(|t| {
-                    json!({
+                    // A strict tool gets the normalized schema subset + the
+                    // top-level strict flag (PRV-203); a non-strict one is
+                    // forwarded verbatim so real constraints aren't discarded.
+                    let mut tool = json!({
                         "name": t.name,
                         "description": t.description,
                         "input_schema": t.parameters,
-                    })
+                    });
+                    if t.strict {
+                        tool["input_schema"] = crate::schema::normalize_strict(&t.parameters);
+                        tool["strict"] = json!(true);
+                    }
+                    tool
                 })
                 .collect();
             if self.prompt_caching
@@ -655,6 +663,7 @@ mod tests {
             name: "calc".to_string(),
             description: "arithmetic".to_string(),
             parameters: json!({ "type": "object", "properties": { "expr": { "type": "string" } } }),
+            strict: false,
         }];
         req
     }
@@ -699,6 +708,40 @@ mod tests {
         let mut req = ChatRequest::new("m", vec![Message::user("hi")]);
         req.max_tokens = Some(99);
         assert_eq!(provider().request_body(&req).unwrap()["max_tokens"], 99);
+    }
+
+    #[test]
+    fn strict_tool_emits_strict_flag_and_normalized_input_schema() {
+        let mut req = request_with_tools();
+        req.tools[0].strict = true;
+        req.tools[0].parameters = json!({
+            "type": "object",
+            "properties": { "expr": { "type": "string", "maxLength": 80 } }
+        });
+        let body = provider().request_body(&req).unwrap();
+        assert_eq!(body["tools"][0]["strict"], json!(true));
+        assert_eq!(
+            body["tools"][0]["input_schema"]["properties"]["expr"],
+            json!({ "type": "string" })
+        );
+        assert_eq!(
+            body["tools"][0]["input_schema"]["additionalProperties"],
+            json!(false)
+        );
+        assert_eq!(
+            body["tools"][0]["input_schema"]["required"],
+            json!(["expr"])
+        );
+        // The prompt-caching breakpoint still lands on the (strict) last tool.
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+        // Non-strict stays verbatim (no strict flag, keywords intact).
+        req.tools[0].strict = false;
+        let body = provider().request_body(&req).unwrap();
+        assert!(body["tools"][0].get("strict").is_none());
+        assert_eq!(
+            body["tools"][0]["input_schema"]["properties"]["expr"]["maxLength"],
+            json!(80)
+        );
     }
 
     #[test]

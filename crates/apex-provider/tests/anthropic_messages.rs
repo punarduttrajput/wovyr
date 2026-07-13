@@ -77,6 +77,7 @@ fn calc_tool() -> ToolSpec {
             "properties": { "expr": { "type": "string" } },
             "required": ["expr"]
         }),
+        strict: false,
     }
 }
 

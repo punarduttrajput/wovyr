@@ -22,6 +22,7 @@ mod provider;
 #[cfg(feature = "redis")]
 mod redis_breaker;
 mod resilience;
+mod schema;
 #[cfg(feature = "qdrant")]
 mod semantic_qdrant;
 mod tokenizer;

@@ -263,6 +263,7 @@ mod tests {
                 "properties": { "place": { "type": "string" } },
                 "required": ["place"],
             }),
+            strict: false,
         }
     }
 

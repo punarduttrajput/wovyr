@@ -177,6 +177,7 @@ fn resolve_tools(def: &AgentDefinition, registry: &ToolRegistry) -> Result<Vec<T
             name: meta.id,
             description: meta.description,
             parameters: tool.input_schema(),
+            strict: false,
         });
     }
     Ok(specs)
@@ -419,7 +420,29 @@ async fn execute_tool_call(
         }
     };
 
-    let parameters: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+    // Malformed arguments are a *model* error, and the model is who can fix
+    // them: feed the parse failure back as the tool result instead of silently
+    // invoking the tool with `null` (RM-AIM-P2 PRV-203 — the old behavior made
+    // the tool fail on an input it never should have seen, or worse, succeed
+    // with defaults). An empty string is the conventional no-argument call
+    // (providers normalize it to `{}`), not an error.
+    let parameters: Value = if call.arguments.trim().is_empty() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        match serde_json::from_str(&call.arguments) {
+            Ok(v) => v,
+            Err(e) => {
+                return ToolOutcome {
+                    result_text: format!(
+                        "error: the arguments for tool `{}` are not valid JSON ({e}). \
+                         Re-issue the tool call with well-formed JSON arguments.",
+                        call.name
+                    ),
+                    ok: false,
+                };
+            }
+        }
+    };
     // Deterministic execution id: no clocks or randomness in core logic. The agent's
     // declared `permissions` (if any) form the grant set enforced against each tool.
     // Absent (`None`) is unrestricted for an unhosted (CLI/local/eval) run — back-compat

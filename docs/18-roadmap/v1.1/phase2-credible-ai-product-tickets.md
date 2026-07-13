@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.2.0
-**Status:** In progress — PRV-201, PRV-202 done
+**Version:** 1.3.0
+**Status:** In progress — PRV-201, PRV-202, PRV-203 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -163,7 +163,7 @@ as are Anthropic's (`encodes_tool_choice_variants`/
 manifest/YAML DSL — callers set the fields programmatically; manifest wiring
 can ride a later slice (e.g. SAF-202's prompt registry) once a consumer needs it.
 
-## PRV-203 `[P2]` — Tool-schema normalization + surfaced arg-parse errors
+## PRV-203 `[P2]` — Tool-schema normalization + surfaced arg-parse errors — **DONE (2026-07-13)**
 
 **Problem.** Tool `parameters` JSON is forwarded verbatim to providers
 (`openai.rs:62-79`); no normalization/`strict` mode. Malformed tool arguments are
@@ -179,6 +179,48 @@ model-visible error turn (not a null-arg tool invocation).
 
 **Files.** `crates/apex-provider/src/openai.rs`, `crates/apex-agent/src/runtime.rs`.
 **Size.** M. **Depends on:** none.
+
+**Implementation notes (2026-07-13).** Two halves. **(1) Schema normalization:**
+new `apex-provider::schema` module with `normalize_strict(schema)` — a pure,
+recursive rewrite into the vendor strict-mode JSON-Schema subset: strips the
+keywords strict validators reject (`minimum`/`maximum`/`multipleOf`,
+`minLength`/`maxLength`/`pattern`/`format`, array/property bounds,
+`patternProperties`, `default`), recursing through `properties`/`items`/
+`anyOf`/`allOf`/`oneOf`/`not`/`if`/`then`/`else`/`$defs`/`definitions`, and
+closes every object node (`additionalProperties: false` + `required` listing
+every declared property, the OpenAI strict rule; Anthropic's is a compatible
+subset). Careful detail: property *names* that collide with keyword names
+(a property literally called `format`) survive — only keyword-position uses
+are stripped. Opt-in via a new `ToolSpec.strict: bool` (`#[serde(default)]`,
+back-compat): when set, `OpenAiProvider` emits `function.strict: true` +
+the normalized `parameters`, and `AnthropicProvider` emits top-level
+`strict: true` + the normalized `input_schema` (the prompt-caching breakpoint
+still lands on the last tool). Deliberately **not** applied to non-strict
+tools: providers ignore unknown keywords in normal mode but honor bounds like
+`minimum`, so unconditional stripping would silently discard real constraints.
+mistral.rs needs no normalization (its `Function.parameters` is passthrough
+and it has no strict mode). **(2) Surfaced arg-parse errors:**
+`execute_tool_call` (`crates/apex-agent/src/runtime.rs`) no longer swallows
+malformed tool arguments to `Value::Null` — a parse failure now returns a
+failed `ToolOutcome` whose text carries the serde error and an instruction to
+re-issue the call, which the existing loop feeds back as the tool-result turn,
+so the model sees and can correct it; the tool itself is never invoked. An
+*empty* argument string is the conventional no-arg call and still invokes the
+tool with `{}` (providers' stream accumulators already normalize empty to
+`"{}"`, but a scripted/foreign provider may not). **Acceptance:**
+`crates/apex-agent/tests/tool_loop.rs::malformed_tool_arguments_surface_as_a_model_visible_error_turn`
+drives the real `run_agent` loop with a recording tool and a scripted provider
+issuing `{"ping": pong` — asserts the tool never executed, the model's next
+turn observed the "not valid JSON" error text, and the sink saw a failed tool
+result; `empty_tool_arguments_invoke_with_an_empty_object` guards the no-arg
+convention. Schema normalization is covered by 5 `schema::tests` unit tests
+plus per-adapter wire-shape tests
+(`strict_tool_emits_strict_flag_and_normalized_schema` /
+`strict_tool_emits_strict_flag_and_normalized_input_schema`), and the
+`mistralrs` feature still compile-checks. Nothing sets `strict: true` on the
+run path yet — `resolve_tools` advertises registry tools non-strict;
+per-tool/manifest opt-in can ride a later slice once a consumer wants
+guaranteed argument shapes.
 
 ## PRV-204 `[P2]` — Multimodal content parts
 
@@ -535,3 +577,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.0.0 | 2026-07-09 | Initial Phase-2 tickets from PRD-004 / the 2026-07-09 engineering audit (credible-AI-product P1/P2 work) |
 | 1.1.0 | 2026-07-13 | PRV-201 (first-class `AnthropicProvider`) implemented and marked DONE with implementation notes |
 | 1.2.0 | 2026-07-13 | PRV-202 (structured output / forced tool) implemented and marked DONE with implementation notes |
+| 1.3.0 | 2026-07-13 | PRV-203 (tool-schema normalization + surfaced arg-parse errors) implemented and marked DONE with implementation notes |

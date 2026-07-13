@@ -60,7 +60,14 @@ v1.0 "GA hardening" (PRD-003, complete) and v1.1 "AI Platform Maturity" Phase 1
   (OpenAI `response_format` + `strict`, Anthropic `output_config.format` +
   `tool_choice`, mistral.rs `Constraint::JsonSchema` grammar + forced `Tool`);
   unsupported combinations fail closed as `Invalid`, and both fields joined the
-  gateway's exact + semantic cache keys.
+  gateway's exact + semantic cache keys. Tool-schema normalization + surfaced
+  arg-parse errors (PRV-203): opt-in `ToolSpec.strict` normalizes a tool's
+  schema into the vendor strict-mode subset (unsupported keywords stripped,
+  objects closed, all properties required) and flags it `strict` on the wire
+  (OpenAI + Anthropic); the agent loop no longer swallows malformed tool
+  arguments to `null` — the parse error is fed back to the model as a failed
+  tool-result turn so it can correct the call (an empty argument string still
+  invokes with `{}`).
 
 ## [0.3.0] — 2026-07-03
 
