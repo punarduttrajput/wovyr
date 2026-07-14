@@ -1464,6 +1464,13 @@ paths:
                     Max LLM tokens (prompt + completion) per rolling day
                     (SRV-202) — the vendor-bill-independent twin of
                     llm_cost_per_day_usd.
+                day_reset_offset_minutes:
+                  type: integer
+                  nullable: true
+                  description: >-
+                    Where this quota's daily budgets reset, in minutes east of
+                    UTC (SRV-203) — e.g. 330 resets at 00:00 IST, -300 at
+                    00:00 EST. Absent/null = UTC midnight. Clamped to ±1440.
       responses:
         '200':
           description: Updated quota

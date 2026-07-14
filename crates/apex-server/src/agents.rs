@@ -146,6 +146,7 @@ async fn run_async_inner(
         match run_agent(&def, &state2.gateway, &state2.registry, opts, &mut NullSink).await {
             Ok(out) => {
                 tenancy::record_run_usage(
+                    &state2.tenancy,
                     &state2.quota,
                     project.as_deref(),
                     out.usage.cost_usd,
@@ -310,6 +311,7 @@ pub(crate) async fn run_stream_handler(
         let frame = match run_agent(&def, &state.gateway, &state.registry, opts, &mut sink).await {
             Ok(out) => {
                 tenancy::record_run_usage(
+                    &state.tenancy,
                     &state.quota,
                     project.as_deref(),
                     out.usage.cost_usd,
@@ -364,6 +366,7 @@ async fn run_definition(
         }
     };
     tenancy::record_run_usage(
+        &state.tenancy,
         &state.quota,
         project,
         out.usage.cost_usd,

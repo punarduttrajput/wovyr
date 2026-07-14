@@ -91,6 +91,8 @@ export interface QuotaLimits {
   /** LLM tokens (prompt + completion) per rolling day (SRV-202). */
   llm_tokens_per_day?: number | null;
   concurrent_agent_runs?: number | null;
+  /** Daily-reset boundary in minutes east of UTC (SRV-203); empty = UTC midnight. */
+  day_reset_offset_minutes?: number | null;
 }
 
 export interface Webhook {

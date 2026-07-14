@@ -120,6 +120,7 @@ impl AgentResolver for StoredAgentResolver {
 
     fn record(&self, ctx: &ActivityContext, usage: &apex_common::Usage) {
         tenancy::record_run_usage(
+            &self.tenancy,
             &self.quota,
             Self::project(ctx),
             usage.cost_usd,

@@ -114,6 +114,7 @@
           <div class="field"><label>LLM cost / day (USD)</label><input type="number" step="0.01" [(ngModel)]="quota.llm_cost_per_day_usd" placeholder="unlimited" /></div>
           <div class="field"><label>LLM tokens / day</label><input type="number" [(ngModel)]="quota.llm_tokens_per_day" placeholder="unlimited" /></div>
           <div class="field"><label>Concurrent agent runs</label><input type="number" [(ngModel)]="quota.concurrent_agent_runs" placeholder="unlimited" /></div>
+          <div class="field"><label>Day reset offset (min east of UTC)</label><input type="number" [(ngModel)]="quota.day_reset_offset_minutes" placeholder="UTC midnight" /></div>
         </div>
         <div class="card-foot"><span class="muted mono mini">empty = unlimited</span><button class="btn pri" (click)="saveQuota()">Save quota</button></div>
       </div>

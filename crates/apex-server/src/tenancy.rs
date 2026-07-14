@@ -503,11 +503,18 @@ impl QuotaTracker {
     /// endpoint).
     #[cfg(test)]
     pub(crate) fn used_today(&self, project: &str) -> Option<(f64, u64)> {
+        self.used_on_day(project, current_day())
+    }
+
+    /// Like [`Self::used_today`] but for an explicit day bucket — lets a test
+    /// assert usage landed under a non-UTC reset boundary (SRV-203).
+    #[cfg(test)]
+    pub(crate) fn used_on_day(&self, project: &str, day: u64) -> Option<(f64, u64)> {
         let usage = self.usage.lock().expect("quota mutex poisoned");
         usage
             .cost
             .get(project)
-            .filter(|(day, _, _)| *day == current_day())
+            .filter(|(d, _, _)| *d == day)
             .map(|(_, usd, tokens)| (*usd, *tokens))
     }
 
@@ -532,13 +539,34 @@ impl QuotaTracker {
     }
 }
 
-/// The current rolling-day bucket (UTC days since the epoch). Wall-clock is read only
-/// here, at the server boundary — never in core engine logic.
-fn current_day() -> u64 {
-    std::time::SystemTime::now()
+/// The day bucket `epoch_secs` falls in for a reset boundary `offset_minutes`
+/// east of UTC (RM-AIM-P2 SRV-203) — pure, so the local-midnight boundary math is
+/// deterministically testable. `offset 0` = the original UTC days-since-epoch;
+/// `+330` (IST) makes the bucket flip at 00:00 IST instead of 00:00 UTC. The
+/// offset is clamped to ±24 h (real timezones span −12 h..+14 h), so a garbage
+/// stored value can't skew a budget window by more than a day.
+fn day_bucket(epoch_secs: u64, offset_minutes: i32) -> u64 {
+    let offset_secs = i64::from(offset_minutes.clamp(-1_440, 1_440)) * 60;
+    (epoch_secs as i64 + offset_secs).div_euclid(86_400).max(0) as u64
+}
+
+/// The current rolling-day bucket for a quota's configured reset boundary
+/// ([`QuotaLimits::day_reset_offset_minutes`], default UTC). Wall-clock is read
+/// only here, at the server boundary — never in core engine logic.
+fn current_day_with_offset(offset_minutes: i32) -> u64 {
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() / 86_400)
-        .unwrap_or(0)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    day_bucket(now, offset_minutes)
+}
+
+/// The current UTC day bucket — what a project with no configured offset uses.
+/// Only the test-only [`QuotaTracker::used_today`] still calls this directly;
+/// the enforcement path always goes through [`current_day_with_offset`].
+#[cfg(test)]
+fn current_day() -> u64 {
+    current_day_with_offset(0)
 }
 
 /// Releases a project's concurrency slot when dropped (after the run completes, succeeds
@@ -587,7 +615,9 @@ pub(crate) fn admit_run(
         return Ok(unmetered(project.to_string()));
     };
 
-    let day = current_day();
+    // The day bucket honors the quota's configured reset boundary (SRV-203):
+    // usage recorded under another bucket (an earlier local day) reads as zero.
+    let day = current_day_with_offset(limits.day_reset_offset_minutes.unwrap_or(0));
     let mut u = quota.usage.lock().expect("quota mutex poisoned");
     let current = u.concurrent.get(project).copied().unwrap_or(0);
     limits.check_concurrent_runs(current)?;
@@ -610,9 +640,12 @@ pub(crate) fn admit_run(
 
 /// Record a run's LLM usage — `cost` USD and `tokens` (prompt + completion) —
 /// against `project`'s current-day budgets (after a run), persisting the
-/// accumulator (RM-GA-P2 DUR-404) so it survives a restart within the same UTC
-/// day. Tokens joined cost in RM-AIM-P2 SRV-202 (`llm_tokens_per_day`).
+/// accumulator (RM-GA-P2 DUR-404) so it survives a restart within the same day.
+/// Tokens joined cost in RM-AIM-P2 SRV-202 (`llm_tokens_per_day`); the day
+/// bucket honors the quota's configured reset boundary (SRV-203) — looked up
+/// here so recording and [`admit_run`] always agree on which day usage lands in.
 pub(crate) fn record_run_usage(
+    tenancy: &Arc<dyn TenancyStore>,
     quota: &Arc<QuotaTracker>,
     project: Option<&str>,
     cost: f64,
@@ -621,7 +654,13 @@ pub(crate) fn record_run_usage(
     let Some(project) = project else {
         return;
     };
-    let day = current_day();
+    let offset = tenancy
+        .get_quota(project)
+        .ok()
+        .flatten()
+        .and_then(|limits| limits.day_reset_offset_minutes)
+        .unwrap_or(0);
+    let day = current_day_with_offset(offset);
     let snapshot = {
         let mut u = quota.usage.lock().expect("quota mutex poisoned");
         let entry = u.cost.entry(project.to_string()).or_insert((day, 0.0, 0));
@@ -948,9 +987,11 @@ mod tests {
         assert!(cost > 0.0, "a priced call must not be free");
 
         // Record it against a project, twice, exactly as a two-run day would.
+        let tenancy: Arc<dyn TenancyStore> =
+            Arc::new(apex_tenancy::InMemoryTenancyStore::default());
         let quota = Arc::new(QuotaTracker::new(None));
-        record_run_usage(&quota, Some("prj-priced"), cost, 1500);
-        record_run_usage(&quota, Some("prj-priced"), cost, 1500);
+        record_run_usage(&tenancy, &quota, Some("prj-priced"), cost, 1500);
+        record_run_usage(&tenancy, &quota, Some("prj-priced"), cost, 1500);
 
         let (spent, tokens) = quota.used_today("prj-priced").unwrap();
         assert!(
@@ -978,7 +1019,7 @@ mod tests {
         let quota = Arc::new(QuotaTracker::new(None));
 
         // Under budget: admitted (999 < 1000).
-        record_run_usage(&quota, Some("prj-tokens"), 0.0, 999);
+        record_run_usage(&tenancy, &quota, Some("prj-tokens"), 0.0, 999);
         assert!(
             admit_run(&tenancy, &quota, Some("prj-tokens")).is_ok(),
             "under the token budget the run is admitted"
@@ -988,7 +1029,7 @@ mod tests {
         // observe-then-enforce boundary as the cost budget (a run is admitted
         // while usage is within the limit; the *next* run after crossing is
         // blocked). Unmetered projects stay unaffected.
-        record_run_usage(&quota, Some("prj-tokens"), 0.0, 2);
+        record_run_usage(&tenancy, &quota, Some("prj-tokens"), 0.0, 2);
         let err = match admit_run(&tenancy, &quota, Some("prj-tokens")) {
             Err(e) => e,
             Ok(_) => panic!("an exhausted token budget must refuse admission"),
@@ -1000,6 +1041,98 @@ mod tests {
             err.message
         );
         assert!(admit_run(&tenancy, &quota, Some("prj-other")).is_ok());
+    }
+
+    /// RM-AIM-P2 SRV-203, the boundary math: a quota with a non-UTC offset resets
+    /// at *its* local midnight, not UTC's. Pure — `day_bucket` is exactly what
+    /// `admit_run`/`record_run_usage` call with the wall clock plugged in.
+    #[test]
+    fn day_bucket_flips_at_the_configured_local_midnight() {
+        let utc_midnight_day_20000 = 86_400u64 * 20_000;
+
+        // IST (+5:30, offset 330): local midnight falls 19 800 s *before* UTC
+        // midnight — so at 18:30 UTC the IST day has already flipped.
+        let ist_midnight = utc_midnight_day_20000 + 86_400 - 19_800; // 00:00 IST, day 20001
+        assert_eq!(day_bucket(ist_midnight - 1, 330), 20_000, "23:59:59 IST");
+        assert_eq!(
+            day_bucket(ist_midnight, 330),
+            20_001,
+            "flips exactly at 00:00 IST"
+        );
+        assert_eq!(
+            day_bucket(ist_midnight, 0),
+            20_000,
+            "the UTC bucket hasn't flipped yet — the boundaries genuinely differ"
+        );
+
+        // EST (−5:00, offset −300): local midnight falls 18 000 s *after* UTC
+        // midnight.
+        let est_midnight = utc_midnight_day_20000 + 18_000;
+        assert_eq!(day_bucket(est_midnight - 1, -300), 19_999, "23:59:59 EST");
+        assert_eq!(
+            day_bucket(est_midnight, -300),
+            20_000,
+            "flips exactly at 00:00 EST"
+        );
+
+        // No offset = the original UTC days-since-epoch.
+        assert_eq!(day_bucket(utc_midnight_day_20000, 0), 20_000);
+        // A garbage stored offset is clamped to ±24 h, never skewing further.
+        assert_eq!(
+            day_bucket(utc_midnight_day_20000, i32::MAX),
+            day_bucket(utc_midnight_day_20000, 1_440)
+        );
+    }
+
+    /// SRV-203, the wiring: with a configured reset offset, `record_run_usage`
+    /// and `admit_run` agree on the (non-UTC) day bucket — recorded usage counts
+    /// against the budget, and it landed under the offset bucket, not UTC's.
+    #[test]
+    fn offset_quota_records_and_enforces_under_its_own_day_bucket() {
+        // Pick whichever ±12 h offset puts "now" in a *different* day bucket
+        // than UTC — guaranteed for one of the two at any time of day.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let offset = if now % 86_400 < 43_200 { -720 } else { 720 };
+        assert_ne!(
+            day_bucket(now, offset),
+            day_bucket(now, 0),
+            "the chosen offset must produce a different current day than UTC"
+        );
+
+        let st = apex_tenancy::InMemoryTenancyStore::default();
+        st.set_quota(
+            "prj-tz",
+            QuotaLimits {
+                llm_tokens_per_day: Some(100),
+                day_reset_offset_minutes: Some(offset),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let tenancy: Arc<dyn TenancyStore> = Arc::new(st);
+        let quota = Arc::new(QuotaTracker::new(None));
+
+        // Usage recorded for this project lands under *its* day bucket…
+        record_run_usage(&tenancy, &quota, Some("prj-tz"), 0.0, 101);
+        assert!(
+            quota.used_today("prj-tz").is_none(),
+            "nothing recorded under the UTC bucket"
+        );
+        assert_eq!(
+            quota.used_on_day("prj-tz", day_bucket(now, offset)),
+            Some((0.0, 101)),
+            "usage landed under the offset day bucket"
+        );
+
+        // …and admission reads the same bucket, so the crossed budget blocks —
+        // if admit had used the UTC bucket it would have seen zero usage.
+        assert!(
+            admit_run(&tenancy, &quota, Some("prj-tz")).is_err(),
+            "the exhausted budget under the offset bucket must refuse admission"
+        );
     }
 
     /// SRV-202's persistence-compat guarantee: a `quota.json` written by a
@@ -1039,9 +1172,11 @@ mod tests {
         let path = dir.join("quota.json");
 
         {
+            let tenancy: Arc<dyn TenancyStore> =
+                Arc::new(apex_tenancy::InMemoryTenancyStore::default());
             let quota = Arc::new(QuotaTracker::new(Some(path.clone())));
-            record_run_usage(&quota, Some("prj-restart"), 3.5, 100);
-            record_run_usage(&quota, Some("prj-restart"), 1.5, 200);
+            record_run_usage(&tenancy, &quota, Some("prj-restart"), 3.5, 100);
+            record_run_usage(&tenancy, &quota, Some("prj-restart"), 1.5, 200);
         }
 
         // A fresh tracker — no in-memory state carried over — reopened against the

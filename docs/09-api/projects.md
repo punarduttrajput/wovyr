@@ -7,7 +7,7 @@ Document ID: API-008
 
 **Document ID:** API-008  
 **File Path:** `docs/09-api/projects.md`  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Draft  
 **Owner:** AI Platform Team  
 **Last Updated:** 2026-07-14
@@ -99,7 +99,8 @@ Projects and organizations carry quotas enforced across subsystems:
   "limits": {
     "llm_cost_per_day_usd": 250,
     "llm_tokens_per_day": 5000000,
-    "concurrent_agent_runs": 50
+    "concurrent_agent_runs": 50,
+    "day_reset_offset_minutes": 330
   }
 }
 ```
@@ -110,6 +111,16 @@ rolling day's token usage (`llm_tokens_per_day`, the vendor-bill-independent
 twin of the cost budget: a local model costs $0/token but still burns
 capacity). Breaches return `429`/`402` per the
 [error model](overview.md#8-error-model).
+
+The "day" the daily budgets roll over on is configurable per quota
+(RM-AIM-P2 SRV-203): `day_reset_offset_minutes` places the reset boundary in
+minutes east of UTC (e.g. `330` resets at 00:00 IST, `-300` at 00:00 EST;
+minutes rather than whole hours because real timezones include half- and
+quarter-hour offsets). Absent, budgets reset at 00:00 UTC exactly as before.
+The offset is clamped to ±24 h, and admission and usage-recording always
+resolve the same boundary, so usage never leaks across a tenant's local
+midnight. Wall-clock is read only at the server boundary per the
+clock-free-core rule.
 
 Two dimensions this section originally speculated (`tool_executions_per_minute`,
 `memory_records`) were **removed in SRV-202 rather than enforced**: they were
@@ -199,3 +210,4 @@ Uses the [standard error envelope](overview.md#8-error-model). Notable codes:
 |---------|------|-------------|
 | 1.0.0 | 2026-06-27 | Initial Projects API specification |
 | 1.1.0 | 2026-07-14 | §5: `llm_tokens_per_day` budget added; dead `tool_executions_per_minute`/`memory_records` dimensions removed (RM-AIM-P2 SRV-202) |
+| 1.2.0 | 2026-07-14 | §5: tenant-configurable daily-reset boundary `day_reset_offset_minutes` (RM-AIM-P2 SRV-203) |

@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.19.0
-**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), WS-D (EVL-201..203), and WS-A/runtime (AIC-201/202, RUN-201/202) fully done; SRV-201/202 done
+**Version:** 1.20.0
+**Status:** In progress — WS-B, WS-C, WS-D, WS-A/runtime, and WS-G (SRV-201..203) fully done; remaining: WS-I (SAF-201/202), WS-L (OBS-201)
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -895,7 +895,7 @@ runs), and `lib.rs::tenant_rate_tier_is_shared_across_principals_and_isolated_
 by_tenant` (two principals under one tenant exhaust the shared budget, a third
 429s, another tenant is untouched).
 
-## SRV-203 `[P2]` — Tenant-configurable daily-cost reset boundary
+## SRV-203 `[P2]` — Tenant-configurable daily-cost reset boundary — **DONE (2026-07-14)**
 
 **Problem.** `current_day()` = epoch-seconds/86400, so budgets reset at 00:00 UTC for
 everyone (`crates/apex-server/src/tenancy.rs:497-502`). (PRD-004 R-G.7; audit Med.)
@@ -908,6 +908,37 @@ local midnight.
 
 **Files.** `crates/apex-server/src/tenancy.rs`, tenancy model. **Size.** S.
 **Depends on:** none.
+
+**Implementation notes (2026-07-14).**
+`QuotaLimits.day_reset_offset_minutes: Option<i32>` (minutes east of UTC —
+minutes, not hours, because real timezones include half- and quarter-hour
+offsets like IST +330; `None` = UTC midnight, the exact pre-SRV-203 behavior)
+rides the same quota record the PATCH route/dashboard already edit, so "the
+tenant's timezone" is configured where the daily budgets it governs live. The
+day computation split into a **pure** `day_bucket(epoch_secs, offset_minutes)`
+(`div_euclid` for correct negative-offset flooring; clamped to ±24 h so a
+garbage stored value can't skew a window by more than a day) and a thin
+`current_day_with_offset` that reads the wall clock — time still enters only
+at the server boundary, and the boundary math is deterministically testable.
+`admit_run` resolves the bucket from the quota it already loaded;
+`record_run_usage` now takes the `TenancyStore` and looks the quota up itself,
+so **recording and admission always agree on which day usage lands in** —
+that agreement, not the offset arithmetic, is the actual correctness property
+(a mismatch would leak usage across the tenant's midnight or wrongly zero it).
+Accumulator entries recorded before an offset change simply belong to a
+different bucket and read as zero — same effect as any day rollover, no
+migration needed. Proven by
+`day_bucket_flips_at_the_configured_local_midnight` (the acceptance test:
+exact second-level flips at 00:00 IST/+330 and 00:00 EST/−300 while the UTC
+bucket disagrees, plus the clamp) and
+`offset_quota_records_and_enforces_under_its_own_day_bucket` (wiring: at any
+wall-clock time the test picks a ±12 h offset guaranteed to differ from UTC's
+current bucket, records usage, asserts nothing landed under the UTC bucket
+and everything under the offset bucket, and that admission — reading the same
+bucket — refuses the crossed token budget). `openapi.yaml`'s quota PATCH
+schema, the dashboard's quota form/types, and `projects.md` §5 updated in
+lockstep. This closes **WS-G (Multi-Node Quotas) entirely** — SRV-201/202/203
+all done.
 
 ---
 
@@ -1207,3 +1238,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.17.0 | 2026-07-13 | RUN-202 (sub-agent runs get a TracingSink instead of NullSink; non-zero run cost proven to reach the project's daily accumulator end to end) implemented and marked DONE with implementation notes — all of WS-A / WS-runtime is now done |
 | 1.18.0 | 2026-07-14 | SRV-201 (Redis-shared rate limiting: atomic Lua token bucket, per-tier prefixes, degrade-to-per-node on Redis failure, `APEX_RATE_LIMIT_REDIS_URL` + `redis` feature, gated combined-budget test wired into CI) implemented and marked DONE with implementation notes |
 | 1.19.0 | 2026-07-14 | SRV-202 (`llm_tokens_per_day` budget with back-compat accumulator persistence; dead `tool_executions_per_minute`/`memory_records` dimensions removed; opt-in per-tenant rate tier) implemented and marked DONE with implementation notes |
+| 1.20.0 | 2026-07-14 | SRV-203 (per-quota `day_reset_offset_minutes` daily-reset boundary; pure `day_bucket` math; admission/recording bucket agreement) implemented and marked DONE with implementation notes — all of WS-G (Multi-Node Quotas) is now done |

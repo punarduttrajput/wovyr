@@ -144,6 +144,13 @@ pub struct QuotaLimits {
     /// Max concurrent agent runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrent_agent_runs: Option<u64>,
+    /// Where this quota's "day" boundary sits, in minutes east of UTC
+    /// (RM-AIM-P2 SRV-203) — e.g. `330` resets daily budgets at 00:00 IST,
+    /// `-300` at 00:00 EST. `None` = UTC midnight (the pre-SRV-203 behavior).
+    /// The enforcing subsystem clamps it to ±24 h; minutes (not whole hours)
+    /// because real timezones include half- and quarter-hour offsets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day_reset_offset_minutes: Option<i32>,
 }
 
 /// A normalized lowercase slug (alphanumerics kept, runs of other chars → single `-`).
