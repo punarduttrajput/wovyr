@@ -31,6 +31,7 @@ The platform is currently in the **Planning / Documentation** phase (v0.1.0).
 | v0.3 | Plugins, dashboard, and multi-tenancy | [v0.3.md](v0.3.md) |
 | v1.0 | Production-ready, GA, enterprise | [v1.0.md](v1.0.md) |
 | v1.1 | AI Platform Maturity: capable, operable, extensible (post-GA) | [v1.1/index.md](v1.1/index.md) |
+| v1.2 | **Generative UI Trust Runtime** — the product milestone: frame protocol, trust/policy engine, durable interaction loop, renderer SDK, internal-tools beachhead | [v1.2-generative-ui.md](v1.2-generative-ui.md) |
 | Future | Beyond 1.0 — research bets | [future.md](future.md) |
 
 **v1.1 (AI Platform Maturity)** is scoped by [PRD-004](../01-product/prd-ai-platform-maturity.md)
@@ -40,6 +41,15 @@ gate, MCP/plugin-SDK ecosystem work, and UI/DX/operability maturity. Three phase
 ticket docs: [P1](v1.1/phase1-production-truth-tickets.md) ·
 [P2](v1.1/phase2-credible-ai-product-tickets.md) ·
 [P3](v1.1/phase3-ecosystem-scale-tickets.md).
+
+**v1.2 (Generative UI Trust Runtime)** executes the strategic repositioning of
+[ADR-0011](../17-adr/ADR-0011-generative-ui-repositioning.md), scoped by
+[PRD-005](../01-product/prd-generative-ui-runtime.md): the platform becomes the
+engine; the product is the runtime that lets AI agents render interactive
+interfaces to humans safely, auditable, and with durable human-in-the-loop
+decisions. v1.1 Phase 3 is re-scoped through PRD-005 — ecosystem items that serve
+the trust runtime fold into v1.2 P3; purely horizontal items defer to
+[future.md](future.md).
 
 ---
 
@@ -71,4 +81,5 @@ learning. ADRs ([section 17](../17-adr/index.md)) record decisions that reshape 
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-14 | Added v1.2 (Generative UI Trust Runtime, PRD-005/ADR-0011); noted the v1.1-P3 re-scope |
 | 1.0.0 | 2026-06-27 | Initial Roadmap index |

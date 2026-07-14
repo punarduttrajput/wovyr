@@ -1,6 +1,8 @@
-# Apex AI Platform
+# Apex — Generative UI Trust Runtime
 
-> An Enterprise AI Agent Operating System written in Rust.
+> The infrastructure that lets AI agents render rich, interactive interfaces to
+> humans **safely, auditable, and with durable human-in-the-loop decisions** —
+> built on an enterprise AI Agent Operating System written in Rust.
 
 ![Version](https://img.shields.io/badge/version-0.3.0-blue)
 ![Rust](https://img.shields.io/badge/Rust-Edition%202024-orange)
@@ -10,7 +12,26 @@
 
 ## Overview
 
-Apex is a next-generation AI Agent Operating System designed for building, deploying, and orchestrating intelligent autonomous agents at enterprise scale.
+**The product** ([PRD-005](docs/01-product/prd-generative-ui-runtime.md),
+[ADR-0011](docs/17-adr/ADR-0011-generative-ui-repositioning.md)): software
+interfaces are shifting from hard-coded pages to interfaces generated at runtime
+by AI. That shift breaks the web's security assumptions — a generated form can be
+a hallucinated phishing vector, prompt injection can manifest *as UI*, and nothing
+can prove what an AI actually showed a user. Apex is the missing layer:
+
+- **Trust & policy** — every agent-generated frame is validated against
+  declarative policy (fail-closed), constrained to a safe component vocabulary
+  (never raw model-authored HTML/JS), and recorded in a tamper-evident audit chain
+  before a human sees it.
+- **Durable interaction** — "agent shows an interface → human decides → agent
+  continues" runs on an event-sourced workflow engine: the decision loop survives
+  crashes, restarts, and time.
+- **Embeddable runtime** — an SSE frame protocol + React/web-component renderer
+  SDK + MCP surface, adoptable as middleware by *any* agent stack; generative
+  **enterprise internal tools** are the beachhead use case. Execution is phased in
+  the [v1.2 roadmap](docs/18-roadmap/v1.2-generative-ui.md).
+
+**The engine**: Apex is a next-generation AI Agent Operating System designed for building, deploying, and orchestrating intelligent autonomous agents at enterprise scale.
 
 Unlike traditional AI frameworks that focus only on LLM orchestration, Apex provides a complete runtime platform featuring:
 
@@ -40,15 +61,21 @@ Apex is designed from the ground up using Rust to provide high performance, memo
 
 # Vision
 
-To become the Linux of AI Agents.
+To be the trust layer of the generative-interface era: every interface an AI
+shows a human is safe, provable, and accountable.
 
-Apex provides everything required to build enterprise-grade AI systems while remaining modular, extensible, secure, and cloud-native.
+The platform underneath — everything required to build enterprise-grade AI
+systems, modular, extensible, secure, and cloud-native — is the engine that makes
+that product credible ([ADR-0011](docs/17-adr/ADR-0011-generative-ui-repositioning.md)).
 
 ---
 
 # Mission
 
-Enable developers to build intelligent autonomous software using modern software engineering principles rather than prompt engineering alone.
+Enable organizations to let AI agents interact with humans through rich,
+generated interfaces — without giving up security, auditability, or human
+control — using modern software engineering principles rather than prompt
+engineering alone.
 
 ---
 
@@ -340,7 +367,13 @@ multimodal parts, RAG chunking/reranking/BM25, LLM-as-judge eval gates,
 Redis-shared rate limiting, token quotas, content-safety guardrails, a
 versioned prompt registry, per-tenant metrics) are **done**;
 [Phase 3](docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md)
-(ecosystem & scale) has not started.
+(ecosystem & scale) has not started and is **re-scoped through
+[PRD-005](docs/01-product/prd-generative-ui-runtime.md)** — the next milestone is
+**[v1.2 "Generative UI Trust Runtime"](docs/18-roadmap/v1.2-generative-ui.md)**
+([ADR-0011](docs/17-adr/ADR-0011-generative-ui-repositioning.md)): the UI frame
+protocol (`apex-ui`), the trust/policy engine (`apex-ui-guard`), the durable
+render→decide→resume interaction loop, the renderer SDK, and the generative
+internal-tools beachhead.
 
 The implemented surface spans: an agent runtime with a real model/tool loop,
 an LLM gateway (chat + streaming + embeddings, mock/OpenAI-compatible/native
