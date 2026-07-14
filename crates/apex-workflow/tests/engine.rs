@@ -977,3 +977,169 @@ async fn for_each_pins_the_resolved_collection_across_resume() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// WFL-303 — checkpoint size cap: an oversized activity output is rejected
+// fail-closed rather than silently bloating every future checkpoint.
+// ---------------------------------------------------------------------------
+
+/// An activity output over the configured cap fails the activity (and, absent
+/// compensation, the workflow) instead of being merged into `state.variables` —
+/// where it would re-serialize into every future checkpoint of the execution.
+#[tokio::test]
+async fn oversized_activity_output_fails_closed_instead_of_bloating_the_checkpoint() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: oversized\nspec:\n  activities:\n    - {id: dump, type: function}\n",
+    )
+    .unwrap();
+
+    // Comfortably over a tiny cap, so the test doesn't need to build a real 1 MiB
+    // payload to exercise the guard.
+    let executor = ClosureExecutor::new().on("dump", |_| async { Ok(json!("x".repeat(1000))) });
+
+    let engine = engine_with(InMemoryStore::new(), executor).with_max_activity_output_bytes(100);
+    let (outcome, state) = engine.run(&def, "wf-oversized-1", json!({})).await.unwrap();
+
+    match outcome {
+        RunOutcome::Failed(msg) => {
+            assert!(msg.contains("dump"), "{msg}");
+            assert!(msg.contains("bytes"), "{msg}");
+        }
+        other => panic!("expected Failed(..), got {other:?}"),
+    }
+    // The oversized output must never have reached the execution's variables.
+    assert!(!state.variables.contains_key("dump"));
+}
+
+/// An output at or under the cap is unaffected — the guard doesn't false-positive
+/// on ordinary-sized activity outputs.
+#[tokio::test]
+async fn activity_output_under_the_cap_is_unaffected() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: small\nspec:\n  activities:\n    - {id: ok, type: function}\n",
+    )
+    .unwrap();
+    let executor = ClosureExecutor::new().on("ok", |_| async { Ok(json!({"fine": true})) });
+
+    let engine = engine_with(InMemoryStore::new(), executor).with_max_activity_output_bytes(100);
+    let (outcome, state) = engine.run(&def, "wf-small-1", json!({})).await.unwrap();
+
+    assert_eq!(outcome, RunOutcome::Completed);
+    assert_eq!(state.variables.get("ok"), Some(&json!({"fine": true})));
+}
+
+/// The cap also guards a `for_each`'s **joined** output — many small, individually
+/// fine item outputs can still aggregate into an oversized whole.
+#[tokio::test]
+async fn for_each_joined_output_over_the_cap_fails_closed() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-oversized\nspec:\n  activities:\n    - {id: loop, type: for_each, inputs: {items: [1, 2, 3], activity: {type: function}}}\n",
+    )
+    .unwrap();
+    let executor = ClosureExecutor::new()
+        .on("loop[0]", |_| async { Ok(json!("x".repeat(50))) })
+        .on("loop[1]", |_| async { Ok(json!("x".repeat(50))) })
+        .on("loop[2]", |_| async { Ok(json!("x".repeat(50))) });
+
+    let engine = engine_with(InMemoryStore::new(), executor).with_max_activity_output_bytes(100);
+    let (outcome, _) = engine
+        .run(&def, "wf-foreach-oversized-1", json!({}))
+        .await
+        .unwrap();
+
+    match outcome {
+        RunOutcome::Failed(msg) => assert!(msg.contains("loop"), "{msg}"),
+        other => panic!("expected Failed(..), got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WFL-307 — activity progress events: a long-running activity can report
+// incremental progress via `ActivityContext::progress`, durably recorded as
+// `ActivityProgress` events.
+// ---------------------------------------------------------------------------
+
+/// A long activity that reports several progress updates gets each one
+/// recorded, in order, as a durable `ActivityProgress` event in the history —
+/// interleaved with real `.await` points, so the reports are genuinely
+/// received (and emitted) as the activity runs, not just recovered from a
+/// leftover buffer after it already returned.
+#[tokio::test]
+async fn a_long_activity_emits_progress_events_as_it_runs() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: progress\nspec:\n  activities:\n    - {id: slow, type: function}\n",
+    )
+    .unwrap();
+
+    let executor = ClosureExecutor::new().on("slow", |ctx| async move {
+        let tx = ctx
+            .progress
+            .as_ref()
+            .expect("progress sink present on the sequential path");
+        for pct in ["25%", "50%", "75%"] {
+            tx.send(pct.to_string()).unwrap();
+            // Yield back to the runtime so the engine's concurrent drain loop
+            // genuinely gets a chance to observe and emit each report as it
+            // arrives, rather than the whole closure running to completion in
+            // one uninterrupted poll.
+            tokio::task::yield_now().await;
+        }
+        Ok(json!("done"))
+    });
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, _) = engine.run(&def, "wf-progress-1", json!({})).await.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
+
+    let history = engine.history("wf-progress-1").await.unwrap();
+    let messages: Vec<String> = history
+        .iter()
+        .filter_map(|e| match e {
+            WorkflowEvent::ActivityProgress { id, message, .. } if id == "slow" => {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages, vec!["25%", "50%", "75%"]);
+
+    // Progress events land *before* the terminal ActivityCompleted event, not
+    // interleaved after it or out of order.
+    let progress_positions: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, WorkflowEvent::ActivityProgress { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let completed_position = history
+        .iter()
+        .position(|e| matches!(e, WorkflowEvent::ActivityCompleted { .. }))
+        .unwrap();
+    assert!(
+        progress_positions.iter().all(|&i| i < completed_position),
+        "every progress event must precede the activity's completion event"
+    );
+}
+
+/// An activity that never reports progress is completely unaffected — no
+/// spurious `ActivityProgress` events, no change in behavior.
+#[tokio::test]
+async fn an_activity_with_no_progress_reports_behaves_exactly_as_before() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: quiet\nspec:\n  activities:\n    - {id: fast, type: function}\n",
+    )
+    .unwrap();
+    let executor = ClosureExecutor::new().on("fast", |_| async { Ok(json!("ok")) });
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, _) = engine.run(&def, "wf-quiet-1", json!({})).await.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
+
+    let history = engine.history("wf-quiet-1").await.unwrap();
+    assert!(
+        !history
+            .iter()
+            .any(|e| matches!(e, WorkflowEvent::ActivityProgress { .. })),
+        "an activity that never reports progress must emit no progress events"
+    );
+}

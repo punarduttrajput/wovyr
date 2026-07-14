@@ -27,8 +27,10 @@ serde_yaml.workspace = true
 async-trait.workspace = true
 # `rt` for the intra-workflow parallel-activity `JoinSet`; `time` for retry-backoff
 # sleeps; `fs`/`io-util` for the file-backed event log/checkpoint/timer/schedule
-# stores; `sync` for their in-process locks (RM-GA-P4 HLTH-904).
-tokio = { workspace = true, features = ["rt", "time", "fs", "io-util", "sync"] }
+# stores; `sync` for their in-process locks (RM-GA-P4 HLTH-904); `macros` for
+# `tokio::select!`, driving an activity's execution concurrently with draining
+# its progress-report channel (WFL-307).
+tokio = { workspace = true, features = ["rt", "time", "fs", "io-util", "sync", "macros"] }
 tracing.workspace = true
 tokio-postgres = { version = "0.7", optional = true }
 # Versioned schema migrations (RM-GA-P3 MIG-A1): `apex admin migrate` applies
@@ -43,7 +45,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = { version = "0.26", optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros"] }
+# `macros` (for `#[tokio::test]`) is already pulled in by `[dependencies]`
+# above — Cargo unions feature requests for the same crate across dependency
+# sections, so no separate override is needed here anymore.
+tokio = { workspace = true }
 # Property/fuzz testing for the workflow DSL and cron-expression parsers
 # (security-testing.md §8): arbitrary input must never panic.
 proptest = "1"

@@ -101,6 +101,7 @@ mod tests {
             inputs: Value::Null,
             variables,
             attempt: 1,
+            progress: None,
         }
     }
 

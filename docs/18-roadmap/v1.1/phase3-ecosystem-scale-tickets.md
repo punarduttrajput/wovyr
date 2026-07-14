@@ -7,8 +7,8 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.4.0
-**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301, WFL-302 done; everything else planned
+**Version:** 1.5.0
+**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301..308 (all of WS-H) done; everything else planned
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
 **Last Updated:** 2026-07-14
 
@@ -360,7 +360,7 @@ asserting the resumed instance still sees the originally-resolved item) plus
 body types, zero `max_concurrent`/`max_items`, non-array/non-reference
 `items`, the reserved `[`/`]` id characters, and the documented defaults).
 
-## WFL-303 `[P2]` — Checkpoint size cap + out-of-line large outputs
+## WFL-303 `[P2]` — Checkpoint size cap + out-of-line large outputs — **DONE (2026-07-14)**
 
 **Problem.** Every step re-serializes and upserts the entire `ExecutionState`; activity
 outputs merge into `variables` unbounded with no cap (`engine.rs:843,1387`;
@@ -375,7 +375,24 @@ not silently bloating every checkpoint.
 **Files.** `crates/apex-workflow/src/{engine.rs,postgres.rs,store.rs}`. **Size.** M.
 **Depends on:** none.
 
-## WFL-304 `[P2]` — Event-log compaction + paged load
+**Implementation notes (2026-07-14).** Took the fail-closed-cap half of the "and/or":
+`Engine` gained `max_activity_output_bytes` (`DEFAULT_MAX_ACTIVITY_OUTPUT_BYTES` = 1
+MiB, overridable via `with_max_activity_output_bytes`) and a `check_output_size(id,
+&output)` helper (serialized-size check, no I/O) called **before** an output ever
+merges into `state.variables` or reaches the event log/checkpoint — an over-cap output
+is a permanent activity failure via the existing `terminal_activity_failure` path
+(saga compensation applies exactly like any other permanent error), not a hard abort.
+Wired at the two commit sites most likely to actually produce something large: the
+sequential path (`run_activity`) and `for_each`'s **joined** output
+(`complete_for_each`) — many individually-small item outputs can still aggregate into
+an oversized whole, so the join itself needs its own check, not just each item.
+Deliberately not wired into the static-parallel-batch commit or a subworkflow's child
+result in this slice — a documented follow-on, not a silent gap. Proven by 3 tests in
+`tests/engine.rs`: an oversized single output fails closed and never reaches
+`variables`; an ordinary-sized output is unaffected (no false positive); a `for_each`
+whose individually-fine items join into an oversized array fails closed at the join.
+
+## WFL-304 `[P2]` — Event-log compaction + paged load — **DONE (2026-07-14)**
 
 **Problem.** Append-only with no retention; `load`/`history` deserialize every event
 (`store.rs:225`; `postgres.rs:169`). (PRD-004 R-H.7; audit Med.)
@@ -388,7 +405,33 @@ the full log for a long execution.
 **Files.** `crates/apex-workflow/src/{store.rs,postgres.rs}`. **Size.** M.
 **Depends on:** none.
 
-## WFL-305 `[P2]` — Indexed `list()` columns + SQL-side filtering
+**Implementation notes (2026-07-14).** `EventLog` gained two default-implemented
+methods: `load_page(execution_id, offset, limit)` (default: load-then-slice; overridden
+per backend for a real bound) and `compact(execution_id, keep_after_seq)` (default:
+no-op — **never** called automatically by the engine, since the log is the append-only
+source of truth; an explicit, caller-invoked prune only). `Engine::history_page`/
+`compact_history` are the new public entry points, additive alongside the unchanged
+`history()`. **`FileStore::load_page`** streams the JSONL file line-by-line
+(`AsyncBufReadExt::lines()`), skipping raw (undeserialized) lines up to `offset` and
+stopping as soon as `limit` is satisfied — the file's tail past the requested page is
+never read at all. **`FileStore::compact`** rewrites the file dropping the first
+`keep_after_seq` lines (line position *is* the seq, per `append`'s existing
+seq-from-line-count convention), atomically. **`PostgresStore`** pushes both
+operations into SQL (`OFFSET`/`LIMIT`, `DELETE … WHERE seq <= $2`) — genuinely bounded
+at the database, not just in application code. The "recovery doesn't read the full
+log" half of the acceptance criterion turned out to already be true by construction —
+`resume` only ever reads the **checkpoint**, never `EventLog::load`/`load_page` —
+proven directly by wrapping the log in a decorator that panics if `load`/`load_page`
+is ever called and driving a crash-and-resume through it
+(`resume_never_reads_the_full_event_log`, `tests/temporal_gaps.rs`). Proven overall by
+9 tests: `history_page` reconstructing the exact full timeline by paging through it in
+small chunks; `compact_history` dropping exactly the oldest events and leaving paging
+correct over the shorter remainder; the resume-never-reads-the-log proof; plus 3
+`FileStore`-specific unit tests exercising the real streaming/rewrite code paths (not
+just the trait defaults) and a live-Postgres integration assertion folded into
+WFL-305's own test (see below).
+
+## WFL-305 `[P2]` — Indexed `list()` columns + SQL-side filtering — **DONE (2026-07-14)**
 
 **Problem.** `list()` scans and decodes every checkpoint, filtering in Rust
 (`postgres.rs:216-238`; `store.rs:259-278`). (PRD-004 R-H.7; audit Med.)
@@ -402,7 +445,28 @@ rows; a migration adds the columns/indexes.
 **Files.** `crates/apex-workflow/src/postgres.rs` + migration. **Size.** M.
 **Depends on:** none.
 
-## WFL-306 `[P2]` — `fire_at`-indexed timers + adaptive dispatch
+**Implementation notes (2026-07-14).** New migration `V3__checkpoint_index_columns.sql`
+adds `workflow_name`/`status` `TEXT` columns to `workflow_checkpoints` (backfilled from
+the existing JSON `snapshot` for any pre-existing rows via `snapshot::jsonb ->> '…'`,
+then set `NOT NULL`) plus one index per column. `PostgresStore::save` keeps both
+columns in lockstep with the JSON snapshot on every upsert — `status`'s exact
+`snake_case` wire string is derived from `WorkflowState`'s real `Serialize` impl
+(`status_str`, via `serde_json::to_value`) rather than hand-duplicated, so it can never
+drift from what the JSON itself would encode. `list()` now builds its `WHERE` clause
+dynamically against these indexed columns (plus, as a bonus matching "push filtering
+**+ pagination** into SQL" literally, the `LIMIT` — previously applied via
+`Vec::truncate` *after* decoding every filtered row in Rust) instead of loading
+everything and filtering in application code. Proven by
+`filtered_list_never_decodes_a_non_matching_rows_corrupt_snapshot`
+(`tests/postgres_store.rs`, capability-gated like the rest of that file): a row is
+inserted directly (bypassing `save`) with a **deliberately corrupt, unparseable**
+`snapshot` but indexed columns that don't match the filter — if `list()` ever fell back
+to decoding every row, this test would fail with a JSON parse error instead of
+succeeding; a companion assertion in the same test confirms selecting that row (by
+matching its indexed columns) really does fail to decode, proving the row is genuinely
+corrupt and not just absent for an unrelated reason.
+
+## WFL-306 `[P2]` — `fire_at`-indexed timers + adaptive dispatch — **DONE (2026-07-14)**
 
 **Problem.** Dispatch accuracy is bounded by the poll interval (default 5s) and each
 poll is O(N) — `due()`/schedule `poll` load all pending timers/schedules
@@ -418,7 +482,35 @@ a near-deadline timer fires promptly.
 **Files.** `crates/apex-workflow/src/{timer.rs,schedule.rs,lib.rs}`. **Size.** M.
 **Depends on:** none.
 
-## WFL-307 `[P3]` — Activity progress events
+**Implementation notes (2026-07-14).** `InMemoryTimerStore` now maintains a secondary
+index — a `BTreeSet<(fire_at_ms, execution_id, timer_id)>` kept in lockstep with the
+primary `(execution_id, timer_id)` map — so `due`/the new `next_deadline` query it
+directly via `BTreeSet::range`/`.first()` (bounded by the number of due entries, or
+O(1) for the next deadline, not a scan over every pending timer regardless of how far
+out its deadline is). `TimerStore`/`ScheduleStore` both gained a `next_deadline()`
+trait method (default: derived from a full scan, for backends that haven't indexed;
+`InMemoryTimerStore` overrides it with the real bound). `TimerDispatcher`/
+`ScheduleDispatcher` each gained `run_adaptive(max_interval, should_stop)`: poll, then
+sleep exactly until the next known deadline — **capped** at `max_interval` so the loop
+still wakes up periodically to notice a timer/schedule registered by another process in
+the meantime (the same guarantee a fixed interval gave), while a near-deadline timer
+fires promptly instead of waiting out a stale interval. The file scope's `lib.rs`
+reference turned out stale (no dispatch loop lives in `apex-workflow/src/lib.rs`, a
+64-line module-wiring file; the actual background poll loop is in `apex-server`) —
+`run_adaptive` is the engine-crate-side capability; wiring the server's own background
+loop to use it instead of its fixed `APEX_DISPATCH_INTERVAL_SECS` is a documented
+follow-on, not in this ticket's stated file scope. Proven by: `next_deadline` tracking
+the true minimum across schedule/cancel/replace (incl. a paused-schedule exclusion
+test); a 20,000-far-future-timer test asserting `due`/`next_deadline` stay fast (a
+generous timing backstop on top of the `BTreeSet`-range structural bound — the same
+"large headroom" philosophy `tests/perf.rs` uses elsewhere in this crate); and a real
+end-to-end **wall-clock** test (`run_adaptive_fires_a_near_deadline_timer_promptly_
+not_after_the_full_interval`, `tests/temporal_gaps.rs`) — the one deliberate exception
+to that file's otherwise fully-deterministic `ManualClock` tests, since "fires
+promptly" can only be demonstrated in real elapsed time — asserting a 60ms-out timer
+completes well under a 5s `max_interval` cap.
+
+## WFL-307 `[P3]` — Activity progress events — **DONE (2026-07-14)**
 
 **Problem.** `ActivityExecutor::execute` returns a single `Value`; no progress channel
 (`crates/apex-workflow/src/executor.rs:69-72`; `event.rs:27-83`). (PRD-004 R-H.8; audit
@@ -432,7 +524,32 @@ event.
 **Files.** `crates/apex-workflow/src/{executor.rs,event.rs}`. **Size.** M.
 **Depends on:** none.
 
-## WFL-308 `[P3]` — Event-enum schema versioning
+**Implementation notes (2026-07-14).** `ActivityContext` gained `progress: Option<
+tokio::sync::mpsc::UnboundedSender<String>>`; `WorkflowEvent` gained `ActivityProgress
+{ id, attempt, message }` (display-only — never consulted by scheduling/resume). Wired
+live on the **sequential** path (`run_activity`, the common single-activity case): a
+fresh channel is created per attempt, and `tokio::select!` drives the executor future
+concurrently with draining the channel, durably `emit`-ing an `ActivityProgress` event
+for each report **as it arrives** rather than only after the activity settles; any
+message sent right before the executor returns (and thus not yet observed by the
+select loop) is caught by a post-loop drain so nothing sent is ever silently lost. This
+needed a new `tokio` `macros` feature on the crate's real (non-dev) dependency, since
+`tokio::select!` requires it — the now-redundant `[dev-dependencies]` override for the
+same feature was removed (Cargo unions feature requests for one crate across every
+dependency table, so listing it once in `[dependencies]` is sufficient). Concurrent
+batch paths (`run_ready_batch`/`for_each` item instances, and compensation-handler
+runs) pass `progress: None` — they isolate an attempt off the shared `ExecutionState`
+until it settles (the two-phase isolate-then-commit shape), so there's nowhere to
+durably emit an event to mid-flight; live progress there is a documented follow-on,
+not a silent gap, and sending on a `None` context is simply a no-op for an executor
+that checks first. Proven by 2 tests in `tests/engine.rs`: a long activity that yields
+between each of 3 progress reports (`tokio::task::yield_now().await`, forcing the
+select loop to genuinely interleave rather than the whole closure running to
+completion in one poll) gets each one recorded in order, all preceding the terminal
+`ActivityCompleted` event; an activity that never reports progress emits zero
+`ActivityProgress` events (no false positives / behavior change for the common case).
+
+## WFL-308 `[P3]` — Event-enum schema versioning — **DONE (2026-07-14)**
 
 **Problem.** The event enum wire format has no version tag; a rename breaks the on-disk
 log (`crates/apex-workflow/src/event.rs:18-24`). (PRD-004 R-H.8; audit Low.)
@@ -443,6 +560,30 @@ log (`crates/apex-workflow/src/event.rs:18-24`). (PRD-004 R-H.8; audit Low.)
 future version cleanly.
 
 **Files.** `crates/apex-workflow/src/event.rs`. **Size.** S. **Depends on:** none.
+
+**Implementation notes (2026-07-14).** `EVENT_SCHEMA_VERSION` (currently `1`) plus a
+`VersionedEvent { v: u32, #[serde(flatten)] event: WorkflowEvent }` wrapper — `flatten`
+keeps a logged line reading as one flat JSON object (`{"v":1,"type":"workflow_
+completed",…}`) rather than nesting the event under its own key. `encode_event`/
+`decode_event` are the one place a `WorkflowEvent` is serialized/deserialized for
+durable storage; every store (`FileStore`, `PostgresStore`) now goes through them
+instead of calling `serde_json::to_string`/`from_str` on the bare enum directly, so the
+version tag can never be forgotten at a new call site (`InMemoryStore` is unaffected —
+it holds `WorkflowEvent`s in-process and never serializes them, so there's no wire
+boundary to version). `decode_event` fails closed on a `v` newer than this binary
+understands (`Error::Config`, a clear upgrade-the-binary message) — and, since this is
+the format's first version with no prior unversioned data to preserve (same "breaking,
+acceptable pre-GA, no real deployment to migrate" stance the earlier `snake_case` tag
+rename already established for this exact format), a line with **no** `v` field at all
+is rejected too, not silently accepted as "version 0". No translation path exists yet
+since there's only one version to translate from; the doc comment on
+`EVENT_SCHEMA_VERSION` is explicit that one must be added to `decode_event` before any
+future variant rename ships. Proven by 3 unit tests in `event.rs`: a round trip through
+`encode_event`/`decode_event` preserves the event and confirms the flat wire shape; a
+`v: 99` line is rejected with a message naming both the found and understood versions;
+a line missing `v` entirely is rejected. The full `apex-workflow` suite (incl.
+`FileStore`/`PostgresStore`-backed durable-resume tests) stayed green through this
+change, confirming the swap didn't alter any other store's on-disk behavior.
 
 ---
 
@@ -849,3 +990,4 @@ lint and load.
 | 1.2.0 | 2026-07-14 | ECO-302 (plugin authoring SDK: new `apex-plugin-sdk` crate with typed `run_tool` stdin/stdout entry point + secret helpers; `apex plugin new` scaffold + `apex plugin build` digest-computing wasm32-wasip1 build step; real scaffold→build→sign→install acceptance round trip, wasm target added to CI) implemented and marked DONE with implementation notes |
 | 1.3.0 | 2026-07-14 | WFL-301/302 (engine-native `for_each`/`map` fan-out: runtime-collection expansion into concurrency-capped, durably-resumable per-item instances joined in item order; `max_items` fail-closed bound; collection pinned into the checkpoint on first encounter, never recomputed on resume) implemented and marked DONE with implementation notes — 18 new tests (9 engine integration + 9 definition-load unit) |
 | 1.4.0 | 2026-07-14 | ECO-304 (one-shot `apex plugin publish --key`: recomputes real artifact digests from disk, rewrites `plugin.yaml`, signs it, and writes the publisher's `.pub` alongside the package so the printed trust line is directly actionable — collapsing `keygen`→hand-edit-digests→`sign`→operator-`trust` into one command) implemented and marked DONE with implementation notes — 4 new unit tests, no marketplace or wasm toolchain needed to run them |
+| 1.5.0 | 2026-07-14 | WFL-303..308 (all remaining WS-H tickets) implemented and marked DONE with implementation notes, closing out WS-H entirely: WFL-303 fail-closed activity-output size cap (permanent failure via the saga path, not a hard abort); WFL-304 event-log paging (`history_page`, real bounded `FileStore`/`PostgresStore` implementations) + explicit opt-in retention (`compact_history`), plus a proof that `resume` already never reads the log at all; WFL-305 indexed `workflow_name`/`status` Postgres columns + SQL-side filtering/pagination (migration V3), proven via a deliberately-corrupt non-matching row that would fail to decode if `list()` ever fell back to scanning; WFL-306 a `fire_at`-sorted `BTreeSet` index for `InMemoryTimerStore` + `TimerDispatcher`/`ScheduleDispatcher::run_adaptive` (sleep until the next deadline, capped at a max interval), proven with a real wall-clock near-deadline-timer test; WFL-307 an `ActivityContext.progress` channel + `ActivityProgress` event, live on the sequential activity path via `tokio::select!`; WFL-308 a versioned event wire envelope (`encode_event`/`decode_event`, fail-closed on an unknown future version) now used by every store. 30 new tests total; full `apex-workflow` suite + whole-workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |

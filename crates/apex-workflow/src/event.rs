@@ -37,6 +37,16 @@ pub enum WorkflowEvent {
     ActivityReady { id: String },
     /// An activity attempt started.
     ActivityStarted { id: String, attempt: u32 },
+    /// An activity reported incremental progress on a still-running attempt
+    /// (WFL-307) — display-only, informational: never consulted by scheduling
+    /// or resume, so it carries no state an activity's own completion doesn't
+    /// already capture. Emitted via [`ActivityContext::progress`](crate::
+    /// ActivityContext::progress).
+    ActivityProgress {
+        id: String,
+        attempt: u32,
+        message: String,
+    },
     /// An activity completed with `output`.
     ActivityCompleted { id: String, output: Value },
     /// An activity was skipped: every inbound branch was disabled by a guard.
@@ -82,6 +92,60 @@ pub enum WorkflowEvent {
     WorkflowCancelled,
 }
 
+/// The current on-wire schema version for a logged [`WorkflowEvent`] (WFL-308).
+///
+/// The event enum's wire format had no version tag at all before this — a
+/// future variant rename would silently break every already-written
+/// `*.events.jsonl`/`workflow_events` row with no way to detect it, let alone
+/// migrate it. Bump this constant, and extend [`decode_event`] with a
+/// translation path from the old shape to the new one, **before** any future
+/// rename ships — never rename a tag string that may already exist in a
+/// durable log without one.
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
+
+/// The durable wire envelope: a schema version alongside the event itself.
+/// `#[serde(flatten)]` keeps the event's own internally-tagged `type` field
+/// (and its variant fields) at the same JSON object level as `v`, so a logged
+/// line still reads as one flat object (e.g. `{"v":1,"type":"workflow_completed"}`)
+/// rather than nesting the event under its own key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VersionedEvent {
+    v: u32,
+    #[serde(flatten)]
+    event: WorkflowEvent,
+}
+
+/// Encode `event` for the durable log, stamped with [`EVENT_SCHEMA_VERSION`].
+/// The one place a `WorkflowEvent` is serialized for storage — every store
+/// (`FileStore`, `PostgresStore`) goes through this rather than serializing
+/// the bare enum directly, so the version tag can never be forgotten at a new
+/// call site.
+pub fn encode_event(event: &WorkflowEvent) -> serde_json::Result<String> {
+    serde_json::to_string(&VersionedEvent {
+        v: EVENT_SCHEMA_VERSION,
+        event: event.clone(),
+    })
+}
+
+/// Decode one logged event, fail-closed on a schema version newer than this
+/// binary understands (`v` missing entirely — a pre-versioning log line — is
+/// also rejected: this is the same "acceptable pre-GA, no real deployment to
+/// migrate" breaking change the `snake_case` tag rename above already made,
+/// not a new one). An older *known* version (`v < EVENT_SCHEMA_VERSION`)
+/// would take a translation path here once one exists; none does yet, since
+/// this is the format's first version.
+pub fn decode_event(line: &str) -> apex_common::Result<WorkflowEvent> {
+    let versioned: VersionedEvent = serde_json::from_str(line)?;
+    if versioned.v > EVENT_SCHEMA_VERSION {
+        return Err(apex_common::Error::config(format!(
+            "workflow event log entry has schema version {}, newer than this binary's \
+             version {EVENT_SCHEMA_VERSION} — upgrade the apex binary before reading this log",
+            versioned.v
+        )));
+    }
+    Ok(versioned.event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +177,14 @@ mod tests {
                     attempt: 1,
                 },
                 "activity_started",
+            ),
+            (
+                WorkflowEvent::ActivityProgress {
+                    id: "a".into(),
+                    attempt: 1,
+                    message: "50% done".into(),
+                },
+                "activity_progress",
             ),
             (
                 WorkflowEvent::ActivityCompleted {
@@ -202,5 +274,50 @@ mod tests {
                 "{tag} must deserialize back to an equivalent event"
             );
         }
+    }
+
+    /// WFL-308: `encode_event`/`decode_event` stamp and round-trip the current
+    /// schema version, and the encoded line still reads as one flat JSON object
+    /// (`v` alongside the event's own `type` tag and fields), not a nested
+    /// wrapper.
+    #[test]
+    fn encode_decode_round_trips_a_versioned_event() {
+        let event = WorkflowEvent::ActivityCompleted {
+            id: "a".into(),
+            output: serde_json::json!({"ok": true}),
+        };
+
+        let encoded = encode_event(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(parsed["v"], EVENT_SCHEMA_VERSION);
+        assert_eq!(parsed["type"], "activity_completed");
+        assert_eq!(parsed["id"], "a");
+
+        let decoded = decode_event(&encoded).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&event).unwrap(),
+        );
+    }
+
+    /// A schema version newer than this binary understands is rejected
+    /// cleanly — not silently misread, not a panic.
+    #[test]
+    fn decode_event_rejects_an_unknown_future_schema_version() {
+        let line = r#"{"v":99,"type":"workflow_completed"}"#;
+        let err = decode_event(line).unwrap_err();
+        assert!(
+            err.to_string().contains("99") && err.to_string().contains("newer"),
+            "{err}"
+        );
+    }
+
+    /// A line with no `v` field at all (the pre-versioning wire shape) is also
+    /// rejected — the same "breaking pre-GA, no real deployment to migrate"
+    /// stance the `snake_case` tag rename already established for this format.
+    #[test]
+    fn decode_event_rejects_a_line_with_no_version_field() {
+        let line = r#"{"type":"workflow_completed"}"#;
+        assert!(decode_event(line).is_err());
     }
 }

@@ -1,17 +1,21 @@
 //! Integration tests for the Temporal gap-closure features
 //! ([scope](../../../docs/03-workflow-engine/temporal-gap-analysis.md)):
 //! durable wall-clock timers (G1), recurring schedules (G2), side-effect-free
-//! queries (G3), and definition pinning (G7). All are exercised deterministically
-//! with a `ManualClock` and in-memory stores — no wall-clock sleeps.
+//! queries (G3), and definition pinning (G7). Most are exercised
+//! deterministically with a `ManualClock` and in-memory stores — no wall-clock
+//! sleeps — except the WFL-306 adaptive-dispatch tests, which need a real clock
+//! and a short real sleep to make "fires promptly" a meaningful claim.
 
 use apex_workflow::{
     ActivityError, ActivityState, CheckpointStore, ClosureExecutor, Definition, DefinitionResolver,
     Engine, EventLog, ExecutionFilter, InMemoryScheduleStore, InMemoryStore, InMemoryTimerStore,
     ManualClock, OverlapPolicy, RunOutcome, Schedule, ScheduleDispatcher, ScheduleStore,
-    TimerDispatcher, TimerStore, WorkflowState,
+    SystemClock, TimerDispatcher, TimerStore, WorkflowState,
 };
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 fn resolver_for(def: &Definition) -> DefinitionResolver {
     let name = def.metadata.name.clone();
@@ -160,6 +164,161 @@ async fn history_returns_the_event_timeline() {
     // A completed single-activity run emits a non-trivial, ordered event log.
     assert!(history.len() >= 4, "expected a populated timeline");
     assert!(engine.history("nope").await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// WFL-304 — event-log paging, compaction/retention, and the "recovery never
+// reads the full log" property.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn history_page_reconstructs_the_full_timeline_in_order() {
+    // Several retries before success generates a long-ish, real event log.
+    let def = Definition::from_yaml(
+        "metadata:\n  name: paged\nspec:\n  retry: {maxAttempts: 4, strategy: fixed, initialDelayMs: 1, maxDelayMs: 1}\n  activities:\n    - {id: flaky, type: function}\n",
+    )
+    .unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor = ClosureExecutor::new().on("flaky", {
+        let calls = calls.clone();
+        move |_| {
+            let calls = calls.clone();
+            async move {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n < 3 {
+                    Err(ActivityError::Retryable("transient".into()))
+                } else {
+                    Ok(json!("ok"))
+                }
+            }
+        }
+    });
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let engine = Engine::new(events, checkpoints, Arc::new(executor));
+    engine.run(&def, "paged-1", json!({})).await.unwrap();
+
+    let full = engine.history("paged-1").await.unwrap();
+    assert!(
+        full.len() >= 7,
+        "expected several retry events, got {full:?}"
+    );
+
+    // Page through in small chunks and reconstruct the exact same order.
+    let mut paged = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = engine.history_page("paged-1", offset, 2).await.unwrap();
+        if page.is_empty() {
+            break;
+        }
+        offset += page.len() as u64;
+        paged.extend(page);
+    }
+    assert_eq!(
+        serde_json::to_value(&paged).unwrap(),
+        serde_json::to_value(&full).unwrap(),
+        "paging through the log must reconstruct the exact same ordered timeline"
+    );
+
+    // An unknown execution pages to empty, same as `history`.
+    assert!(engine.history_page("nope", 0, 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn compact_history_prunes_old_events_and_paging_still_works_on_the_remainder() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: compactable\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n  transitions:\n    - {from: a, to: b}\n",
+    )
+    .unwrap();
+    let executor = ClosureExecutor::new()
+        .on("a", |_| async { Ok(json!("a-done")) })
+        .on("b", |_| async { Ok(json!("b-done")) });
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let engine = Engine::new(events, checkpoints, Arc::new(executor));
+    engine.run(&def, "compact-1", json!({})).await.unwrap();
+
+    let before = engine.history("compact-1").await.unwrap();
+    assert!(before.len() >= 4);
+
+    // Prune everything up to (and including) the first 2 events.
+    engine.compact_history("compact-1", 2).await.unwrap();
+    let after = engine.history("compact-1").await.unwrap();
+    assert_eq!(after.len(), before.len() - 2);
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&before[2..]).unwrap(),
+        "compaction must drop exactly the oldest events, keeping the tail intact and ordered"
+    );
+
+    // Paging still works correctly against the compacted (shorter) log.
+    let page = engine.history_page("compact-1", 0, 1).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&page[0]).unwrap(),
+        serde_json::to_value(&after[0]).unwrap()
+    );
+}
+
+/// The keystone property: `resume` recovers an execution from its **checkpoint**,
+/// never by reading the event log — proven here by wrapping the event log in a
+/// decorator that panics if `load`/`load_page` is ever called, and driving a
+/// (simulated) crash-and-resume through it.
+#[tokio::test]
+async fn resume_never_reads_the_full_event_log() {
+    struct NoLoadEventLog(InMemoryStore);
+
+    #[async_trait::async_trait]
+    impl EventLog for NoLoadEventLog {
+        async fn append(
+            &self,
+            execution_id: &str,
+            event: apex_workflow::WorkflowEvent,
+        ) -> apex_common::Result<u64> {
+            self.0.append(execution_id, event).await
+        }
+        async fn load(
+            &self,
+            _execution_id: &str,
+        ) -> apex_common::Result<Vec<apex_workflow::WorkflowEvent>> {
+            panic!("resume must not read the full event log (WFL-304)");
+        }
+        async fn load_page(
+            &self,
+            _execution_id: &str,
+            _offset: u64,
+            _limit: u64,
+        ) -> apex_common::Result<Vec<apex_workflow::WorkflowEvent>> {
+            panic!("resume must not page the event log either");
+        }
+    }
+
+    let def = Definition::from_yaml(
+        "metadata:\n  name: noload\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n  transitions:\n    - {from: a, to: b}\n",
+    )
+    .unwrap();
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(NoLoadEventLog(store.clone()));
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+
+    // First run interrupts on `b`, simulating a crash mid-execution.
+    let executor1 = ClosureExecutor::new()
+        .on("a", |_| async { Ok(json!("a-done")) })
+        .on("b", |_| async {
+            Err(ActivityError::Interrupted("crash".into()))
+        });
+    let engine1 = Engine::new(events.clone(), checkpoints.clone(), Arc::new(executor1));
+    let (outcome, _) = engine1.run(&def, "noload-1", json!({})).await.unwrap();
+    assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+
+    // Resume must complete via the checkpoint alone — if it ever called
+    // `load`/`load_page`, the panic above would fail this test.
+    let executor2 = ClosureExecutor::new().on("b", |_| async { Ok(json!("b-done")) });
+    let engine2 = Engine::new(events, checkpoints, Arc::new(executor2));
+    let (outcome, _) = engine2.resume(&def, "noload-1").await.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +571,85 @@ async fn durable_timer_fires_when_the_deadline_passes() {
 
     // The fired timer left no pending registration behind.
     assert!(timers.due(u64::MAX).await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// WFL-306 — adaptive dispatch: sleep until the next deadline, not a fixed
+// interval, so a near-deadline timer fires promptly.
+// ---------------------------------------------------------------------------
+
+/// `TimerDispatcher::run_adaptive` fires a timer well before the fixed poll
+/// interval it's capped at would have — the whole point of sleeping until the
+/// actual next deadline instead of a stale fixed interval. Uses the **real**
+/// clock and a short real sleep (the one deliberate exception to this file's
+/// otherwise fully deterministic `ManualClock` tests): a `ManualClock` can't
+/// demonstrate "fires promptly" in wall-clock terms, since nothing advances it.
+#[tokio::test]
+async fn run_adaptive_fires_a_near_deadline_timer_promptly_not_after_the_full_interval() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: adaptive\nspec:\n  activities:\n    - {id: gate, type: wait, inputs: {timer: {after: \"60ms\"}}}\n    - {id: finish, type: function}\n  transitions:\n    - {from: gate, to: finish}\n",
+    )
+    .unwrap();
+
+    let store = InMemoryStore::new();
+    let events: Arc<dyn EventLog> = Arc::new(store.clone());
+    let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+    let timers = Arc::new(InMemoryTimerStore::new());
+    let executor = ClosureExecutor::new().on("finish", |_| async { Ok(json!("done")) });
+
+    let engine = Engine::new(events, checkpoints, Arc::new(executor))
+        .with_clock(Arc::new(SystemClock))
+        .with_timer_store(timers.clone());
+
+    let (outcome, _) = engine.run(&def, "adaptive-1", json!({})).await.unwrap();
+    assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+
+    let dispatcher = TimerDispatcher::new(
+        engine.clone(),
+        timers.clone() as Arc<dyn TimerStore>,
+        Arc::new(SystemClock),
+        resolver_for(&def),
+    );
+
+    // The stale-interval baseline `run_adaptive` is capped at — deliberately
+    // far longer than the 60ms deadline, so "promptly" is unambiguous: a
+    // fixed-interval poller would still be asleep well past this test's own
+    // completion deadline below.
+    let max_interval = Duration::from_secs(5);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = stop.clone();
+    let handle = tokio::spawn(async move {
+        dispatcher
+            .run_adaptive(max_interval, move || stop_flag.load(Ordering::SeqCst))
+            .await
+    });
+
+    // Drive completion by polling status while the dispatcher's own adaptive
+    // loop runs concurrently in the background.
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(2);
+    loop {
+        if let Some(state) = engine.query("adaptive-1").await.unwrap()
+            && state.status == WorkflowState::Completed
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "adaptive dispatch did not complete the near-deadline timer in time"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let elapsed = start.elapsed();
+
+    stop.store(true, Ordering::SeqCst);
+    let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "expected the 60ms-out timer to fire promptly (well under the {max_interval:?} \
+         fixed-interval cap), took {elapsed:?}"
+    );
 }
 
 #[tokio::test]

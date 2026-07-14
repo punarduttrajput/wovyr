@@ -29,6 +29,17 @@ pub struct ActivityContext {
     pub variables: BTreeMap<String, Value>,
     /// Current attempt number (1-based).
     pub attempt: u32,
+    /// An optional channel a long-running activity can use to report
+    /// incremental progress (WFL-307) — send a human-readable message and the
+    /// engine durably records it as an [`ActivityProgress`](crate::WorkflowEvent::
+    /// ActivityProgress) event as soon as it's received. `None` on scheduling
+    /// paths that don't stream progress live (the concurrent batch/`for_each`
+    /// paths isolate an attempt off the shared state until it settles, so they
+    /// have nowhere to emit an event to mid-flight — a documented follow-on,
+    /// not a silent gap: sending on a `None` context is simply a no-op for an
+    /// executor that checks first). Display-only: never read back by the
+    /// engine itself, so a message an executor never sends changes nothing.
+    pub progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// The outcome of a failed activity, used by the retry classifier

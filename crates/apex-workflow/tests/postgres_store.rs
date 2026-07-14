@@ -24,7 +24,7 @@
 
 use apex_workflow::{
     ActivityError, ActivityState, CheckpointStore, ClosureExecutor, Definition, DefinitionResolver,
-    Engine, EventLog, PostgresStore, RunOutcome, WorkQueue, Worker, WorkflowState,
+    Engine, EventLog, ExecutionFilter, PostgresStore, RunOutcome, WorkQueue, Worker, WorkflowState,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -385,4 +385,91 @@ async fn concurrent_store_calls_are_served_by_the_pool() {
             "each independent execution has one event"
         );
     }
+}
+
+/// WFL-305: `list()` filters at the database against the indexed
+/// `workflow_name`/`status` columns rather than decoding every row in Rust —
+/// proven by inserting a row whose `snapshot` JSON is deliberately corrupt but
+/// whose indexed columns don't match the filter. If `list()` ever fell back to
+/// loading and decoding every row, this test would fail with a JSON parse
+/// error instead of succeeding.
+#[tokio::test]
+async fn filtered_list_never_decodes_a_non_matching_rows_corrupt_snapshot() {
+    let Some(store) = store().await else { return };
+    let url = std::env::var("APEX_WORKFLOW_POSTGRES_URL").unwrap();
+    let def = linear_abc();
+    let n = nonce();
+    let matching_id = format!("wf-pg-listfilter-match-{n}");
+    let corrupt_id = format!("wf-pg-listfilter-corrupt-{n}");
+
+    // A real, valid, completed checkpoint that the filter below should match.
+    let executor = ClosureExecutor::new()
+        .on("a", |_| async { Ok(json!({"a": true})) })
+        .on("b", |_| async { Ok(json!({"b": true})) })
+        .on("c", |_| async { Ok(json!({"c": true})) });
+    let engine = Engine::new(
+        store.clone() as Arc<dyn EventLog>,
+        store.clone() as Arc<dyn CheckpointStore>,
+        Arc::new(executor),
+    );
+    engine.run(&def, &matching_id, json!({})).await.unwrap();
+
+    // A raw row with a *different* workflow_name/status and unparseable
+    // `snapshot` JSON, inserted directly — bypassing `PostgresStore::save`
+    // entirely, so any regression back to Rust-side filter/decode-everything
+    // would surface as a JSON error here rather than silently passing.
+    let (raw, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    raw.execute(
+        "INSERT INTO workflow_checkpoints (execution_id, snapshot, workflow_name, status)
+         VALUES ($1, 'not valid json {{{', 'a-totally-different-workflow', 'cancelled')",
+        &[&corrupt_id],
+    )
+    .await
+    .unwrap();
+
+    // Filtering by the matching execution's real name/status must succeed and
+    // include it — the corrupt row is excluded by the SQL WHERE clause, never
+    // reaching `serde_json::from_str`.
+    let filtered = store
+        .list(&ExecutionFilter {
+            workflow_name: Some("durable-pg".to_string()),
+            status: Some(WorkflowState::Completed),
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        filtered.iter().any(|s| s.execution_id == matching_id),
+        "the matching execution must be present"
+    );
+    assert!(
+        filtered.iter().all(|s| s.execution_id != corrupt_id),
+        "the corrupt, non-matching row must never appear"
+    );
+
+    // Sanity: a filter that *does* select the corrupt row really does fail to
+    // decode it — proving the row is genuinely corrupt (not merely absent for
+    // an unrelated reason), so the exclusion above is what protected us.
+    let unfiltered = store
+        .list(&ExecutionFilter {
+            workflow_name: Some("a-totally-different-workflow".to_string()),
+            ..Default::default()
+        })
+        .await;
+    assert!(
+        unfiltered.is_err(),
+        "the corrupt row, when actually selected, must fail to decode"
+    );
+
+    raw.execute(
+        "DELETE FROM workflow_checkpoints WHERE execution_id = $1",
+        &[&corrupt_id],
+    )
+    .await
+    .unwrap();
 }

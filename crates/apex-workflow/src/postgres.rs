@@ -411,7 +411,7 @@ impl PostgresStore {
 #[async_trait]
 impl EventLog for PostgresStore {
     async fn append(&self, execution_id: &str, event: WorkflowEvent) -> Result<u64> {
-        let payload = serde_json::to_string(&event)?;
+        let payload = crate::event::encode_event(&event)?;
         let conn = self.pool.get().await?;
         // Allocate the next per-execution sequence via an atomic upsert on a dedicated
         // counter row (WFL-104): `UPDATE … SET next_seq = next_seq + 1 RETURNING`
@@ -452,8 +452,43 @@ impl EventLog for PostgresStore {
             .await
             .map_err(|e| pg_err("load events", e))?;
         rows.iter()
-            .map(|row| serde_json::from_str(row.get::<_, &str>("event")).map_err(Error::from))
+            .map(|row| crate::event::decode_event(row.get::<_, &str>("event")))
             .collect()
+    }
+
+    async fn load_page(
+        &self,
+        execution_id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<WorkflowEvent>> {
+        // Bounded at the database (WFL-304): unlike `load`, this never pulls rows
+        // beyond the requested page across the wire at all.
+        let conn = self.pool.get().await?;
+        let rows = conn
+            .client()
+            .query(
+                "SELECT event FROM workflow_events WHERE execution_id = $1
+                 ORDER BY seq OFFSET $2 LIMIT $3",
+                &[&execution_id, &(offset as i64), &(limit as i64)],
+            )
+            .await
+            .map_err(|e| pg_err("load event page", e))?;
+        rows.iter()
+            .map(|row| crate::event::decode_event(row.get::<_, &str>("event")))
+            .collect()
+    }
+
+    async fn compact(&self, execution_id: &str, keep_after_seq: u64) -> Result<()> {
+        let conn = self.pool.get().await?;
+        conn.client()
+            .execute(
+                "DELETE FROM workflow_events WHERE execution_id = $1 AND seq <= $2",
+                &[&execution_id, &(keep_after_seq as i64)],
+            )
+            .await
+            .map_err(|e| pg_err("compact events", e))?;
+        Ok(())
     }
 }
 
@@ -461,14 +496,25 @@ impl EventLog for PostgresStore {
 impl CheckpointStore for PostgresStore {
     async fn save(&self, snapshot: &ExecutionState) -> Result<()> {
         let payload = serde_json::to_string(snapshot)?;
+        // WFL-305: `workflow_name`/`status` ride along as their own indexed
+        // columns, kept in lockstep with the JSON snapshot on every upsert, so
+        // `list()` can filter in SQL instead of decoding every row in Rust.
+        let status = status_str(snapshot.status);
         let conn = self.pool.get().await?;
-        // Upsert: one latest checkpoint per execution.
         conn.client()
             .execute(
-                "INSERT INTO workflow_checkpoints (execution_id, snapshot)
-                 VALUES ($1, $2)
-                 ON CONFLICT (execution_id) DO UPDATE SET snapshot = EXCLUDED.snapshot",
-                &[&snapshot.execution_id, &payload],
+                "INSERT INTO workflow_checkpoints (execution_id, snapshot, workflow_name, status)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (execution_id) DO UPDATE SET
+                     snapshot = EXCLUDED.snapshot,
+                     workflow_name = EXCLUDED.workflow_name,
+                     status = EXCLUDED.status",
+                &[
+                    &snapshot.execution_id,
+                    &payload,
+                    &snapshot.workflow_name,
+                    &status,
+                ],
             )
             .await
             .map_err(|e| pg_err("save checkpoint", e))?;
@@ -492,28 +538,49 @@ impl CheckpointStore for PostgresStore {
     }
 
     async fn list(&self, filter: &ExecutionFilter) -> Result<Vec<ExecutionState>> {
-        // Ordered by execution id at the database; name/status/limit are applied in
-        // Rust over the decoded snapshots (a dedicated index column is a later slice).
+        // WFL-305: name/status/limit are pushed into the query itself, against the
+        // indexed `workflow_name`/`status` columns — a filtered call never even
+        // reads, let alone JSON-decodes, a row that doesn't match.
+        let name = filter.workflow_name.clone();
+        let status = filter.status.map(status_str);
+        let limit = filter.limit.map(|l| l as i64);
+
+        let mut sql = String::from("SELECT snapshot FROM workflow_checkpoints WHERE true");
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+        if let Some(name) = &name {
+            params.push(name);
+            sql.push_str(&format!(" AND workflow_name = ${}", params.len()));
+        }
+        if let Some(status) = &status {
+            params.push(status);
+            sql.push_str(&format!(" AND status = ${}", params.len()));
+        }
+        sql.push_str(" ORDER BY execution_id");
+        if let Some(limit) = &limit {
+            params.push(limit);
+            sql.push_str(&format!(" LIMIT ${}", params.len()));
+        }
+
         let conn = self.pool.get().await?;
         let rows = conn
             .client()
-            .query(
-                "SELECT snapshot FROM workflow_checkpoints ORDER BY execution_id",
-                &[],
-            )
+            .query(&sql, &params)
             .await
             .map_err(|e| pg_err("list checkpoints", e))?;
-        let mut snapshots = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let state: ExecutionState = serde_json::from_str(row.get::<_, &str>("snapshot"))?;
-            if filter.matches(&state) {
-                snapshots.push(state);
-            }
-        }
-        if let Some(limit) = filter.limit {
-            snapshots.truncate(limit);
-        }
-        Ok(snapshots)
+        rows.iter()
+            .map(|row| serde_json::from_str(row.get::<_, &str>("snapshot")).map_err(Error::from))
+            .collect()
+    }
+}
+
+/// The exact `snake_case` wire string a [`WorkflowState`] serializes to (`running`,
+/// `completed`, …) — derived from the real `Serialize` impl rather than
+/// hand-duplicated, so the indexed `status` column can never drift from what the
+/// JSON snapshot itself would encode.
+fn status_str(status: crate::state::WorkflowState) -> String {
+    match serde_json::to_value(status) {
+        Ok(serde_json::Value::String(s)) => s,
+        other => unreachable!("WorkflowState must serialize to a string, got {other:?}"),
     }
 }
 

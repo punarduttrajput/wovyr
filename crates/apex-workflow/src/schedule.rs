@@ -156,6 +156,19 @@ pub trait ScheduleStore: Send + Sync {
     async fn list(&self) -> Result<Vec<Schedule>>;
     /// Remove a schedule. Idempotent.
     async fn remove(&self, id: &str) -> Result<()>;
+
+    /// The earliest `next_fire_ms` among every non-paused schedule (WFL-306) —
+    /// `None` if there are none. Lets a dispatcher sleep exactly until the next
+    /// deadline instead of polling on a fixed interval.
+    async fn next_deadline(&self) -> Result<Option<u64>> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|s| !s.paused)
+            .map(|s| s.next_fire_ms)
+            .min())
+    }
 }
 
 /// An in-process [`ScheduleStore`]. Cloning shares state.
@@ -337,6 +350,38 @@ impl ScheduleDispatcher {
         }
         Ok(started)
     }
+
+    /// The earliest pending deadline, in Unix-epoch milliseconds — see
+    /// [`ScheduleStore::next_deadline`].
+    pub async fn next_deadline_ms(&self) -> Result<Option<u64>> {
+        self.store.next_deadline().await
+    }
+
+    /// Run indefinitely: [`poll`](Self::poll), then sleep exactly until the next
+    /// pending deadline instead of a fixed interval (WFL-306), capped at
+    /// `max_interval` so the loop still wakes up periodically to notice a
+    /// schedule registered by another process in the meantime. Checked once per
+    /// iteration, `should_stop` lets a caller shut the loop down cleanly (e.g.
+    /// on server shutdown); returns `Ok(())` the first time it reports `true`.
+    pub async fn run_adaptive(
+        &self,
+        max_interval: std::time::Duration,
+        mut should_stop: impl FnMut() -> bool,
+    ) -> Result<()> {
+        loop {
+            if should_stop() {
+                return Ok(());
+            }
+            self.poll().await?;
+            let now = self.clock.now_millis();
+            let sleep_for = match self.next_deadline_ms().await? {
+                Some(next) => std::time::Duration::from_millis(next.saturating_sub(now)),
+                None => max_interval,
+            }
+            .min(max_interval);
+            tokio::time::sleep(sleep_for).await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +397,35 @@ mod tests {
         let mut s = Schedule::every("s", "w", 1_000, 1_000);
         s.advance_past(5_500).unwrap(); // host was down; skip missed ticks
         assert_eq!(s.next_fire_ms, 6_000);
+    }
+
+    /// WFL-306: `next_deadline` is the minimum `next_fire_ms` among non-paused
+    /// schedules, ignoring paused ones entirely.
+    #[tokio::test]
+    async fn next_deadline_ignores_paused_schedules_and_tracks_the_minimum() {
+        let store = InMemoryScheduleStore::new();
+        assert_eq!(store.next_deadline().await.unwrap(), None);
+
+        store
+            .save(&Schedule::every("a", "w", 1_000, 5_000))
+            .await
+            .unwrap();
+        assert_eq!(store.next_deadline().await.unwrap(), Some(5_000));
+
+        // A closer, but paused, schedule must not win.
+        let mut paused = Schedule::every("b", "w", 1_000, 100);
+        paused.paused = true;
+        store.save(&paused).await.unwrap();
+        assert_eq!(
+            store.next_deadline().await.unwrap(),
+            Some(5_000),
+            "a paused schedule's deadline must not be considered"
+        );
+
+        // Unpausing it makes it the new minimum.
+        paused.paused = false;
+        store.save(&paused).await.unwrap();
+        assert_eq!(store.next_deadline().await.unwrap(), Some(100));
     }
 
     #[test]

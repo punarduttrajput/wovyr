@@ -416,6 +416,7 @@ mod tests {
             inputs,
             variables: Default::default(),
             attempt: 1,
+            progress: None,
         }
     }
 

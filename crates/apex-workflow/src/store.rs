@@ -24,6 +24,47 @@ pub trait EventLog: Send + Sync {
     async fn append(&self, execution_id: &str, event: WorkflowEvent) -> Result<u64>;
     /// Load all events for an execution, in order.
     async fn load(&self, execution_id: &str) -> Result<Vec<WorkflowEvent>>;
+
+    /// Load a bounded page of events (WFL-304), in order, skipping `offset` and
+    /// returning at most `limit` — for a long-running execution's history, this
+    /// avoids reading/deserializing the *entire* log just to show one page of it.
+    /// The default implementation loads the full log and slices it (correct, but
+    /// not bounded); a store backed by a real file or database should override
+    /// this to actually bound how much it reads.
+    async fn load_page(
+        &self,
+        execution_id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<WorkflowEvent>> {
+        let all = self.load(execution_id).await?;
+        Ok(all
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect())
+    }
+
+    /// Permanently delete every event for `execution_id` at or before
+    /// `keep_after_seq` (WFL-304 retention) — an explicit, caller-invoked prune,
+    /// **never** run automatically by the engine: the event log is the
+    /// append-only source of truth ([`crate::event`]'s own doc comment), so only
+    /// a caller who has decided older history is no longer needed should call
+    /// this (e.g. once it's confirmed durable elsewhere, or past a retention
+    /// window). The default implementation is a no-op, matching today's
+    /// keep-everything behavior for a store that hasn't opted in. Note for
+    /// [`FileStore`]: seq numbers after a compaction are only guaranteed
+    /// contiguous for the process that performed it (its warm in-memory seq
+    /// cache is unaffected); a *fresh* `FileStore` reseeds from the compacted
+    /// file's new line count, so an execution appended to again after a
+    /// restart post-compaction gets renumbered seqs starting after the kept
+    /// tail, not the original numbering. Harmless for `load`/`load_page` (both
+    /// read positionally, not by the original seq value) but worth knowing
+    /// before relying on absolute seq numbers across a compaction + restart.
+    async fn compact(&self, execution_id: &str, keep_after_seq: u64) -> Result<()> {
+        let _ = (execution_id, keep_after_seq);
+        Ok(())
+    }
 }
 
 /// Stores the latest full execution snapshot for fast recovery.
@@ -90,6 +131,15 @@ impl EventLog for InMemoryStore {
     async fn load(&self, execution_id: &str) -> Result<Vec<WorkflowEvent>> {
         let events = self.inner.events.lock().expect("events mutex poisoned");
         Ok(events.get(execution_id).cloned().unwrap_or_default())
+    }
+
+    async fn compact(&self, execution_id: &str, keep_after_seq: u64) -> Result<()> {
+        let mut events = self.inner.events.lock().expect("events mutex poisoned");
+        if let Some(log) = events.get_mut(execution_id) {
+            let drop_count = (keep_after_seq as usize).min(log.len());
+            log.drain(0..drop_count);
+        }
+        Ok(())
     }
 }
 
@@ -190,7 +240,7 @@ impl EventLog for FileStore {
         use tokio::io::AsyncWriteExt;
 
         let path = self.events_path(execution_id);
-        let mut line = serde_json::to_string(&event)?;
+        let mut line = crate::event::encode_event(&event)?;
         line.push('\n');
 
         let mut file = tokio::fs::OpenOptions::new()
@@ -228,8 +278,63 @@ impl EventLog for FileStore {
         lines
             .iter()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l).map_err(Error::from))
+            .map(|l| crate::event::decode_event(l))
             .collect()
+    }
+
+    async fn load_page(
+        &self,
+        execution_id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<WorkflowEvent>> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let path = self.events_path(execution_id);
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::Io(e)),
+        };
+        // Stream line-by-line rather than `load`'s whole-file read: skipped lines
+        // are never even deserialized, and reading stops as soon as `limit` is
+        // satisfied — the file's tail (everything past the requested page) is
+        // never touched at all, which is the actual bound WFL-304 asks for.
+        let mut reader = BufReader::new(file).lines();
+        let mut skipped = 0u64;
+        while skipped < offset {
+            match reader.next_line().await? {
+                Some(_) => skipped += 1,
+                None => return Ok(Vec::new()),
+            }
+        }
+        let mut out = Vec::with_capacity(limit.min(1024) as usize);
+        while (out.len() as u64) < limit {
+            match reader.next_line().await? {
+                Some(line) if line.trim().is_empty() => continue,
+                Some(line) => out.push(crate::event::decode_event(&line)?),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    async fn compact(&self, execution_id: &str, keep_after_seq: u64) -> Result<()> {
+        // Line position *is* the seq (1-based, per `append`'s seq-from-line-count
+        // seeding) — so "keep events after seq N" is exactly "drop the first N
+        // lines". Rewritten atomically (temp file + fsync + rename, same as a
+        // checkpoint save) so a crash mid-compaction never leaves a torn log.
+        let path = self.events_path(execution_id);
+        let lines = load_lines(&path).await?;
+        let drop_count = (keep_after_seq as usize).min(lines.len());
+        let mut kept = lines[drop_count..].join("\n");
+        if !kept.is_empty() {
+            kept.push('\n');
+        }
+        tokio::task::spawn_blocking(move || apex_common::fs::atomic_write(&path, kept))
+            .await
+            .map_err(|e| Error::Runtime(format!("event log compaction task panicked: {e}")))??;
+        Ok(())
     }
 }
 
@@ -295,4 +400,87 @@ async fn sync_dir(dir: &Path) -> Result<()> {
         .await
         .map_err(|e| Error::Runtime(format!("fsync task panicked: {e}")))??;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::WorkflowEvent;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("apex-wf-store-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn ready(id: &str) -> WorkflowEvent {
+        WorkflowEvent::ActivityReady { id: id.to_string() }
+    }
+
+    /// `FileStore::load_page` (WFL-304) — the real streaming implementation, not
+    /// the trait's slice-the-full-load default — bounds correctly and matches
+    /// `load` over the same range.
+    #[tokio::test]
+    async fn file_store_load_page_matches_full_load_over_the_same_range() {
+        let dir = scratch("page");
+        let store = FileStore::new(&dir).unwrap();
+        for i in 0..5 {
+            store.append("x", ready(&format!("a{i}"))).await.unwrap();
+        }
+        let full = store.load("x").await.unwrap();
+        assert_eq!(full.len(), 5);
+
+        let page = store.load_page("x", 1, 2).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&page).unwrap(),
+            serde_json::to_value(&full[1..3]).unwrap()
+        );
+
+        // Past the end of the log, and an unknown execution, both page to empty
+        // rather than erroring.
+        assert!(store.load_page("x", 10, 5).await.unwrap().is_empty());
+        assert!(store.load_page("nope", 0, 5).await.unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `FileStore::compact` rewrites the on-disk log dropping the oldest
+    /// `keep_after_seq` lines, leaving the tail intact and still loadable.
+    #[tokio::test]
+    async fn file_store_compact_drops_the_oldest_events_and_keeps_the_tail() {
+        let dir = scratch("compact");
+        let store = FileStore::new(&dir).unwrap();
+        for i in 0..4 {
+            store.append("x", ready(&format!("a{i}"))).await.unwrap();
+        }
+
+        store.compact("x", 2).await.unwrap();
+
+        let remaining = store.load("x").await.unwrap();
+        assert_eq!(remaining.len(), 2);
+        match &remaining[0] {
+            WorkflowEvent::ActivityReady { id } => assert_eq!(id, "a2"),
+            other => panic!("expected ActivityReady, got {other:?}"),
+        }
+        match &remaining[1] {
+            WorkflowEvent::ActivityReady { id } => assert_eq!(id, "a3"),
+            other => panic!("expected ActivityReady, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Compacting away everything leaves an empty (not missing) log.
+    #[tokio::test]
+    async fn file_store_compact_to_nothing_leaves_an_empty_log() {
+        let dir = scratch("compact-all");
+        let store = FileStore::new(&dir).unwrap();
+        store.append("x", ready("a0")).await.unwrap();
+        store.append("x", ready("a1")).await.unwrap();
+
+        store.compact("x", 100).await.unwrap();
+
+        assert!(store.load("x").await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

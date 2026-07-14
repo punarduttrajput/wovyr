@@ -101,12 +101,42 @@ pub trait TimerStore: Send + Sync {
     /// All timers due at `now_ms` (i.e. `fire_at_ms <= now_ms`), in deterministic
     /// order (by deadline, then execution id, then timer id).
     async fn due(&self, now_ms: u64) -> Result<Vec<PendingTimer>>;
+
+    /// The earliest `fire_at_ms` among every pending timer (WFL-306) — `None` if
+    /// there are none. Lets a dispatcher sleep exactly until the next deadline
+    /// instead of polling on a fixed interval, so a near-deadline timer fires
+    /// promptly rather than waiting out a stale interval. The default
+    /// implementation derives it from [`due`](Self::due) with an unbounded
+    /// horizon (correct, but a full scan); [`InMemoryTimerStore`] overrides
+    /// this with an O(1) lookup against a `fire_at`-sorted index instead.
+    async fn next_deadline(&self) -> Result<Option<u64>> {
+        Ok(self
+            .due(u64::MAX)
+            .await?
+            .into_iter()
+            .map(|t| t.fire_at_ms)
+            .min())
+    }
 }
 
 /// An in-process [`TimerStore`] for tests and single-node use. Cloning shares state.
+///
+/// Maintains a **secondary index** sorted by `(fire_at_ms, execution_id,
+/// timer_id)` alongside the primary `(execution_id, timer_id)` map (WFL-306):
+/// `due`/`next_deadline` query this index directly via `BTreeSet::range`/
+/// `.first()`, bounded by the number of timers actually due (or O(1) for the
+/// next deadline) rather than scanning every pending timer regardless of how
+/// far out its deadline is.
 #[derive(Clone, Default)]
 pub struct InMemoryTimerStore {
-    inner: Arc<Mutex<BTreeMap<(String, String), PendingTimer>>>,
+    inner: Arc<Mutex<TimerIndex>>,
+}
+
+#[derive(Default)]
+struct TimerIndex {
+    by_key: BTreeMap<(String, String), PendingTimer>,
+    /// `(fire_at_ms, execution_id, timer_id)`, kept in lockstep with `by_key`.
+    by_deadline: std::collections::BTreeSet<(u64, String, String)>,
 }
 
 impl InMemoryTimerStore {
@@ -120,30 +150,46 @@ impl InMemoryTimerStore {
 impl TimerStore for InMemoryTimerStore {
     async fn schedule(&self, timer: PendingTimer) -> Result<()> {
         let mut g = self.inner.lock().expect("timer mutex poisoned");
-        g.insert((timer.execution_id.clone(), timer.timer_id.clone()), timer);
+        let key = (timer.execution_id.clone(), timer.timer_id.clone());
+        // Replacing an existing timer must also drop its old deadline-index entry
+        // — the whole point of a secondary index is that it never drifts from
+        // the primary map.
+        if let Some(old_fire_at_ms) = g.by_key.get(&key).map(|t| t.fire_at_ms) {
+            g.by_deadline
+                .remove(&(old_fire_at_ms, key.0.clone(), key.1.clone()));
+        }
+        g.by_deadline
+            .insert((timer.fire_at_ms, key.0.clone(), key.1.clone()));
+        g.by_key.insert(key, timer);
         Ok(())
     }
 
     async fn cancel(&self, execution_id: &str, timer_id: &str) -> Result<()> {
         let mut g = self.inner.lock().expect("timer mutex poisoned");
-        g.remove(&(execution_id.to_string(), timer_id.to_string()));
+        let key = (execution_id.to_string(), timer_id.to_string());
+        if let Some(old) = g.by_key.remove(&key) {
+            g.by_deadline.remove(&(old.fire_at_ms, key.0, key.1));
+        }
         Ok(())
     }
 
     async fn due(&self, now_ms: u64) -> Result<Vec<PendingTimer>> {
         let g = self.inner.lock().expect("timer mutex poisoned");
-        let mut due: Vec<PendingTimer> = g
-            .values()
-            .filter(|t| t.fire_at_ms <= now_ms)
-            .cloned()
-            .collect();
-        due.sort_by(|a, b| {
-            a.fire_at_ms
-                .cmp(&b.fire_at_ms)
-                .then_with(|| a.execution_id.cmp(&b.execution_id))
-                .then_with(|| a.timer_id.cmp(&b.timer_id))
-        });
-        Ok(due)
+        // Every entry ordered before `(now_ms + 1, "", "")` has `fire_at_ms <=
+        // now_ms` — `fire_at_ms` is the tuple's primary sort key, so this bound
+        // is correct regardless of the string components (no "maximum string"
+        // sentinel needed). Bounded by the number of due entries, not the total
+        // pending count.
+        let upper = (now_ms.saturating_add(1), String::new(), String::new());
+        Ok(g.by_deadline
+            .range(..upper)
+            .map(|(_, exec, timer)| g.by_key[&(exec.clone(), timer.clone())].clone())
+            .collect())
+    }
+
+    async fn next_deadline(&self) -> Result<Option<u64>> {
+        let g = self.inner.lock().expect("timer mutex poisoned");
+        Ok(g.by_deadline.first().map(|(ms, _, _)| *ms))
     }
 }
 
@@ -281,6 +327,40 @@ impl TimerDispatcher {
         }
         Ok(fired)
     }
+
+    /// The earliest pending deadline, in Unix-epoch milliseconds — see
+    /// [`TimerStore::next_deadline`].
+    pub async fn next_deadline_ms(&self) -> Result<Option<u64>> {
+        self.timers.next_deadline().await
+    }
+
+    /// Run indefinitely: [`poll`](Self::poll), then sleep exactly until the next
+    /// pending deadline instead of a fixed interval (WFL-306) — capped at
+    /// `max_interval` so the loop still wakes up periodically to notice a timer
+    /// registered by another process in the meantime (the same guarantee a fixed
+    /// interval gives), while a near-deadline timer fires promptly rather than
+    /// waiting out a stale interval. Checked once per iteration, `should_stop`
+    /// lets a caller shut the loop down cleanly (e.g. on server shutdown);
+    /// returns `Ok(())` the first time it reports `true`.
+    pub async fn run_adaptive(
+        &self,
+        max_interval: std::time::Duration,
+        mut should_stop: impl FnMut() -> bool,
+    ) -> Result<()> {
+        loop {
+            if should_stop() {
+                return Ok(());
+            }
+            self.poll().await?;
+            let now = self.clock.now_millis();
+            let sleep_for = match self.next_deadline_ms().await? {
+                Some(next) => std::time::Duration::from_millis(next.saturating_sub(now)),
+                None => max_interval,
+            }
+            .min(max_interval);
+            tokio::time::sleep(sleep_for).await;
+        }
+    }
 }
 
 /// Parse a duration value from a `wait` timer's `after` field into milliseconds.
@@ -371,5 +451,94 @@ mod tests {
 
         store.cancel("e1", "t").await.unwrap();
         assert_eq!(store.due(100).await.unwrap().len(), 1);
+    }
+
+    /// WFL-306: `next_deadline` tracks the true minimum across
+    /// schedule/cancel/replace, and stays correct as the earliest entry changes.
+    #[tokio::test]
+    async fn next_deadline_tracks_the_true_minimum_across_mutations() {
+        let store = InMemoryTimerStore::new();
+        assert_eq!(store.next_deadline().await.unwrap(), None);
+
+        store
+            .schedule(PendingTimer {
+                execution_id: "e1".into(),
+                timer_id: "t".into(),
+                fire_at_ms: 5_000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.next_deadline().await.unwrap(), Some(5_000));
+
+        // A closer deadline becomes the new minimum.
+        store
+            .schedule(PendingTimer {
+                execution_id: "e2".into(),
+                timer_id: "t".into(),
+                fire_at_ms: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.next_deadline().await.unwrap(), Some(100));
+
+        // Replacing e2's own timer with a later deadline must drop its old
+        // index entry, not leave a stale (100, e2, t) alongside the new one.
+        store
+            .schedule(PendingTimer {
+                execution_id: "e2".into(),
+                timer_id: "t".into(),
+                fire_at_ms: 9_000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.next_deadline().await.unwrap(), Some(5_000));
+
+        store.cancel("e1", "t").await.unwrap();
+        assert_eq!(store.next_deadline().await.unwrap(), Some(9_000));
+
+        store.cancel("e2", "t").await.unwrap();
+        assert_eq!(store.next_deadline().await.unwrap(), None);
+    }
+
+    /// WFL-306: `due`/`next_deadline` are backed by a `fire_at`-sorted index
+    /// (`BTreeSet::range`/`.first()`), not a scan over every pending timer —
+    /// correctness holds even with a large number of far-future timers mixed
+    /// in, and this comfortably-bounded timing check is a generous sanity
+    /// backstop on top of that structural guarantee (the same "large headroom"
+    /// philosophy `tests/perf.rs` uses elsewhere in this crate).
+    #[tokio::test]
+    async fn due_and_next_deadline_stay_fast_with_many_far_future_timers() {
+        let store = InMemoryTimerStore::new();
+        for i in 0..20_000u64 {
+            store
+                .schedule(PendingTimer {
+                    execution_id: format!("far-{i}"),
+                    timer_id: "t".into(),
+                    fire_at_ms: 1_000_000_000 + i,
+                })
+                .await
+                .unwrap();
+        }
+        store
+            .schedule(PendingTimer {
+                execution_id: "due-now".into(),
+                timer_id: "t".into(),
+                fire_at_ms: 100,
+            })
+            .await
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let due = store.due(100).await.unwrap();
+        let next = store.next_deadline().await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].execution_id, "due-now");
+        assert_eq!(next, Some(100));
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "expected a bounded lookup, took {elapsed:?} against 20,000 pending timers"
+        );
     }
 }

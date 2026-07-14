@@ -234,6 +234,11 @@ async fn run_attempts(
             inputs: activity.inputs.clone(),
             variables: variables.clone(),
             attempt,
+            // Isolated (Phase 1, off the shared `ExecutionState`) so a batch of
+            // these can run concurrently — there's nowhere to durably emit a
+            // progress event until the outcome commits (Phase 2). Live progress
+            // on this path is a documented follow-on (WFL-307).
+            progress: None,
         };
         match executor.execute(&ctx).await {
             Ok(output) => {
@@ -333,12 +338,24 @@ pub struct Engine {
     /// (RM-AIM-P1 WFL-102) — the guard against a self-referential or mutually-recursive
     /// workflow recursing forever. Default [`DEFAULT_MAX_SUBWORKFLOW_DEPTH`].
     max_subworkflow_depth: usize,
+    /// Maximum serialized size of one activity output before it's rejected fail-closed
+    /// (WFL-303) — every future checkpoint re-serializes and upserts the *entire*
+    /// `ExecutionState`, so one oversized output would bloat every checkpoint for the
+    /// rest of the run, not just the one it's produced in. Default
+    /// [`DEFAULT_MAX_ACTIVITY_OUTPUT_BYTES`].
+    max_activity_output_bytes: usize,
 }
 
 /// Default cap on sub-workflow nesting depth (WFL-102): generous enough for any
 /// legitimate composition, low enough to stop unbounded recursion well before a
 /// stack overflow.
 pub const DEFAULT_MAX_SUBWORKFLOW_DEPTH: usize = 16;
+
+/// Default cap on one activity output's serialized size (WFL-303): generous enough
+/// for ordinary tool/AI outputs, low enough that a pathological output (an
+/// accidentally-dumped file, an unbounded tool result) is caught immediately rather
+/// than silently bloating every checkpoint of the execution from then on.
+pub const DEFAULT_MAX_ACTIVITY_OUTPUT_BYTES: usize = 1024 * 1024;
 
 impl Engine {
     /// Build an engine over an event log, checkpoint store, and activity executor.
@@ -357,6 +374,7 @@ impl Engine {
             timers: None,
             subworkflows: None,
             max_subworkflow_depth: DEFAULT_MAX_SUBWORKFLOW_DEPTH,
+            max_activity_output_bytes: DEFAULT_MAX_ACTIVITY_OUTPUT_BYTES,
         }
     }
 
@@ -383,6 +401,14 @@ impl Engine {
     /// whose child would exceed this depth fails closed instead of recursing.
     pub fn with_max_subworkflow_depth(mut self, max_depth: usize) -> Self {
         self.max_subworkflow_depth = max_depth;
+        self
+    }
+
+    /// Override the maximum serialized size of one activity output (WFL-303, bytes).
+    /// An output over this cap fails the activity closed rather than being merged
+    /// into `state.variables` and bloating every future checkpoint.
+    pub fn with_max_activity_output_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_activity_output_bytes = max_bytes;
         self
     }
 
@@ -414,6 +440,28 @@ impl Engine {
     /// detail view (G4). Empty if the execution is unknown.
     pub async fn history(&self, execution_id: &str) -> Result<Vec<WorkflowEvent>> {
         self.events.load(execution_id).await
+    }
+
+    /// A bounded **page** of an execution's event history (WFL-304), in order,
+    /// skipping `offset` and returning at most `limit`. Unlike [`history`](Self::
+    /// history), which loads the entire log, this bounds how much is read for a
+    /// long-running execution with a large event count — see
+    /// [`EventLog::load_page`].
+    pub async fn history_page(
+        &self,
+        execution_id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<WorkflowEvent>> {
+        self.events.load_page(execution_id, offset, limit).await
+    }
+
+    /// Permanently prune an execution's event history at or before
+    /// `keep_after_seq` (WFL-304 retention) — see [`EventLog::compact`] for the
+    /// fail-safe/no-op default and why this is never called automatically by the
+    /// engine itself.
+    pub async fn compact_history(&self, execution_id: &str, keep_after_seq: u64) -> Result<()> {
+        self.events.compact(execution_id, keep_after_seq).await
     }
 
     /// Start a new execution of `def` with id `execution_id` and JSON `input`, and
@@ -870,6 +918,7 @@ impl Engine {
             )
             .await?;
 
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let ctx = ActivityContext {
                 id: id.to_string(),
                 activity_type: activity.activity_type.clone(),
@@ -877,10 +926,55 @@ impl Engine {
                 inputs: activity.inputs.clone(),
                 variables: state.variables.clone(),
                 attempt,
+                progress: Some(progress_tx),
             };
 
-            match self.executor.execute(&ctx).await {
+            // Drive the executor concurrently with draining progress reports
+            // (WFL-307), so a long-running activity's incremental updates land
+            // in the durable log as they happen rather than only surfacing once
+            // it settles.
+            let outcome = {
+                let mut exec_fut = std::pin::pin!(self.executor.execute(&ctx));
+                loop {
+                    tokio::select! {
+                        biased;
+                        Some(message) = progress_rx.recv() => {
+                            self.emit(
+                                state,
+                                WorkflowEvent::ActivityProgress {
+                                    id: id.to_string(),
+                                    attempt,
+                                    message,
+                                },
+                            )
+                            .await?;
+                        }
+                        result = &mut exec_fut => break result,
+                    }
+                }
+            };
+            // The executor may have sent a final report right before returning;
+            // drain whatever's left in the now-closed channel rather than
+            // dropping it silently.
+            while let Ok(message) = progress_rx.try_recv() {
+                self.emit(
+                    state,
+                    WorkflowEvent::ActivityProgress {
+                        id: id.to_string(),
+                        attempt,
+                        message,
+                    },
+                )
+                .await?;
+            }
+
+            match outcome {
                 Ok(output) => {
+                    if let Err(msg) = self.check_output_size(id, &output) {
+                        return self
+                            .terminal_activity_failure(state, id, attempt, msg)
+                            .await;
+                    }
                     let record = state.activities.get_mut(id).expect("record exists");
                     record.attempts = attempt;
                     record.state = ActivityState::Completed;
@@ -1171,6 +1265,7 @@ impl Engine {
                     inputs: Value::Null,
                     variables: state.variables.clone(),
                     attempt: state.activities[&id].attempts + 1,
+                    progress: None,
                 };
                 let resolved = crate::template::resolve(&spec.items, &probe);
                 let Value::Array(items) = resolved else {
@@ -1350,6 +1445,12 @@ impl Engine {
         outputs: Vec<Value>,
     ) -> Result<Step> {
         let output = Value::Array(outputs);
+        if let Err(msg) = self.check_output_size(id, &output) {
+            let attempt = state.activities[id].attempts + 1;
+            return self
+                .terminal_activity_failure(state, id, attempt, msg)
+                .await;
+        }
         {
             let record = state.activities.get_mut(id).expect("record exists");
             record.attempts += 1;
@@ -1611,6 +1712,7 @@ impl Engine {
                 inputs: activity.inputs.clone(),
                 variables: state.variables.clone(),
                 attempt,
+                progress: None,
             };
             match self.executor.execute(&ctx).await {
                 Ok(output) => {
@@ -1689,6 +1791,26 @@ impl Engine {
     /// Persist a full checkpoint of the current state.
     async fn checkpoint(&self, state: &mut ExecutionState) -> Result<()> {
         self.checkpoints.save(state).await
+    }
+
+    /// Reject an activity output whose serialized size exceeds
+    /// `max_activity_output_bytes` (WFL-303), **before** it ever merges into
+    /// `state.variables` or reaches the event log/checkpoint — every future
+    /// checkpoint of this execution re-serializes the whole `ExecutionState`, so
+    /// catching an oversized output at the source, not after the fact, is what
+    /// keeps it from bloating every one of them.
+    fn check_output_size(&self, id: &str, output: &Value) -> std::result::Result<(), String> {
+        let size = serde_json::to_vec(output).map(|b| b.len()).unwrap_or(0);
+        if size > self.max_activity_output_bytes {
+            return Err(format!(
+                "activity `{id}` output is {size} bytes, over the {}-byte cap (WFL-303) — \
+                 every future checkpoint of this execution re-serializes the full state, so \
+                 this would bloat all of them; keep outputs small, or store the large payload \
+                 externally (object storage, a blob store) and pass a reference instead",
+                self.max_activity_output_bytes
+            ));
+        }
+        Ok(())
     }
 }
 
