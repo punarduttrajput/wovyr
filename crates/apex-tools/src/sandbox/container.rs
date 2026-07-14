@@ -92,6 +92,33 @@ impl Sandbox for ContainerSandbox {
 
     async fn execute(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
         if self.network.needs_proxy() {
+            // Fail closed (SBX-304) *before* ever starting a container: a non-empty
+            // egress allow-list is only meaningfully enforced by the host-side
+            // `nsenter`/`iptables` lockdown, which needs a Linux host and a Docker
+            // runtime (see the platform matrix on `egress_lockdown`'s module docs).
+            // Refusing here, rather than letting `execute_with_egress_lockdown` run
+            // and only then fail deep inside the lockdown sequence, turns an
+            // accidental (if still fail-closed) missing-binary spawn error into a
+            // deliberate, clearly-worded refusal — and never starts a container
+            // whose egress this platform/runtime combination can't actually confine.
+            if !crate::egress_lockdown::lockdown_supported() {
+                return Err(SandboxError::Internal(
+                    "a non-empty egress allow-list needs the host-side network-namespace \
+                     lockdown (nsenter + iptables), which is only supported on a Linux \
+                     host; refusing to run with an unenforceable network policy rather \
+                     than silently allowing full container egress"
+                        .to_string(),
+                ));
+            }
+            if self.runtime != "docker" {
+                return Err(SandboxError::Internal(format!(
+                    "a non-empty egress allow-list needs the host-side lockdown, which \
+                     only understands Docker's `network inspect` output shape; refusing \
+                     to run under the `{}` runtime rather than silently allowing full \
+                     container egress",
+                    self.runtime
+                )));
+            }
             return self.execute_with_egress_lockdown(cmd).await;
         }
 
@@ -438,5 +465,89 @@ mod tests {
             .argv(&sample_cmd());
         let net = argv.windows(2).find(|w| w[0] == "--network").unwrap();
         assert_eq!(net[1], "bridge");
+    }
+
+    // --- SBX-304: fail closed when the L3 egress lockdown isn't available -----------
+
+    fn allowlist_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            default_deny: true,
+            outbound_allow: vec!["api.example.com".to_string()],
+        }
+    }
+
+    /// A non-empty egress allow-list run is refused outright on a host that can't
+    /// enforce the lockdown — proven directly on whichever platform this test suite
+    /// actually runs on: the check runs *before* any container starts, so this needs
+    /// neither a real Docker daemon nor a Linux host to observe the refusal (it's
+    /// exactly the platforms this is meant to protect that make the test meaningful).
+    #[tokio::test]
+    async fn network_policy_run_is_refused_when_lockdown_is_unsupported_on_this_host() {
+        if crate::egress_lockdown::lockdown_supported() {
+            eprintln!(
+                "skipping: this test exercises the refusal path on a host where the \
+                 lockdown is *not* supported (this one supports it)"
+            );
+            return;
+        }
+        let sandbox = ContainerSandbox::docker("alpine:3.20").with_network(allowlist_policy());
+        let err = sandbox.execute(&sample_cmd()).await.unwrap_err();
+        assert!(matches!(err, SandboxError::Internal(_)), "{err:?}");
+        // The refusal names the actual reason (host-side lockdown unavailability),
+        // not a generic/unrelated failure.
+        assert!(err.to_string().contains("Linux"), "{err}");
+    }
+
+    /// The gVisor backend goes through the identical `execute` gate (it's the same
+    /// `ContainerSandbox` type, just with `runtime_class: Some("runsc")`) — the
+    /// refusal isn't accidentally scoped to the plain Docker constructor only.
+    #[tokio::test]
+    async fn gvisor_network_policy_run_is_also_refused_when_lockdown_is_unsupported() {
+        if crate::egress_lockdown::lockdown_supported() {
+            eprintln!("skipping: this test exercises the refusal path on a non-Linux host");
+            return;
+        }
+        let sandbox = ContainerSandbox::gvisor("alpine:3.20").with_network(allowlist_policy());
+        let err = sandbox.execute(&sample_cmd()).await.unwrap_err();
+        assert!(matches!(err, SandboxError::Internal(_)), "{err:?}");
+    }
+
+    /// A Podman runtime is refused too, even on a host that *does* support the Linux
+    /// lockdown mechanism — this module only speaks Docker's `network inspect`
+    /// output shape. The platform check runs first, so on a non-Linux host this
+    /// sandbox is already refused for that reason (covered by the two tests above);
+    /// here we only additionally check the Podman-specific message when the
+    /// platform check alone would otherwise have let it through.
+    #[tokio::test]
+    async fn podman_network_policy_run_is_refused_regardless_of_platform_support() {
+        let sandbox = ContainerSandbox::podman("alpine:3.20").with_network(allowlist_policy());
+        let err = sandbox.execute(&sample_cmd()).await.unwrap_err();
+        assert!(matches!(err, SandboxError::Internal(_)), "{err:?}");
+        if crate::egress_lockdown::lockdown_supported() {
+            assert!(err.to_string().contains("Docker"), "{err}");
+        }
+    }
+
+    /// A deny-all or fully-open policy needs no lockdown at all, on any platform —
+    /// the refusal above must not become an accidental blanket ban on every
+    /// container run, only the specific case that actually needs the lockdown.
+    #[tokio::test]
+    async fn deny_all_and_allow_all_policies_are_unaffected_by_the_lockdown_gate() {
+        // Neither of these calls `execute_with_egress_lockdown` at all (`needs_proxy()`
+        // is false for both), so neither is refused by the SBX-304 gate — whatever
+        // happens next depends only on whether a real container runtime is present,
+        // which this test doesn't require: it just asserts the error (if any) is
+        // never the lockdown-unsupported message.
+        let deny_all = ContainerSandbox::docker("alpine:3.20");
+        if let Err(e) = deny_all.execute(&sample_cmd()).await {
+            assert!(!e.to_string().contains("egress allow-list"), "{e}");
+        }
+        let allow_all = ContainerSandbox::docker("alpine:3.20").with_network(NetworkPolicy {
+            default_deny: false,
+            outbound_allow: vec![],
+        });
+        if let Err(e) = allow_all.execute(&sample_cmd()).await {
+            assert!(!e.to_string().contains("egress allow-list"), "{e}");
+        }
     }
 }

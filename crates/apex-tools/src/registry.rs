@@ -55,11 +55,43 @@ impl ToolRegistry {
         self
     }
 
-    /// `with_builtins()` plus `shell` — a convenience for trusted first-party/local
-    /// contexts that want the full v0.1 built-in set, including arbitrary command
-    /// execution (SEC-301).
+    /// Register `fs_write` into this registry — like `shell`, `with_builtins()`
+    /// deliberately withholds write access (SBX-301): confined to the run's
+    /// workspace root the same way `fs_read` is, but a much bigger blast radius
+    /// than read-only access to hand every agent by default.
+    pub fn with_fs_write(mut self) -> Self {
+        self.register(Arc::new(crate::builtin::FsWriteTool));
+        self
+    }
+
+    /// Register `code_execute` into this registry — like `shell`, `with_builtins()`
+    /// deliberately withholds it (SBX-302): arbitrary code execution, just in a
+    /// language runtime rather than a shell command line. Native-only, so a
+    /// verified/untrusted run fails closed; a server that has probed the node's
+    /// capabilities should use [`Self::with_code_execute_using`] instead.
+    pub fn with_code_execute(mut self) -> Self {
+        self.register(Arc::new(crate::builtin::CodeExecuteTool::native_only()));
+        self
+    }
+
+    /// Register `code_execute` driven by the node's **detected** sandbox
+    /// capabilities (SBX-101), mirroring [`Self::with_shell_using`].
+    pub fn with_code_execute_using(mut self, manager: crate::SandboxManager) -> Self {
+        self.register(Arc::new(crate::builtin::CodeExecuteTool::with_manager(
+            manager,
+        )));
+        self
+    }
+
+    /// `with_builtins()` plus `shell`, `fs_write`, and `code_execute` — a
+    /// convenience for trusted first-party/local contexts that want the full
+    /// v0.1 built-in set, including arbitrary command/code execution and
+    /// confined write access (SEC-301, SBX-301, SBX-302).
     pub fn with_privileged_builtins() -> Self {
-        Self::with_builtins().with_shell()
+        Self::with_builtins()
+            .with_shell()
+            .with_fs_write()
+            .with_code_execute()
     }
 
     /// Register a tool, overwriting any existing tool with the same id.
@@ -123,9 +155,32 @@ mod tests {
         assert!(r.contains("echo"));
         assert!(r.contains("fs_read"));
         assert!(r.contains("http_get"));
-        // shell is not a default builtin (SEC-301) — explicit opt-in only.
+        // shell/fs_write/code_execute are not default builtins
+        // (SEC-301/SBX-301/SBX-302) — explicit opt-in only.
         assert!(!r.contains("shell"));
+        assert!(!r.contains("fs_write"));
+        assert!(!r.contains("code_execute"));
         assert_eq!(r.ids().len(), 3);
+    }
+
+    #[test]
+    fn code_execute_is_an_explicit_opt_in() {
+        assert!(!ToolRegistry::with_builtins().contains("code_execute"));
+        assert!(
+            ToolRegistry::with_builtins()
+                .with_code_execute()
+                .contains("code_execute")
+        );
+    }
+
+    #[test]
+    fn fs_write_is_an_explicit_opt_in() {
+        assert!(!ToolRegistry::with_builtins().contains("fs_write"));
+        assert!(
+            ToolRegistry::with_builtins()
+                .with_fs_write()
+                .contains("fs_write")
+        );
     }
 
     #[test]
@@ -133,7 +188,14 @@ mod tests {
         assert!(!ToolRegistry::with_builtins().contains("shell"));
         assert!(ToolRegistry::with_builtins().with_shell().contains("shell"));
         let privileged = ToolRegistry::with_privileged_builtins();
-        for id in ["echo", "fs_read", "http_get", "shell"] {
+        for id in [
+            "echo",
+            "fs_read",
+            "http_get",
+            "shell",
+            "fs_write",
+            "code_execute",
+        ] {
             assert!(privileged.contains(id), "missing {id}");
         }
     }

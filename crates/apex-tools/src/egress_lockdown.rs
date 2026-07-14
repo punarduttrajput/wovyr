@@ -17,10 +17,44 @@
 //! daemon whose `network inspect` reports an IPAM gateway — Podman's output shape
 //! may differ and is not handled here). Fails closed: if any step fails, the
 //! caller must not proceed to run the untrusted command.
+//!
+//! ## Platform matrix (SBX-304)
+//!
+//! | Host OS | `default_deny` + empty allow-list (deny-all) | `default_deny: false` (allow-all) | `default_deny` + non-empty allow-list (needs the proxy + lockdown) |
+//! |---|---|---|---|
+//! | Linux + Docker | `--network none` (airtight, no lockdown needed) | plain `bridge` (no lockdown needed) | **enforced** via this module |
+//! | Windows / macOS (incl. Docker Desktop) | `--network none` (airtight, no lockdown needed) | plain `bridge` (no lockdown needed) | **refused** ([`lockdown_supported`] is `false`) |
+//! | Any host, Podman runtime | `--network none` (airtight) | plain `bridge` | **refused** — this module only speaks Docker's `network inspect` output shape |
+//!
+//! Only the last column needs this module at all: a full deny (`--network none`)
+//! or a fully-open bridge need no per-host lockdown regardless of platform,
+//! since there's nothing partial to enforce. [`lockdown_supported`] is the single
+//! gate [`crate::sandbox::ContainerSandbox::execute`] checks **before** starting
+//! any container for that case — refusing up front (`SandboxError::Internal`,
+//! naming the reason) rather than starting a container and only then discovering,
+//! deep inside the lockdown sequence, that `nsenter` doesn't exist on this host.
+//! That earlier failure mode was still fail-closed in effect (the untrusted
+//! command's `docker exec` is sequenced after the lockdown call, which errors
+//! first), but relied on a missing-binary spawn error as an accidental side
+//! effect rather than a deliberate, documented platform check — and gave a less
+//! specific error, and wasted a container start attempting the impossible.
 
 use crate::sandbox::SandboxError;
 use std::process::Stdio;
 use tokio::process::Command;
+
+/// Whether this host can actually enforce the L3 egress lockdown this module
+/// implements (SBX-304) — checked from the compile target, not by probing for
+/// `nsenter`/`iptables` at runtime: those tools operate on Linux network
+/// namespaces specifically, so even a hypothetical non-Linux host that happened
+/// to have same-named binaries on `PATH` (e.g. under some compatibility layer)
+/// would not be attaching to the same kind of namespace this module was built
+/// and proven against. Linux is the only supported host for the lockdown path;
+/// see the platform matrix above for what happens on every other platform (or
+/// with a non-Docker container runtime).
+pub(crate) fn lockdown_supported() -> bool {
+    cfg!(target_os = "linux")
+}
 
 /// The gateway IP of a docker `network` (default `"bridge"`) — the address a
 /// container reaches the host at. Resolved once per run and used both as the

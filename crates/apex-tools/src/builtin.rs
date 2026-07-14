@@ -13,8 +13,8 @@
 //! doc comment) rather than getting it for free in every agent.
 
 use crate::sandbox::{
-    CommandOutcome, ContainerSandbox, NativeSandbox, ResourceLimits, Sandbox, SandboxBackend,
-    SandboxCommand, SandboxManager,
+    CommandOutcome, ContainerSandbox, NativeSandbox, NetworkPolicy, ResourceLimits, Sandbox,
+    SandboxBackend, SandboxCommand, SandboxError, SandboxManager,
 };
 use crate::tool::{Tool, ToolContext, ToolError, ToolMetadata, ToolRequest, ToolResponse};
 use apex_provider::{Gateway, ImageGenRequest};
@@ -88,6 +88,79 @@ async fn confine_path(root: &str, requested: &str) -> Result<std::path::PathBuf,
     Ok(candidate_canonical)
 }
 
+/// Resolve `requested` against the confinement root `root` for a **write** target
+/// (SBX-301) — the write-side counterpart of [`confine_path`], which can't be reused
+/// directly because it canonicalizes the *whole* candidate, and a brand-new file
+/// naturally doesn't exist yet for `canonicalize` to resolve. Instead: split off the
+/// file name, canonicalize just the *parent directory* (which must already exist) the
+/// same way `confine_path` canonicalizes a read target, and reject if that escapes
+/// `root`. If the target itself already exists as a **symlink**, its resolved
+/// destination is checked too — otherwise a write would silently follow a symlink
+/// planted inside the confined root out to a target outside it, a write-specific
+/// escape a read-only confinement check doesn't need to consider (a symlink `fs_read`
+/// might follow only leaks data already reachable by read; a symlink `fs_write`
+/// follows could **overwrite** an arbitrary file outside the root).
+async fn confine_path_for_write(
+    root: &str,
+    requested: &str,
+) -> Result<std::path::PathBuf, ToolError> {
+    let root = if root.is_empty() { "." } else { root };
+    let root_canonical = tokio::fs::canonicalize(root).await.map_err(|e| {
+        ToolError::Internal(format!("could not resolve workspace root `{root}`: {e}"))
+    })?;
+
+    let requested_path = std::path::Path::new(requested);
+    let file_name = requested_path.file_name().ok_or_else(|| {
+        ToolError::Validation(format!("path `{requested}` has no file name component"))
+    })?;
+    if file_name == ".." || file_name == "." {
+        return Err(ToolError::Validation(format!(
+            "path `{requested}` must name a file, not `.`/`..`"
+        )));
+    }
+
+    let parent = requested_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
+    let parent_candidate = if parent.as_os_str().is_empty() {
+        root_canonical.clone()
+    } else if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        root_canonical.join(parent)
+    };
+
+    let parent_canonical = tokio::fs::canonicalize(&parent_candidate)
+        .await
+        .map_err(|e| {
+            ToolError::Internal(format!(
+                "could not resolve parent directory of `{requested}`: {e}"
+            ))
+        })?;
+
+    if !parent_canonical.starts_with(&root_canonical) {
+        return Err(ToolError::PermissionDenied(format!(
+            "path `{requested}` escapes the confined workspace root `{root}`"
+        )));
+    }
+
+    let candidate = parent_canonical.join(file_name);
+    if let Ok(metadata) = tokio::fs::symlink_metadata(&candidate).await
+        && metadata.file_type().is_symlink()
+    {
+        match tokio::fs::canonicalize(&candidate).await {
+            Ok(resolved) if resolved.starts_with(&root_canonical) => {}
+            _ => {
+                return Err(ToolError::PermissionDenied(format!(
+                    "path `{requested}` is a symlink that escapes the confined workspace root \
+                     `{root}`"
+                )));
+            }
+        }
+    }
+    Ok(candidate)
+}
+
 /// Read a UTF-8 text file from disk, confined to the run's workspace root
 /// (`ctx.workdir`) — SEC-302. Never able to read outside it (e.g. `~/.apex`'s
 /// platform state — secrets, the KMS root key), symlink escapes included.
@@ -134,6 +207,94 @@ impl Tool for FsReadTool {
         Ok(ToolResponse::success(json!({
             "path": path,
             "content": content,
+        })))
+    }
+}
+
+/// Write UTF-8 text content to a file, confined to the run's workspace root
+/// (`ctx.workdir`) — SBX-301, the write-side counterpart of `fs_read`'s SEC-302
+/// confinement (via [`confine_path_for_write`], including a check against a
+/// planted symlink escaping the root). Deliberately **not** registered by
+/// [`crate::ToolRegistry::with_builtins`] — like `shell`, write access is an
+/// explicit opt-in ([`crate::ToolRegistry::with_fs_write`]/
+/// [`crate::ToolRegistry::with_privileged_builtins`]), since handing every agent
+/// unconditional write access by default is a much bigger blast radius than the
+/// read-only builtins (SEC-301's stance extended to writes).
+pub struct FsWriteTool;
+
+#[async_trait]
+impl Tool for FsWriteTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new(
+            "fs_write",
+            "1.0.0",
+            "filesystem",
+            "Write UTF-8 text content to a file at the given path, creating or \
+             overwriting it (or appending, with `append: true`).",
+        )
+        .with_permissions(["filesystem.write"])
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["path", "content"],
+            "properties": {
+                "path": { "type": "string", "description": "Path to the file to write." },
+                "content": { "type": "string", "description": "UTF-8 text content to write." },
+                "append": {
+                    "type": "boolean",
+                    "description": "Append to the file instead of overwriting it (default false)."
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        request: ToolRequest,
+    ) -> Result<ToolResponse, ToolError> {
+        let path = request
+            .parameters
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::Validation("missing required string field `path`".into()))?;
+        let content = request
+            .parameters
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ToolError::Validation("missing required string field `content`".into())
+            })?;
+        let append = request
+            .parameters
+            .get("append")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let confined = confine_path_for_write(&ctx.workdir, path).await?;
+
+        if append {
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&confined)
+                .await
+                .map_err(|e| ToolError::Internal(format!("could not open {path}: {e}")))?;
+            file.write_all(content.as_bytes())
+                .await
+                .map_err(|e| ToolError::Internal(format!("could not write {path}: {e}")))?;
+        } else {
+            tokio::fs::write(&confined, content)
+                .await
+                .map_err(|e| ToolError::Internal(format!("could not write {path}: {e}")))?;
+        }
+
+        Ok(ToolResponse::success(json!({
+            "path": path,
+            "bytes_written": content.len(),
         })))
     }
 }
@@ -742,6 +903,254 @@ impl Tool for ShellTool {
     }
 }
 
+/// Default execution timeout for [`CodeExecuteTool`], in seconds.
+const CODE_DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum allowed code-execution timeout, in seconds.
+const CODE_MAX_TIMEOUT_SECS: u64 = 300;
+
+/// Resolve a declared `language` to its interpreter binary and the source file
+/// extension to write the snippet under (some interpreters, notably Python,
+/// behave differently invoked as `-c '<code>'` vs. a real `.py` file on disk —
+/// writing a real file with the right extension is the more faithful, more
+/// debuggable execution mode, and it's what makes a stack trace point at a real
+/// path). `python3` is preferred on non-Windows (the standard modern binary
+/// name); Windows commonly ships only the bare `python` launcher.
+fn interpreter_for(language: &str) -> Result<(&'static str, &'static str), ToolError> {
+    match language {
+        "python" | "python3" => Ok((if cfg!(windows) { "python" } else { "python3" }, "py")),
+        "node" | "javascript" | "js" => Ok(("node", "js")),
+        other => Err(ToolError::Validation(format!(
+            "unsupported language `{other}` (expected `python` or `node`)"
+        ))),
+    }
+}
+
+/// A process-unique, collision-free file name stem — the same "counter, not just
+/// a timestamp" fix `builtin.rs`'s own test `TempDir` needed (coarse clock
+/// resolution under concurrent load can otherwise collide).
+fn unique_suffix() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// Run a source-code snippet in a sandboxed language runtime (SBX-302) — the
+/// code-execution counterpart of [`ShellTool`], for a language snippet rather
+/// than a raw shell command line. Routed through the identical sandbox backend
+/// selection (SBX-101/SEC-305, see [`ShellTool`]'s doc comment): a first-party
+/// run executes natively; a verified/untrusted run is floored to a
+/// network-isolated container when one is available, else fails closed — never a
+/// silent native fallback. Resource limits (timeout, memory, CPU, output cap)
+/// apply on every backend; an optional egress allow-list applies on the
+/// container path (a native run always has full host network access, the same
+/// as `ShellTool`'s native path — isolating a *trusted* first-party run's
+/// network was never this tool's job).
+///
+/// The interpreter must actually exist in the execution environment: the
+/// default sandbox image (`alpine:3.20`, [`ShellTool`]'s same default) has
+/// neither Python nor Node installed — override via [`Self::with_image`] or
+/// `APEX_SANDBOX_IMAGE` to a runtime-appropriate image for container/gVisor
+/// runs; a native run uses whatever's on the host `PATH`.
+pub struct CodeExecuteTool {
+    /// The node's backend capabilities, used to resolve the trust-class floor.
+    manager: SandboxManager,
+    /// OCI image used when a container/gVisor backend is selected.
+    image: String,
+}
+
+impl CodeExecuteTool {
+    /// A code-execution tool for a **trusted first-party / local** context:
+    /// native-only capabilities, so a verified/untrusted run fails closed. Mirrors
+    /// [`ShellTool::native_only`].
+    pub fn native_only() -> Self {
+        Self {
+            manager: SandboxManager::native_only(),
+            image: default_sandbox_image(),
+        }
+    }
+
+    /// A code-execution tool driven by the node's **detected** backend
+    /// capabilities (SBX-101). Mirrors [`ShellTool::with_manager`].
+    pub fn with_manager(manager: SandboxManager) -> Self {
+        Self {
+            manager,
+            image: default_sandbox_image(),
+        }
+    }
+
+    /// Override the container image (builder-style; default [`DEFAULT_SANDBOX_IMAGE`]).
+    pub fn with_image(mut self, image: impl Into<String>) -> Self {
+        self.image = image.into();
+        self
+    }
+}
+
+#[async_trait]
+impl Tool for CodeExecuteTool {
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new(
+            "code_execute",
+            "1.0.0",
+            "system",
+            "Run a source-code snippet in a sandboxed language runtime (`python` or \
+             `node`) and return its stdout, stderr, and exit code.",
+        )
+        .with_permissions(["code.execute"])
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["language", "code"],
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "enum": ["python", "node"],
+                    "description": "Language runtime to execute the snippet in."
+                },
+                "code": { "type": "string", "description": "Source code to execute." },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Optional execution timeout in seconds (default 30, max 300)."
+                },
+                "network": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Egress allow-list (container/gVisor runs only; a native \
+                        run always has full host network access). Omitted or empty means no \
+                        outbound network access on an isolated run."
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        ctx: &ToolContext,
+        request: ToolRequest,
+    ) -> Result<ToolResponse, ToolError> {
+        let language = request
+            .parameters
+            .get("language")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ToolError::Validation("missing required string field `language`".into())
+            })?;
+        let code = request
+            .parameters
+            .get("code")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::Validation("missing required string field `code`".into()))?;
+        let (interpreter, ext) = interpreter_for(language)?;
+
+        let timeout_secs = request
+            .parameters
+            .get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(CODE_DEFAULT_TIMEOUT_SECS)
+            .min(CODE_MAX_TIMEOUT_SECS);
+
+        let network: Vec<String> = request
+            .parameters
+            .get("network")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let workdir = if ctx.workdir.is_empty() {
+            "."
+        } else {
+            ctx.workdir.as_str()
+        };
+
+        // We pick the file name ourselves (never derived from caller input), so
+        // there's no path-confinement concern the way `fs_write`'s caller-supplied
+        // path needs — it's always a fresh file directly under `workdir`.
+        let file_name = format!(".apex-codeexec-{}.{ext}", unique_suffix());
+        let file_path = std::path::Path::new(workdir).join(&file_name);
+        tokio::fs::write(&file_path, code)
+            .await
+            .map_err(|e| ToolError::Internal(format!("could not stage the snippet: {e}")))?;
+
+        // Resolved once as a `SandboxError` throughout (never converted to
+        // `ToolError` and back) so the final classification below sees the real
+        // failure kind — in particular, a selection failure must surface as
+        // `PermissionDenied`, matching `ShellTool`'s behavior, not the generic
+        // `Internal` a lossy round-trip through `ToolError` would collapse it to.
+        let backend = self.manager.select(SandboxBackend::Native, ctx.trust_class);
+
+        let limits = ResourceLimits {
+            timeout: Duration::from_secs(timeout_secs),
+            ..ResourceLimits::default()
+        };
+
+        let result: Result<CommandOutcome, SandboxError> = match backend {
+            Ok(SandboxBackend::Native) => {
+                NativeSandbox::with_limits(limits)
+                    .run(interpreter, &[file_name.as_str()], workdir)
+                    .await
+            }
+            Ok(backend @ (SandboxBackend::Container | SandboxBackend::Gvisor)) => {
+                let network_policy = NetworkPolicy {
+                    default_deny: true,
+                    outbound_allow: network,
+                };
+                let sandbox: ContainerSandbox = match backend {
+                    SandboxBackend::Gvisor => ContainerSandbox::gvisor(&self.image),
+                    _ => ContainerSandbox::docker(&self.image),
+                }
+                .with_network(network_policy);
+                let cmd = SandboxCommand {
+                    program: interpreter.to_string(),
+                    args: vec![format!("/workspace/{file_name}")],
+                    workdir: workdir.to_string(),
+                    env: Vec::new(),
+                    limits,
+                };
+                sandbox.execute(&cmd).await
+            }
+            Ok(other) => Err(SandboxError::Unsupported(other)),
+            Err(e) => Err(e),
+        };
+
+        // Best-effort cleanup regardless of outcome — never leave the snippet
+        // behind in the caller's workspace.
+        let _ = tokio::fs::remove_file(&file_path).await;
+
+        let outcome = result.map_err(|e| match e {
+            SandboxError::Unsupported(_) => ToolError::PermissionDenied(e.to_string()),
+            _ => ToolError::Internal(e.to_string()),
+        })?;
+
+        Ok(ToolResponse {
+            // A non-zero exit or timeout is reported as success=false so the model
+            // can react, while still receiving the captured output.
+            success: outcome.exit_code == Some(0) && !outcome.timed_out,
+            payload: json!({
+                "language": language,
+                "exit_code": outcome.exit_code,
+                "stdout": outcome.stdout,
+                "stderr": outcome.stderr,
+                "timed_out": outcome.timed_out,
+                "truncated": outcome.truncated,
+            }),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,6 +1331,210 @@ mod tests {
             matches!(err, ToolError::PermissionDenied(_) | ToolError::Internal(_)),
             "{err:?}"
         );
+    }
+
+    // --- SBX-301: fs_write confinement -----------------------------------------------
+
+    #[tokio::test]
+    async fn fs_write_missing_fields_are_validation_errors() {
+        let (root, _outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let err = FsWriteTool
+            .execute(&ctx, ToolRequest::new(json!({"path": "new.txt"})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)));
+        let err = FsWriteTool
+            .execute(&ctx, ToolRequest::new(json!({"content": "hi"})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn fs_write_creates_a_new_file_inside_the_workspace_root() {
+        let (root, _outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let resp = FsWriteTool
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"path": "new.txt", "content": "hello"})),
+            )
+            .await
+            .unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.payload["bytes_written"], 5);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("new.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_write_overwrites_an_existing_file_by_default() {
+        let (root, _outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        FsWriteTool
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"path": "inside.txt", "content": "replaced"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("inside.txt")).unwrap(),
+            "replaced"
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_write_appends_when_requested() {
+        let (root, _outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        FsWriteTool
+            .execute(
+                &ctx,
+                ToolRequest::new(
+                    json!({"path": "inside.txt", "content": " appended", "append": true}),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("inside.txt")).unwrap(),
+            "inside content appended"
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_write_denies_dot_dot_traversal_out_of_the_root() {
+        let (root, outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let traversal = format!(
+            "../{}/{}",
+            outside
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            outside.file_name().unwrap().to_string_lossy()
+        );
+        let err = FsWriteTool
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"path": traversal, "content": "pwned"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn fs_write_denies_an_absolute_path_outside_the_root() {
+        let (root, outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let err = FsWriteTool
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"path": outside.to_string_lossy(), "content": "pwned"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_write_denies_a_symlinked_file_that_escapes_the_root() {
+        // A symlink planted *inside* the root, pointing to a file *outside* it — the
+        // write-specific escape confine_path_for_write's extra symlink check guards
+        // against (writing through the link would otherwise silently overwrite the
+        // external target).
+        let (root, outside) = workspace_fixture();
+        let link = root.path().join("escape-link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let err = FsWriteTool
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"path": "escape-link", "content": "pwned"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+        // The external target must be untouched.
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "outside content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_write_denies_writing_through_a_symlinked_parent_directory() {
+        // The parent *directory* itself is a symlink escaping the root — caught by
+        // the parent-canonicalization check (the same class of escape `fs_read`
+        // already guards against, just applied to the parent instead of the target).
+        let (root, outside_dir) = {
+            let root = tempfile_dir::TempDir::new();
+            let outside = tempfile_dir::TempDir::new();
+            std::mem::forget(&outside); // keep alive; workspace_fixture-style leak
+            (root, outside.path().to_path_buf())
+        };
+        let link = root.path().join("escape-dir");
+        std::os::unix::fs::symlink(&outside_dir, &link).unwrap();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let err = FsWriteTool
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"path": "escape-dir/pwned.txt", "content": "pwned"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+        assert!(!outside_dir.join("pwned.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn fs_write_rejects_a_path_with_no_file_name() {
+        let (root, _outside) = workspace_fixture();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        let err = FsWriteTool
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"path": "..", "content": "x"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)), "{err:?}");
     }
 
     #[tokio::test]
@@ -1344,5 +1957,209 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    // --- SBX-302: code_execute ---------------------------------------------------
+
+    /// Whether `cmd --version` runs at all — the capability gate the `code_execute`
+    /// tests below use to skip cleanly on a machine without that language runtime
+    /// installed, the same "skip, don't fail" pattern this workspace uses for
+    /// Postgres/Docker/wasm-toolchain-gated tests elsewhere.
+    fn interpreter_missing(cmd: &str) -> bool {
+        match std::process::Command::new(cmd).arg("--version").output() {
+            // A non-zero exit isn't necessarily a spawn failure: Windows'
+            // "app execution alias" stub for `python`/`python3` spawns
+            // successfully but exits non-zero with a "Python was not found;
+            // run without arguments to install from the Microsoft Store…"
+            // message when no real interpreter is installed behind it — the
+            // spawn succeeding is not evidence the interpreter is real.
+            Ok(out) => !out.status.success(),
+            Err(_) => true,
+        }
+    }
+
+    #[tokio::test]
+    async fn code_execute_missing_fields_are_validation_errors() {
+        let t = CodeExecuteTool::native_only();
+        let ctx = ToolContext::default();
+        let err = t
+            .execute(&ctx, ToolRequest::new(json!({"code": "print(1)"})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)));
+        let err = t
+            .execute(&ctx, ToolRequest::new(json!({"language": "python"})))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn code_execute_rejects_an_unsupported_language() {
+        let t = CodeExecuteTool::native_only();
+        let ctx = ToolContext::default();
+        let err = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"language": "ruby", "code": "puts 1"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn code_execute_runs_a_python_snippet_and_captures_stdout_and_exit_code() {
+        let interpreter = if cfg!(windows) { "python" } else { "python3" };
+        if interpreter_missing(interpreter) {
+            eprintln!("skipping: `{interpreter}` not available on this machine");
+            return;
+        }
+        let t = CodeExecuteTool::native_only();
+        let ctx = ToolContext::default();
+        let resp = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({
+                    "language": "python",
+                    "code": "print('apex_code_exec_ok')",
+                })),
+            )
+            .await
+            .unwrap();
+        assert!(resp.success, "{resp:?}");
+        assert_eq!(resp.payload["exit_code"], 0);
+        assert!(
+            resp.payload["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("apex_code_exec_ok")
+        );
+    }
+
+    #[tokio::test]
+    async fn code_execute_runs_a_node_snippet_and_captures_stdout_and_exit_code() {
+        if interpreter_missing("node") {
+            eprintln!("skipping: `node` not available on this machine");
+            return;
+        }
+        let t = CodeExecuteTool::native_only();
+        let ctx = ToolContext::default();
+        let resp = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({
+                    "language": "node",
+                    "code": "console.log('apex_code_exec_ok')",
+                })),
+            )
+            .await
+            .unwrap();
+        assert!(resp.success, "{resp:?}");
+        assert_eq!(resp.payload["exit_code"], 0);
+        assert!(
+            resp.payload["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("apex_code_exec_ok")
+        );
+    }
+
+    #[tokio::test]
+    async fn code_execute_reports_a_nonzero_exit_code_as_unsuccessful() {
+        let interpreter = if cfg!(windows) { "python" } else { "python3" };
+        if interpreter_missing(interpreter) {
+            eprintln!("skipping: `{interpreter}` not available on this machine");
+            return;
+        }
+        let t = CodeExecuteTool::native_only();
+        let ctx = ToolContext::default();
+        let resp = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({
+                    "language": "python",
+                    "code": "import sys; sys.exit(7)",
+                })),
+            )
+            .await
+            .unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.payload["exit_code"], 7);
+    }
+
+    /// SBX-302's resource-limits acceptance bar: a snippet that runs longer than
+    /// `timeout_secs` is killed and reported `timed_out` rather than left to run
+    /// unbounded.
+    #[tokio::test]
+    async fn code_execute_timeout_resource_limit_applies() {
+        let interpreter = if cfg!(windows) { "python" } else { "python3" };
+        if interpreter_missing(interpreter) {
+            eprintln!("skipping: `{interpreter}` not available on this machine");
+            return;
+        }
+        let t = CodeExecuteTool::native_only();
+        let ctx = ToolContext::default();
+        let resp = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({
+                    "language": "python",
+                    "code": "import time; time.sleep(30)",
+                    "timeout_secs": 1,
+                })),
+            )
+            .await
+            .unwrap();
+        assert!(!resp.success, "{resp:?}");
+        assert_eq!(resp.payload["timed_out"], true);
+    }
+
+    #[tokio::test]
+    async fn code_execute_cleans_up_the_staged_snippet_file() {
+        let interpreter = if cfg!(windows) { "python" } else { "python3" };
+        if interpreter_missing(interpreter) {
+            eprintln!("skipping: `{interpreter}` not available on this machine");
+            return;
+        }
+        let root = tempfile_dir::TempDir::new();
+        let t = CodeExecuteTool::native_only();
+        let ctx = ToolContext {
+            workdir: root.path().to_string_lossy().to_string(),
+            ..ToolContext::default()
+        };
+        t.execute(
+            &ctx,
+            ToolRequest::new(json!({"language": "python", "code": "print('hi')"})),
+        )
+        .await
+        .unwrap();
+        let leftover: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "the staged snippet must not linger in the workspace: {leftover:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn code_execute_denies_untrusted_provenance_rather_than_running_natively() {
+        let t = CodeExecuteTool::native_only();
+        let ctx = ToolContext {
+            trust_class: crate::sandbox::TrustClass::Untrusted,
+            ..ToolContext::default()
+        };
+        let err = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"language": "python", "code": "print(1)"})),
+            )
+            .await
+            .unwrap_err();
+        // Floored to Gvisor, unsupported by this native-only manager — fails
+        // closed rather than silently running natively (SEC-305).
+        assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
     }
 }

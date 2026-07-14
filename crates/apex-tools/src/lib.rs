@@ -3,9 +3,10 @@
 //! Implements the core of the
 //! [Tool Framework spec](../../docs/04-agent-framework/tool-framework.md): the
 //! [`Tool`] trait (§42), [`ToolMetadata`], [`ToolContext`], request/response
-//! types, and a [`ToolRegistry`] (§57). It ships four built-in tools —
-//! [`EchoTool`], [`FsReadTool`], [`HttpGetTool`], and [`ShellTool`] — plus the
-//! sandbox isolation backends: a resource-enforcing [`NativeSandbox`], a
+//! types, and a [`ToolRegistry`] (§57). It ships six built-in tools —
+//! [`EchoTool`], [`FsReadTool`], [`FsWriteTool`], [`HttpGetTool`],
+//! [`ShellTool`], and [`CodeExecuteTool`] — plus the sandbox isolation
+//! backends: a resource-enforcing [`NativeSandbox`], a
 //! [`ContainerSandbox`] (Docker/Podman, and gVisor via `runsc`), a capability-gated
 //! [`FirecrackerSandbox`], and (under the `wasi` cargo feature) a `WasiSandbox`
 //! that runs `wasm32-wasi` modules in an in-process Wasmtime VM.
@@ -27,7 +28,9 @@ mod sandbox;
 mod scheduler;
 mod tool;
 
-pub use builtin::{EchoTool, FsReadTool, HttpGetTool, ImageGenTool, ShellTool};
+pub use builtin::{
+    CodeExecuteTool, EchoTool, FsReadTool, FsWriteTool, HttpGetTool, ImageGenTool, ShellTool,
+};
 pub use egress::EgressProxy;
 pub use mcp::{
     HttpTransport, MCP_PROTOCOL_VERSION, McpClient, McpToolInfo, McpTransport, StdioTransport,

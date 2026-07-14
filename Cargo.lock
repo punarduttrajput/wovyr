@@ -458,14 +458,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-tool-macros"
+version = "0.3.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "apex-tools"
 version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-provider",
+ "apex-tool-macros",
  "async-trait",
  "libc",
  "reqwest 0.12.28",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "tokio",

@@ -7,8 +7,8 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.5.0
-**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301..308 (all of WS-H) done; everything else planned
+**Version:** 1.6.0
+**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E) done; everything else planned
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
 **Last Updated:** 2026-07-14
 
@@ -234,7 +234,7 @@ wasm import-analysis for undeclared syscalls.
 
 # WS-E — Richer Tools
 
-## SBX-301 `[P2]` — Confined `fs_write` builtin
+## SBX-301 `[P2]` — Confined `fs_write` builtin — **DONE (2026-07-14)**
 
 **Problem.** No write tool; write access explicitly deferred
 (`crates/apex-tools/src/builtin.rs:5-8`). (PRD-004 R-E.3; audit Med.)
@@ -247,7 +247,24 @@ it (symlink-escape included).
 
 **Files.** `crates/apex-tools/src/builtin.rs`. **Size.** M. **Depends on:** none.
 
-## SBX-302 `[P2]` — Sandboxed code-execution tool
+**Implementation notes (2026-07-14).** `FsWriteTool` (`fs_write`) writes (or, with
+`append: true`, appends) UTF-8 `content` to `path`, confined to `ctx.workdir` —
+opt-in via `ToolRegistry::with_fs_write()`/folded into `with_privileged_builtins()`,
+never in `with_builtins()` (SBX-301 extends SEC-301's stance to writes). Couldn't
+reuse `confine_path` as-is: it canonicalizes the *whole* candidate path, which fails
+outright for a brand-new file that doesn't exist yet. New `confine_path_for_write`
+instead canonicalizes just the *parent directory* (which must already exist) and
+checks that against the root — plus, since a write specifically can be tricked into
+following a symlink to overwrite something outside the root (a read merely leaking
+already-readable data is a materially smaller risk), an extra check: if the target
+path already exists as a symlink, its *resolved* destination is verified to stay
+under the root too. Proven by 8 tests mirroring `fs_read`'s own confinement suite
+(create, overwrite, append, `../` traversal, an absolute path outside the root, a
+missing-file-name path, a symlinked *file* escaping the root, and — Unix-only — a
+symlinked *parent directory* escaping the root, with an assertion that the external
+target is provably untouched in both symlink cases).
+
+## SBX-302 `[P2]` — Sandboxed code-execution tool — **DONE (2026-07-14)**
 
 **Problem.** No code-exec/python tool. (PRD-004 R-E.4; audit Med.)
 
@@ -260,7 +277,42 @@ stdout/exit; resource limits apply.
 **Files.** `crates/apex-tools/src/builtin.rs` + sandbox wiring. **Size.** L.
 **Depends on:** SBX-101.
 
-## SBX-303 `[P2]` — `#[derive(Tool)]` / schemars ergonomics
+**Implementation notes (2026-07-14).** `CodeExecuteTool` (`code_execute`) runs a
+`code` snippet in a declared `language` (`python` or `node`) rather than a raw shell
+command line — staged to a process-uniquely-named file directly under `ctx.workdir`
+(the tool picks the name itself, so there's no caller-supplied-path confinement
+concern the way `fs_write` has) and executed via the *identical* sandbox backend
+selection `ShellTool` uses (SBX-101/SEC-305): a first-party run executes natively; a
+verified/untrusted run is floored to a network-isolated container when one is
+available, else fails closed, never a silent native fallback. `ResourceLimits`
+(timeout, memory, CPU, output cap) apply on every backend; an optional `network`
+allow-list (container/gVisor path only — a native run always has full host network
+access, unchanged from `ShellTool`'s own native path) maps to a `NetworkPolicy`.
+Opt-in like `shell`/`fs_write` (`with_code_execute`/`with_code_execute_using`,
+folded into `with_privileged_builtins()`), since it's arbitrary code execution just
+in a language runtime rather than a shell. The interpreter must actually exist in
+the execution environment — the default sandbox image (`alpine:3.20`, same default
+as `ShellTool`) has neither Python nor Node installed; override via `with_image`/
+`APEX_SANDBOX_IMAGE` for a container/gVisor run. Proven by 9 tests, each gated on
+the real interpreter actually being present (skip cleanly otherwise, the same
+"skip, don't fail" pattern this workspace uses for Postgres/Docker/wasm-toolchain
+tests) — including a real trap found live on this dev box: Windows' `python`/
+`python3` "app execution alias" stub spawns successfully but exits non-zero with a
+"install from the Microsoft Store" message when no real interpreter is installed
+behind it, so the availability probe checks exit *status*, not just spawn success,
+or it silently believes a fake interpreter is real. Covers: a Python snippet's
+stdout/exit code; a Node snippet's stdout/exit code; a non-zero exit reported as
+unsuccessful; **the resource-limit acceptance bar** — a snippet that sleeps past
+`timeout_secs` is killed and reported `timed_out`; the staged snippet file is
+cleaned up afterward (present or absent, success or failure); and the SEC-305
+fail-closed selection guard applies here too (an untrusted run on a native-only
+manager is denied, never silently run natively). A Docker-backed container-path
+test was deliberately not added (the default alpine image has no Python/Node, and
+pulling a language-specific image would make the test network-dependent/flaky) —
+the routing itself already rides the same `SandboxManager`/`ContainerSandbox`
+primitives `ShellTool`'s own container tests already prove correct.
+
+## SBX-303 `[P2]` — `#[derive(Tool)]` / schemars ergonomics — **DONE (2026-07-14)**
 
 **Problem.** Authors hand-write JSON Schema as `json!` literals and parse params with
 `.get().and_then()` (`crates/apex-tools/src/tool.rs:177-190`; e.g.
@@ -275,7 +327,29 @@ with no hand-written JSON.
 **Files.** new derive crate + `crates/apex-tools/src/tool.rs`. **Size.** M.
 **Depends on:** none.
 
-## SBX-304 `[P2]` — Egress platform matrix + fail-closed
+**Implementation notes (2026-07-14).** New proc-macro crate `apex-tool-macros`
+(`#[derive(Tool)]`, `#[tool(id, version, category, description, params, permissions)]`)
+generates the *declarative* boilerplate a `Tool` impl needs — `ToolMetadata`
+construction and a JSON Schema via `schemars::schema_for!` over a separately-declared
+params struct that derives `schemars::JsonSchema` (+ `serde::Deserialize` for the
+actual typed parsing) — as three inherent associated functions
+(`__tool_metadata`/`__tool_input_schema`/`__tool_parse_params`) the author's own
+`impl Tool for X` delegates to. Deliberately does **not** attempt to generate
+`execute()` itself — that's the tool's real logic, and there's nothing to derive it
+from; the value is eliminating the `json!({...})` schema literal (kept in sync with
+the params type by the compiler now, not by hand) and the `.get().and_then()`
+parameter-extraction chain, replaced by one `Self::__tool_parse_params(&request)?`
+call yielding a typed struct. `schemars` (workspace dep, `1.x`) was already
+resolvable from the offline cargo cache — no network needed. Proven end to end by
+`crates/apex-tools/tests/derive_tool.rs`: a `GreetTool`/`GreetParams` pair defined
+purely via the derive, asserting the generated metadata matches the `#[tool(...)]`
+attributes, the generated schema is a real object schema with correct
+`properties`/`required` (derived from `#[serde(default = ...)]` presence, not
+hand-listed), a full round trip through a real `ToolRegistry::execute` call
+(including a serde default applying when a field is omitted), and that malformed
+parameters (missing/wrong-typed) come back as `ToolError::Validation`, never a panic.
+
+## SBX-304 `[P2]` — Egress platform matrix + fail-closed — **DONE (2026-07-14)**
 
 **Problem.** `egress_lockdown` is Linux/Docker-only; on Windows/macOS the L3 egress
 protection silently doesn't exist (`crates/apex-tools/src/lib.rs:14-18`,
@@ -288,6 +362,29 @@ protection silently doesn't exist (`crates/apex-tools/src/lib.rs:14-18`,
 is refused, not silently unrestricted.
 
 **Files.** `crates/apex-tools/src/{lib.rs,sandbox/*}`. **Size.** S. **Depends on:** none.
+
+**Implementation notes (2026-07-14).** Investigation first: the lockdown path
+(`nsenter`+`iptables`, spawned from the host) was *already* fail-closed in effect on
+a non-Linux host — those binaries simply don't exist there, so the spawn errors and
+propagates before the untrusted command's `docker exec` ever runs. But that was an
+**accidental** side effect of a missing binary, not a deliberate check: it wasted a
+full container start on a doomed attempt, gave a generic/unhelpful error, and (per
+the module's own pre-existing caveat) never accounted for a **Podman** runtime,
+whose `network inspect` output shape this module doesn't parse — a gap with no
+error-path guarantee at all before this ticket. New `egress_lockdown::
+lockdown_supported()` (`cfg!(target_os = "linux")`) plus a runtime-name check are now
+called explicitly, and *first*, in `ContainerSandbox::execute()` whenever a
+non-empty egress allow-list is requested — refusing (`SandboxError::Internal`, a
+specific message naming the reason) **before** any container ever starts, for both
+the platform case and the Podman case. The module's doc comment now carries an
+explicit platform-matrix table. Proven by 4 tests in `sandbox/container.rs`
+(deliberately requiring no real Docker daemon, since the refusal happens before any
+docker command runs — meaning the test is directly meaningful on whichever platform
+the suite actually runs on, this Windows dev box included): the refusal fires for
+both the plain Docker and gVisor constructors on an unsupported platform; a Podman
+runtime is refused regardless of platform; and — the regression guard — a deny-all
+or fully-open policy (neither needs the lockdown at all) is provably unaffected by
+the new gate.
 
 ---
 
@@ -991,3 +1088,4 @@ lint and load.
 | 1.3.0 | 2026-07-14 | WFL-301/302 (engine-native `for_each`/`map` fan-out: runtime-collection expansion into concurrency-capped, durably-resumable per-item instances joined in item order; `max_items` fail-closed bound; collection pinned into the checkpoint on first encounter, never recomputed on resume) implemented and marked DONE with implementation notes — 18 new tests (9 engine integration + 9 definition-load unit) |
 | 1.4.0 | 2026-07-14 | ECO-304 (one-shot `apex plugin publish --key`: recomputes real artifact digests from disk, rewrites `plugin.yaml`, signs it, and writes the publisher's `.pub` alongside the package so the printed trust line is directly actionable — collapsing `keygen`→hand-edit-digests→`sign`→operator-`trust` into one command) implemented and marked DONE with implementation notes — 4 new unit tests, no marketplace or wasm toolchain needed to run them |
 | 1.5.0 | 2026-07-14 | WFL-303..308 (all remaining WS-H tickets) implemented and marked DONE with implementation notes, closing out WS-H entirely: WFL-303 fail-closed activity-output size cap (permanent failure via the saga path, not a hard abort); WFL-304 event-log paging (`history_page`, real bounded `FileStore`/`PostgresStore` implementations) + explicit opt-in retention (`compact_history`), plus a proof that `resume` already never reads the log at all; WFL-305 indexed `workflow_name`/`status` Postgres columns + SQL-side filtering/pagination (migration V3), proven via a deliberately-corrupt non-matching row that would fail to decode if `list()` ever fell back to scanning; WFL-306 a `fire_at`-sorted `BTreeSet` index for `InMemoryTimerStore` + `TimerDispatcher`/`ScheduleDispatcher::run_adaptive` (sleep until the next deadline, capped at a max interval), proven with a real wall-clock near-deadline-timer test; WFL-307 an `ActivityContext.progress` channel + `ActivityProgress` event, live on the sequential activity path via `tokio::select!`; WFL-308 a versioned event wire envelope (`encode_event`/`decode_event`, fail-closed on an unknown future version) now used by every store. 30 new tests total; full `apex-workflow` suite + whole-workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
+| 1.6.0 | 2026-07-14 | SBX-301..304 (all of WS-E) implemented and marked DONE with implementation notes, closing out WS-E entirely: SBX-301 a confined `fs_write` builtin (opt-in like `shell`) with a write-specific symlink-escape guard beyond `fs_read`'s existing confinement; SBX-302 a sandboxed `code_execute` tool (Python/Node) routed through the identical SBX-101/SEC-305 backend selection `ShellTool` uses, resource-limited and egress-controlled, including a real Windows "app execution alias" false-positive found and fixed in the test gating itself; SBX-303 a new `apex-tool-macros` proc-macro crate (`#[derive(Tool)]`) generating `ToolMetadata`/JSON-Schema (via `schemars`)/typed-parse boilerplate so a tool author never hand-writes a schema literal or a `.get().and_then()` chain; SBX-304 an explicit, documented platform-matrix fail-closed check (Linux+Docker only) in `ContainerSandbox::execute`, replacing what used to be only an *accidental* fail-closed side effect of a missing `nsenter` binary, and additionally closing a real, previously-unguarded Podman gap. 27 new tests total (8 fs_write + 9 code_execute + 4 derive(Tool) + 2 registry opt-in + 4 egress-lockdown-gate); full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |

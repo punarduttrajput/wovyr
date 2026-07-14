@@ -4,6 +4,7 @@ members = [
     "crates/apex-common",
     "crates/apex-provider",
     "crates/apex-tools",
+    "crates/apex-tool-macros",
     "crates/apex-agent",
     "crates/apex-workflow",
     "crates/apex-runtime",
@@ -38,6 +39,7 @@ repository = "https://github.com/punarduttrajput/Apex"
 apex-common = { path = "crates/apex-common" }
 apex-provider = { path = "crates/apex-provider" }
 apex-tools = { path = "crates/apex-tools" }
+apex-tool-macros = { path = "crates/apex-tool-macros" }
 apex-agent = { path = "crates/apex-agent" }
 apex-workflow = { path = "crates/apex-workflow" }
 apex-runtime = { path = "crates/apex-runtime" }
@@ -87,6 +89,10 @@ hmac = "0.12"
 # Platform-API / plugin-manifest compatibility ranges (apex-plugin, apex-marketplace,
 # apex-server, the CLI).
 semver = "1"
+# JSON Schema derivation for `#[derive(Tool)]`'s generated `input_schema()`
+# (SBX-303) — a tool's params struct derives `schemars::JsonSchema` instead of a
+# hand-written `json!({...})` schema literal.
+schemars = "1"
 
 [profile.release]
 opt-level = 3
