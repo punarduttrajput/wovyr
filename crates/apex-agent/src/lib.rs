@@ -15,6 +15,7 @@ mod definition;
 mod events;
 mod guardrail;
 mod memory;
+mod prompt;
 mod runtime;
 
 pub use context::{CompactionStrategy, ContextPolicy};
@@ -25,4 +26,5 @@ pub use guardrail::{
     PiiRedactor,
 };
 pub use memory::{ContextRetriever, RetrievedContext};
+pub use prompt::{AbArm, PromptRegistry, PromptSpec, PromptTemplate, VariableSpec, VariableType};
 pub use runtime::{AgentOutput, RunOptions, run_agent, run_agent_with_memory};

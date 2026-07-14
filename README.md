@@ -319,24 +319,30 @@ The documentation is organized into the following sections:
 
 Current Phase
 
-**v0.1–v0.3 shipped and tagged.** The v1.0 "GA hardening" effort
-([PRD-003](docs/01-product/prd-ga-hardening.md)) is now in progress, phased:
-[Phase 1](docs/18-roadmap/v1.0/phase1-security-floor-tickets.md) (security
-floor) and [Phase 2](docs/18-roadmap/v1.0/phase2-durability-execution-tickets.md)
-(durability & execution) are **done** — crash-safe atomic writes everywhere,
-cross-process locking, no restart amnesia, the server drives its own
-timers/schedules/crash-recovery, real workflow cancellation, `apex admin
-backup`/`restore`, and KMS root-key escrow with a proven restore drill.
-[Phase 3](docs/18-roadmap/v1.0/phase3-scale-distribution-tickets.md) (scale &
-distribution) is **in progress** — [ADR-0010](docs/17-adr/ADR-0010-ga-deployment-topology.md)
-ratified a single-node-appliance GA topology, deferring the distributed
-multi-replica scheduler to a v1.1 "Scale-Out" milestone.
-[Phase 4](docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md)
-(contract & operability) has not started.
+**v0.1–v0.3 shipped and tagged; the v1.0 "GA hardening" effort
+([PRD-003](docs/01-product/prd-ga-hardening.md)) is done across all four
+phases** — security floor, durability & execution, scale & distribution
+(single-node-appliance topology per
+[ADR-0010](docs/17-adr/ADR-0010-ga-deployment-topology.md)), and contract &
+operability. The **v1.1 "AI Platform Maturity" milestone**
+([PRD-004](docs/01-product/prd-ai-platform-maturity.md),
+[tickets](docs/18-roadmap/v1.1/index.md)) is in progress:
+[Phase 1](docs/18-roadmap/v1.1/phase1-production-truth-tickets.md) (make
+production claims true — real per-model cost, context-window management,
+sandbox activation on the run path, graceful shutdown, durable async
+runs/webhook outbox, API-key lifecycle, release automation) and
+[Phase 2](docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md)
+(credible AI product — native Anthropic provider, structured output,
+multimodal parts, RAG chunking/reranking/BM25, LLM-as-judge eval gates,
+Redis-shared rate limiting, token quotas, content-safety guardrails, a
+versioned prompt registry, per-tenant metrics) are **done**;
+[Phase 3](docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md)
+(ecosystem & scale) has not started.
 
 The implemented surface spans: an agent runtime with a real model/tool loop,
-an LLM gateway (chat + streaming + embeddings, mock/OpenAI-compatible/local
-mistral.rs backends, with retry/failover/circuit-breaking/caching), a tool
+an LLM gateway (chat + streaming + embeddings, mock/OpenAI-compatible/native
+Anthropic/local mistral.rs backends, with retry/failover/circuit-breaking/
+caching), a tool
 runtime with a sandbox spectrum (native/WASI/container/gVisor/microVM), a
 **durable, event-sourced workflow engine** (checkpointing, retry, saga
 compensation, durable timers/schedules, distributed worker leases as tested

@@ -7,6 +7,7 @@
 //! `#[serde(deny_unknown_fields)]` is intentionally *not* set so richer manifests
 //! from the [full spec](../../docs/04-agent-framework/agent-definition.md) still load.
 
+use crate::prompt::{PromptRegistry, PromptSpec};
 use apex_common::{Error, Result};
 use apex_provider::ModelSelector;
 use serde::Deserialize;
@@ -36,8 +37,17 @@ pub struct Metadata {
 /// Agent behavior and runtime configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Spec {
-    /// System instructions injected as the system prompt.
+    /// System instructions injected as the system prompt. May be omitted when
+    /// `prompt` references a registered template instead (SAF-202) — exactly
+    /// one of the two must be set.
+    #[serde(default)]
     pub instructions: String,
+    /// Reference to a named, versioned prompt template (SAF-202) — the
+    /// alternative to inline `instructions`. Resolved against a
+    /// [`PromptRegistry`] via [`AgentDefinition::resolve_instructions`] before
+    /// the run; the runtime fails closed on an unresolved reference.
+    #[serde(default)]
+    pub prompt: Option<PromptSpec>,
     /// Pinned model id; takes precedence over `model_selector`.
     #[serde(default)]
     pub model: Option<String>,
@@ -118,6 +128,22 @@ impl AgentDefinition {
         self.spec.model_selector.clone().unwrap_or_default()
     }
 
+    /// Resolve a `spec.prompt` template reference (SAF-202) into
+    /// `spec.instructions`, rendering the registered template with the
+    /// reference's variables. `ab_unit` is the A/B assignment unit (user/
+    /// session id), required only when the reference declares an experiment.
+    /// A no-op for a manifest using inline `instructions`.
+    pub fn resolve_instructions(
+        &mut self,
+        registry: &PromptRegistry,
+        ab_unit: Option<&str>,
+    ) -> Result<()> {
+        if let Some(prompt) = &self.spec.prompt {
+            self.spec.instructions = registry.resolve(prompt, ab_unit)?;
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         if let Some(kind) = &self.kind
             && kind != "Agent"
@@ -129,8 +155,19 @@ impl AgentDefinition {
         if self.metadata.name.trim().is_empty() {
             return Err(Error::invalid("metadata.name must not be empty"));
         }
-        if self.spec.instructions.trim().is_empty() {
-            return Err(Error::invalid("spec.instructions must not be empty"));
+        match (&self.spec.prompt, self.spec.instructions.trim().is_empty()) {
+            (None, true) => {
+                return Err(Error::invalid(
+                    "spec.instructions must not be empty (or reference a template via spec.prompt)",
+                ));
+            }
+            (Some(_), false) => {
+                return Err(Error::invalid(
+                    "spec sets both `instructions` and `prompt` — inline text or a template reference, not both",
+                ));
+            }
+            (Some(prompt), true) => prompt.validate()?,
+            (None, false) => {}
         }
         Ok(())
     }
@@ -170,6 +207,54 @@ spec:
     fn rejects_empty_instructions() {
         let yaml = "metadata:\n  name: x\nspec:\n  instructions: \"  \"\n";
         assert!(AgentDefinition::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn a_prompt_reference_manifest_parses_and_resolves_against_a_registry() {
+        let mut def = AgentDefinition::from_yaml(
+            r#"
+metadata:
+  name: templated
+spec:
+  prompt:
+    template: support
+    version: 1
+    variables:
+      tone: patient
+"#,
+        )
+        .unwrap();
+        assert!(def.spec.instructions.is_empty());
+
+        let registry = crate::prompt::PromptRegistry::from_yaml(
+            "prompts:\n  - name: support\n    version: 1\n    body: \"Be {{tone}}.\"\n    variables: [{name: tone}]\n",
+        )
+        .unwrap();
+        def.resolve_instructions(&registry, None).unwrap();
+        assert_eq!(def.spec.instructions, "Be patient.");
+
+        // Inline-instructions manifests are untouched by resolution (no-op).
+        let mut inline = AgentDefinition::from_yaml(HELLO).unwrap();
+        let before = inline.spec.instructions.clone();
+        inline.resolve_instructions(&registry, None).unwrap();
+        assert_eq!(inline.spec.instructions, before);
+    }
+
+    #[test]
+    fn rejects_both_or_neither_of_instructions_and_prompt() {
+        // Both set — one source of truth, not a silent precedence rule.
+        let err = AgentDefinition::from_yaml(
+            "metadata:\n  name: x\nspec:\n  instructions: hi\n  prompt: {template: t}\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not both"), "{err}");
+
+        // A structurally invalid prompt block fails at load (pin + experiment).
+        let err = AgentDefinition::from_yaml(
+            "metadata:\n  name: x\nspec:\n  prompt: {template: t, version: 1, ab: [{version: 1, weight: 1}]}\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("pin or experiment"), "{err}");
     }
 
     #[test]

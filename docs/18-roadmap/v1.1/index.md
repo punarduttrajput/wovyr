@@ -7,10 +7,10 @@ Document ID: RM-AIM-INDEX
 
 **Document ID:** RM-AIM-INDEX
 **File Path:** `docs/18-roadmap/v1.1/index.md`
-**Version:** 1.0.0
-**Status:** Planned — ticket docs authored from the 2026-07-09 engineering audit; not yet started
+**Version:** 1.1.0
+**Status:** In progress — Phase 1 done (WFL-104 lease fencing deferred), Phase 2 done, Phase 3 not started
 **Owner:** Product / AI Engineering
-**Last Updated:** 2026-07-09
+**Last Updated:** 2026-07-14
 
 ---
 
@@ -81,3 +81,4 @@ not committed, pending that decision. See
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-07-09 | Initial v1.1 milestone index: three phase ticket docs derived from PRD-004 / the 2026-07-09 engineering audit |
+| 1.1.0 | 2026-07-14 | Status refresh: Phase 1 complete (WFL-104 lease fencing deferred within its ticket), Phase 2 complete (SAF-202 was the last ticket); Phase 3 remains planned |

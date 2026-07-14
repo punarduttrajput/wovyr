@@ -8,7 +8,7 @@ Document ID: RM-AIM-P2
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
 **Version:** 1.22.0
-**Status:** In progress — WS-B, WS-C, WS-D, WS-A/runtime, WS-G, and WS-L fully done; SAF-201 done; remaining: SAF-202
+**Status:** **DONE** — every Phase-2 ticket complete (WS-B, WS-C, WS-D, WS-A/runtime, WS-G, WS-I, WS-L)
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-14
 
@@ -1207,7 +1207,7 @@ error). Not yet surfaced in the agent manifest YAML or the server/CLI —
 callers attach guardrails programmatically via `RunOptions`, the same stance
 as PRV-202/PRV-204; manifest/API wiring is a follow-on.
 
-## SAF-202 `[P2]` — Prompt template/versioning registry
+## SAF-202 `[P2]` — Prompt template/versioning registry — **DONE (2026-07-14)**
 
 **Problem.** Instructions are a raw YAML string (`crates/apex-agent/src/definition.rs:39`);
 only workflow `${...}` interpolation exists — no versioned prompt registry, variables,
@@ -1220,6 +1220,51 @@ agents reference a template + version; support A/B selection.
 version across runs.
 
 **Files.** `crates/apex-agent/src/` (new `prompt.rs`). **Size.** M. **Depends on:** none.
+
+**Implementation notes (2026-07-14).** New `crates/apex-agent/src/prompt.rs`:
+a `PromptTemplate` (name + `u32` version + body + declared `VariableSpec`s —
+`string`/`integer`/`number`/`boolean` with an optional typed `default`; a
+variable without a default is required) held in a `PromptRegistry`
+(`register`/`get`/`latest`/`resolve`, plus `from_yaml` for a
+`prompts: [...]` document, mirroring the other YAML-DSL loaders). **Versions
+are immutable**: re-registering an existing `(name, version)` is
+`Error::Conflict` — that immutability is what makes a pin meaningful, and is
+exactly how the acceptance criterion is proven
+(`a_pinned_version_resolves_identically_across_runs`: a pinned reference
+renders byte-identically after a newer version lands, while an unpinned one
+picks up the new latest — unpinned = documented opt-in to drift).
+**Placeholders are `{{name}}`** — deliberately distinct from the workflow
+engine's `${...}` (which binds activity outputs, not prompt variables);
+non-identifier braced content (a JSON example in the body) stays literal, so
+no escaping mechanism is needed. **Rendering is fail-closed** (the
+guardrail/eval stance): a missing required variable, a wrongly-typed value, a
+supplied-but-undeclared name (typo protection), or an undeclared body
+placeholder (caught at registration) are all clear errors — never a literal
+`{{hole}}` silently shipped to the model. **A/B selection is deterministic**
+(coding-standards §7 — no ambient randomness): `PromptSpec.ab` declares
+weighted arms over registered versions, and resolution assigns a
+caller-supplied *unit* (user/session id — what the experiment is sticky per)
+via a stable FNV-1a hash of `(template, unit)` — not `DefaultHasher`, whose
+output isn't stable across builds (the same fleet-consistency reason the
+semantic cache embeds text verbatim); the same unit gets the same arm on
+every run and node, a zero-weight arm gets no traffic, and resolving an
+experiment without a unit key fails closed. **Agents reference a template**
+via a new optional `spec.prompt` block (`template`/`version`/`ab`/
+`variables`) on the manifest — mutually exclusive with inline
+`instructions`, exactly one required, structural validation (pin XOR
+experiment, non-zero total weight) at load;
+`AgentDefinition::resolve_instructions(&registry, ab_unit)` renders it into
+`spec.instructions` (a no-op for inline manifests), and `run_agent` fails
+closed with a clear `Config` error on an unresolved reference instead of
+silently running with an empty system prompt. Proven by 9 `prompt.rs` unit
+tests (render/defaults/typing, fail-closed rendering, placeholder-vs-JSON
+literal scanning, immutability + `latest`, the pinning acceptance test, A/B
+stickiness/split/zero-weight, A/B fail-closed, YAML loader), 2 manifest
+tests, and the runtime guard test
+(`an_unresolved_prompt_reference_is_a_config_error_not_an_empty_system_prompt`).
+Registry storage is in-process/programmatic (a `from_yaml` document is the
+durable form) — server routes/CLI surface and a persisted store are a
+follow-on, the same stance as SAF-201/PRV-202/PRV-204.
 
 ---
 
@@ -1325,3 +1370,4 @@ and `workflow_runner::tests::agent_activity_cost_is_charged_to_the_project_accum
 | 1.20.0 | 2026-07-14 | SRV-203 (per-quota `day_reset_offset_minutes` daily-reset boundary; pure `day_bucket` math; admission/recording bucket agreement) implemented and marked DONE with implementation notes — all of WS-G (Multi-Node Quotas) is now done |
 | 1.21.0 | 2026-07-14 | SAF-201 (pluggable `Guardrail` trait on input/output: block/redact, fail-closed, buffered streaming; blocklist/PII-redactor/LLM-moderator implementations) implemented and marked DONE with implementation notes |
 | 1.22.0 | 2026-07-14 | OBS-201 (bounded per-tenant/per-project metric labels: `TenantLabelCap` cardinality bound shared between a new low-cardinality `apex_api_requests_by_tenant_total` RED aggregate and new `apex_llm_{cost_usd,tokens}_by_tenant_total` LLM usage metrics, wired into every `record_run_usage` call site including the workflow sub-agent path) implemented and marked DONE with implementation notes — all of WS-L (Per-Tenant Metrics) is now done; only SAF-202 remains in Phase 2 |
+| 1.23.0 | 2026-07-14 | SAF-202 (prompt template/versioning registry: immutable named+versioned templates with typed variables, fail-closed `{{var}}` rendering, deterministic FNV-1a-keyed A/B arms, `spec.prompt` manifest reference + `resolve_instructions`, unresolved-reference run guard) implemented and marked DONE with implementation notes — **Phase 2 is fully done** |

@@ -279,6 +279,20 @@ async fn run_agent_inner(
         .or(def.spec.max_steps)
         .unwrap_or(DEFAULT_MAX_STEPS);
 
+    // A manifest referencing a prompt template (SAF-202) must be resolved
+    // (`AgentDefinition::resolve_instructions`) before the run — fail closed
+    // rather than silently handing the model an empty system prompt.
+    if def.spec.instructions.trim().is_empty() {
+        return Err(Error::config(match &def.spec.prompt {
+            Some(prompt) => format!(
+                "agent `{}` references prompt template `{}` — resolve it against a \
+                 PromptRegistry (AgentDefinition::resolve_instructions) before running",
+                def.metadata.name, prompt.template
+            ),
+            None => format!("agent `{}` has empty instructions", def.metadata.name),
+        }));
+    }
+
     let model = gateway.resolve_model(def.spec.model.as_deref(), &def.selector());
     let provider = gateway.provider_name().to_string();
     sink.emit(RunEvent::Start {
@@ -1526,6 +1540,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_prompt_reference_is_a_config_error_not_an_empty_system_prompt() {
+        // A manifest referencing a template (SAF-202) that was never resolved
+        // against a registry must fail closed, not run with empty instructions.
+        let def = AgentDefinition::from_yaml(
+            "metadata:\n  name: templated\nspec:\n  prompt: {template: support, version: 1}\n",
+        )
+        .unwrap();
+        let gw = Gateway::new(Box::new(MockProvider::new()));
+        let reg = ToolRegistry::with_builtins();
+        let err = run_agent(&def, &gw, &reg, RunOptions::new(json!("hi")), &mut NullSink)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err}");
+        assert!(err.to_string().contains("resolve"), "{err}");
     }
 
     // ---- retrieval-augmented grounding ----------------------------------------

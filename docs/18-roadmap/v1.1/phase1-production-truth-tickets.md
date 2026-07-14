@@ -8,9 +8,9 @@ Document ID: RM-AIM-P1
 **Document ID:** RM-AIM-P1
 **File Path:** `docs/18-roadmap/v1.1/phase1-production-truth-tickets.md`
 **Version:** 1.0.0
-**Status:** Planned — not started
+**Status:** Done — every ticket complete except WFL-104 (seq-safety done; lease-token fencing deferred, documented in the ticket)
 **Owner:** Engineering (AI Core / Platform)
-**Last Updated:** 2026-07-09
+**Last Updated:** 2026-07-14
 
 ---
 
