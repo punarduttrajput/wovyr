@@ -21,6 +21,15 @@
 //! (RM-GA-P4 HLTH-901 — the same dispatch body the CLI's local runner and
 //! `apex-eval`'s comparison harness use), parameterized here by
 //! [`StoredAgentResolver`] for `agent`-typed activities.
+//!
+//! `.unwrap()`/`.expect()`/`unreachable!()` on request-derived data are denied here
+//! (RM-AIM-P3 SRV-306) — a malformed client request must return a mapped `ApiError`,
+//! never panic.
+
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
+)]
 
 use apex_runtime::{AdmissionGuard, AgentResolver, PlatformActivityExecutor};
 use apex_tenancy::TenancyStore;
@@ -36,6 +45,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use crate::{AgentStore, ApiError, AppState, tenancy};
 
@@ -123,6 +133,7 @@ impl AgentResolver for StoredAgentResolver {
 
     async fn admit(&self, ctx: &ActivityContext) -> Result<Box<dyn AdmissionGuard>, String> {
         tenancy::admit_run(&self.tenancy, &self.quota, Self::project(ctx))
+            .await
             .map(|permit| Box::new(permit) as Box<dyn AdmissionGuard>)
             .map_err(|e| e.message)
     }
@@ -184,15 +195,27 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
 
 // ── validate ──────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct ValidateRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ValidateRequest {
     manifest: String,
 }
 
 /// `POST /api/v1/workflows/validate` — parse the definition YAML and return a DAG
 /// summary (activity list, dependency edges, and the validated metadata), or a
 /// structured validation error without running anything.
-async fn validate_handler(Json(req): Json<ValidateRequest>) -> Result<Json<Value>, ApiError> {
+#[utoipa::path(
+    post,
+    path = "/api/v1/workflows/validate",
+    tag = "workflows",
+    request_body = ValidateRequest,
+    responses(
+        (status = 200, description = "A DAG summary: activities, edges, validated metadata."),
+        (status = 400, description = "Invalid definition.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn validate_handler(
+    Json(req): Json<ValidateRequest>,
+) -> Result<Json<Value>, ApiError> {
     let def = Definition::from_yaml(&req.manifest)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
 
@@ -223,8 +246,8 @@ async fn validate_handler(Json(req): Json<ValidateRequest>) -> Result<Json<Value
 
 // ── submit ────────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct SubmitRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct SubmitRequest {
     manifest: String,
     #[serde(default)]
     input: Value,
@@ -235,7 +258,17 @@ struct SubmitRequest {
 /// `POST /api/v1/workflows` — validate the manifest, create a durable execution,
 /// and drive it asynchronously.  Returns immediately with the execution id so the
 /// client can poll `GET /api/v1/workflows/{id}` for status.
-async fn submit_handler(
+#[utoipa::path(
+    post,
+    path = "/api/v1/workflows",
+    tag = "workflows",
+    request_body = SubmitRequest,
+    responses(
+        (status = 200, description = "Execution created (status: submitted); poll GET /api/v1/workflows/{id}."),
+        (status = 400, description = "Invalid definition.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn submit_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<SubmitRequest>,
@@ -359,8 +392,8 @@ async fn resolve_definition(
 
 // ── signal ────────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct SignalRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct SignalRequest {
     /// The workflow definition YAML. Optional (RM-GA-P2 DUR-405): when omitted,
     /// the server resolves the execution's own workflow definition instead of
     /// requiring the client to re-upload it on every call — see
@@ -376,7 +409,18 @@ struct SignalRequest {
 
 /// `POST /api/v1/workflows/{id}/signal` — deliver a named event to a waiting
 /// execution and resume it.  Used for `wait: {event: …}` activities.
-async fn signal_handler(
+#[utoipa::path(
+    post,
+    path = "/api/v1/workflows/{id}/signal",
+    tag = "workflows",
+    params(("id" = String, Path, description = "The execution id.")),
+    request_body = SignalRequest,
+    responses(
+        (status = 200, description = "Event delivered; execution resumed."),
+        (status = 404, description = "Unknown execution.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn signal_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -414,8 +458,8 @@ async fn signal_handler(
 
 // ── approve ───────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct ApproveRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ApproveRequest {
     /// The workflow definition YAML. Optional (RM-GA-P2 DUR-405) — see
     /// [`resolve_definition`].
     #[serde(default)]
@@ -430,7 +474,18 @@ struct ApproveRequest {
 /// `POST /api/v1/workflows/{id}/approve` — approve (or reject) a suspended `human`
 /// activity and resume the execution.  Internally this is a signal whose key is
 /// the activity id, consistent with how the CLI's `workflows approve` command works.
-async fn approve_handler(
+#[utoipa::path(
+    post,
+    path = "/api/v1/workflows/{id}/approve",
+    tag = "workflows",
+    params(("id" = String, Path, description = "The execution id.")),
+    request_body = ApproveRequest,
+    responses(
+        (status = 200, description = "Decision delivered; execution resumed."),
+        (status = 404, description = "Unknown execution.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn approve_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -478,7 +533,18 @@ async fn approve_handler(
 /// Note: cancellation is advisory for activities already **in flight** — this only
 /// mutates the durable checkpoint, so a step a concurrently-running driver commits
 /// immediately afterward is not retroactively undone.
-async fn cancel_handler(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/workflows/{id}",
+    tag = "workflows",
+    params(("id" = String, Path, description = "The execution id.")),
+    responses(
+        (status = 200, description = "Execution cancelled (a real state transition, not advisory)."),
+        (status = 404, description = "Unknown execution.", body = crate::openapi::ApiErrorBody),
+        (status = 409, description = "Execution already terminal.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn cancel_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,

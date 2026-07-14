@@ -13,6 +13,16 @@
 //! in-scope project's org + the project itself), and every handler authorizes the
 //! scope from the [endpoint table](../../docs/09-api/projects.md#3-endpoints)
 //! **fail-closed** (default-deny → `403`).
+//!
+//! `.unwrap()`/`.expect()`/`unreachable!()` on request-derived data are denied here
+//! (RM-AIM-P3 SRV-306) — a malformed client request must return a mapped `ApiError`,
+//! never panic. The mutex-poison `.expect()`s this file still has are internal
+//! invariants, not request-dependent, and each carries an explicit `#[allow]`.
+
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
+)]
 
 use crate::{ApiError, AppState};
 use apex_tenancy::{
@@ -31,6 +41,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use utoipa::ToSchema;
 
 /// The tenancy sub-router, merged into the main app router.
 pub(crate) fn routes() -> Router<Arc<AppState>> {
@@ -123,12 +134,23 @@ pub(crate) fn context(
 
 // --- organizations ---------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct CreateOrgRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct CreateOrgRequest {
     name: String,
 }
 
-async fn list_orgs(
+/// List the caller's tenant's organizations.
+#[utoipa::path(
+    get,
+    path = "/api/v1/organizations",
+    tag = "tenancy",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses((status = 200, description = "A paginated list of the caller's tenant's organizations.")),
+)]
+pub(crate) async fn list_orgs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(page): Query<crate::hardening::PageQuery>,
@@ -144,7 +166,18 @@ async fn list_orgs(
     Ok(Json(crate::hardening::paginate(items, &page.page())))
 }
 
-async fn create_org(
+/// Create an organization in the caller's tenant.
+#[utoipa::path(
+    post,
+    path = "/api/v1/organizations",
+    tag = "tenancy",
+    request_body = CreateOrgRequest,
+    responses(
+        (status = 201, description = "Organization created."),
+        (status = 403, description = "Caller lacks org.admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn create_org(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<CreateOrgRequest>,
@@ -168,21 +201,34 @@ async fn create_org(
 
 // --- projects --------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct CreateProjectRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct CreateProjectRequest {
     name: String,
     organization: String,
 }
 
-#[derive(Deserialize)]
-struct PatchProjectRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct PatchProjectRequest {
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     settings: Option<std::collections::BTreeMap<String, Value>>,
     #[serde(default)]
+    #[schema(value_type = Option<String>)]
     status: Option<ProjectStatus>,
 }
 
-async fn list_projects(
+/// List the caller's tenant's projects.
+#[utoipa::path(
+    get,
+    path = "/api/v1/projects",
+    tag = "tenancy",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses((status = 200, description = "A paginated list of the caller's tenant's projects.")),
+)]
+pub(crate) async fn list_projects(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(page): Query<crate::hardening::PageQuery>,
@@ -198,7 +244,18 @@ async fn list_projects(
     Ok(Json(crate::hardening::paginate(items, &page.page())))
 }
 
-async fn create_project(
+/// Create a project under an organization.
+#[utoipa::path(
+    post,
+    path = "/api/v1/projects",
+    tag = "tenancy",
+    request_body = CreateProjectRequest,
+    responses(
+        (status = 201, description = "Project created (ETag header carries its version)."),
+        (status = 404, description = "Unknown organization.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn create_project(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<CreateProjectRequest>,
@@ -227,7 +284,18 @@ async fn create_project(
         .into_response())
 }
 
-async fn get_project(
+/// Fetch a project by id.
+#[utoipa::path(
+    get,
+    path = "/api/v1/projects/{id}",
+    tag = "tenancy",
+    params(("id" = String, Path, description = "The project id.")),
+    responses(
+        (status = 200, description = "The project (ETag header carries its version)."),
+        (status = 404, description = "Unknown project.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn get_project(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -243,7 +311,23 @@ async fn get_project(
     Ok(([(header::ETAG, etag)], Json(json!(project))).into_response())
 }
 
-async fn patch_project(
+/// Update a project's settings/status.
+#[utoipa::path(
+    patch,
+    path = "/api/v1/projects/{id}",
+    tag = "tenancy",
+    params(
+        ("id" = String, Path, description = "The project id."),
+        ("If-Match" = Option<String>, Header, description = "The expected resource version (optimistic concurrency, §10); a stale value is rejected 409."),
+    ),
+    request_body = PatchProjectRequest,
+    responses(
+        (status = 200, description = "The updated project (ETag header carries its new version)."),
+        (status = 404, description = "Unknown project.", body = crate::openapi::ApiErrorBody),
+        (status = 409, description = "Stale If-Match.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn patch_project(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -291,7 +375,18 @@ async fn patch_project(
     Ok(([(header::ETAG, etag)], Json(json!(project))).into_response())
 }
 
-async fn delete_project(
+/// Delete a project.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/projects/{id}",
+    tag = "tenancy",
+    params(("id" = String, Path, description = "The project id.")),
+    responses(
+        (status = 204, description = "Project deleted."),
+        (status = 404, description = "Unknown project.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn delete_project(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -313,13 +408,22 @@ async fn delete_project(
 
 // --- memberships -----------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct AddMemberRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct AddMemberRequest {
     user: String,
+    #[schema(value_type = String)]
     role: Role,
 }
 
-async fn list_members(
+/// List a project's memberships.
+#[utoipa::path(
+    get,
+    path = "/api/v1/projects/{id}/members",
+    tag = "tenancy",
+    params(("id" = String, Path, description = "The project id.")),
+    responses((status = 200, description = "The project's memberships.")),
+)]
+pub(crate) async fn list_members(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -330,7 +434,16 @@ async fn list_members(
     Ok(Json(json!({ "members": members })))
 }
 
-async fn add_member(
+/// Add a member to a project.
+#[utoipa::path(
+    post,
+    path = "/api/v1/projects/{id}/members",
+    tag = "tenancy",
+    params(("id" = String, Path, description = "The project id.")),
+    request_body = AddMemberRequest,
+    responses((status = 201, description = "Membership added.")),
+)]
+pub(crate) async fn add_member(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -356,7 +469,18 @@ async fn add_member(
     Ok((StatusCode::CREATED, Json(json!(membership))))
 }
 
-async fn remove_member(
+/// Remove a member from a project.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/projects/{id}/members/{uid}",
+    tag = "tenancy",
+    params(
+        ("id" = String, Path, description = "The project id."),
+        ("uid" = String, Path, description = "The member's user id."),
+    ),
+    responses((status = 204, description = "Membership removed.")),
+)]
+pub(crate) async fn remove_member(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((id, uid)): Path<(String, String)>,
@@ -385,7 +509,15 @@ async fn remove_member(
 
 // --- quotas ----------------------------------------------------------------------
 
-async fn get_quota(
+/// Get a project's quota limits.
+#[utoipa::path(
+    get,
+    path = "/api/v1/projects/{id}/quota",
+    tag = "tenancy",
+    params(("id" = String, Path, description = "The project id.")),
+    responses((status = 200, description = "The project's quota limits.")),
+)]
+pub(crate) async fn get_quota(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -396,7 +528,19 @@ async fn get_quota(
     Ok(Json(json!({ "scope": "project", "limits": limits })))
 }
 
-async fn set_quota(
+/// `limits` is `apex_tenancy::QuotaLimits` (an external-crate type, so it has no
+/// generated schema here — see `GET .../quota`'s response for its shape).
+#[utoipa::path(
+    patch,
+    path = "/api/v1/projects/{id}/quota",
+    tag = "tenancy",
+    params(("id" = String, Path, description = "The project id.")),
+    responses(
+        (status = 200, description = "The updated quota limits."),
+        (status = 403, description = "Caller lacks org.admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn set_quota(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -463,9 +607,21 @@ impl From<StoredDayUsage> for (u64, f64, u64) {
 /// its daily budget. `concurrent` (in-flight runs) deliberately does **not** persist:
 /// a restart means nothing is actually still running, so carrying over a stale count
 /// would incorrectly throttle the runs that follow.
+///
+/// **Distributed enforcement (RM-AIM-P3 SRV-307):** `concurrent` is in-process by
+/// default — correct for one node, but N nodes each enforcing their own copy of a
+/// project's `concurrent_agent_runs` limit multiplies the effective budget by N. Behind
+/// the `redis` cargo feature with `APEX_QUOTA_REDIS_URL` set, the concurrency slot
+/// lives in a shared Redis counter instead (same degrade-to-local-never-to-unlimited
+/// posture as [`crate::rate_limit::RateLimiter`]'s SRV-201 sibling): admission is an
+/// atomic "increment only if under the limit" Lua script, and a `PEXPIRE` safety net
+/// self-heals a slot a node's hard crash left stranded (no `Drop` runs on `kill -9`) —
+/// a documented, bounded tradeoff, not full crash-recovery semantics.
 pub(crate) struct QuotaTracker {
     usage: Mutex<QuotaUsage>,
     path: Option<PathBuf>,
+    #[cfg(feature = "redis")]
+    shared_concurrency: Option<Arc<redis_concurrency::SharedConcurrency>>,
 }
 
 impl Default for QuotaTracker {
@@ -493,7 +649,59 @@ impl QuotaTracker {
                 cost,
             }),
             path,
+            #[cfg(feature = "redis")]
+            shared_concurrency: None,
         }
+    }
+
+    /// Back this tracker's concurrency slots with a shared Redis (SRV-307),
+    /// namespaced under `prefix` (so a fleet's quota counters never collide with
+    /// e.g. rate-limit buckets sharing the same Redis). Mirrors
+    /// [`crate::rate_limit::RateLimiter::with_redis`] exactly: lazily-dialed,
+    /// re-dialed after an error, degrades to the in-process `BTreeMap` on failure.
+    #[cfg(feature = "redis")]
+    pub(crate) fn with_redis(mut self, client: redis::Client, prefix: impl Into<String>) -> Self {
+        self.shared_concurrency = Some(Arc::new(redis_concurrency::SharedConcurrency::new(
+            client,
+            prefix.into(),
+        )));
+        self
+    }
+
+    /// Open a tracker from the environment: Redis-shared concurrency when the
+    /// server is compiled with the `redis` feature and `APEX_QUOTA_REDIS_URL` is
+    /// set, else purely in-process. Setting the variable on a binary built
+    /// *without* the feature logs a loud warning rather than silently running
+    /// per-node concurrency limits.
+    pub(crate) fn from_env(path: Option<PathBuf>) -> Self {
+        let tracker = Self::new(path);
+        let Ok(url) = std::env::var("APEX_QUOTA_REDIS_URL") else {
+            return tracker;
+        };
+        #[cfg(feature = "redis")]
+        {
+            match redis::Client::open(url.as_str()) {
+                Ok(client) => {
+                    tracing::info!("quota: shared Redis concurrency counters enabled");
+                    return tracker.with_redis(client, "apex:quota:concur");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "APEX_QUOTA_REDIS_URL is invalid; falling back to per-node concurrency limits"
+                    );
+                }
+            }
+        }
+        #[cfg(not(feature = "redis"))]
+        {
+            let _ = &url;
+            tracing::error!(
+                "APEX_QUOTA_REDIS_URL is set but this binary was built without the `redis` \
+                 feature — concurrency limits are per-node, not fleet-wide"
+            );
+        }
+        tracker
     }
 
     /// The project's `(usd, tokens)` LLM usage recorded for the current rolling
@@ -539,6 +747,155 @@ impl QuotaTracker {
     }
 }
 
+/// The Redis-shared concurrency-slot store (SRV-307), behind the `redis` cargo
+/// feature. Structurally mirrors [`crate::rate_limit`]'s `redis_shared` module
+/// (lazily-dialed connection, re-dialed on error, a `REDIS_BUDGET` timeout) — the
+/// two differ only in what they atomically compute: a token-bucket refill there,
+/// a bounded increment/decrement counter here.
+#[cfg(feature = "redis")]
+mod redis_concurrency {
+    use std::time::Duration;
+
+    /// Atomic "increment only if under the limit" — executed inside Redis so
+    /// concurrent nodes serialize on one counter instead of each independently
+    /// reading-then-incrementing (which could race two nodes both past the
+    /// limit). Returns `1` (admitted) or `0` (at limit). The `PEXPIRE` on every
+    /// successful increment is the safety net described on [`SLOT_TTL`].
+    const TRY_ADMIT_SCRIPT: &str = r#"
+        local limit = tonumber(ARGV[1])
+        local ttl_ms = tonumber(ARGV[2])
+        local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+        if current < limit then
+            redis.call('INCR', KEYS[1])
+            redis.call('PEXPIRE', KEYS[1], ttl_ms)
+            return 1
+        end
+        return 0
+    "#;
+
+    /// Atomic "decrement, floored at 0" — a stray extra release (e.g. a
+    /// double-release bug) must never push the counter negative, which would
+    /// silently widen the effective limit for every node sharing it.
+    const RELEASE_SCRIPT: &str = r#"
+        local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+        if current > 0 then
+            redis.call('DECR', KEYS[1])
+        end
+        return 1
+    "#;
+
+    /// A held slot's safety-net TTL. `RunPermit::drop` releases the slot
+    /// explicitly on the normal path, but `Drop` never runs on a hard crash
+    /// (`kill -9`, power loss) — without this, a node that dies mid-run would
+    /// permanently strand that project's concurrency budget for the whole
+    /// fleet. Generous enough that no legitimate run should outlive it in
+    /// practice; a documented, bounded tradeoff, not full crash-recovery
+    /// semantics (a run genuinely still in flight past 24h would have its slot
+    /// expire and could race a fresh admission past the limit).
+    const SLOT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// Cap on how long the shared path may take before the caller degrades to
+    /// the local counter — mirrors [`crate::rate_limit`]'s identical budget.
+    const REDIS_BUDGET: Duration = Duration::from_secs(1);
+
+    pub(super) struct SharedConcurrency {
+        client: redis::Client,
+        /// Lazily-dialed multiplexed connection; cleared on command failure so
+        /// the next call re-dials instead of erroring forever on a dead socket.
+        conn: tokio::sync::Mutex<Option<redis::aio::MultiplexedConnection>>,
+        prefix: String,
+        admit_script: redis::Script,
+        release_script: redis::Script,
+    }
+
+    impl SharedConcurrency {
+        pub(super) fn new(client: redis::Client, prefix: String) -> Self {
+            Self {
+                client,
+                conn: tokio::sync::Mutex::new(None),
+                prefix,
+                admit_script: redis::Script::new(TRY_ADMIT_SCRIPT),
+                release_script: redis::Script::new(RELEASE_SCRIPT),
+            }
+        }
+
+        async fn connection(&self) -> Result<redis::aio::MultiplexedConnection, String> {
+            let mut slot = self.conn.lock().await;
+            if let Some(conn) = slot.as_ref() {
+                return Ok(conn.clone());
+            }
+            let conn = self
+                .client
+                .get_multiplexed_async_connection()
+                .await
+                .map_err(|e| format!("redis connect: {e}"))?;
+            *slot = Some(conn.clone());
+            Ok(conn)
+        }
+
+        fn key(&self, project: &str) -> String {
+            format!("{}:{project}", self.prefix)
+        }
+
+        /// Try to admit one more concurrent run for `project` under `limit`.
+        /// `Ok(true)`/`Ok(false)` is the real admission decision; `Err` means the
+        /// store itself is unavailable (caller degrades to the local counter).
+        pub(super) async fn try_admit(&self, project: &str, limit: u64) -> Result<bool, String> {
+            let attempt = async {
+                let mut conn = self.connection().await?;
+                let allowed: i64 = self
+                    .admit_script
+                    .key(self.key(project))
+                    .arg(limit)
+                    .arg(SLOT_TTL.as_millis() as u64)
+                    .invoke_async(&mut conn)
+                    .await
+                    .map_err(|e| format!("redis eval: {e}"))?;
+                Ok(allowed == 1)
+            };
+            match tokio::time::timeout(REDIS_BUDGET, attempt).await {
+                Ok(Ok(decision)) => Ok(decision),
+                Ok(Err(reason)) => {
+                    *self.conn.lock().await = None;
+                    Err(reason)
+                }
+                Err(_) => {
+                    *self.conn.lock().await = None;
+                    Err(format!("redis timed out after {REDIS_BUDGET:?}"))
+                }
+            }
+        }
+
+        /// Release a previously-admitted slot. Best-effort: a failure here just
+        /// means the slot stays held until its `PEXPIRE` safety net expires it —
+        /// logged, never propagated (there's no meaningful recovery action for a
+        /// caller, especially the fire-and-forget release `RunPermit::drop` spawns).
+        pub(super) async fn release(&self, project: &str) {
+            let attempt = async {
+                let mut conn = self.connection().await?;
+                let _: i64 = self
+                    .release_script
+                    .key(self.key(project))
+                    .invoke_async(&mut conn)
+                    .await
+                    .map_err(|e| format!("redis eval: {e}"))?;
+                Ok::<(), String>(())
+            };
+            match tokio::time::timeout(REDIS_BUDGET, attempt).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(reason)) => {
+                    *self.conn.lock().await = None;
+                    tracing::warn!(error = %reason, project, "failed to release shared quota slot");
+                }
+                Err(_) => {
+                    *self.conn.lock().await = None;
+                    tracing::warn!(project, "timed out releasing shared quota slot");
+                }
+            }
+        }
+    }
+}
+
 /// The day bucket `epoch_secs` falls in for a reset boundary `offset_minutes`
 /// east of UTC (RM-AIM-P2 SRV-203) — pure, so the local-midnight boundary math is
 /// deterministically testable. `offset 0` = the original UTC days-since-epoch;
@@ -579,11 +936,28 @@ pub(crate) struct RunPermit {
     quota: Arc<QuotaTracker>,
     project: String,
     metered: bool,
+    /// Whether this slot was granted via the shared Redis counter (SRV-307) —
+    /// release must go back through the same store it was admitted through.
+    #[cfg(feature = "redis")]
+    via_shared: bool,
 }
 
 impl Drop for RunPermit {
     fn drop(&mut self) {
         if !self.metered {
+            return;
+        }
+        #[cfg(feature = "redis")]
+        if self.via_shared
+            && let Some(shared) = self.quota.shared_concurrency.clone()
+        {
+            // `Drop::drop` is sync, but releasing a shared slot is a network call —
+            // spawned rather than blocked on, fire-and-forget like this codebase's
+            // other best-effort release paths (e.g. webhook delivery). Safe because
+            // a `RunPermit` only ever drops from within request-handling code,
+            // always inside an active Tokio runtime.
+            let project = self.project.clone();
+            tokio::spawn(async move { shared.release(&project).await });
             return;
         }
         if let Ok(mut u) = self.quota.usage.lock()
@@ -598,7 +972,17 @@ impl Drop for RunPermit {
 /// (concurrent runs + the day's LLM spend). Returns a [`RunPermit`] holding the
 /// concurrency slot until dropped; `Err` ([`Error::QuotaExceeded`] → `429`) if a limit
 /// is hit. Unmetered (returns a no-op permit) when there is no project or no quota.
-pub(crate) fn admit_run(
+///
+/// **Concurrency is checked via the shared Redis store first (SRV-307)** when the
+/// tracker is configured for it and the quota actually bounds concurrency — an
+/// atomic "increment only if under the limit" that a fleet of nodes shares, so N
+/// nodes enforce one combined budget instead of N independent ones. Any shared-store
+/// failure (unreachable, timed out) degrades to the in-process counter, never to
+/// unlimited. Cost/token budgets stay per-node (each node's own disk-persisted
+/// accumulator, RM-GA-P2 DUR-404) — only the concurrency dimension is fleet-shared;
+/// widening cost/token sharing the same way is a documented follow-on, not silently
+/// assumed to already work.
+pub(crate) async fn admit_run(
     tenancy: &Arc<dyn TenancyStore>,
     quota: &Arc<QuotaTracker>,
     project: Option<&str>,
@@ -607,6 +991,8 @@ pub(crate) fn admit_run(
         quota: quota.clone(),
         project,
         metered: false,
+        #[cfg(feature = "redis")]
+        via_shared: false,
     };
     let Some(project) = project else {
         return Ok(unmetered(String::new()));
@@ -618,6 +1004,54 @@ pub(crate) fn admit_run(
     // The day bucket honors the quota's configured reset boundary (SRV-203):
     // usage recorded under another bucket (an earlier local day) reads as zero.
     let day = current_day_with_offset(limits.day_reset_offset_minutes.unwrap_or(0));
+
+    #[cfg(feature = "redis")]
+    if let (Some(shared), Some(limit)) = (
+        quota.shared_concurrency.clone(),
+        limits.concurrent_agent_runs,
+    ) {
+        match shared.try_admit(project, limit).await {
+            Ok(true) => {
+                // Slot granted by the shared store; cost/token checks still go
+                // through the local accumulator (see this fn's doc comment).
+                let (spent, tokens_used) = {
+                    #[allow(clippy::expect_used)] // SRV-306: mutex-poison invariant
+                    let u = quota.usage.lock().expect("quota mutex poisoned");
+                    match u.cost.get(project) {
+                        Some((d, c, t)) if *d == day => (*c, *t),
+                        _ => (0.0, 0),
+                    }
+                };
+                if let Err(e) = limits
+                    .check_llm_cost(spent, 0.0)
+                    .and_then(|()| limits.check_llm_tokens(tokens_used, 0))
+                {
+                    shared.release(project).await;
+                    return Err(e.into());
+                }
+                return Ok(RunPermit {
+                    quota: quota.clone(),
+                    project: project.to_string(),
+                    metered: true,
+                    via_shared: true,
+                });
+            }
+            Ok(false) => {
+                return Err(apex_common::Error::quota_exceeded(format!(
+                    "concurrent_agent_runs: shared fleet-wide limit {limit} reached"
+                ))
+                .into());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "shared quota store unavailable; degrading to per-node concurrency limiting"
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::expect_used)] // SRV-306: mutex-poison invariant, not request data
     let mut u = quota.usage.lock().expect("quota mutex poisoned");
     let current = u.concurrent.get(project).copied().unwrap_or(0);
     limits.check_concurrent_runs(current)?;
@@ -635,6 +1069,8 @@ pub(crate) fn admit_run(
         quota: quota.clone(),
         project: project.to_string(),
         metered: true,
+        #[cfg(feature = "redis")]
+        via_shared: false,
     })
 }
 
@@ -662,6 +1098,7 @@ pub(crate) fn record_run_usage(
         .unwrap_or(0);
     let day = current_day_with_offset(offset);
     let snapshot = {
+        #[allow(clippy::expect_used)] // SRV-306: mutex-poison invariant, not request data
         let mut u = quota.usage.lock().expect("quota mutex poisoned");
         let entry = u.cost.entry(project.to_string()).or_insert((day, 0.0, 0));
         if entry.0 != day {
@@ -824,7 +1261,7 @@ mod tests {
             .await
             .with_tenancy(Arc::new(apex_tenancy::InMemoryTenancyStore::new()));
         // `AppState::from_env()` otherwise points the idempotency cache at the real
-        // `~/.apex/server/idempotency.json` (DUR-404) shared by every process on this
+        // `~/.apex/server/idempotency.jsonl` (DUR-404) shared by every process on this
         // machine — including a previous `cargo test` run. A fixed key like this
         // module's `idempotency_key_replays_...` test uses would then replay a
         // *prior run's* cached response instead of exercising the fresh in-memory
@@ -952,19 +1389,29 @@ mod tests {
             )
             .unwrap();
 
-        let permit = admit_run(&st.tenancy, &st.quota, Some("prj-x")).expect("first run admitted");
+        let permit = admit_run(&st.tenancy, &st.quota, Some("prj-x"))
+            .await
+            .expect("first run admitted");
         // A second concurrent run is rejected.
         assert!(matches!(
-            admit_run(&st.tenancy, &st.quota, Some("prj-x")),
+            admit_run(&st.tenancy, &st.quota, Some("prj-x")).await,
             Err(e) if e.status == StatusCode::TOO_MANY_REQUESTS
         ));
         // Releasing the slot lets the next run in.
         drop(permit);
-        assert!(admit_run(&st.tenancy, &st.quota, Some("prj-x")).is_ok());
+        assert!(
+            admit_run(&st.tenancy, &st.quota, Some("prj-x"))
+                .await
+                .is_ok()
+        );
 
         // A project with no quota, and a run with no project, are unmetered.
-        assert!(admit_run(&st.tenancy, &st.quota, Some("prj-none")).is_ok());
-        assert!(admit_run(&st.tenancy, &st.quota, None).is_ok());
+        assert!(
+            admit_run(&st.tenancy, &st.quota, Some("prj-none"))
+                .await
+                .is_ok()
+        );
+        assert!(admit_run(&st.tenancy, &st.quota, None).await.is_ok());
     }
 
     /// RM-AIM-P1 PRV-101 acceptance: a real, price-book-computed `cost_usd` (the exact
@@ -1004,8 +1451,8 @@ mod tests {
     /// RM-AIM-P2 SRV-202 acceptance: once a project's recorded token usage crosses
     /// `llm_tokens_per_day`, the next run is refused at admission — even with no
     /// cost limit set (a $0-per-token local model still burns capacity).
-    #[test]
-    fn token_budget_blocks_admission_at_threshold() {
+    #[tokio::test]
+    async fn token_budget_blocks_admission_at_threshold() {
         let st = apex_tenancy::InMemoryTenancyStore::default();
         st.set_quota(
             "prj-tokens",
@@ -1021,7 +1468,9 @@ mod tests {
         // Under budget: admitted (999 < 1000).
         record_run_usage(&tenancy, &quota, Some("prj-tokens"), 0.0, 999);
         assert!(
-            admit_run(&tenancy, &quota, Some("prj-tokens")).is_ok(),
+            admit_run(&tenancy, &quota, Some("prj-tokens"))
+                .await
+                .is_ok(),
             "under the token budget the run is admitted"
         );
 
@@ -1030,7 +1479,7 @@ mod tests {
         // while usage is within the limit; the *next* run after crossing is
         // blocked). Unmetered projects stay unaffected.
         record_run_usage(&tenancy, &quota, Some("prj-tokens"), 0.0, 2);
-        let err = match admit_run(&tenancy, &quota, Some("prj-tokens")) {
+        let err = match admit_run(&tenancy, &quota, Some("prj-tokens")).await {
             Err(e) => e,
             Ok(_) => panic!("an exhausted token budget must refuse admission"),
         };
@@ -1040,7 +1489,7 @@ mod tests {
             "{}",
             err.message
         );
-        assert!(admit_run(&tenancy, &quota, Some("prj-other")).is_ok());
+        assert!(admit_run(&tenancy, &quota, Some("prj-other")).await.is_ok());
     }
 
     /// RM-AIM-P2 SRV-203, the boundary math: a quota with a non-UTC offset resets
@@ -1087,8 +1536,8 @@ mod tests {
     /// SRV-203, the wiring: with a configured reset offset, `record_run_usage`
     /// and `admit_run` agree on the (non-UTC) day bucket — recorded usage counts
     /// against the budget, and it landed under the offset bucket, not UTC's.
-    #[test]
-    fn offset_quota_records_and_enforces_under_its_own_day_bucket() {
+    #[tokio::test]
+    async fn offset_quota_records_and_enforces_under_its_own_day_bucket() {
         // Pick whichever ±12 h offset puts "now" in a *different* day bucket
         // than UTC — guaranteed for one of the two at any time of day.
         let now = std::time::SystemTime::now()
@@ -1130,7 +1579,7 @@ mod tests {
         // …and admission reads the same bucket, so the crossed budget blocks —
         // if admit had used the UTC bucket it would have seen zero usage.
         assert!(
-            admit_run(&tenancy, &quota, Some("prj-tz")).is_err(),
+            admit_run(&tenancy, &quota, Some("prj-tz")).await.is_err(),
             "the exhausted budget under the offset bucket must refuse admission"
         );
     }
@@ -1644,5 +2093,189 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(err["error"]["code"], "quota_exceeded");
+    }
+}
+
+/// Live integration tests for Redis-shared concurrency slots (RM-AIM-P3 SRV-307) —
+/// capability-gated exactly like [`crate::rate_limit`]'s `redis_tests`: read
+/// `APEX_REDIS_URL`, skip cleanly (a `skipping:` line CI's service-container job
+/// fails on) when unset or unreachable, so the suite still passes offline.
+///
+/// ```bash
+/// APEX_REDIS_URL=redis://127.0.0.1:6379 \
+///   cargo test -p apex-server --features redis --lib tenancy::redis_tests -- --nocapture
+/// ```
+#[cfg(all(test, feature = "redis"))]
+mod redis_tests {
+    use super::{QuotaTracker, admit_run};
+    use apex_tenancy::{InMemoryTenancyStore, QuotaLimits, TenancyStore};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A unique key prefix per run so repeated runs (and parallel tests) don't collide.
+    fn prefix(name: &str) -> String {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("apex:it:quota:{name}:{nonce}")
+    }
+
+    /// Open a Redis client, or `None` (logging a skip) when unconfigured/unreachable.
+    async fn client() -> Option<redis::Client> {
+        let url = match std::env::var("APEX_REDIS_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("skipping: APEX_REDIS_URL not set");
+                return None;
+            }
+        };
+        let client = match redis::Client::open(url.as_str()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: invalid APEX_REDIS_URL {url}: {e}");
+                return None;
+            }
+        };
+        match client.get_multiplexed_async_connection().await {
+            Ok(_) => Some(client),
+            Err(e) => {
+                eprintln!("skipping: redis unreachable at {url}: {e}");
+                None
+            }
+        }
+    }
+
+    fn tenancy_with_quota(project: &str, limits: QuotaLimits) -> Arc<dyn TenancyStore> {
+        let store = InMemoryTenancyStore::default();
+        store.set_quota(project, limits).unwrap();
+        Arc::new(store)
+    }
+
+    /// The ticket's literal acceptance criterion: two `QuotaTracker`s over one shared
+    /// Redis prefix — standing in for two server nodes in a fleet — enforce a
+    /// **combined** concurrency budget, not 2×.
+    #[tokio::test]
+    async fn two_nodes_share_one_concurrency_budget() {
+        let Some(client) = client().await else { return };
+        let p = prefix("combined");
+        let tenancy = tenancy_with_quota(
+            "prj-fleet",
+            QuotaLimits {
+                concurrent_agent_runs: Some(2),
+                ..Default::default()
+            },
+        );
+
+        // Two independently-constructed trackers over the same Redis prefix = two
+        // server nodes admitting against the same project.
+        let node_a = Arc::new(QuotaTracker::new(None).with_redis(client.clone(), p.clone()));
+        let node_b = Arc::new(QuotaTracker::new(None).with_redis(client.clone(), p.clone()));
+
+        // Alternating across nodes, exactly `concurrent_agent_runs` (2) permits are
+        // admitted…
+        let permit_a = admit_run(&tenancy, &node_a, Some("prj-fleet"))
+            .await
+            .expect("1/2 via node A");
+        let _permit_b = admit_run(&tenancy, &node_b, Some("prj-fleet"))
+            .await
+            .expect("2/2 via node B");
+
+        // …and the 3rd is rejected on *both* nodes: one shared budget, not 2×.
+        let Err(err) = admit_run(&tenancy, &node_a, Some("prj-fleet")).await else {
+            panic!("node A must see the combined budget exhausted");
+        };
+        assert_eq!(err.status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            admit_run(&tenancy, &node_b, Some("prj-fleet"))
+                .await
+                .is_err(),
+            "node B must see the combined budget exhausted too"
+        );
+
+        // Releasing a slot on node A frees capacity node B can immediately use —
+        // proving the release path is shared too, not just the admit path.
+        drop(permit_a);
+        // The release is a spawned fire-and-forget task (`RunPermit::drop`); give it
+        // a moment to actually run before asserting the freed slot is visible.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        admit_run(&tenancy, &node_b, Some("prj-fleet"))
+            .await
+            .expect("the slot node A released is visible to node B");
+    }
+
+    /// Two projects (two different Redis keys under the same prefix) don't share a
+    /// budget with each other.
+    #[tokio::test]
+    async fn shared_concurrency_is_still_per_project() {
+        let Some(client) = client().await else { return };
+        let p = prefix("per-project");
+        let tenancy = tenancy_with_quota(
+            "prj-one",
+            QuotaLimits {
+                concurrent_agent_runs: Some(1),
+                ..Default::default()
+            },
+        );
+        tenancy
+            .set_quota(
+                "prj-two",
+                QuotaLimits {
+                    concurrent_agent_runs: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let quota = Arc::new(QuotaTracker::new(None).with_redis(client, p));
+
+        let _permit_one = admit_run(&tenancy, &quota, Some("prj-one"))
+            .await
+            .expect("prj-one's own slot is free");
+        // prj-one is now exhausted…
+        assert!(
+            admit_run(&tenancy, &quota, Some("prj-one")).await.is_err(),
+            "prj-one is exhausted"
+        );
+        // …but prj-two's counter is untouched.
+        admit_run(&tenancy, &quota, Some("prj-two"))
+            .await
+            .expect("prj-two has its own independent budget");
+    }
+
+    /// SRV-307's degrade contract, testable offline: a Redis-configured tracker whose
+    /// Redis is unreachable falls back to the in-process counter — per-node limiting,
+    /// never unlimited. Unlike the two tests above, this doesn't need a live Redis.
+    #[tokio::test]
+    async fn unreachable_redis_degrades_to_local_concurrency_limiting_not_unlimited() {
+        // A local TCP listener nothing ever accepts on: the connection attempt hangs
+        // rather than being refused immediately, so this reliably exercises the
+        // `REDIS_BUDGET` timeout path (a `connection refused` port, as `rate_limit`'s
+        // equivalent test uses, was found to behave inconsistently across platforms).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = redis::Client::open(format!("redis://{addr}")).unwrap();
+        let tenancy = tenancy_with_quota(
+            "prj-degrade",
+            QuotaLimits {
+                concurrent_agent_runs: Some(1),
+                ..Default::default()
+            },
+        );
+        let quota = Arc::new(QuotaTracker::new(None).with_redis(client, "apex:quota:test-degrade"));
+
+        let permit = admit_run(&tenancy, &quota, Some("prj-degrade"))
+            .await
+            .expect("degraded first slot");
+        assert!(
+            admit_run(&tenancy, &quota, Some("prj-degrade"))
+                .await
+                .is_err(),
+            "the local fallback counter still enforces the budget"
+        );
+        drop(permit);
+        admit_run(&tenancy, &quota, Some("prj-degrade"))
+            .await
+            .expect("releasing the local slot frees it for the next run");
     }
 }

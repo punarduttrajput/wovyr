@@ -22,7 +22,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "lint:openapi": "redocly lint ../../docs/09-api/openapi.yaml",
+    "lint:openapi": "redocly lint http://127.0.0.1:8080/openapi.json",
     "test": "npm run lint:openapi && npm run build && node --test dist/test/"
   },
   "devDependencies": {

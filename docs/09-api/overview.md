@@ -7,11 +7,20 @@ Document ID: API-001
 
 **Document ID:** API-001  
 **File Path:** `docs/09-api/overview.md`  
-**Version:** 1.3.0  
+**Version:** 1.4.0  
 **Status:** Draft — this document describes the **target-state** convention;
 the machine-readable, ground-truth contract for what `apex-server` actually
-implements today is [`openapi.yaml`](openapi.yaml) (hand-authored from the
-Axum routes, v1.0 "Stability" deliverable). Notable gaps between the two: the
+implements today is served live at `GET /openapi.json` (RM-AIM-P3 SRV-303) —
+generated at compile time from `#[utoipa::path(...)]` annotations on the
+handlers themselves plus `#[derive(ToSchema)]` request/error types (see
+`crates/apex-server/src/openapi.rs`), so it cannot silently drift from the
+code the way a hand-maintained file can; the CI contract-gate job lints this
+live document, not a checked-in copy. [`openapi.yaml`](openapi.yaml) (hand-
+authored from the Axum routes, v1.0 "Stability" deliverable) remains as a
+browsable, checked-in snapshot but is no longer the thing CI validates
+against — treat a divergence between the two as the hand-authored file being
+stale, not the generated one. Notable gaps between this doc's target-state
+convention and the real API (both `openapi.yaml` and the generated doc): the
 real API has no opaque `agt_01H...`-style ids (resources use their natural
 key — agent name, workflow `execution_id`, `publisher/name`, …), no OAuth2
 authorization-code flow and no mTLS, and no generic `/operations/{id}`
@@ -265,6 +274,7 @@ signed, retried with backoff, and mirror Event Bus topics.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.4.0 | 2026-07-14 | RM-AIM-P3 SRV-303: `GET /openapi.json` is now the generated, drift-proof ground-truth contract (derived from `#[utoipa::path]`/`ToSchema` on the handlers), and the CI contract gate lints that live document instead of the checked-in `openapi.yaml`, which remains only as a browsable snapshot |
 | 1.3.0 | 2026-07-07 | Corrected the top divergence note: it said "no OAuth2/JWT" for the real API, which stopped being true once RM-GA-P1 SEC-101 shipped real JWT/API-key bearer verification (`APEX_AUTH_MODE`). Also noted `Idempotency-Key`'s RM-GA-P4 API-703 broadening to every mutating route. No API behavior changed — this was a stale-documentation fix found during a project-wide status review |
 | 1.2.0 | 2026-07-04 | Linked the new [deprecation-policy.md](deprecation-policy.md) from §3; noted the TypeScript SDK's new retry/backoff and `paginateAll()` helper |
 | 1.1.0 | 2026-07-03 | Added `openapi.yaml` as the hand-authored, ground-truth machine-readable contract (v1.0 "Stability" workstream), noting where this convention doc describes target-state behavior the real API doesn't implement (opaque ids, OAuth2/JWT, `/operations/{id}`). First TypeScript client (`sdks/typescript`) landed against the spec, integration-tested against a live `apex dev` server |

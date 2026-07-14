@@ -4,6 +4,15 @@
 //! store the CLI's `memory` commands use, under `~/.apex/memory`). Retrieval is the
 //! engine's hybrid (vector + keyword) search; results carry the ranking
 //! `score_breakdown` so the UI can explain why each record matched.
+//!
+//! `.unwrap()`/`.expect()`/`unreachable!()` on request-derived data are denied here
+//! (RM-AIM-P3 SRV-306) — a malformed client request must return a mapped `ApiError`,
+//! never panic.
+
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
+)]
 
 use crate::AppState;
 use crate::hardening::{PageQuery, paginate};
@@ -22,6 +31,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 /// The required-scope prefix that tags a record with its owning tenant.
 const TENANT_SCOPE_PREFIX: &str = "tenant:";
@@ -107,7 +117,13 @@ fn parse_strategy(s: Option<&str>) -> RetrievalStrategy {
 
 /// `GET /api/v1/memory/namespaces` — distinct namespaces with their record counts
 /// (scoped to the caller's tenant).
-async fn list_namespaces(
+#[utoipa::path(
+    get,
+    path = "/api/v1/memory/namespaces",
+    tag = "memory",
+    responses((status = 200, description = "The tenant's distinct namespaces with record counts.")),
+)]
+pub(crate) async fn list_namespaces(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, crate::ApiError> {
@@ -130,14 +146,25 @@ async fn list_namespaces(
 }
 
 #[derive(Deserialize)]
-struct RecordsQuery {
+pub(crate) struct RecordsQuery {
     namespace: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
 }
 
 /// `GET /api/v1/memory/records?namespace=` — browse records (cursor-paginated).
-async fn list_records(
+#[utoipa::path(
+    get,
+    path = "/api/v1/memory/records",
+    tag = "memory",
+    params(
+        ("namespace" = Option<String>, Query, description = "Filter to a namespace."),
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses((status = 200, description = "A paginated list of records (newest first).")),
+)]
+pub(crate) async fn list_records(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(q): Query<RecordsQuery>,
@@ -158,8 +185,8 @@ async fn list_records(
     Ok(Json(paginate(items, &page)))
 }
 
-#[derive(Deserialize)]
-struct QueryRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct QueryRequest {
     text: String,
     namespace: Option<String>,
     strategy: Option<String>,
@@ -178,7 +205,14 @@ struct QueryRequest {
 /// cursor/`has_more`, since retrieval is bounded by `limit`/relevance, not an
 /// offset into a stable ordering. `data` matches the field name every other list
 /// route uses (RM-GA-P4 API-701) even though this route isn't cursor-paginated.
-async fn query(
+#[utoipa::path(
+    post,
+    path = "/api/v1/memory:query",
+    tag = "memory",
+    request_body = QueryRequest,
+    responses((status = 200, description = "A ranked result set with an explainable score breakdown (not cursor-paginated).")),
+)]
+pub(crate) async fn query(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<QueryRequest>,
@@ -248,8 +282,8 @@ async fn query(
     Ok(Json(json!({ "data": data, "count": data.len() })))
 }
 
-#[derive(Deserialize)]
-struct PutRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct PutRequest {
     namespace: String,
     content: String,
     #[serde(rename = "type")]
@@ -264,7 +298,14 @@ struct PutRequest {
 }
 
 /// `POST /api/v1/memory/records` — store a memory (embedded via the gateway).
-async fn put_record(
+#[utoipa::path(
+    post,
+    path = "/api/v1/memory/records",
+    tag = "memory",
+    request_body = PutRequest,
+    responses((status = 200, description = "Record stored.")),
+)]
+pub(crate) async fn put_record(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<PutRequest>,

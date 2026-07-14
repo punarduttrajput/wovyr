@@ -383,12 +383,30 @@ impl ApiKeyStore for InMemoryApiKeyStore {
     }
 }
 
+/// The in-memory cache [`FileApiKeyStore`] keeps warm (SRV-302): the last-loaded key
+/// map, stamped with the file's modification time at load — the invalidation signal.
+/// A cheap `stat()` per request (checking `mtime`) replaces a full read + JSON parse
+/// on every request; the map itself is only re-read when the file's `mtime` has
+/// actually moved (an operator's `create-key`/`revoke`/`rotate`, in this process or
+/// another one sharing the same `~/.apex/auth`).
+struct CachedKeys {
+    mtime: std::time::SystemTime,
+    map: BTreeMap<String, KeyRecord>,
+}
+
 /// A durable key store at `~/.apex/auth/api_keys.json` ([`KeyRecord`] keyed by hash;
 /// the raw key is never stored, mirroring secrets/webhook signing keys elsewhere).
 /// Supports the full lifecycle (SRV-104): create (with optional TTL), list, revoke,
-/// rotate-with-grace — used by the CLI's `apex auth` subcommands.
+/// rotate-with-grace — used by the CLI's `apex auth` subcommands. **Cached in memory**
+/// (SRV-302): the hot `principal_for` auth path no longer reads + deserializes the
+/// whole file on every request — see [`CachedKeys`] / [`Self::load_cached`].
 pub struct FileApiKeyStore {
     path: PathBuf,
+    cache: RwLock<Option<CachedKeys>>,
+    /// Test-observability only: counts real disk reads via [`Self::load`], so a test
+    /// can assert the cache actually avoids repeat reads after warm-up. Negligible
+    /// runtime cost (one atomic increment per real load, never per request).
+    load_count: std::sync::atomic::AtomicUsize,
 }
 
 impl FileApiKeyStore {
@@ -397,12 +415,50 @@ impl FileApiKeyStore {
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
             path: dir.join("api_keys.json"),
+            cache: RwLock::new(None),
+            load_count: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
+    fn file_mtime(&self) -> Option<std::time::SystemTime> {
+        std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok()
+    }
+
+    /// The key map, served from the in-memory cache when the file's `mtime` hasn't
+    /// moved since it was last loaded (SRV-302) — the common case on the hot auth
+    /// path, where nothing has changed between one request and the next. Falls back
+    /// to a real disk read + reparse ([`Self::load`]) on the first call, or whenever
+    /// an external change (or the lack of a readable `mtime` at all) is detected.
+    fn load_cached(&self) -> BTreeMap<String, KeyRecord> {
+        let mtime = self.file_mtime();
+        if let Some(mtime) = mtime {
+            let cache = self.cache.read().expect("api key cache poisoned");
+            if let Some(cached) = cache.as_ref()
+                && cached.mtime == mtime
+            {
+                return cached.map.clone();
+            }
+        }
+        let map = self.load();
+        if let Some(mtime) = mtime {
+            *self.cache.write().expect("api key cache poisoned") = Some(CachedKeys {
+                mtime,
+                map: map.clone(),
+            });
+        }
+        map
+    }
+
     /// Load the key map, transparently migrating the pre-SRV-104 `hash → principal`
-    /// string format (each entry becomes a live, never-expiring [`KeyRecord`]).
+    /// string format (each entry becomes a live, never-expiring [`KeyRecord`]). A
+    /// real disk read — [`Self::load_cached`] is the path that should usually be
+    /// called instead; this exists as the cache-miss fallback and for the
+    /// mutating operations below, which always need the true current contents.
     fn load(&self) -> BTreeMap<String, KeyRecord> {
+        self.load_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Ok(bytes) = std::fs::read(&self.path) else {
             return BTreeMap::new();
         };
@@ -432,8 +488,18 @@ impl FileApiKeyStore {
             .unwrap_or_default()
     }
 
+    /// Persist `map` and refresh the in-memory cache to match, so a mutation made in
+    /// *this* process (create/revoke/rotate) is immediately reflected without an
+    /// extra disk round-trip on the next `principal_for` call.
     fn save(&self, map: &BTreeMap<String, KeyRecord>) -> std::io::Result<()> {
-        std::fs::write(&self.path, serde_json::to_vec_pretty(map)?)
+        std::fs::write(&self.path, serde_json::to_vec_pretty(map)?)?;
+        if let Some(mtime) = self.file_mtime() {
+            *self.cache.write().expect("api key cache poisoned") = Some(CachedKeys {
+                mtime,
+                map: map.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Mint a fresh key for `principal` (optionally expiring after `ttl`), persist only
@@ -536,7 +602,9 @@ impl FileApiKeyStore {
 
 impl ApiKeyStore for FileApiKeyStore {
     fn principal_for(&self, raw_key: &str) -> Option<String> {
-        let mut map = self.load();
+        // SRV-302: the cached path — no disk read at all unless the file's `mtime`
+        // has moved since it was last loaded.
+        let mut map = self.load_cached();
         let (principal, changed) = resolve_live_key(&mut map, raw_key);
         if changed {
             // Best-effort last-used refresh; failure to persist must not fail auth.
@@ -678,6 +746,61 @@ mod tests {
         let (_key_id, raw) = store.create_key("alice", None).unwrap();
         assert_eq!(store.principal_for(&raw).as_deref(), Some("alice"));
         assert_eq!(store.principal_for("not-a-key"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SRV-302: after warm-up, repeated `principal_for` lookups are served from the
+    /// in-memory cache — no additional real disk reads as long as the file's
+    /// `mtime` hasn't moved.
+    #[test]
+    fn file_api_key_store_avoids_repeat_reads_after_warm_up() {
+        let dir = std::env::temp_dir().join(format!("apex-auth-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FileApiKeyStore::new(&dir).unwrap();
+        let (_id, raw) = store.create_key("alice", None).unwrap();
+
+        let loads_after_create = store.load_count.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            loads_after_create > 0,
+            "create_key itself performs at least one real load"
+        );
+
+        for _ in 0..5 {
+            assert_eq!(store.principal_for(&raw).as_deref(), Some("alice"));
+        }
+        assert_eq!(
+            store.load_count.load(std::sync::atomic::Ordering::Relaxed),
+            loads_after_create,
+            "repeated lookups after warm-up must not re-read the file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SRV-302: a key change made through an independent `FileApiKeyStore` handle on
+    /// the same directory (standing in for a separate process, e.g. the CLI's
+    /// `apex auth` commands) is still picked up — the cache invalidates on the
+    /// file's `mtime`, not just this process's own writes.
+    #[test]
+    fn file_api_key_store_picks_up_an_external_change() {
+        let dir = std::env::temp_dir().join(format!("apex-auth-external-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let store_a = FileApiKeyStore::new(&dir).unwrap();
+        let (_id_a, raw_a) = store_a.create_key("alice", None).unwrap();
+        assert_eq!(store_a.principal_for(&raw_a).as_deref(), Some("alice"));
+
+        // A distinct mtime is needed for the change to be observable; NTFS/most
+        // modern filesystems have far finer resolution than this, but a short
+        // sleep keeps the test robust regardless.
+        std::thread::sleep(Duration::from_millis(10));
+        let store_b = FileApiKeyStore::new(&dir).unwrap();
+        let (_id_b, raw_b) = store_b.create_key("bob", None).unwrap();
+
+        // `store_a` never wrote bob's key itself, but must still resolve it.
+        assert_eq!(store_a.principal_for(&raw_b).as_deref(), Some("bob"));
+        // The original key is unaffected.
+        assert_eq!(store_a.principal_for(&raw_a).as_deref(), Some("alice"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

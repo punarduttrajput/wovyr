@@ -4,6 +4,15 @@
 //! Routes: list, install, enable, disable, upgrade, rollback, uninstall, trust.
 //! All reads/writes are to the same files `apex plugin *` CLI commands use, so
 //! changes made here are immediately visible to the CLI and vice versa.
+//!
+//! `.unwrap()`/`.expect()`/`unreachable!()` on request-derived data are denied here
+//! (RM-AIM-P3 SRV-306) — a malformed client request must return a mapped `ApiError`,
+//! never panic.
+
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
+)]
 
 use apex_plugin::{
     CapabilityKind, CapabilityRuntime, InstalledPlugin, NotLoadedRuntime, Package, PluginEngine,
@@ -20,6 +29,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use crate::ApiError;
 use crate::AppState;
@@ -305,14 +315,24 @@ fn plugin_json(p: &InstalledPlugin) -> Value {
 
 /// `GET /api/v1/plugins` — the installed plugin catalog, cursor-paginated
 /// (overview §6, RM-GA-P4 API-701).
-async fn list_plugins(Query(page): Query<PageQuery>) -> Result<Json<Value>, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/plugins",
+    tag = "plugins",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses((status = 200, description = "The installed plugin catalog.")),
+)]
+pub(crate) async fn list_plugins(Query(page): Query<PageQuery>) -> Result<Json<Value>, ApiError> {
     let catalog = load_catalog()?;
     let items: Vec<Value> = catalog.iter().map(plugin_json).collect();
     Ok(Json(paginate(items, &page.page())))
 }
 
-#[derive(Deserialize)]
-struct PluginRef {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct PluginRef {
     id: String,
 }
 
@@ -321,7 +341,17 @@ struct PluginRef {
 /// `plugins:admin`-gated ([RM-GA-P1 SEC-103](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
 /// an enabled tool runs inside *every* tenant's agent runs with tenant-scoped
 /// secrets injected, so this is a platform-admin-tier action, not a per-tenant one.
-async fn enable_plugin(
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugins:enable",
+    tag = "plugins",
+    request_body = PluginRef,
+    responses(
+        (status = 200, description = "Plugin enabled."),
+        (status = 403, description = "Caller lacks plugins:admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn enable_plugin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<PluginRef>,
@@ -345,7 +375,17 @@ async fn enable_plugin(
 
 /// `POST /api/v1/plugins:disable` — disable a plugin (withdraws its capabilities).
 /// `plugins:admin`-gated (SEC-103).
-async fn disable_plugin(
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugins:disable",
+    tag = "plugins",
+    request_body = PluginRef,
+    responses(
+        (status = 200, description = "Plugin disabled."),
+        (status = 403, description = "Caller lacks plugins:admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn disable_plugin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<PluginRef>,
@@ -367,8 +407,8 @@ async fn disable_plugin(
     Ok(Json(json!({ "id": req.id, "state": "disabled" })))
 }
 
-#[derive(Deserialize)]
-struct InstallReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct InstallReq {
     /// Base64-encoded `.apexpkg` file contents.
     apexpkg: String,
     #[serde(default)]
@@ -381,7 +421,18 @@ struct InstallReq {
 /// (`POST /api/v1/plugins:trust` registers publishers). On success the plugin is
 /// installed in the *disabled* state; call `:enable` to activate it. `plugins:admin`-
 /// gated (SEC-103).
-async fn install_plugin(
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugins:install",
+    tag = "plugins",
+    request_body = InstallReq,
+    responses(
+        (status = 200, description = "Plugin installed (disabled)."),
+        (status = 400, description = "Invalid package or unsigned/untrusted publisher.", body = crate::openapi::ApiErrorBody),
+        (status = 403, description = "Caller lacks plugins:admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn install_plugin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<InstallReq>,
@@ -410,7 +461,17 @@ pub(crate) fn install_package(package: &Package, grants: &[String]) -> Result<Va
 ///
 /// Retains the prior version for rollback. Any new permissions beyond what was
 /// previously granted must be listed in `grants`. `plugins:admin`-gated (SEC-103).
-async fn upgrade_plugin(
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugins:upgrade",
+    tag = "plugins",
+    request_body = InstallReq,
+    responses(
+        (status = 200, description = "Plugin upgraded (prior version retained for rollback)."),
+        (status = 403, description = "Caller lacks plugins:admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn upgrade_plugin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<InstallReq>,
@@ -428,14 +489,24 @@ async fn upgrade_plugin(
     Ok(Json(json!({ "id": id, "status": "upgraded" })))
 }
 
-#[derive(Deserialize)]
-struct RollbackReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct RollbackReq {
     id: String,
 }
 
 /// `POST /api/v1/plugins:rollback` — revert a plugin to its retained prior version.
 /// `plugins:admin`-gated (SEC-103).
-async fn rollback_plugin(
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugins:rollback",
+    tag = "plugins",
+    request_body = RollbackReq,
+    responses(
+        (status = 200, description = "Plugin rolled back."),
+        (status = 403, description = "Caller lacks plugins:admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn rollback_plugin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<RollbackReq>,
@@ -461,7 +532,17 @@ async fn rollback_plugin(
 ///
 /// `id` is URL-encoded `publisher/name` (e.g. `acme%2Fmy-plugin`). `plugins:admin`-
 /// gated (SEC-103).
-async fn uninstall_plugin(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/plugins/{id}",
+    tag = "plugins",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    responses(
+        (status = 200, description = "Plugin uninstalled."),
+        (status = 403, description = "Caller lacks plugins:admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn uninstall_plugin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -476,8 +557,8 @@ async fn uninstall_plugin(
     Ok(Json(json!({ "id": id, "status": "uninstalled" })))
 }
 
-#[derive(Deserialize)]
-struct TrustReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct TrustReq {
     publisher: String,
     /// Hex-encoded ed25519 public key (32 bytes = 64 hex chars).
     public_key_hex: String,
@@ -487,7 +568,17 @@ struct TrustReq {
 ///
 /// After this, packages signed by that publisher can be installed. `plugins:admin`-
 /// gated (SEC-103): trusting a publisher is the root of the plugin supply chain.
-async fn trust_publisher(
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugins:trust",
+    tag = "plugins",
+    request_body = TrustReq,
+    responses(
+        (status = 200, description = "Publisher trusted."),
+        (status = 403, description = "Caller lacks plugins:admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn trust_publisher(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<TrustReq>,

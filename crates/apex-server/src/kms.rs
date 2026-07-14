@@ -6,6 +6,15 @@
 //! (`kms:write` — routine, low-stakes) or permanently **crypto-shred** a tenant's key
 //! material (`kms:admin` — irreversible, gated at a materially higher tier than routine
 //! writes). Both actions are audited by tenant reference, never touching key material.
+//!
+//! `.unwrap()`/`.expect()`/`unreachable!()` on request-derived data are denied here
+//! (RM-AIM-P3 SRV-306) — a malformed client request must return a mapped `ApiError`,
+//! never panic.
+
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
+)]
 
 use crate::{ApiError, AppState};
 use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
@@ -28,7 +37,16 @@ fn audit_kms(state: &AppState, headers: &HeaderMap, tenant: &str, action: &str) 
 /// wrapped data keys remain valid under their original version (nothing is
 /// re-encrypted); only new seals use the new version until a consumer explicitly
 /// rewraps.
-async fn rotate_tenant_key(
+#[utoipa::path(
+    post,
+    path = "/api/v1/kms/tenant-key/rotate",
+    tag = "kms",
+    responses(
+        (status = 200, description = "New tenant-key version rolled."),
+        (status = 403, description = "Caller lacks kms:write.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn rotate_tenant_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
@@ -45,7 +63,16 @@ async fn rotate_tenant_key(
 /// unrecoverable, so any sealed secret/memory content for it is gone for good. Gated
 /// at `kms:admin`, a materially higher tier than the routine `kms:write`/`secrets:write`
 /// scopes.
-async fn destroy_tenant_key(
+#[utoipa::path(
+    post,
+    path = "/api/v1/kms/tenant-key/destroy",
+    tag = "kms",
+    responses(
+        (status = 200, description = "Tenant key destroyed (crypto-shred, irreversible)."),
+        (status = 403, description = "Caller lacks kms:admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn destroy_tenant_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {

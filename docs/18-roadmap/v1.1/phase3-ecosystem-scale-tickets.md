@@ -7,8 +7,8 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.6.0
-**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E) done; everything else planned
+**Version:** 1.7.0
+**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G) done; everything else planned
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
 **Last Updated:** 2026-07-14
 
@@ -686,7 +686,7 @@ change, confirming the swap didn't alter any other store's on-disk behavior.
 
 # WS-G — Server Health (R-G.8 cluster)
 
-## SRV-302 `[P2]` — Cache `FileApiKeyStore` in memory
+## SRV-302 `[P2]` — Cache `FileApiKeyStore` in memory — **DONE (2026-07-14)**
 
 **Problem.** `principal_for` calls `self.load()` per authenticated request — disk I/O +
 full deserialize on the hot auth path (`crates/apex-server/src/auth.rs:315-318,291-296`).
@@ -699,7 +699,24 @@ an external key change is picked up.
 
 **Files.** `crates/apex-server/src/auth.rs`. **Size.** S. **Depends on:** SRV-104.
 
-## SRV-303 `[P2]` — Serve a generated OpenAPI spec
+**Resolution.** `FileApiKeyStore` gained an mtime-stamped in-memory cache
+(`CachedKeys`): `principal_for` now calls `load_cached()`, which `stat()`s the file
+(one cheap syscall) and only re-reads + reparses when the mtime has moved since the
+last load — a single `stat()` replaces a full read+JSON-parse on every request in the
+common case (nothing changed). `save()` (called by `create_key`/`revoke`/`rotate`)
+refreshes the cache in the same process immediately after writing, so a mutation this
+process makes is visible without an extra disk round-trip. A `load_count` atomic
+(test-observability only, mirrors nothing constructed at runtime) proves the cache
+actually avoids repeat reads. Mutating operations (`create_key`/`list_keys`/`revoke`/
+`rotate`) intentionally keep calling the raw uncached `load()` — a read-modify-write
+must see the true current disk state, never a possibly-stale cache. Proven by
+`file_api_key_store_avoids_repeat_reads_after_warm_up` (five repeated lookups after
+warm-up trigger zero additional real reads) and `file_api_key_store_picks_up_an_
+external_change` (a second `FileApiKeyStore` handle on the same directory — standing
+in for a separate process — writes a new key, and the first handle picks it up on its
+next lookup without being reconstructed).
+
+## SRV-303 `[P2]` — Serve a generated OpenAPI spec — **DONE (2026-07-14)**
 
 **Problem.** No `utoipa`/OpenAPI generation; `openapi.yaml` is hand-synced
 (audit grep). (PRD-004 R-G.8; audit Med.)
@@ -713,7 +730,35 @@ against it.
 **Files.** `crates/apex-server/src/*` + `docs/09-api/openapi.yaml` pipeline.
 **Size.** L. **Depends on:** none.
 
-## SRV-304 `[P2]` — Extract the inline `lib.rs` test suite
+**Resolution.** New `crates/apex-server/src/openapi.rs`: every one of the ~65 routes
+`router()` mounts (agents, workflows, tenancy, webhooks, memory, plugins,
+marketplace, audit, tools, secrets, kms, health/metrics/this-doc) carries a real
+`#[utoipa::path(...)]` attribute on its handler function, and every request-body/
+error type used on the wire derives `utoipa::ToSchema` (foreign types from other
+crates — `apex_tenancy::QuotaLimits`/`Role`/`ProjectStatus` — are documented via
+`#[schema(value_type = ...)]` overrides or left untyped with a prose note, rather
+than pulling `utoipa` into crates that shouldn't need to know about it). A
+`SecurityAddon` (`utoipa::Modify`) registers the two real auth schemes
+(`tenantHeader`/`bearerAuth`, matching `crates/apex-server/src/auth.rs`'s actual
+`APEX_AUTH_MODE` contract) since utoipa's macro syntax only expresses security
+*requirements*, not the schemes themselves; `/healthz`/`/metrics`/`/openapi.json`
+carry an explicit `security(())` override matching their real unauthenticated
+status. `ApiDoc` (a `#[derive(OpenApi)]` struct) aggregates it all and is served as
+JSON at `GET /openapi.json`, unauthenticated (describes the API's shape, not any
+tenant's data) alongside health/metrics. A same-crate test,
+`served_spec_covers_every_mounted_route`, asserts every mounted path+method has a
+generated entry — a handler added to `router()` but never annotated (or vice versa)
+is a compile/test failure, not just a convention. Verified live end to end: started
+a real `apex dev` server, fetched the actual `/openapi.json` it serves, and ran
+`redocly lint` against it — 0 errors (29 stylistic warnings, comparable to the old
+hand-written file's 112). `docs/09-api/openapi.yaml` remains as a browsable,
+checked-in snapshot, but `docs/09-api/overview.md` now states plainly that
+`/openapi.json` is the generated, drift-proof ground truth and the CI contract gate
+(`sdks/typescript`'s `npm run lint:openapi`) now lints the **live served document**
+(`http://127.0.0.1:8080/openapi.json`, the address the contract-gate job's `apex dev`
+already binds) instead of the static file.
+
+## SRV-304 `[P2]` — Extract the inline `lib.rs` test suite — **DONE (2026-07-14)**
 
 **Problem.** `lib.rs` is ~86% inline test code (~2,260 of 2,618 lines,
 `crates/apex-server/src/lib.rs:356`→EOF). (PRD-004 R-G.8; audit Med.)
@@ -726,7 +771,28 @@ against it.
 **Files.** `crates/apex-server/src/lib.rs` (+ new test module). **Size.** M.
 **Depends on:** none.
 
-## SRV-305 `[P2]` — Idempotency store write-amplification
+**Resolution.** Took the `tests.rs` **submodule** branch of the "or", not the external
+`tests/` directory branch: `lib.rs`'s `#[cfg(test)] mod tests { ... }` (2,410 lines)
+moved verbatim into a new file-backed `crates/apex-server/src/tests.rs`
+(`#[cfg(test)] mod tests;` in `lib.rs`), keeping the exact same crate-internal
+visibility the tests already relied on — several reach into `AppState`'s `pub(crate)`
+fields directly (seeding a workflow engine/tenancy store before driving a request
+through `router()`), so a true external `tests/` integration-test crate would have
+forced those fields to `pub`, a real API-surface change out of scope for a pure
+code-motion refactor (exactly the tradeoff CLAUDE.md's HLTH-904 note already
+flagged as deliberately deferred). `lib.rs` is now 444 lines — genuinely navigable
+production code (`router()`/`serve()`/TLS bootstrap), no scrolling past a test module
+to find it. All 137 (now 139, +2 from SRV-302's own tests) tests still pass
+unchanged; `cargo fmt` normalized the moved code's indentation. One real hazard hit
+mid-move and fixed: Windows PowerShell's `Get-Content` (no explicit `-Encoding`)
+silently misreads UTF-8-without-BOM as the system codepage, mangling every em-dash/
+§/smart-quote in the file into mojibake — caught immediately via a post-move `Read`,
+recovered via `git checkout` + reapplying the (small, already-correct) `Edit`-tool
+changes, then redone with `[System.IO.File]::ReadAllLines(path,
+[System.Text.Encoding]::UTF8)` / `WriteAllLines(..., new UTF8Encoding(false))`
+(explicit UTF-8, no BOM) instead.
+
+## SRV-305 `[P2]` — Idempotency store write-amplification — **DONE (2026-07-14)**
 
 **Problem.** `put` does a full-file `atomic_write` of the whole map per mutating
 request (`crates/apex-server/src/hardening.rs:230-266`). (PRD-004 R-G.8; audit Med.)
@@ -738,7 +804,33 @@ cache file each time.
 
 **Files.** `crates/apex-server/src/hardening.rs`. **Size.** M. **Depends on:** none.
 
-## SRV-306 `[P3]` — Request-path unwrap audit
+**Resolution.** Took the append-only-log branch, not debounce: debouncing would
+reintroduce the exact "a crash-loop loses a recently-cached idempotent response" bug
+RM-GA-P2 DUR-404 exists to prevent, since a response would sit unpersisted in memory
+for some window before the next flush. `IdempotencyStore::put` now appends exactly
+one JSON-encoded line per call (`fsync` the file, then `fsync` the parent directory
+via `apex_common::fs::sync_parent_dir` — the same durability an `atomic_write`
+whole-file rewrite gives, without paying for one; the identical primitive
+`apex-workflow`'s event log and `apex-audit`'s hash chain already use for this exact
+reason). The on-disk log can accumulate more lines than live entries (an expired/
+evicted key's old line is never retroactively deleted), so `put` compacts — one full
+`atomic_write` rewrite collapsing back to exactly the current live entries — once the
+log has grown to `max_entries * 2`, keeping the amortized cost per `put` O(1) instead
+of the old O(entries)-per-call. The file extension changed `idempotency.json` →
+`idempotency.jsonl` (a breaking on-disk format change for a pre-existing file, made
+deliberately visible via the new name rather than silently misread under the old one
+— low-stakes to lose across an upgrade, since entries are a short-TTL dedup cache,
+not a source of truth, and per this workspace's established pre-GA stance no real
+deployment exists yet to migrate). Proven by two new tests:
+`put_appends_instead_of_rewriting_the_whole_log_each_time` (30 puts under a large
+`max_entries` produce exactly 30 appends and 0 compactions, verified via
+test-observability counters mirroring `FileApiKeyStore::load_count`'s SRV-302
+pattern; a fresh store reopened from the same path recovers every entry) and
+`put_compacts_the_log_once_it_grows_past_the_threshold` (a small `max_entries`
+crosses the `*2` threshold on schedule, and the post-compaction file holds exactly
+the live entry count, not every line ever appended).
+
+## SRV-306 `[P3]` — Request-path unwrap audit — **DONE (2026-07-14)**
 
 **Problem.** ~317 `.unwrap()`/`unreachable!()`/`.expect()` across the crate; some on
 live paths (e.g. `agents.rs:218,220`; `webhooks.rs:56`). (PRD-004 R-G.8; audit Low.)
@@ -751,7 +843,38 @@ lint/CI check guards new ones on handler paths.
 **Files.** `crates/apex-server/src/{agents.rs,webhooks.rs,...}`. **Size.** M.
 **Depends on:** none.
 
-## SRV-307 `[P3]` — Shared concurrency slots
+**Resolution.** The audit (all 30 production-code — i.e. outside `#[cfg(test)]` —
+`.unwrap()`/`.expect()`/`unreachable!()` call sites across the 11 route-handler
+modules, read in their containing-function context) found **zero** that are
+attacker/client-triggerable: every one is a `Mutex`/`RwLock` poison guard (panics
+only if an earlier panic already happened while holding the same lock, never from
+request content) or, in `agents.rs`'s `get_run_handler`, an `.unwrap()`/
+`unreachable!()` pair operating on a `json!({"run_id": run_id})` literal (always a
+`Value::Object` regardless of what `run_id` contains) and a fixed-shape internal
+enum's `Serialize` output — neither shape depends on request data. The two file:line
+examples the ticket cited (`agents.rs:218,220`/`webhooks.rs:56`) no longer point at
+unwraps at all — `webhooks.rs` in particular has **zero** production-code unwraps;
+every match is inside its own `#[cfg(test)] mod tests`. So "eliminate" had nothing
+left to do; the ticket's other half — "a clippy lint/CI check guards new ones on
+handler paths" — is what actually shipped: all 11 route-handler modules (`agents.rs`,
+`audit.rs`, `kms.rs`, `marketplace.rs`, `memory.rs`, `plugins.rs`, `secrets.rs`,
+`tenancy.rs`, `tools.rs`, `webhooks.rs`, `workflow_runner.rs`) now carry
+`#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used,
+clippy::unreachable))]`. The `cfg_attr(not(test), ...)` gate is deliberate, not
+decorative: `cargo clippy --all-targets` compiles this crate twice — once as the
+plain lib (`cfg(test)` false, where the lint is active and every handler file's
+`#[cfg(test)] mod tests` is stripped out entirely, so there's nothing inside it to
+false-positive on) and once as the test binary (`cfg(test)` true crate-wide, where
+`not(test)` is false and the lint is inert) — so the guard fires exactly on
+production code and never on test code, with no need to separately annotate every
+test module. The 4 pre-existing legitimate call sites this actually affected
+(`agents.rs`'s json-literal/enum-shape pair, `tenancy.rs`'s two `quota.usage.lock()`
+mutex-poison `.expect()`s) each carry a scoped `#[allow(...)]` with a one-line
+justification. Verified the guard is real, not a no-op, by temporarily deleting one
+`#[allow]` and confirming `cargo clippy -p apex-server -- -D warnings` fails with
+exactly the expected `unwrap_used`/`unreachable` diagnostics, then restoring it.
+
+## SRV-307 `[P3]` — Shared concurrency slots — **DONE (2026-07-14)**
 
 **Problem.** `QuotaTracker.concurrent` is in-process/per-node
 (`crates/apex-server/src/state.rs`; `tenancy.rs:432,516-527`); N nodes multiply the
@@ -762,6 +885,52 @@ effective limit. (PRD-004 R-G.6; audit Low.)
 **Acceptance criteria.** A gated test asserts two nodes share one concurrency budget.
 
 **Files.** `crates/apex-server/src/tenancy.rs`. **Size.** M. **Depends on:** SRV-201.
+
+**Resolution.** Mirrors SRV-201's `RateLimiter`/`redis_shared` design closely (same
+`with_redis`/`from_env` shape, same lazily-dialed-and-redialed connection, same 1s
+`REDIS_BUDGET` timeout, same degrade-to-local-never-to-unlimited posture) rather than
+inventing a new pattern: a new `redis_concurrency` module (behind the existing
+`redis` cargo feature) provides `SharedConcurrency`, whose atomic "increment only if
+under the limit" Lua script lets a fleet of nodes serialize on one Redis counter per
+`(prefix, project)` instead of each independently reading-then-incrementing (which
+could race two nodes both past the limit). `QuotaTracker::from_env` (wired into
+`state.rs` in place of the old bare `QuotaTracker::new`) enables it when
+`APEX_QUOTA_REDIS_URL` is set on a `redis`-feature build (a dedicated var, so CI's
+`APEX_REDIS_URL` for the live capability-gated tests doesn't silently flip
+production config). `admit_run` became `async fn` (the shared path is a network
+call) — every call site (`agents.rs` ×3, `workflow_runner.rs`'s `StoredAgentResolver
+::admit`, plus the test suite) now `.await`s it. The harder half: `RunPermit`
+releases a slot in `Drop::drop`, which is unavoidably sync, but a shared release is
+an async Redis call — solved by spawning a detached `tokio::spawn` from `drop`
+(fire-and-forget, safe because a `RunPermit` only ever drops from within
+request-handling code, always inside an active Tokio runtime — the same pattern this
+codebase already uses for best-effort webhook delivery). **A known, documented,
+bounded gap, not silently assumed away:** `Drop` never runs on a hard crash
+(`kill -9`, power loss), which would otherwise permanently strand a shared slot for
+the whole fleet — closed by a generous `PEXPIRE` safety-net TTL (24h) refreshed on
+every successful admit, self-healing a stranded slot rather than requiring operator
+intervention, at the honestly-stated cost that a run genuinely still in flight past
+24h could have its slot expire and race a fresh admission past the limit. Only the
+concurrency dimension is fleet-shared; cost/token budgets stay per-node
+(disk-persisted, RM-GA-P2 DUR-404) exactly as before — widening those the same way is
+a documented follow-on, not silently assumed to already work. Proven by three new
+capability-gated tests in `tenancy::redis_tests` (skip cleanly, logging a `skipping:`
+line, when `APEX_REDIS_URL` is unset/unreachable — identical convention to
+`rate_limit::redis_tests`): `two_nodes_share_one_concurrency_budget` is the ticket's
+literal acceptance criterion (two independently-constructed `QuotaTracker`s over one
+Redis prefix admit exactly `concurrent_agent_runs` permits combined, not 2×, and a
+release on one node is visible to the other); `shared_concurrency_is_still_per_
+project` (two projects' counters don't cross-contaminate); and
+`unreachable_redis_degrades_to_local_concurrency_limiting_not_unlimited` — this one
+needs no live Redis and was run for real: it deliberately avoids the fixed
+"port 9 = connection refused" assumption `rate_limit`'s equivalent test uses (which
+was found, while validating this ticket, to behave inconsistently on this Windows
+dev machine — flagged separately, out of scope here) in favor of binding an
+ephemeral TCP listener and immediately dropping it, which passed reliably.
+**Not independently verified against a live Redis** in this environment (no
+Docker/`redis-server` available here) — the two live-Redis tests are exercised for
+real by CI's service-container job, the same honest limitation SRV-201's own
+integration tests already carry.
 
 ---
 
@@ -1089,3 +1258,4 @@ lint and load.
 | 1.4.0 | 2026-07-14 | ECO-304 (one-shot `apex plugin publish --key`: recomputes real artifact digests from disk, rewrites `plugin.yaml`, signs it, and writes the publisher's `.pub` alongside the package so the printed trust line is directly actionable — collapsing `keygen`→hand-edit-digests→`sign`→operator-`trust` into one command) implemented and marked DONE with implementation notes — 4 new unit tests, no marketplace or wasm toolchain needed to run them |
 | 1.5.0 | 2026-07-14 | WFL-303..308 (all remaining WS-H tickets) implemented and marked DONE with implementation notes, closing out WS-H entirely: WFL-303 fail-closed activity-output size cap (permanent failure via the saga path, not a hard abort); WFL-304 event-log paging (`history_page`, real bounded `FileStore`/`PostgresStore` implementations) + explicit opt-in retention (`compact_history`), plus a proof that `resume` already never reads the log at all; WFL-305 indexed `workflow_name`/`status` Postgres columns + SQL-side filtering/pagination (migration V3), proven via a deliberately-corrupt non-matching row that would fail to decode if `list()` ever fell back to scanning; WFL-306 a `fire_at`-sorted `BTreeSet` index for `InMemoryTimerStore` + `TimerDispatcher`/`ScheduleDispatcher::run_adaptive` (sleep until the next deadline, capped at a max interval), proven with a real wall-clock near-deadline-timer test; WFL-307 an `ActivityContext.progress` channel + `ActivityProgress` event, live on the sequential activity path via `tokio::select!`; WFL-308 a versioned event wire envelope (`encode_event`/`decode_event`, fail-closed on an unknown future version) now used by every store. 30 new tests total; full `apex-workflow` suite + whole-workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
 | 1.6.0 | 2026-07-14 | SBX-301..304 (all of WS-E) implemented and marked DONE with implementation notes, closing out WS-E entirely: SBX-301 a confined `fs_write` builtin (opt-in like `shell`) with a write-specific symlink-escape guard beyond `fs_read`'s existing confinement; SBX-302 a sandboxed `code_execute` tool (Python/Node) routed through the identical SBX-101/SEC-305 backend selection `ShellTool` uses, resource-limited and egress-controlled, including a real Windows "app execution alias" false-positive found and fixed in the test gating itself; SBX-303 a new `apex-tool-macros` proc-macro crate (`#[derive(Tool)]`) generating `ToolMetadata`/JSON-Schema (via `schemars`)/typed-parse boilerplate so a tool author never hand-writes a schema literal or a `.get().and_then()` chain; SBX-304 an explicit, documented platform-matrix fail-closed check (Linux+Docker only) in `ContainerSandbox::execute`, replacing what used to be only an *accidental* fail-closed side effect of a missing `nsenter` binary, and additionally closing a real, previously-unguarded Podman gap. 27 new tests total (8 fs_write + 9 code_execute + 4 derive(Tool) + 2 registry opt-in + 4 egress-lockdown-gate); full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
+| 1.7.0 | 2026-07-14 | SRV-302..307 (all of WS-G) implemented and marked DONE with implementation notes, closing out WS-G entirely: SRV-302 an mtime-stamped in-memory cache for `FileApiKeyStore` (one `stat()` replaces a full read+parse per request in the common case); SRV-303 a real generated OpenAPI spec (`#[utoipa::path]` on all ~65 routes + `ToSchema` request/error types, served at `GET /openapi.json`, verified live end-to-end via a real `apex dev` server + `redocly lint` at 0 errors, with the CI contract gate repointed at the live document instead of the hand-written `openapi.yaml`); SRV-304 `lib.rs`'s inline test suite moved to a file-backed `tests.rs` submodule (2,842 → 444 lines, same crate-internal visibility, no `pub` widening); SRV-305 the idempotency store rewritten from a per-`put` full-file rewrite to an append-only JSON-lines log with periodic compaction (O(1) amortized instead of O(entries) per call); SRV-306 an 11-file audit finding zero attacker-triggerable unwraps in production handler code, plus a real `cfg_attr(not(test), warn(...))`-gated clippy lint (verified to actually fire) guarding regressions; SRV-307 Redis-shared concurrency slots mirroring SRV-201's `RateLimiter` design (atomic Lua increment-if-under-limit, `Drop`-triggered fire-and-forget async release, a documented 24h crash-recovery safety-net TTL), `admit_run` converted to `async fn` across all call sites. 8 new tests total (2 SRV-302 + 2 SRV-305 + 3 SRV-307 capability-gated); a pre-existing, unrelated flaky test in `rate_limit.rs` was found (not fixed — flagged separately) on this Windows dev machine while validating SRV-307; full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout, incl. the `redis` feature build |

@@ -47,6 +47,10 @@ apex-memory.workspace = true
 apex-plugin.workspace = true
 apex-marketplace.workspace = true
 axum.workspace = true
+# Generated OpenAPI spec (RM-AIM-P3 SRV-303): the served `/openapi.json` is derived
+# from `#[utoipa::path]`-annotated handlers + `#[derive(ToSchema)]` request/response
+# types, so it can't drift from the handlers the way a hand-maintained YAML file can.
+utoipa = "5"
 # `rt` for the timer/schedule dispatch loops, webhook delivery worker, and the
 # marketplace registry's `spawn_blocking`; `time` for their sleeps; `net` for
 # `serve()`'s listener (RM-GA-P4 HLTH-904); `signal` + `macros` for graceful-shutdown

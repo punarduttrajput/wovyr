@@ -129,6 +129,13 @@ fn now_ms() -> u64 {
 struct IdempotencyInner {
     entries: HashMap<String, IdempotencyEntry>,
     order: VecDeque<String>,
+    /// Lines currently in the on-disk log (SRV-305) — always `>= entries.len()`,
+    /// since a `put` appends a line unconditionally but a key can only be
+    /// overwritten by a *fresh* `put` after its old cached response already
+    /// expired (the normal idempotency flow never re-`put`s a live key: a retry
+    /// within the TTL hits `get` and short-circuits before `put` runs again).
+    /// Reset to exactly `entries.len()` whenever [`IdempotencyStore::put`] compacts.
+    log_lines: u64,
 }
 
 /// Caches responses to mutating requests by `Idempotency-Key`, so a client retry
@@ -140,11 +147,31 @@ struct IdempotencyInner {
 /// (FIFO) rather than growing without bound. Durable when opened with a path
 /// (RM-GA-P2 DUR-404, [`new_with_path`](Self::new_with_path)) — otherwise
 /// ([`new`](Self::new), what tests use) purely in-memory, exactly as before.
+///
+/// **On-disk shape is an append-only JSON-lines log, not a rewritten snapshot**
+/// (RM-AIM-P3 SRV-305): the original design re-serialized and `atomic_write`-rewrote
+/// *every* live entry on *every* `put`, so one mutating request paid O(entries) disk
+/// I/O — real write amplification once the store approached `max_entries`. `put` now
+/// appends exactly one line (the same fsync-then-parent-dir-fsync durability
+/// `atomic_write` gives a whole-file rewrite, via [`apex_common::fs::sync_parent_dir`]
+/// — the standalone primitive this workspace already exposes for append-only logs
+/// that don't rename anything, the same one `apex-workflow`'s event log and
+/// `apex-audit`'s hash chain use for this exact reason). The log can accumulate more
+/// lines than live entries (an expired/evicted key's old line is never retroactively
+/// deleted), so [`Self::put`] compacts — a single full rewrite via `atomic_write`,
+/// collapsing back to exactly the current live entries — once the log has grown to
+/// `max_entries * 2` (never on every call, so the amortized cost per `put` stays O(1)).
 pub(crate) struct IdempotencyStore {
     inner: Mutex<IdempotencyInner>,
     ttl: Duration,
     max_entries: usize,
     path: Option<PathBuf>,
+    /// Test-observability only (mirrors `FileApiKeyStore::load_count`, SRV-302): counts
+    /// real appends vs. full-log compactions, so a test can assert `put` amortizes to
+    /// O(1) I/O instead of rewriting the whole log every call. Negligible runtime cost
+    /// (one atomic increment per `put` that has a `path`, never per in-memory-only call).
+    append_count: std::sync::atomic::AtomicUsize,
+    compact_count: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for IdempotencyStore {
@@ -163,17 +190,24 @@ impl IdempotencyStore {
     }
 
     /// Open a store retaining entries for `ttl` (capped at `max_entries`), loading any
-    /// persisted entries from `path` (best-effort: a missing or corrupt file starts
-    /// empty rather than failing server startup). `path: None` behaves exactly like
-    /// [`new`](Self::new).
+    /// persisted entries from `path`'s append-only JSON-lines log (best-effort: a
+    /// missing file starts empty rather than failing server startup, and a truncated
+    /// trailing line — a crash mid-append — is skipped rather than discarding every
+    /// entry parsed before it). `path: None` behaves exactly like [`new`](Self::new).
     pub(crate) fn new_with_path(ttl: Duration, max_entries: usize, path: Option<PathBuf>) -> Self {
         let inner = path
             .as_deref()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|bytes| serde_json::from_slice::<Vec<PersistedEntry>>(&bytes).ok())
-            .map(|records| {
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|contents| {
                 let mut inner = IdempotencyInner::default();
-                for r in records {
+                for line in contents.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let Ok(r) = serde_json::from_str::<PersistedEntry>(line) else {
+                        continue;
+                    };
+                    inner.log_lines += 1;
                     inner.entries.insert(
                         r.key.clone(),
                         IdempotencyEntry {
@@ -191,6 +225,8 @@ impl IdempotencyStore {
             ttl,
             max_entries,
             path,
+            append_count: std::sync::atomic::AtomicUsize::new(0),
+            compact_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -226,50 +262,111 @@ impl IdempotencyStore {
     }
 
     /// Remember `body` as the response for `(tenant, key)`, persisting the store
-    /// (RM-GA-P2 DUR-404) if opened with a path.
+    /// (RM-GA-P2 DUR-404) if opened with a path — appending one log line in the
+    /// common case, or compacting (SRV-305) once the log has grown past
+    /// `max_entries * 2`.
     pub(crate) fn put(&self, tenant: &str, key: &str, body: Value) {
-        let persisted = {
+        enum Persist {
+            Append(PersistedEntry),
+            Compact(Vec<PersistedEntry>),
+        }
+
+        let persist = {
             let mut inner = self.inner.lock().expect("idempotency mutex poisoned");
             Self::evict(&mut inner, self.ttl, self.max_entries, true);
             let scoped_key = scoped(tenant, key);
+            let inserted_at_ms = now_ms();
             inner.entries.insert(
                 scoped_key.clone(),
                 IdempotencyEntry {
-                    body,
-                    inserted_at_ms: now_ms(),
+                    body: body.clone(),
+                    inserted_at_ms,
                 },
             );
-            inner.order.push_back(scoped_key);
+            inner.order.push_back(scoped_key.clone());
+            inner.log_lines += 1;
+
             self.path.as_ref().map(|_| {
-                inner
-                    .order
-                    .iter()
-                    .filter_map(|k| {
-                        inner.entries.get(k).map(|e| PersistedEntry {
-                            key: k.clone(),
-                            body: e.body.clone(),
-                            inserted_at_ms: e.inserted_at_ms,
+                // Never on every call — that would reintroduce the O(entries) cost
+                // this design exists to avoid — only once the log has grown to
+                // roughly twice the live entry count.
+                if inner.log_lines >= (self.max_entries as u64).saturating_mul(2) {
+                    let records: Vec<PersistedEntry> = inner
+                        .order
+                        .iter()
+                        .filter_map(|k| {
+                            inner.entries.get(k).map(|e| PersistedEntry {
+                                key: k.clone(),
+                                body: e.body.clone(),
+                                inserted_at_ms: e.inserted_at_ms,
+                            })
                         })
+                        .collect();
+                    inner.log_lines = records.len() as u64;
+                    Persist::Compact(records)
+                } else {
+                    Persist::Append(PersistedEntry {
+                        key: scoped_key,
+                        body,
+                        inserted_at_ms,
                     })
-                    .collect::<Vec<_>>()
+                }
             })
         };
-        if let (Some(path), Some(records)) = (&self.path, persisted) {
-            if let Some(parent) = path.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                tracing::error!(error = %e, "failed to create idempotency store directory");
-                return;
-            }
-            match serde_json::to_vec_pretty(&records) {
-                Ok(bytes) => {
-                    if let Err(e) = apex_common::fs::atomic_write(path, bytes) {
-                        tracing::error!(error = %e, "failed to persist idempotency store");
-                    }
+
+        let (Some(path), Some(persist)) = (&self.path, persist) else {
+            return;
+        };
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::error!(error = %e, "failed to create idempotency store directory");
+            return;
+        }
+        match persist {
+            Persist::Append(record) => {
+                self.append_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Err(e) = Self::append_line(path, &record) {
+                    tracing::error!(error = %e, "failed to append to idempotency store");
                 }
-                Err(e) => tracing::error!(error = %e, "failed to encode idempotency store"),
+            }
+            Persist::Compact(records) => {
+                self.compact_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Err(e) = Self::write_snapshot(path, &records) {
+                    tracing::error!(error = %e, "failed to compact idempotency store");
+                }
             }
         }
+    }
+
+    /// Append one JSON-encoded line to the log, `fsync`ing the file then its parent
+    /// directory — the same durability an `atomic_write` gives a whole-file rewrite,
+    /// without paying for one.
+    fn append_line(path: &PathBuf, record: &PersistedEntry) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut line = serde_json::to_string(record)?;
+        line.push('\n');
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        file.write_all(line.as_bytes())?;
+        file.sync_data()?;
+        drop(file);
+        apex_common::fs::sync_parent_dir(path)
+    }
+
+    /// Rewrite the log to contain exactly `records`, one per line — collapsing every
+    /// prior append (including stale/superseded ones) back down to the live set.
+    fn write_snapshot(path: &PathBuf, records: &[PersistedEntry]) -> std::io::Result<()> {
+        let mut out = String::new();
+        for r in records {
+            out.push_str(&serde_json::to_string(r)?);
+            out.push('\n');
+        }
+        apex_common::fs::atomic_write(path, out)
     }
 }
 
@@ -1350,6 +1447,92 @@ mod tests {
         let inner = store.inner.lock().unwrap();
         assert!(inner.entries.len() <= max_entries);
         assert!(inner.order.len() <= max_entries);
+    }
+
+    // --- RM-AIM-P3 SRV-305: durable persistence is append-only, not a per-`put`
+    // whole-file rewrite ---------------------------------------------------------------
+
+    /// The literal SRV-305 acceptance criterion: a mutating request (`put`) doesn't
+    /// rewrite the entire cache file each time. With `max_entries` large enough that
+    /// no compaction triggers across this run, every one of N `put`s must append
+    /// (O(1) I/O) rather than rewrite a growing O(N) snapshot.
+    #[test]
+    fn put_appends_instead_of_rewriting_the_whole_log_each_time() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-idempotency-append-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("idempotency.jsonl");
+
+        let store =
+            IdempotencyStore::new_with_path(Duration::from_secs(3600), 1_000, Some(path.clone()));
+        for i in 0..30 {
+            store.put("acme", &format!("k{i}"), json!({ "n": i }));
+        }
+
+        assert_eq!(
+            store
+                .append_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            30,
+            "every put should append a single line, not rewrite the log"
+        );
+        assert_eq!(
+            store
+                .compact_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no compaction should have triggered yet"
+        );
+
+        // The log round-trips: reopening a fresh store from the same path recovers
+        // every entry, proving the append-only format is faithfully readable.
+        let reopened =
+            IdempotencyStore::new_with_path(Duration::from_secs(3600), 1_000, Some(path.clone()));
+        for i in 0..30 {
+            assert_eq!(
+                reopened.get("acme", &format!("k{i}")),
+                Some(json!({ "n": i }))
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Once the log has grown to roughly twice the live entry count, `put` compacts
+    /// it back down to exactly the live entries in one rewrite — bounding disk usage
+    /// without paying the O(entries) cost on every call.
+    #[test]
+    fn put_compacts_the_log_once_it_grows_past_the_threshold() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-idempotency-compact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("idempotency.jsonl");
+
+        // A small max_entries (4) means the compaction threshold (max_entries * 2 = 8)
+        // is reached quickly; a short TTL keeps eviction from also shrinking the log.
+        let store =
+            IdempotencyStore::new_with_path(Duration::from_secs(3600), 4, Some(path.clone()));
+        for i in 0..8 {
+            store.put("acme", &format!("k{i}"), json!(i));
+        }
+        assert_eq!(
+            store
+                .compact_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the 8th put should have compacted the log"
+        );
+
+        // The on-disk log now holds only the live (post-eviction) entries, not every
+        // line ever appended.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let live_lines = contents.lines().filter(|l| !l.trim().is_empty()).count();
+        let inner = store.inner.lock().unwrap();
+        assert_eq!(live_lines, inner.entries.len());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- RM-GA-P4 API-705: deprecation headers ---------------------------------------

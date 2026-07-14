@@ -1,5 +1,17 @@
 //! Agent-run and workflow-visibility HTTP handlers, plus the shared
 //! [`ApiError`] envelope (RM-GA-P4 HLTH-904 — split out of `lib.rs`).
+//!
+//! `.unwrap()`/`.expect()`/`unreachable!()` on request-derived data are denied here
+//! (RM-AIM-P3 SRV-306) — a malformed client request must return a mapped `ApiError`,
+//! never panic. The two calls this file still has are on values whose shape doesn't
+//! depend on request content at all, so each carries an explicit, justified
+//! `#[allow]`; `mod tests` is exempted wholesale (the house convention is
+//! unwrap-freely in tests, never in production request paths).
+
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
+)]
 
 use crate::state::{AppState, AsyncRunStatus};
 use crate::{tenancy, webhooks};
@@ -21,14 +33,22 @@ use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use utoipa::ToSchema;
 
 /// Liveness probe.
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tag = "system",
+    security(()),
+    responses((status = 200, description = "The server is up.")),
+)]
 pub(crate) async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
 }
 
 /// Body for `POST /api/v1/agents:run`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(crate) struct RunRequest {
     /// The agent manifest (YAML), supplied inline in v0.1.
     manifest: String,
@@ -66,6 +86,17 @@ fn wants_async(headers: &HeaderMap) -> bool {
 /// wraps this route — so a repeated key replays the cached response whichever branch
 /// produced it, sync or async (an async retry gets back the same `run_id` rather than
 /// starting a second run).
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents:run",
+    tag = "agents",
+    request_body = RunRequest,
+    responses(
+        (status = 200, description = "Run succeeded (sync), or accepted with `Prefer: respond-async`."),
+        (status = 400, description = "Invalid manifest.", body = crate::openapi::ApiErrorBody),
+        (status = 429, description = "Project quota exceeded.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
 #[tracing::instrument(name = "api.agents_run", skip_all)]
 pub(crate) async fn run_handler(
     State(state): State<Arc<AppState>>,
@@ -127,7 +158,7 @@ async fn run_async_inner(
     // Quota gate up front, same as the synchronous path: a rejected run never gets a
     // run id at all, rather than reporting `failed` later for a run that never
     // started.
-    let permit = tenancy::admit_run(&state.tenancy, &state.quota, project.as_deref())?;
+    let permit = tenancy::admit_run(&state.tenancy, &state.quota, project.as_deref()).await?;
 
     let run_id = format!("run_{}", state.run_counter.fetch_add(1, Ordering::SeqCst));
     state.runs.insert_running(run_id.clone(), tenant.clone());
@@ -203,6 +234,16 @@ async fn run_async_inner(
 /// `Prefer: respond-async` (RM-GA-P2 EXE-604). Tenant-scoped like every other
 /// resource: a run belonging to another tenant is hidden behind the same `404` an
 /// unknown run gets, rather than a `403` that would confirm it exists.
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents/runs/{run_id}",
+    tag = "agents",
+    params(("run_id" = String, Path, description = "The `run_id` returned by an async `agents:run` submission.")),
+    responses(
+        (status = 200, description = "The run's current status (running/succeeded/failed)."),
+        (status = 404, description = "Unknown run, or belongs to another tenant.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
 pub(crate) async fn get_run_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -221,6 +262,10 @@ pub(crate) async fn get_run_handler(
         return Err(missing());
     }
     let mut body = json!({ "run_id": run_id });
+    // SRV-306: not request-data-dependent — `body` is always the object literal
+    // above regardless of `run_id`'s contents, and `AsyncRunStatus` is a fixed-shape
+    // internal enum whose `Serialize` impl always yields an object.
+    #[allow(clippy::unwrap_used, clippy::unreachable)]
     match serde_json::to_value(&status).map_err(|e| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -279,6 +324,16 @@ impl RunEventSink for ChannelSink {
 /// `POST /api/v1/agents:stream` — run an inline-manifest agent, streaming its events
 /// (start / delta / tool_call_delta / reasoning / tool_call / tool_result / done,
 /// then a final `result`) as SSE.
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents:stream",
+    tag = "agents",
+    request_body = RunRequest,
+    responses(
+        (status = 200, description = "An SSE stream: start/delta/tool_call_delta/reasoning/tool_call/tool_result/done frames, then a final result/error event."),
+        (status = 400, description = "Invalid manifest.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
 pub(crate) async fn run_stream_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -301,7 +356,7 @@ pub(crate) async fn run_stream_handler(
     // the run task and releases when it ends.
     let project = tenancy::run_project(&headers);
     let tenant = tenancy::run_tenant(&headers);
-    let permit = match tenancy::admit_run(&state.tenancy, &state.quota, project.as_deref()) {
+    let permit = match tenancy::admit_run(&state.tenancy, &state.quota, project.as_deref()).await {
         Ok(p) => p,
         Err(e) => return e.into_response(),
     };
@@ -365,7 +420,7 @@ async fn run_definition(
 
     // Quota gate: hold a concurrency slot for the duration of the run (released on
     // drop), then record the run's cost against the project's daily budget.
-    let _permit = tenancy::admit_run(&state.tenancy, &state.quota, project)?;
+    let _permit = tenancy::admit_run(&state.tenancy, &state.quota, project).await?;
     let mut opts = RunOptions::new(input).with_tenant(tenant).with_hosted(true);
     // An explicit per-run override wins; otherwise fall back to the agent's own default.
     if let Some(n) = max_steps.or(def.spec.max_steps) {
@@ -420,14 +475,14 @@ async fn run_definition(
 }
 
 /// Body for `POST /api/v1/agents` — register an agent from its YAML manifest.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(crate) struct CreateAgentRequest {
     /// The agent manifest (YAML).
     manifest: String,
 }
 
 /// Body for `POST /api/v1/agents/{id}/run` — run a stored agent.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub(crate) struct RunStoredRequest {
     /// Run input (e.g. `{"message": "..."}`).
     #[serde(default)]
@@ -438,6 +493,16 @@ pub(crate) struct RunStoredRequest {
 }
 
 /// `POST /api/v1/agents` — register an agent; returns its id.
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents",
+    tag = "agents",
+    request_body = CreateAgentRequest,
+    responses(
+        (status = 200, description = "Agent registered."),
+        (status = 400, description = "Invalid manifest.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
 pub(crate) async fn create_agent_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -451,6 +516,16 @@ pub(crate) async fn create_agent_handler(
 
 /// `GET /api/v1/agents` — list the caller's tenant's agent ids (cursor-paginated,
 /// overview §6).
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents",
+    tag = "agents",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses((status = 200, description = "A paginated list of the caller's tenant's agent ids.")),
+)]
 pub(crate) async fn list_agents_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -467,6 +542,16 @@ pub(crate) async fn list_agents_handler(
 }
 
 /// `GET /api/v1/agents/{id}` — fetch a stored agent's manifest (within the caller's tenant).
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents/{id}",
+    tag = "agents",
+    params(("id" = String, Path, description = "The agent id.")),
+    responses(
+        (status = 200, description = "The stored agent's manifest."),
+        (status = 404, description = "Unknown agent (in this tenant).", body = crate::openapi::ApiErrorBody),
+    ),
+)]
 pub(crate) async fn get_agent_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -484,6 +569,16 @@ pub(crate) async fn get_agent_handler(
 }
 
 /// `DELETE /api/v1/agents/{id}` — remove a stored agent (within the caller's tenant).
+#[utoipa::path(
+    delete,
+    path = "/api/v1/agents/{id}",
+    tag = "agents",
+    params(("id" = String, Path, description = "The agent id.")),
+    responses(
+        (status = 204, description = "Agent deleted."),
+        (status = 404, description = "Unknown agent (in this tenant).", body = crate::openapi::ApiErrorBody),
+    ),
+)]
 pub(crate) async fn delete_agent_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -503,6 +598,18 @@ pub(crate) async fn delete_agent_handler(
 }
 
 /// `POST /api/v1/agents/{id}/run` — run a stored agent by id.
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/{id}/run",
+    tag = "agents",
+    params(("id" = String, Path, description = "The stored agent's id.")),
+    request_body = RunStoredRequest,
+    responses(
+        (status = 200, description = "Run succeeded (sync), or accepted with `Prefer: respond-async`."),
+        (status = 404, description = "Unknown agent (in this tenant).", body = crate::openapi::ApiErrorBody),
+        (status = 429, description = "Project quota exceeded.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
 #[tracing::instrument(name = "api.agents_run_stored", skip_all)]
 pub(crate) async fn run_stored_handler(
     State(state): State<Arc<AppState>>,
@@ -551,6 +658,21 @@ pub(crate) struct WorkflowListQuery {
 
 /// `GET /api/v1/workflows` — list executions, optionally filtered (G4 visibility),
 /// cursor-paginated (overview §6).
+#[utoipa::path(
+    get,
+    path = "/api/v1/workflows",
+    tag = "workflows",
+    params(
+        ("workflow" = Option<String>, Query, description = "Filter to a workflow name."),
+        ("status" = Option<String>, Query, description = "Filter to a status (e.g. running, completed, failed)."),
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses(
+        (status = 200, description = "A paginated list of execution summaries."),
+        (status = 400, description = "Invalid status filter.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
 pub(crate) async fn list_workflows_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -589,6 +711,16 @@ pub(crate) async fn list_workflows_handler(
 }
 
 /// `GET /api/v1/workflows/{id}` — an execution's status plus its event timeline (G4).
+#[utoipa::path(
+    get,
+    path = "/api/v1/workflows/{id}",
+    tag = "workflows",
+    params(("id" = String, Path, description = "The execution id.")),
+    responses(
+        (status = 200, description = "The execution's summary + event timeline."),
+        (status = 404, description = "Unknown execution (or belongs to another tenant).", body = crate::openapi::ApiErrorBody),
+    ),
+)]
 pub(crate) async fn get_workflow_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

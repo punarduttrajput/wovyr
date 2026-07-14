@@ -4,6 +4,15 @@
 //! `AppState.audit`; [`GET /api/v1/audit`](list_audit) reads them back, scoped to the
 //! caller's tenant and RBAC-gated. Audit records reference resources by id (never value),
 //! so a secret read/rotate audits the `secret://…` reference, not the secret.
+//!
+//! `.unwrap()`/`.expect()`/`unreachable!()` on request-derived data are denied here
+//! (RM-AIM-P3 SRV-306) — a malformed client request must return a mapped `ApiError`,
+//! never panic.
+
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
+)]
 
 use crate::hardening::{PageQuery, paginate};
 use crate::{ApiError, AppState};
@@ -71,7 +80,7 @@ pub(crate) fn audit(
 }
 
 #[derive(Deserialize)]
-struct AuditQuery {
+pub(crate) struct AuditQuery {
     principal: Option<String>,
     action: Option<String>,
     /// `limit` + `cursor` (overview §6, RM-GA-P4 API-701).
@@ -83,7 +92,19 @@ struct AuditQuery {
 /// filterable by `principal`/`action` and cursor-paginated (overview §6).
 /// RBAC-gated (`audit:read`) and always tenant-scoped, so a caller only sees
 /// its own tenant's records.
-async fn list_audit(
+#[utoipa::path(
+    get,
+    path = "/api/v1/audit",
+    tag = "audit",
+    params(
+        ("principal" = Option<String>, Query, description = "Filter to a principal."),
+        ("action" = Option<String>, Query, description = "Filter to an action."),
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses((status = 200, description = "The tenant's audit trail, most-recent first.")),
+)]
+pub(crate) async fn list_audit(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(q): Query<AuditQuery>,

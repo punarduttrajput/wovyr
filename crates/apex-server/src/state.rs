@@ -484,7 +484,10 @@ impl AppState {
             crate::config::workflows_dir().map(|d| d.join("agents.json")),
         ));
         let tenancy_store = crate::config::default_tenancy_store();
-        let quota = Arc::new(tenancy::QuotaTracker::new(
+        // `from_env` (RM-AIM-P3 SRV-307) picks up fleet-shared concurrency limits
+        // via `APEX_QUOTA_REDIS_URL` when this binary was built with the `redis`
+        // feature; otherwise identical to the old bare `QuotaTracker::new`.
+        let quota = Arc::new(tenancy::QuotaTracker::from_env(
             crate::config::server_state_dir().map(|d| d.join("quota.json")),
         ));
         // Durable G1/G2 registries, shared with the CLI's `apex workflows tick`/
@@ -541,7 +544,16 @@ impl AppState {
                     24 * 60 * 60,
                 )),
                 crate::config::env_u64("APEX_IDEMPOTENCY_MAX_ENTRIES", 10_000) as usize,
-                crate::config::server_state_dir().map(|d| d.join("idempotency.json")),
+                // `.jsonl`, not `.json` (RM-AIM-P3 SRV-305): the on-disk shape changed
+                // from a whole-array snapshot rewritten on every `put` to an append-only
+                // JSON-lines log, a breaking format change for a pre-existing file — the
+                // new name makes that visible instead of silently misreading (or
+                // silently discarding) an old-format file under the old name. Low-stakes
+                // to lose across an upgrade either way: entries are a short-TTL
+                // request-dedup cache, not a source of truth, and (per this workspace's
+                // established pre-GA stance — e.g. RM-GA-P4 API-702/WFL-308) no real
+                // deployment exists yet to migrate.
+                crate::config::server_state_dir().map(|d| d.join("idempotency.jsonl")),
             ),
             runs: Arc::new(RunStore::new_with_path(
                 Duration::from_secs(crate::config::env_u64("APEX_ASYNC_RUN_TTL_SECS", 60 * 60)),

@@ -15,6 +15,15 @@
 //! permissive default). The install bridge downloads a listed package and installs it into
 //! the local plugin catalog via the shared [`plugins::install_package`](crate::plugins)
 //! helper.
+//!
+//! `.unwrap()`/`.expect()`/`unreachable!()` on request-derived data are denied here
+//! (RM-AIM-P3 SRV-306) — a malformed client request must return a mapped `ApiError`,
+//! never panic.
+
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
+)]
 
 use apex_marketplace::{
     FileRegistryStore, PermissionRisk, Registry, RegistryPolicy, RegistryStore, Review, SearchQuery,
@@ -31,6 +40,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use crate::{ApiError, AppState, plugins};
 
@@ -188,7 +198,7 @@ fn parse_capability(s: &str) -> Option<CapabilityKind> {
 }
 
 #[derive(Deserialize)]
-struct SearchParams {
+pub(crate) struct SearchParams {
     #[serde(default)]
     q: String,
     category: Option<String>,
@@ -200,7 +210,22 @@ struct SearchParams {
 
 /// `GET /api/v1/marketplace/listings?q=&category=&capability=` — search/browse,
 /// cursor-paginated (overview §6).
-async fn search_listings(Query(params): Query<SearchParams>) -> Result<Json<Value>, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/marketplace/listings",
+    tag = "marketplace",
+    params(
+        ("q" = Option<String>, Query, description = "Full-text search over name/publisher/description/categories/capability kinds."),
+        ("category" = Option<String>, Query, description = "Filter to a category."),
+        ("capability" = Option<String>, Query, description = "Filter to a capability kind (tool/provider/memory_backend/policy/workflow_activity)."),
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses((status = 200, description = "A paginated list of matching listings.")),
+)]
+pub(crate) async fn search_listings(
+    Query(params): Query<SearchParams>,
+) -> Result<Json<Value>, ApiError> {
     let page = params.page.page();
     let query = SearchQuery {
         text: params.q,
@@ -217,7 +242,17 @@ async fn search_listings(Query(params): Query<SearchParams>) -> Result<Json<Valu
 
 /// `GET /api/v1/marketplace/listings/{id}` — one listing's detail (`id` URL-encoded
 /// `publisher%2Fname`).
-async fn get_listing(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/marketplace/listings/{id}",
+    tag = "marketplace",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    responses(
+        (status = 200, description = "The listing's detail."),
+        (status = 404, description = "Unknown listing.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn get_listing(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     let listing = with_registry(move |reg| {
         reg.get(&id)?.ok_or_else(|| {
             ApiError::new(
@@ -231,8 +266,8 @@ async fn get_listing(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(listing)))
 }
 
-#[derive(Deserialize)]
-struct PublishReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct PublishReq {
     /// Base64-encoded `.apexpkg` file contents.
     apexpkg: String,
     #[serde(default)]
@@ -248,7 +283,17 @@ struct PublishReq {
 /// `block_scan_severity` ceiling is configured — the security scan). The response
 /// carries the scan report so the publisher sees advisory findings. Emits
 /// `plugin.published` on success.
-async fn publish_listing(
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace:publish",
+    tag = "marketplace",
+    request_body = PublishReq,
+    responses(
+        (status = 200, description = "Published; includes the scan report."),
+        (status = 400, description = "Invalid/unsigned/untrusted/policy-rejected package.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn publish_listing(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<PublishReq>,
@@ -289,13 +334,26 @@ async fn publish_listing(
 }
 
 #[derive(Deserialize)]
-struct DownloadParams {
+pub(crate) struct DownloadParams {
     version: Option<String>,
 }
 
 /// `GET /api/v1/marketplace/listings/{id}/download?version=` — fetch the `.apexpkg`
 /// bytes (base64) for a version (latest stable if omitted).
-async fn download_version(
+#[utoipa::path(
+    get,
+    path = "/api/v1/marketplace/listings/{id}/download",
+    tag = "marketplace",
+    params(
+        ("id" = String, Path, description = "URL-encoded `publisher/name`."),
+        ("version" = Option<String>, Query, description = "Version to download (default: latest on the stable channel)."),
+    ),
+    responses(
+        (status = 200, description = "The base64-encoded `.apexpkg` bytes."),
+        (status = 404, description = "Unknown listing or version.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn download_version(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -322,7 +380,20 @@ async fn download_version(
 /// trust store, and a live security-scan report (against the current operator
 /// deny-list). Derived on demand from the stored (signed) package, so it reflects
 /// exactly what `download` serves. Latest stable version if `version` is omitted.
-async fn version_attestation(
+#[utoipa::path(
+    get,
+    path = "/api/v1/marketplace/listings/{id}/attestation",
+    tag = "marketplace",
+    params(
+        ("id" = String, Path, description = "URL-encoded `publisher/name`."),
+        ("version" = Option<String>, Query, description = "Version to attest (default: latest on the stable channel)."),
+    ),
+    responses(
+        (status = 200, description = "The supply-chain attestation: risk, SBOM, provenance, digest, signature, live scan."),
+        (status = 404, description = "Unknown listing or version.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn version_attestation(
     Path(id): Path<String>,
     Query(params): Query<DownloadParams>,
 ) -> Result<Json<Value>, ApiError> {
@@ -384,8 +455,8 @@ fn attestation_json(
     }))
 }
 
-#[derive(Deserialize)]
-struct ReviewReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ReviewReq {
     author: String,
     rating: u8,
     #[serde(default)]
@@ -393,7 +464,15 @@ struct ReviewReq {
 }
 
 /// `POST /api/v1/marketplace/listings/{id}/reviews` — add a 1–5 star review.
-async fn review_listing(
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace/listings/{id}/reviews",
+    tag = "marketplace",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    request_body = ReviewReq,
+    responses((status = 200, description = "Review recorded.")),
+)]
+pub(crate) async fn review_listing(
     Path(id): Path<String>,
     Json(req): Json<ReviewReq>,
 ) -> Result<Json<Value>, ApiError> {
@@ -407,8 +486,8 @@ async fn review_listing(
     Ok(Json(json!({ "id": id_for_resp, "status": "reviewed" })))
 }
 
-#[derive(Deserialize)]
-struct VerifyReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct VerifyReq {
     #[serde(default = "default_true")]
     verified: bool,
 }
@@ -421,7 +500,18 @@ fn default_true() -> bool {
 /// directly, bypassing the request/approve/reject workflow below (e.g. an immediate
 /// takedown, or back-compat with a pre-workflow verified listing). `marketplace:moderate`-
 /// gated ([RM-GA-P1 SEC-104](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)).
-async fn verify_listing(
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace/listings/{id}/verify",
+    tag = "marketplace",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    request_body = VerifyReq,
+    responses(
+        (status = 200, description = "Verified badge set."),
+        (status = 403, description = "Caller lacks marketplace:moderate.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn verify_listing(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -445,14 +535,21 @@ async fn verify_listing(
 /// `POST /api/v1/marketplace/listings/{id}/request-review` — the publisher requests
 /// human review of the listing's current latest version, the step gating the
 /// **verified** badge ([Marketplace §6]). Does not gate `publish` itself.
-async fn request_review(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace/listings/{id}/request-review",
+    tag = "marketplace",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    responses((status = 200, description = "Review requested (status: pending).")),
+)]
+pub(crate) async fn request_review(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     let id_for_resp = id.clone();
     with_registry(move |reg| Ok(reg.request_review(&id)?)).await?;
     Ok(Json(json!({ "id": id_for_resp, "status": "pending" })))
 }
 
-#[derive(Deserialize)]
-struct ReviewDecisionReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ReviewDecisionReq {
     /// The reviewing identity, when the caller didn't send `X-Apex-Principal`.
     #[serde(default)]
     reviewer: Option<String>,
@@ -491,7 +588,18 @@ fn require_authenticated_principal(headers: &HeaderMap) -> Result<String, ApiErr
 /// `POST /api/v1/marketplace/listings/{id}/approve` — a reviewer approves the
 /// listing's pending review, setting the verified badge ([Marketplace §6]).
 /// `marketplace:moderate`-gated (SEC-104).
-async fn approve_review(
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace/listings/{id}/approve",
+    tag = "marketplace",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    request_body = ReviewDecisionReq,
+    responses(
+        (status = 200, description = "Review approved (verified badge set)."),
+        (status = 403, description = "Caller lacks marketplace:moderate.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn approve_review(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
@@ -515,8 +623,8 @@ async fn approve_review(
     ))
 }
 
-#[derive(Deserialize)]
-struct RejectReviewReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct RejectReviewReq {
     /// The reviewing identity, when the caller didn't send `X-Apex-Principal`.
     #[serde(default)]
     reviewer: Option<String>,
@@ -528,7 +636,18 @@ struct RejectReviewReq {
 /// pending review with actionable feedback ([Marketplace §6]), clearing the verified
 /// badge; the publisher may address it and request review again. `marketplace:moderate`-
 /// gated (SEC-104).
-async fn reject_review(
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace/listings/{id}/reject",
+    tag = "marketplace",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    request_body = RejectReviewReq,
+    responses(
+        (status = 200, description = "Review rejected (verified badge cleared)."),
+        (status = 403, description = "Caller lacks marketplace:moderate.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn reject_review(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
@@ -558,8 +677,8 @@ async fn reject_review(
     })))
 }
 
-#[derive(Deserialize)]
-struct InstallReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct InstallReq {
     version: Option<String>,
     #[serde(default)]
     grants: Vec<String>,
@@ -567,7 +686,15 @@ struct InstallReq {
 
 /// `POST /api/v1/marketplace/listings/{id}/install` — download a listed package and
 /// install it into the local plugin catalog (disabled), then bump the install count.
-async fn install_listing(
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace/listings/{id}/install",
+    tag = "marketplace",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    request_body = InstallReq,
+    responses((status = 200, description = "Downloaded and installed (disabled).")),
+)]
+pub(crate) async fn install_listing(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -596,8 +723,8 @@ async fn install_listing(
     ))
 }
 
-#[derive(Deserialize)]
-struct AbuseReportReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct AbuseReportReq {
     /// The reporting principal, when the caller didn't send `X-Apex-Principal`.
     #[serde(default)]
     reporter: Option<String>,
@@ -609,7 +736,15 @@ struct AbuseReportReq {
 /// `POST /api/v1/marketplace/listings/{id}/report` — file an abuse report against a
 /// listing ([Marketplace §8]). Feeds moderation and can trigger delisting via the
 /// `resolve` route below. Emits `plugin.abuse_reported`.
-async fn report_abuse(
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace/listings/{id}/report",
+    tag = "marketplace",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    request_body = AbuseReportReq,
+    responses((status = 200, description = "Abuse report filed (status: open).")),
+)]
+pub(crate) async fn report_abuse(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
@@ -654,13 +789,20 @@ async fn report_abuse(
 
 /// `GET /api/v1/marketplace/listings/{id}/reports` — the abuse reports filed against
 /// a listing, for moderator review.
-async fn list_abuse_reports(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/marketplace/listings/{id}/reports",
+    tag = "marketplace",
+    params(("id" = String, Path, description = "URL-encoded `publisher/name`.")),
+    responses((status = 200, description = "The listing's filed abuse reports.")),
+)]
+pub(crate) async fn list_abuse_reports(Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     let reports = with_registry(move |reg| Ok(reg.abuse_reports(&id)?)).await?;
     Ok(Json(json!({ "reports": reports })))
 }
 
-#[derive(Deserialize)]
-struct ResolveAbuseReportReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ResolveAbuseReportReq {
     /// The moderating identity, when the caller didn't send `X-Apex-Principal`.
     #[serde(default)]
     moderator: Option<String>,
@@ -674,7 +816,21 @@ struct ResolveAbuseReportReq {
 /// moderator resolves an open abuse report as valid ([Marketplace §8]), optionally
 /// delisting the listing. Emits `plugin.delisted` when `delist` is `true`.
 /// `marketplace:moderate`-gated (SEC-104).
-async fn resolve_abuse_report(
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace/listings/{id}/reports/{report_id}/resolve",
+    tag = "marketplace",
+    params(
+        ("id" = String, Path, description = "URL-encoded `publisher/name`."),
+        ("report_id" = u64, Path, description = "The abuse report id."),
+    ),
+    request_body = ResolveAbuseReportReq,
+    responses(
+        (status = 200, description = "Report resolved (optionally delisting the listing)."),
+        (status = 403, description = "Caller lacks marketplace:moderate.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn resolve_abuse_report(
     State(state): State<Arc<AppState>>,
     Path((id, report_id)): Path<(String, u64)>,
     headers: HeaderMap,
@@ -719,8 +875,8 @@ async fn resolve_abuse_report(
     })))
 }
 
-#[derive(Deserialize)]
-struct DismissAbuseReportReq {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct DismissAbuseReportReq {
     /// The moderating identity, when the caller didn't send `X-Apex-Principal`.
     #[serde(default)]
     moderator: Option<String>,
@@ -731,7 +887,21 @@ struct DismissAbuseReportReq {
 /// `POST /api/v1/marketplace/listings/{id}/reports/{report_id}/dismiss` — a
 /// moderator dismisses an open abuse report as not actionable ([Marketplace §8]).
 /// `marketplace:moderate`-gated (SEC-104).
-async fn dismiss_abuse_report(
+#[utoipa::path(
+    post,
+    path = "/api/v1/marketplace/listings/{id}/reports/{report_id}/dismiss",
+    tag = "marketplace",
+    params(
+        ("id" = String, Path, description = "URL-encoded `publisher/name`."),
+        ("report_id" = u64, Path, description = "The abuse report id."),
+    ),
+    request_body = DismissAbuseReportReq,
+    responses(
+        (status = 200, description = "Report dismissed."),
+        (status = 403, description = "Caller lacks marketplace:moderate.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn dismiss_abuse_report(
     State(state): State<Arc<AppState>>,
     Path((id, report_id)): Path<(String, u64)>,
     headers: HeaderMap,

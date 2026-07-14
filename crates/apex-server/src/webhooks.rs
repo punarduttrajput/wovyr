@@ -10,6 +10,15 @@
 //!
 //! Delivery is fire-and-forget (spawned), so a slow/broken subscriber never blocks the
 //! request that produced the event.
+//!
+//! `.unwrap()`/`.expect()`/`unreachable!()` on request-derived data are denied here
+//! (RM-AIM-P3 SRV-306) — a malformed client request must return a mapped `ApiError`,
+//! never panic.
+
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
+)]
 
 use crate::{ApiError, AppState};
 use apex_events::{BackoffPolicy, Event, WebhookSubscription, sign::sign};
@@ -26,6 +35,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use utoipa::ToSchema;
 
 /// Posts a signed webhook payload to a subscriber. Abstracted so the delivery logic is
 /// unit-testable without real HTTP.
@@ -260,7 +270,17 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
 
 /// List this tenant's dead-lettered webhook deliveries (SRV-103) — the persisted DLQ,
 /// queryable rather than lost to a log. Secrets are never included.
-async fn list_dead_letters(
+#[utoipa::path(
+    get,
+    path = "/api/v1/webhooks/dead-letters",
+    tag = "webhooks",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses((status = 200, description = "A paginated list of dead-lettered deliveries.")),
+)]
+pub(crate) async fn list_dead_letters(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(page): Query<crate::hardening::PageQuery>,
@@ -284,14 +304,25 @@ async fn list_dead_letters(
     Ok(Json(crate::hardening::paginate(items, &page.page())))
 }
 
-#[derive(Deserialize)]
-struct RegisterWebhookRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct RegisterWebhookRequest {
     url: String,
     events: Vec<String>,
     secret: String,
 }
 
-async fn list_webhooks(
+/// List the tenant's webhook subscriptions.
+#[utoipa::path(
+    get,
+    path = "/api/v1/webhooks",
+    tag = "webhooks",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
+    ),
+    responses((status = 200, description = "A paginated list of the tenant's webhook subscriptions (secrets redacted).")),
+)]
+pub(crate) async fn list_webhooks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(page): Query<crate::hardening::PageQuery>,
@@ -308,7 +339,18 @@ async fn list_webhooks(
     Ok(Json(crate::hardening::paginate(items, &page.page())))
 }
 
-async fn register_webhook(
+/// Register a webhook subscription.
+#[utoipa::path(
+    post,
+    path = "/api/v1/webhooks",
+    tag = "webhooks",
+    request_body = RegisterWebhookRequest,
+    responses(
+        (status = 201, description = "Webhook registered."),
+        (status = 403, description = "Caller lacks org.admin.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn register_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<RegisterWebhookRequest>,
@@ -332,7 +374,18 @@ async fn register_webhook(
     ))
 }
 
-async fn delete_webhook(
+/// Delete a webhook subscription.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/webhooks/{id}",
+    tag = "webhooks",
+    params(("id" = String, Path, description = "The webhook subscription id.")),
+    responses(
+        (status = 204, description = "Webhook deleted."),
+        (status = 404, description = "Unknown webhook.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn delete_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,

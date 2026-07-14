@@ -372,9 +372,11 @@ jobs:
           cat apex-dev.log
           exit 1
 
-      # `npm test` = lint:openapi (redocly) + build + the integration suite
-      # (dist/test/client.test.js) — one command covers both halves of this
-      # ticket's TypeScript side.
+      # `npm test` = lint:openapi (redocly, against the *generated*
+      # `/openapi.json` the just-started server serves — RM-AIM-P3 SRV-303 —
+      # not the hand-authored docs/09-api/openapi.yaml, so this gate can catch
+      # a handler drifting from its own `#[utoipa::path]` annotation) + build +
+      # the integration suite (dist/test/client.test.js).
       - name: TypeScript SDK — redocly lint + integration suite
         working-directory: sdks/typescript
         run: |
