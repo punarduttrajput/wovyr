@@ -7,10 +7,10 @@ Document ID: WF-013
 
 **Document ID:** WF-013  
 **File Path:** `docs/03-workflow-engine/agent-runtime.md`  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Draft  
 **Owner:** Workflow Engine Team  
-**Last Updated:** 2026-07-13
+**Last Updated:** 2026-07-14
 
 ---
 
@@ -563,6 +563,21 @@ The runtime enforces:
 
 Sensitive information is never exposed to unauthorized tools.
 
+**Content-safety guardrails (RM-AIM-P2 SAF-201).** A pluggable `Guardrail`
+trait runs on the user's input (before retrieval or any model call) and on the
+final answer (before it reaches the caller): each guardrail allows, redacts
+(passes a transformed replacement), or blocks (the run fails `Forbidden` —
+permanent, never retried). Guardrails are off by default — a run with none
+configured behaves exactly as before — and **fail closed**: a guardrail that
+errors fails the run rather than admitting unchecked content. When any
+configured guardrail checks the output stage, the run buffers streaming (no
+raw model deltas reach the sink) and emits the checked final answer as a
+single delta, so unchecked content can't leak through the streaming side
+channel. Shipped implementations: a keyword blocklist, a dependency-free
+PII redactor (emails + long digit runs — a documented heuristic, not a DLP
+engine), and an LLM moderator (one schema-constrained gateway call, on its
+own gateway to avoid self-moderation bias).
+
 ---
 
 # 23. Observability
@@ -739,3 +754,4 @@ This module depends on:
 |---------|------|-------------|
 | 1.0.0 | 2026-06-26 | Initial Agent Runtime Specification |
 | 1.1.0 | 2026-07-13 | §9: loop recovery — transient step-error retry + forced final answer on the last budgeted step (RM-AIM-P2 AIC-201) |
+| 1.2.0 | 2026-07-14 | §22: pluggable content-safety guardrails — block/redact on input and output, fail-closed, buffered streaming (RM-AIM-P2 SAF-201) |

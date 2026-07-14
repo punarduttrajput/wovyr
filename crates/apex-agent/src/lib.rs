@@ -13,11 +13,16 @@
 mod context;
 mod definition;
 mod events;
+mod guardrail;
 mod memory;
 mod runtime;
 
 pub use context::{CompactionStrategy, ContextPolicy};
 pub use definition::{AgentDefinition, MemorySpec, Retrieval};
 pub use events::{NullSink, RunEvent, RunEventSink};
+pub use guardrail::{
+    BlocklistGuardrail, Guardrail, GuardrailDecision, GuardrailStage, Guardrails, LlmModerator,
+    PiiRedactor,
+};
 pub use memory::{ContextRetriever, RetrievedContext};
 pub use runtime::{AgentOutput, RunOptions, run_agent, run_agent_with_memory};

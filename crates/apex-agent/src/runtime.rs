@@ -11,6 +11,7 @@
 use crate::context::{ContextPolicy, compact};
 use crate::definition::AgentDefinition;
 use crate::events::{RunEvent, RunEventSink};
+use crate::guardrail::{Guardrail, GuardrailStage, Guardrails};
 use crate::memory::{ContextRetriever, RetrievedContext};
 use apex_common::{Error, Result, Usage};
 use apex_provider::{
@@ -76,6 +77,14 @@ pub struct RunOptions {
     /// (per-call retry doesn't apply to streams) — as well as a step whose gateway
     /// retries were exhausted. Permanent errors (`Invalid`/`Config`/…) never retry.
     pub step_retries: usize,
+    /// Content-safety guardrails (RM-AIM-P2 SAF-201), applied to the user's input
+    /// before it reaches retrieval/the model and to the final answer before it
+    /// reaches the caller. Empty (the default) skips every check — behavior
+    /// unchanged. When any configured guardrail checks the output stage, the run
+    /// buffers streaming (no raw model deltas reach the sink) and emits the
+    /// checked final answer as a single `Delta` instead — unchecked content must
+    /// not leak through the streaming side channel.
+    pub guardrails: Guardrails,
 }
 
 impl RunOptions {
@@ -90,6 +99,7 @@ impl RunOptions {
             trust_class: TrustClass::FirstParty,
             context: ContextPolicy::default(),
             step_retries: DEFAULT_STEP_RETRIES,
+            guardrails: Guardrails::none(),
         }
     }
 
@@ -139,6 +149,13 @@ impl RunOptions {
     /// `0` restores the old abort-on-first-error behavior.
     pub fn with_step_retries(mut self, step_retries: usize) -> Self {
         self.step_retries = step_retries;
+        self
+    }
+
+    /// Attach a content-safety guardrail (SAF-201), applied in insertion order on
+    /// model input and output.
+    pub fn with_guardrail(mut self, guardrail: std::sync::Arc<dyn Guardrail>) -> Self {
+        self.guardrails.push(guardrail);
         self
     }
 }
@@ -271,7 +288,17 @@ async fn run_agent_inner(
 
     let tools = resolve_tools(def, registry)?;
 
-    let prompt = user_prompt(&opts.input);
+    // Input guardrails (SAF-201) run on the untrusted user turn *before* it
+    // reaches retrieval or the model — so a redaction also keeps the PII out of
+    // the memory engine's query, and a block costs no model call at all.
+    let prompt = opts
+        .guardrails
+        .apply(GuardrailStage::Input, user_prompt(&opts.input))
+        .await?;
+    // When an output-stage guardrail is configured, raw model output must not
+    // reach the sink through the streaming side channel — the loop buffers and
+    // emits the checked final answer as one `Delta` at the end instead.
+    let buffer_streaming = opts.guardrails.checks_output();
     let mut messages = vec![Message::system(def.spec.instructions.clone())];
 
     // Retrieval-augmented grounding: if the agent enables memory and a retriever is
@@ -355,7 +382,7 @@ async fn run_agent_inner(
         let response = {
             let mut attempt = 0usize;
             loop {
-                match stream_chat(gateway, request.clone(), sink).await {
+                match stream_chat(gateway, request.clone(), sink, buffer_streaming).await {
                     Ok(response) => break response,
                     Err(err)
                         if matches!(err, Error::Provider { .. }) && attempt < opts.step_retries =>
@@ -431,6 +458,19 @@ async fn run_agent_inner(
         )));
     }
 
+    // Output guardrails (SAF-201): the final answer is checked/redacted before it
+    // reaches the caller. Streaming was buffered above, so the checked text is
+    // emitted here as the run's one `Delta` — the sink never saw raw output.
+    if buffer_streaming {
+        final_text = opts
+            .guardrails
+            .apply(GuardrailStage::Output, final_text)
+            .await?;
+        if !final_text.is_empty() {
+            sink.emit(RunEvent::Delta { text: &final_text });
+        }
+    }
+
     sink.emit(RunEvent::Done { usage });
     Ok(AgentOutput {
         text: final_text,
@@ -441,10 +481,16 @@ async fn run_agent_inner(
 
 /// Drive one streamed model call: emit a `Delta` per content chunk and return the
 /// completed [`ChatResponse`] from the terminal `Done` event.
+///
+/// `buffer` (SAF-201) suppresses every incremental event — text, tool-call
+/// fragments, reasoning — because all of them are raw model output that would
+/// bypass an output guardrail if streamed; the caller emits the checked final
+/// answer itself.
 async fn stream_chat(
     gateway: &Gateway,
     request: apex_provider::ChatRequest,
     sink: &mut dyn RunEventSink,
+    buffer: bool,
 ) -> Result<apex_provider::ChatResponse> {
     use apex_provider::ChatStreamEvent;
     use futures::StreamExt;
@@ -452,7 +498,14 @@ async fn stream_chat(
     let mut stream = gateway.chat_stream(request).await?;
     let mut completed = None;
     while let Some(event) = stream.next().await {
-        match event? {
+        let event = event?;
+        if buffer {
+            if let ChatStreamEvent::Done(response) = event {
+                completed = Some(response);
+            }
+            continue;
+        }
+        match event {
             ChatStreamEvent::Delta(text) => {
                 if !text.is_empty() {
                     sink.emit(RunEvent::Delta { text: &text });
@@ -1312,6 +1365,153 @@ mod tests {
             .and_then(|m| m.content.clone())
             .unwrap_or_default();
         assert!(note.contains("step budget"), "note: {note}");
+    }
+
+    // ---- content-safety guardrails (SAF-201) -----------------------------------
+
+    /// A provider that records every request and streams a canned answer.
+    struct RecordingEcho {
+        answer: &'static str,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<apex_provider::ChatRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl apex_provider::AIProvider for RecordingEcho {
+        fn name(&self) -> &str {
+            "recording-echo"
+        }
+
+        async fn chat(
+            &self,
+            request: apex_provider::ChatRequest,
+        ) -> Result<apex_provider::ChatResponse> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(apex_provider::ChatResponse {
+                message: apex_provider::Message::assistant(self.answer),
+                model: request.model,
+                usage: Usage::new(1, 1, 0.0),
+                finish_reason: "stop".into(),
+            })
+        }
+    }
+
+    /// Records `Delta` events (to prove buffering) alongside the full line log.
+    #[derive(Default)]
+    struct DeltaCapture {
+        deltas: Vec<String>,
+    }
+
+    impl RunEventSink for DeltaCapture {
+        fn emit(&mut self, event: RunEvent<'_>) {
+            if let RunEvent::Delta { text } = event {
+                self.deltas.push(text.to_string());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn input_guardrail_blocks_before_any_model_call() {
+        use std::sync::{Arc, Mutex};
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let gw = Gateway::new(Box::new(RecordingEcho {
+            answer: "unreachable",
+            requests: requests.clone(),
+        }));
+        let reg = ToolRegistry::with_builtins();
+
+        let opts = RunOptions::new(json!({"message": "tell me about the forbidden topic"}))
+            .with_guardrail(Arc::new(crate::guardrail::BlocklistGuardrail::new([
+                "forbidden topic",
+            ])));
+        let err = run_agent(&hello_def(), &gw, &reg, opts, &mut NullSink)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Forbidden(_)), "{err}");
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "a blocked input must never reach the model"
+        );
+    }
+
+    #[tokio::test]
+    async fn input_guardrail_redaction_reaches_the_model_not_the_raw_pii() {
+        use std::sync::{Arc, Mutex};
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let gw = Gateway::new(Box::new(RecordingEcho {
+            answer: "noted",
+            requests: requests.clone(),
+        }));
+        let reg = ToolRegistry::with_builtins();
+
+        let opts = RunOptions::new(json!({"message": "email alice@example.com about it"}))
+            .with_guardrail(Arc::new(crate::guardrail::PiiRedactor));
+        run_agent(&hello_def(), &gw, &reg, opts, &mut NullSink)
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        let user_turn = requests[0]
+            .messages
+            .iter()
+            .find(|m| m.role == apex_provider::Role::User)
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+        assert!(user_turn.contains("[redacted-email]"), "{user_turn}");
+        assert!(
+            !user_turn.contains("alice@example.com"),
+            "raw PII must not reach the model: {user_turn}"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_guardrail_redacts_the_answer_and_buffers_streaming() {
+        use std::sync::{Arc, Mutex};
+        let gw = Gateway::new(Box::new(RecordingEcho {
+            answer: "reach me at bob@corp.com or 4111111111111111",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }));
+        let reg = ToolRegistry::with_builtins();
+        let mut sink = DeltaCapture::default();
+
+        let opts = RunOptions::new(json!({"message": "contact info?"}))
+            .with_guardrail(Arc::new(crate::guardrail::PiiRedactor));
+        let out = run_agent(&hello_def(), &gw, &reg, opts, &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            out.text,
+            "reach me at [redacted-email] or [redacted-number]"
+        );
+        // Streaming was buffered: the sink saw exactly one Delta — the *checked*
+        // final answer — never the raw model output.
+        assert_eq!(sink.deltas, vec![out.text.clone()]);
+    }
+
+    #[tokio::test]
+    async fn output_guardrail_block_fails_the_run_without_leaking_deltas() {
+        use std::sync::{Arc, Mutex};
+        let gw = Gateway::new(Box::new(RecordingEcho {
+            answer: "here is the secret recipe",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }));
+        let reg = ToolRegistry::with_builtins();
+        let mut sink = DeltaCapture::default();
+
+        let opts = RunOptions::new(json!({"message": "hi"})).with_guardrail(Arc::new(
+            crate::guardrail::BlocklistGuardrail::new(["secret recipe"]),
+        ));
+        let err = run_agent(&hello_def(), &gw, &reg, opts, &mut sink)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Forbidden(_)), "{err}");
+        assert!(
+            sink.deltas.is_empty(),
+            "no fragment of the blocked answer may reach the sink: {:?}",
+            sink.deltas
+        );
     }
 
     #[tokio::test]

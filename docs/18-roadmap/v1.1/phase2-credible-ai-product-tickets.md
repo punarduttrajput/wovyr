@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.20.0
-**Status:** In progress — WS-B, WS-C, WS-D, WS-A/runtime, and WS-G (SRV-201..203) fully done; remaining: WS-I (SAF-201/202), WS-L (OBS-201)
+**Version:** 1.21.0
+**Status:** In progress — WS-B, WS-C, WS-D, WS-A/runtime, and WS-G fully done; SAF-201 done; remaining: SAF-202, OBS-201
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -1149,7 +1149,7 @@ AIC-201/202 and RUN-201/202 all done.
 
 # WS-I — Guardrails & Prompt Management
 
-## SAF-201 `[P1]` — Content-safety / moderation / PII hooks
+## SAF-201 `[P1]` — Content-safety / moderation / PII hooks — **DONE (2026-07-14)**
 
 **Problem.** No moderation, PII-redaction, or jailbreak checks anywhere in the agent
 loop or provider layer (audit grep). (PRD-004 R-I.1; audit Med.)
@@ -1163,6 +1163,49 @@ flagged input and output; absent config, behavior is unchanged.
 
 **Files.** `crates/apex-agent/src/runtime.rs` + new `guardrail.rs`. **Size.** L.
 **Depends on:** none.
+
+**Implementation notes (2026-07-14).** New `crates/apex-agent/src/guardrail.rs`:
+a `Guardrail` trait (`check(stage, content) -> GuardrailDecision` —
+`Allow`/`Redact(replacement)`/`Block(reason)`; `applies_to(stage)` lets a cheap
+input-only filter opt out of the output stage so its mere presence doesn't
+disable streaming) and a `Guardrails` ordered set attached via
+`RunOptions::with_guardrail` — empty by default, so an unconfigured run
+behaves exactly as before (the acceptance criterion's back-compat half is
+every pre-existing runtime test passing unchanged). Applied at two points in
+`run_agent`: the user turn immediately after extraction — **before retrieval**,
+so a redaction also keeps PII out of the memory engine's query, and a block
+costs zero model calls — and the final answer before it returns. **Fail-closed,
+deliberately** (the `apex-eval` stance, not the memory-reranker degrade — a
+safety control whose failure mode is "no safety" isn't one): a guardrail
+*error* fails the run with a "failing closed" `Runtime` error; a *block*
+surfaces as `Error::Forbidden` — permanent, so neither the gateway nor a
+workflow retry loop retries content that will be refused again. **The
+streaming side channel is closed too**: when any configured guardrail checks
+the output stage, `stream_chat` buffers (no raw `Delta`/`ToolCallDelta`/
+`ReasoningDelta` reaches the sink) and the checked final answer is emitted as
+one `Delta` after the output check passes — otherwise an output guardrail
+would be decorative, with the unredacted text already streamed. Three
+implementations ship: `BlocklistGuardrail` (deterministic case-insensitive
+deny-list whose block reason deliberately doesn't echo the matched term — the
+blocklist is policy, not something to leak back one probe at a time),
+`PiiRedactor` (deterministic, dependency-free email + long-digit-run
+redaction — a documented light heuristic in the `HeuristicTokenizer` spirit,
+not a DLP engine), and `LlmModerator` (one gateway chat call, PRV-202
+JSON-schema-constrained to `{"flagged", "reason"}`, lenient about code fences
+but an unparseable verdict is an error, never a silent allow; runs on its
+*own* gateway with the same self-moderation-bias note as `LlmJudge`).
+Proven by four run-loop acceptance tests
+(`input_guardrail_blocks_before_any_model_call` — zero provider calls,
+`input_guardrail_redaction_reaches_the_model_not_the_raw_pii`,
+`output_guardrail_redacts_the_answer_and_buffers_streaming` — the sink sees
+exactly one `Delta`, the checked text,
+`output_guardrail_block_fails_the_run_without_leaking_deltas`) plus seven
+`guardrail.rs` unit tests (sequential piping — a later blocklist sees the
+earlier redaction; fail-closed on guardrail error; blocklist/redactor/email
+heuristics; both `LlmModerator` verdict directions and its unparseable-verdict
+error). Not yet surfaced in the agent manifest YAML or the server/CLI —
+callers attach guardrails programmatically via `RunOptions`, the same stance
+as PRV-202/PRV-204; manifest/API wiring is a follow-on.
 
 ## SAF-202 `[P2]` — Prompt template/versioning registry
 
@@ -1239,3 +1282,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.18.0 | 2026-07-14 | SRV-201 (Redis-shared rate limiting: atomic Lua token bucket, per-tier prefixes, degrade-to-per-node on Redis failure, `APEX_RATE_LIMIT_REDIS_URL` + `redis` feature, gated combined-budget test wired into CI) implemented and marked DONE with implementation notes |
 | 1.19.0 | 2026-07-14 | SRV-202 (`llm_tokens_per_day` budget with back-compat accumulator persistence; dead `tool_executions_per_minute`/`memory_records` dimensions removed; opt-in per-tenant rate tier) implemented and marked DONE with implementation notes |
 | 1.20.0 | 2026-07-14 | SRV-203 (per-quota `day_reset_offset_minutes` daily-reset boundary; pure `day_bucket` math; admission/recording bucket agreement) implemented and marked DONE with implementation notes — all of WS-G (Multi-Node Quotas) is now done |
+| 1.21.0 | 2026-07-14 | SAF-201 (pluggable `Guardrail` trait on input/output: block/redact, fail-closed, buffered streaming; blocklist/PII-redactor/LLM-moderator implementations) implemented and marked DONE with implementation notes |
