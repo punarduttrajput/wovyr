@@ -1739,9 +1739,7 @@ mod tests {
             .audit
             .query(&AuditFilter {
                 tenant: Some("acme".to_string()),
-                principal: None,
-                action: None,
-                limit: None,
+                ..Default::default()
             })
             .unwrap();
         let actions: Vec<&str> = entries.iter().map(|e| e.event.action.as_str()).collect();

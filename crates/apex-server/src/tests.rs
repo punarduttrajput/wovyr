@@ -1245,7 +1245,87 @@ async fn secret_mutations_are_audited() {
     // Tenant-scoped: a beta principal sees none of acme's audit records.
     let (st, beta) = tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(beta["total_estimate"], 0);
+    assert!(beta["data"].as_array().unwrap().is_empty());
+}
+
+/// SEC-301: `GET /api/v1/audit` supports an inclusive `[after_ms, before_ms]`
+/// time range and a seq-based cursor, and its `total_estimate` is always `null`
+/// (the one documented exception — an exact count would need the full-log scan
+/// this route's bounded paging exists to avoid).
+#[tokio::test]
+async fn audit_route_time_range_and_cursor_page_through_the_window() {
+    use apex_audit::{AuditEvent, AuditLog};
+    use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+    let tenancy = Arc::new(InMemoryTenancyStore::new());
+    let org = tenancy
+        .create_org(Organization::new("acme", "Acme"))
+        .unwrap();
+    tenancy
+        .add_membership(Membership {
+            user: "alice".to_string(),
+            role: Role::OrgAdmin,
+            scope: MemberScope::Organization(org.id.clone()),
+        })
+        .unwrap();
+    let state = Arc::new(
+        AppState::from_env()
+            .await
+            .with_tenancy(tenancy)
+            .with_audit(AuditLog::in_memory()),
+    );
+    for ts in 1..=10u64 {
+        state
+            .audit
+            .record(AuditEvent::new(
+                ts,
+                "alice",
+                "acme",
+                "config.change",
+                "project",
+                "proj-1",
+            ))
+            .unwrap();
+    }
+
+    // First page of the [3, 8] window: most-recent first, capped at 3.
+    let (st, page1) = tenant_req(
+        &state,
+        "GET",
+        "/api/v1/audit?after_ms=3&before_ms=8&limit=3",
+        "acme",
+        "alice",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let ts_of = |page: &Value| -> Vec<u64> {
+        page["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["event"]["timestamp_ms"].as_u64().unwrap())
+            .collect()
+    };
+    assert_eq!(ts_of(&page1), vec![8, 7, 6]);
+    assert_eq!(page1["has_more"], true);
+    assert!(page1["total_estimate"].is_null());
+    let cursor = page1["next_cursor"].as_str().unwrap().to_string();
+
+    // The cursor continues the same window to exhaustion.
+    let (st, page2) = tenant_req(
+        &state,
+        "GET",
+        &format!("/api/v1/audit?after_ms=3&before_ms=8&limit=3&cursor={cursor}"),
+        "acme",
+        "alice",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(ts_of(&page2), vec![5, 4, 3]);
+    assert_eq!(page2["has_more"], false);
+    assert!(page2["next_cursor"].is_null());
 }
 
 /// A fresh in-memory-backed KMS for tests, isolated from the shared `~/.apex/kms`.
@@ -1497,7 +1577,7 @@ async fn kms_tenant_key_mutations_are_audited() {
     // Tenant-scoped: beta sees none of acme's kms audit records.
     let (st, beta) = tenant_req(&state, "GET", "/api/v1/audit", "beta", "bob", Value::Null).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(beta["total_estimate"], 0);
+    assert!(beta["data"].as_array().unwrap().is_empty());
 }
 
 /// **RM-GA-P4/GA-003, narrowing SEC-102**: `tenant_authorize` used to skip its

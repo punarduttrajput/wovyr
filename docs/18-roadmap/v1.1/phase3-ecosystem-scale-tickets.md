@@ -936,7 +936,7 @@ integration tests already carry.
 
 # WS-I / WS-C — Audit, Secret Channel, Re-embedding
 
-## SEC-301 `[P2]` — Audit query: time-range + pagination + indexed sink
+## SEC-301 `[P2]` — Audit query: time-range + pagination + indexed sink — **DONE (2026-07-14)**
 
 **Problem.** `query()` loads the entire log via `sink.all()` then filters in memory;
 `AuditFilter` has only tenant/principal/action/limit — no from/to, no cursor; the JSONL
@@ -949,6 +949,37 @@ sink re-reads the whole file per op (`crates/apex-audit/src/log.rs:116-140,220-2
 whole log.
 
 **Files.** `crates/apex-audit/src/log.rs`. **Size.** M. **Depends on:** none.
+
+**Done.** `AuditFilter` gained inclusive `after_ms`/`before_ms` bounds (shared by
+`query()` and the new paged path via `AuditFilter::matches`, so the two can't drift);
+`AuditSink` gained `query_page(filter, before_seq, limit) -> AuditPage` — a
+most-recent-first page plus a seq-based cursor — with a default read-everything
+implementation any sink inherits (`InMemoryAuditSink` keeps it; an in-memory scan
+isn't the I/O cost this ticket targets) and a real bounded override on
+`FileAuditSink`: `scan_reverse` reads `audit.jsonl` **backward in 64 KiB chunks**,
+stopping as soon as the page is filled — no separate index needed, because the
+append-only file's line order *is* the seq order, read tail-first. A dedicated
+DB-backed sink was deliberately not built: the reverse scan meets the acceptance
+criterion without new infrastructure, and the trait's `query_page` is the port a
+future Postgres sink would implement. `GET /api/v1/audit` gained
+`after_ms`/`before_ms` and now reads via `query_page` (cursor wraps a seq, same
+opaque wire encoding as every other list route); its `total_estimate` is now always
+`null` — the one documented envelope exception, since an exact count would require
+the full scan the route exists to avoid. Both SDKs + `openapi.yaml` updated in
+lockstep (`AuditPage` type). **Fixed in passing:** the first-draft `scan_reverse`
+parsed the bytes before a chunk's first `\n` (the tail of a line starting in an
+earlier chunk) as a complete line and carried the wrong end of the buffer — masked
+whenever a page early-returned inside the first chunk, but any multi-chunk scan
+failed with a JSON parse error; proven by a written-first failing test forcing
+7-byte chunks. Acceptance proven by
+`time_ranged_paged_query_reads_only_the_tail_of_the_log` (400-entry log, 1 KiB
+chunks: a time-ranged page of 5 reads < ¼ of the file, asserted via the scan's
+actual bytes-read count), plus `reverse_scan_reassembles_lines_split_across_chunks`,
+`query_page_cursor_walks_the_log_without_gaps_or_overlap`,
+`default_query_page_and_file_override_agree` (page-by-page parity between the
+trait default and the file override, filtered), `time_range_bounds_are_inclusive`,
+and the route-level
+`audit_route_time_range_and_cursor_page_through_the_window` in `apex-server`.
 
 ## SEC-302 `[P3]` — Request-scoped secret channel
 

@@ -32,6 +32,13 @@ export interface Page<T> {
   total_estimate: number;
 }
 
+/** `GET /api/v1/audit`'s envelope (SEC-301): identical to {@link Page} except
+ * `total_estimate` is always `null` — computing an exact count would require
+ * the full-log scan this route's bounded, time-ranged paging exists to avoid. */
+export interface AuditPage<T> extends Omit<Page<T>, "total_estimate"> {
+  total_estimate: null;
+}
+
 export interface PageParams {
   limit?: number;
   cursor?: string;

@@ -893,9 +893,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
             .audit
             .query(&AuditFilter {
                 tenant: Some("default".to_string()),
-                principal: None,
-                action: None,
-                limit: None,
+                ..Default::default()
             })
             .unwrap();
         let actions: Vec<&str> = entries.iter().map(|e| e.event.action.as_str()).collect();

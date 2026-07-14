@@ -20,4 +20,6 @@ mod event;
 mod log;
 
 pub use event::{Actor, ActorType, AuditEvent, Outcome, Resource};
-pub use log::{AuditEntry, AuditFilter, AuditLog, AuditSink, FileAuditSink, InMemoryAuditSink};
+pub use log::{
+    AuditEntry, AuditFilter, AuditLog, AuditPage, AuditSink, FileAuditSink, InMemoryAuditSink,
+};

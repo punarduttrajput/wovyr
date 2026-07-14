@@ -18,6 +18,18 @@ class Page(TypedDict):
     total_estimate: int
 
 
+class AuditPage(TypedDict):
+    """`GET /api/v1/audit`'s envelope (SEC-301): identical to `Page` except
+    `total_estimate` is always `None` — computing an exact count would
+    require the full-log scan this route's bounded, time-ranged paging
+    exists to avoid."""
+
+    data: List[Any]
+    has_more: bool
+    next_cursor: Optional[str]
+    total_estimate: None
+
+
 class PageParams(TypedDict, total=False):
     limit: int
     cursor: str

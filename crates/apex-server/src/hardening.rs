@@ -70,7 +70,14 @@ pub(crate) fn paginate(items: Vec<Value>, page: &Page) -> Value {
 }
 
 /// Opaque cursor: the offset hex-encoded (clients must not parse it).
-fn encode_cursor(offset: usize) -> String {
+///
+/// `pub(crate)` (not just an implementation detail of [`paginate`]) so a route whose
+/// pagination isn't offset-based — [`crate::audit`]'s SEC-301 seq-cursor — can reuse
+/// the exact same opaque wire encoding instead of inventing a second cursor format;
+/// the number it wraps means something different per route, but the format looks
+/// identical across every `/v1` list endpoint, matching this being documented as
+/// opaque rather than route-specific.
+pub(crate) fn encode_cursor(offset: usize) -> String {
     offset
         .to_string()
         .bytes()
@@ -78,7 +85,7 @@ fn encode_cursor(offset: usize) -> String {
         .collect()
 }
 
-fn decode_cursor(cursor: &str) -> Option<usize> {
+pub(crate) fn decode_cursor(cursor: &str) -> Option<usize> {
     if cursor.len() % 2 != 0 {
         return None;
     }

@@ -27,6 +27,7 @@ from .http import HttpClient, Opener, RetryOptions
 from .sse import parse_sse
 from .types import (
     Attestation,
+    AuditPage,
     MarketplaceSearchParams,
     Page,
     PublishResult,
@@ -658,15 +659,28 @@ class AuditResource:
         *,
         principal: Optional[str] = None,
         action: Optional[str] = None,
+        after_ms: Optional[int] = None,
+        before_ms: Optional[int] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
-    ) -> Page:
+    ) -> AuditPage:
         """`GET /api/v1/audit` — tenant-scoped, tamper-evident hash-chained
-        log, most-recent first, cursor-paginated."""
+        log, most-recent first, cursor-paginated. `after_ms`/`before_ms`
+        restrict to a timestamp range (epoch ms, inclusive; SEC-301) — a
+        paged, time-ranged query reads a bounded tail of the log rather than
+        scanning it whole, which is also why `total_estimate` is always
+        `None` on this route specifically (see `AuditPage`)."""
         return self._http.request(
             "GET",
             "/api/v1/audit",
-            query={"principal": principal, "action": action, "limit": limit, "cursor": cursor},
+            query={
+                "principal": principal,
+                "action": action,
+                "after_ms": after_ms,
+                "before_ms": before_ms,
+                "limit": limit,
+                "cursor": cursor,
+            },
         )
 
 

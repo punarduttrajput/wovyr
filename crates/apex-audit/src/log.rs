@@ -42,12 +42,52 @@ fn chain_hash(prev_hash: &str, id: &str, seq: u64, event: &AuditEvent) -> String
     format!("{:x}", h.finalize())
 }
 
+/// One page of a [`AuditSink::query_page`] read: entries most-recent first, plus a
+/// cursor to pass back as `before_seq` for the next page (`None` once exhausted).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuditPage {
+    /// Matching entries, most-recent first.
+    pub entries: Vec<AuditEntry>,
+    /// Pass as `before_seq` to continue; `None` when there's nothing more.
+    pub next_cursor: Option<u64>,
+}
+
 /// Durable storage for audit entries (append-only).
 pub trait AuditSink: Send + Sync {
     /// Append an entry (never mutate or delete existing ones).
     fn append(&self, entry: &AuditEntry) -> Result<()>;
     /// All entries in insertion order.
     fn all(&self) -> Result<Vec<AuditEntry>>;
+
+    /// Read one page of entries matching `filter`, most-recent first, continuing from
+    /// `before_seq` (exclusive) up to `limit` entries (SEC-301).
+    ///
+    /// The default implementation reads the whole log via [`all`](Self::all) and
+    /// filters/pages in memory — correct for any sink, but exactly the "scan the
+    /// whole log per query" cost SEC-301 is about; [`InMemoryAuditSink`] keeps this
+    /// default since scanning an in-memory `Vec` isn't the I/O concern this ticket
+    /// targets, while [`FileAuditSink`] overrides it with a real bounded read.
+    fn query_page(
+        &self,
+        filter: &AuditFilter,
+        before_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<AuditPage> {
+        let mut entries = self.all()?;
+        entries.retain(|e| filter.matches(e) && before_seq.is_none_or(|b| e.seq < b));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.seq));
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        let next_cursor = if has_more {
+            entries.last().map(|e| e.seq)
+        } else {
+            None
+        };
+        Ok(AuditPage {
+            entries,
+            next_cursor,
+        })
+    }
 }
 
 /// In-process sink (tests / single process).
@@ -124,6 +164,152 @@ impl AuditSink for FileAuditSink {
             Err(e) => Err(Error::config(format!("read audit.jsonl: {e}"))),
         }
     }
+
+    /// Reads `audit.jsonl` backward from the end in bounded chunks, stopping as soon as
+    /// `limit` matching entries are found — for the common case (a recent, unfiltered or
+    /// lightly-filtered page) this reads only the tail of the file rather than the whole
+    /// log every `all()`-based query pays for (SEC-301).
+    fn query_page(
+        &self,
+        filter: &AuditFilter,
+        before_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<AuditPage> {
+        Ok(scan_reverse(&self.path, filter, before_seq, limit, READ_CHUNK_BYTES)?.page)
+    }
+}
+
+/// Production chunk size for [`scan_reverse`]'s backward read.
+const READ_CHUNK_BYTES: usize = 64 * 1024;
+
+/// [`scan_reverse`]'s result plus the byte count it actually read from disk — the
+/// latter is test-only signal (proving a page read didn't scan the whole file), not
+/// part of the public [`AuditSink`] contract.
+struct ReverseScan {
+    page: AuditPage,
+    /// Only the test suite reads this (the production caller wants just the page).
+    #[cfg_attr(not(test), allow(dead_code))]
+    bytes_read: u64,
+}
+
+/// The backward, bounded-chunk scan behind [`FileAuditSink::query_page`]. Since
+/// entries are appended in ascending `seq` order, reading the file from its end
+/// yields entries in descending `seq` (most-recent-first) order for free — no
+/// separate index or sort is needed, unlike [`AuditSink::query_page`]'s default
+/// (read-everything-then-sort) implementation.
+///
+/// `chunk_bytes` is a parameter (not a bare constant) so tests can force many small
+/// chunk reads — and so exercise the cross-chunk line-splitting logic — without
+/// needing a multi-megabyte fixture file.
+fn scan_reverse(
+    path: &std::path::Path,
+    filter: &AuditFilter,
+    before_seq: Option<u64>,
+    limit: usize,
+    chunk_bytes: usize,
+) -> Result<ReverseScan> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ReverseScan {
+                page: AuditPage::default(),
+                bytes_read: 0,
+            });
+        }
+        Err(e) => return Err(Error::config(format!("open audit.jsonl: {e}"))),
+    };
+    let mut pos = file
+        .metadata()
+        .map_err(|e| Error::config(format!("stat audit.jsonl: {e}")))?
+        .len();
+
+    let mut collected: Vec<AuditEntry> = Vec::new();
+    // The head of the previously-read (higher-offset) chunk, up to its first '\n':
+    // those bytes continue a line that *starts* somewhere below `chunk_start`, so
+    // they're appended after the next (lower-offset) chunk's bytes to complete it.
+    let mut carry: Vec<u8> = Vec::new();
+    let mut bytes_read: u64 = 0;
+
+    while pos > 0 {
+        let read_size = chunk_bytes.min(pos as usize);
+        let chunk_start = pos - read_size as u64;
+        let mut buf = vec![0u8; read_size];
+        file.seek(SeekFrom::Start(chunk_start))
+            .map_err(|e| Error::config(format!("seek audit.jsonl: {e}")))?;
+        file.read_exact(&mut buf)
+            .map_err(|e| Error::config(format!("read audit.jsonl: {e}")))?;
+        bytes_read += read_size as u64;
+        buf.extend_from_slice(&carry);
+        pos = chunk_start;
+
+        // Everything before this buffer's first '\n' continues a line that starts
+        // in the not-yet-read file below — defer it to the next iteration, unless
+        // we've reached byte 0, where it's a complete line of its own.
+        let lines_from = if pos == 0 {
+            carry = Vec::new();
+            0
+        } else if let Some(i) = buf.iter().position(|&b| b == b'\n') {
+            carry = buf[..i].to_vec();
+            i + 1
+        } else {
+            // No line boundary anywhere in this chunk: the whole buffer is still
+            // a fragment of one line — keep accumulating.
+            carry = buf;
+            continue;
+        };
+
+        let mut lines: Vec<&[u8]> = Vec::new();
+        let mut line_start = lines_from;
+        for i in lines_from..buf.len() {
+            if buf[i] == b'\n' {
+                lines.push(&buf[line_start..i]);
+                line_start = i + 1;
+            }
+        }
+        // The bytes after the last '\n' are a complete line too: their terminating
+        // '\n' was consumed as the carry boundary of the previous (higher-offset)
+        // iteration. On the very first iteration this tail is whatever follows the
+        // file's final '\n' — empty for a well-formed log, and a parse error
+        // (matching `all()`'s behavior) for a torn one.
+        if line_start < buf.len() {
+            lines.push(&buf[line_start..]);
+        }
+
+        for line in lines.iter().rev() {
+            if line.trim_ascii().is_empty() {
+                continue;
+            }
+            let entry: AuditEntry = serde_json::from_slice(line).map_err(Error::from)?;
+            if before_seq.is_some_and(|b| entry.seq >= b) {
+                continue;
+            }
+            if !filter.matches(&entry) {
+                continue;
+            }
+            collected.push(entry);
+            if collected.len() > limit {
+                collected.truncate(limit);
+                let next_cursor = collected.last().map(|e| e.seq);
+                return Ok(ReverseScan {
+                    page: AuditPage {
+                        entries: collected,
+                        next_cursor,
+                    },
+                    bytes_read,
+                });
+            }
+        }
+    }
+
+    Ok(ReverseScan {
+        page: AuditPage {
+            entries: collected,
+            next_cursor: None,
+        },
+        bytes_read,
+    })
 }
 
 /// A filter for reading audit history ([audit §6](../../docs/13-security/audit.md#6-access--search)).
@@ -137,6 +323,35 @@ pub struct AuditFilter {
     pub action: Option<String>,
     /// Cap the number returned (most-recent first when set).
     pub limit: Option<usize>,
+    /// Restrict to entries at or after this timestamp (epoch ms, inclusive).
+    pub after_ms: Option<u64>,
+    /// Restrict to entries at or before this timestamp (epoch ms, inclusive).
+    pub before_ms: Option<u64>,
+}
+
+impl AuditFilter {
+    /// Whether `entry` satisfies every set predicate (tenant/principal/action/time-range).
+    /// Shared by [`AuditLog::query`] and the paged [`AuditSink::query_page`] path so the
+    /// two can never drift on what "matches" means.
+    pub fn matches(&self, entry: &AuditEntry) -> bool {
+        self.tenant
+            .as_ref()
+            .is_none_or(|t| &entry.event.actor.tenant == t)
+            && self
+                .principal
+                .as_ref()
+                .is_none_or(|p| &entry.event.actor.principal == p)
+            && self
+                .action
+                .as_ref()
+                .is_none_or(|a| &entry.event.action == a)
+            && self
+                .after_ms
+                .is_none_or(|from| entry.event.timestamp_ms >= from)
+            && self
+                .before_ms
+                .is_none_or(|to| entry.event.timestamp_ms <= to)
+    }
 }
 
 /// The audit log: chains events onto a [`AuditSink`] and reads them back.
@@ -217,24 +432,33 @@ impl AuditLog {
     }
 
     /// Read entries matching `filter` (most-recent first when a limit is set).
+    ///
+    /// This always reads the entire log (`sink.all()`) and filters in memory — fine for
+    /// small logs or a one-off query, but exactly the cost
+    /// [`query_page`](Self::query_page) exists to avoid for a paged, possibly
+    /// time-ranged read of a large log (SEC-301).
     pub fn query(&self, filter: &AuditFilter) -> Result<Vec<AuditEntry>> {
         let mut entries = self.sink.all()?;
-        entries.retain(|e| {
-            filter
-                .tenant
-                .as_ref()
-                .is_none_or(|t| &e.event.actor.tenant == t)
-                && filter
-                    .principal
-                    .as_ref()
-                    .is_none_or(|p| &e.event.actor.principal == p)
-                && filter.action.as_ref().is_none_or(|a| &e.event.action == a)
-        });
+        entries.retain(|e| filter.matches(e));
         if let Some(limit) = filter.limit {
             entries.reverse();
             entries.truncate(limit);
         }
         Ok(entries)
+    }
+
+    /// Read one page of entries matching `filter`, most-recent first, continuing from
+    /// `before_seq` (exclusive — omit for the first page) up to `limit` entries
+    /// (SEC-301). Delegates to the sink, which may serve this from a bounded scan
+    /// instead of the full-log read `query` always pays for — see
+    /// [`FileAuditSink`]'s override.
+    pub fn query_page(
+        &self,
+        filter: &AuditFilter,
+        before_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<AuditPage> {
+        self.sink.query_page(filter, before_seq, limit)
     }
 
     /// Verify the hash chain: every entry's hash recomputes and links to its predecessor.
@@ -369,6 +593,154 @@ mod tests {
             .unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].event.action, "secret.rotate");
+    }
+
+    /// A scratch dir unique per test (several tests in this module use the
+    /// filesystem within one process, so the pid alone isn't enough).
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("apex_audit_test_{}_{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A file-backed log under `dir` holding `n` entries with timestamps `1..=n`.
+    fn file_log_with(dir: &std::path::Path, n: u64) -> AuditLog {
+        let log = AuditLog::open(Box::new(FileAuditSink::new(dir).unwrap())).unwrap();
+        for ts in 1..=n {
+            log.record(ev(ts, "secret.rotate")).unwrap();
+        }
+        log
+    }
+
+    /// The SEC-301 acceptance criterion: a time-ranged, paged query must not scan
+    /// the whole log. `scan_reverse` reports the bytes it actually read, so this
+    /// asserts the bounded backward scan stopped after a small tail of the file.
+    #[test]
+    fn time_ranged_paged_query_reads_only_the_tail_of_the_log() {
+        let dir = scratch_dir("tail_read");
+        file_log_with(&dir, 400);
+        let path = dir.join("audit.jsonl");
+        let file_len = std::fs::metadata(&path).unwrap().len();
+
+        let filter = AuditFilter {
+            after_ms: Some(380),
+            ..Default::default()
+        };
+        let scan = scan_reverse(&path, &filter, None, 5, 1024).unwrap();
+
+        assert_eq!(scan.page.entries.len(), 5);
+        // Most-recent first, and every entry inside the requested window.
+        assert_eq!(scan.page.entries[0].event.timestamp_ms, 400);
+        assert!(
+            scan.page
+                .entries
+                .iter()
+                .all(|e| e.event.timestamp_ms >= 380)
+        );
+        assert!(
+            scan.page.next_cursor.is_some(),
+            "window holds more than a page"
+        );
+        assert!(
+            scan.bytes_read < file_len / 4,
+            "paged read scanned {} of {} bytes — not a bounded tail read",
+            scan.bytes_read,
+            file_len
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A chunk size far smaller than one JSON line forces every entry to span
+    /// multiple chunks, exercising the carry/reassembly logic: the bytes before a
+    /// chunk's first newline belong to a line that starts in an earlier chunk and
+    /// must be deferred, never parsed as a line of their own.
+    #[test]
+    fn reverse_scan_reassembles_lines_split_across_chunks() {
+        let dir = scratch_dir("cross_chunk");
+        file_log_with(&dir, 10);
+        let path = dir.join("audit.jsonl");
+
+        let scan = scan_reverse(&path, &AuditFilter::default(), None, 100, 7).unwrap();
+        let seqs: Vec<u64> = scan.page.entries.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, (0..10).rev().collect::<Vec<_>>());
+        assert!(scan.page.next_cursor.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Walking the cursor to exhaustion yields every entry exactly once,
+    /// most-recent first, with `next_cursor` gone on the final page.
+    #[test]
+    fn query_page_cursor_walks_the_log_without_gaps_or_overlap() {
+        let dir = scratch_dir("cursor_walk");
+        let log = file_log_with(&dir, 10);
+
+        let mut cursor = None;
+        let mut seqs = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = log.query_page(&AuditFilter::default(), cursor, 3).unwrap();
+            seqs.extend(page.entries.iter().map(|e| e.seq));
+            pages += 1;
+            assert!(pages <= 10, "cursor failed to make progress");
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(seqs, (0..10).rev().collect::<Vec<_>>());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The trait's default (read-everything) implementation and `FileAuditSink`'s
+    /// bounded backward scan must never drift on page contents or cursors —
+    /// walk both page by page over identical logs, filtered, and compare.
+    #[test]
+    fn default_query_page_and_file_override_agree() {
+        let dir = scratch_dir("impl_parity");
+        let file_log = AuditLog::open(Box::new(FileAuditSink::new(&dir).unwrap())).unwrap();
+        let mem_log = AuditLog::in_memory();
+        for ts in 1..=9 {
+            // Alternate principals so the filter drops some entries.
+            let who = if ts % 3 == 0 { "bob" } else { "alice" };
+            let e = AuditEvent::new(ts, who, "acme", "secret.rotate", "secret", "secret://k");
+            file_log.record(e.clone()).unwrap();
+            mem_log.record(e).unwrap();
+        }
+
+        let filter = AuditFilter {
+            principal: Some("alice".into()),
+            ..Default::default()
+        };
+        let mut cursor = None;
+        loop {
+            let from_file = file_log.query_page(&filter, cursor, 2).unwrap();
+            let from_mem = mem_log.query_page(&filter, cursor, 2).unwrap();
+            assert_eq!(from_file, from_mem);
+            match from_file.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `after_ms`/`before_ms` are inclusive on both ends.
+    #[test]
+    fn time_range_bounds_are_inclusive() {
+        let log = AuditLog::in_memory();
+        for ts in 1..=3 {
+            log.record(ev(ts, "secret.rotate")).unwrap();
+        }
+        let hits = log
+            .query(&AuditFilter {
+                after_ms: Some(2),
+                before_ms: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].event.timestamp_ms, 2);
     }
 
     #[test]

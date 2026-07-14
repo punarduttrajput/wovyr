@@ -92,6 +92,14 @@ independently of operational logs.
 - Filter by principal, action, resource, time, outcome.
 - Export is itself audited.
 
+**Implemented (SEC-301):** `GET /api/v1/audit` filters by principal/action and an
+inclusive `[after_ms, before_ms]` epoch-ms time range, cursor-paginated
+most-recent-first. Reads go through `AuditSink::query_page`, which `FileAuditSink`
+serves via a bounded backward scan of `audit.jsonl` (stops once the page fills)
+rather than re-reading the whole log per query; `total_estimate` is always `null`
+on this route, since an exact count would require the full scan the paged read
+exists to avoid. Resource/outcome filters and export remain future surface.
+
 ---
 
 # 7. Retention

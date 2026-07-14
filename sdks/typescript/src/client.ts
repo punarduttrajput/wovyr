@@ -6,6 +6,7 @@ import type {
   ApexClientOptions,
   Attestation,
   AuditEntry,
+  AuditPage,
   MarketplaceSearchParams,
   MemoryQueryResult,
   Page,
@@ -617,10 +618,19 @@ class AuditResource {
   constructor(private readonly http: HttpClient) {}
 
   /** `GET /api/v1/audit` — tenant-scoped, tamper-evident hash-chained log,
-   * most-recent first, cursor-paginated (RM-GA-P4 API-701). */
+   * most-recent first, cursor-paginated (RM-GA-P4 API-701). `after_ms`/
+   * `before_ms` restrict to a timestamp range (epoch ms, inclusive; SEC-301) —
+   * a paged, time-ranged query reads a bounded tail of the log rather than
+   * scanning it whole, which is also why `total_estimate` is always `null`
+   * on this route specifically (see {@link AuditPage}). */
   async query(
-    params?: { principal?: string; action?: string } & PageParams,
-  ): Promise<Page<AuditEntry>> {
+    params?: {
+      principal?: string;
+      action?: string;
+      after_ms?: number;
+      before_ms?: number;
+    } & PageParams,
+  ): Promise<AuditPage<AuditEntry>> {
     return this.http.request("GET", "/api/v1/audit", undefined, { query: params });
   }
 }

@@ -14,7 +14,7 @@
     warn(clippy::unwrap_used, clippy::expect_used, clippy::unreachable)
 )]
 
-use crate::hardening::{PageQuery, paginate};
+use crate::hardening::{DEFAULT_LIMIT, MAX_LIMIT, decode_cursor, encode_cursor};
 use crate::{ApiError, AppState};
 use apex_audit::{AuditEvent, AuditFilter};
 use axum::{
@@ -24,7 +24,7 @@ use axum::{
     routing::get,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(crate) fn routes() -> Router<Arc<AppState>> {
@@ -83,15 +83,28 @@ pub(crate) fn audit(
 pub(crate) struct AuditQuery {
     principal: Option<String>,
     action: Option<String>,
-    /// `limit` + `cursor` (overview §6, RM-GA-P4 API-701).
-    #[serde(flatten)]
-    page: PageQuery,
+    /// Restrict to entries at or after this timestamp (epoch ms, inclusive; SEC-301).
+    after_ms: Option<u64>,
+    /// Restrict to entries at or before this timestamp (epoch ms, inclusive; SEC-301).
+    before_ms: Option<u64>,
+    limit: Option<usize>,
+    /// Opaque pagination cursor from a prior page's `next_cursor` (overview §6,
+    /// RM-GA-P4 API-701) — for this route it wraps a `seq` (SEC-301), not an offset,
+    /// but uses the identical wire encoding every other list route's cursor does.
+    cursor: Option<String>,
 }
 
 /// `GET /api/v1/audit` — the caller's tenant's audit trail, most-recent first,
-/// filterable by `principal`/`action` and cursor-paginated (overview §6).
-/// RBAC-gated (`audit:read`) and always tenant-scoped, so a caller only sees
-/// its own tenant's records.
+/// filterable by `principal`/`action`/a `[after_ms, before_ms]` time range and
+/// cursor-paginated (overview §6). RBAC-gated (`audit:read`) and always
+/// tenant-scoped, so a caller only sees its own tenant's records.
+///
+/// Reads via [`apex_audit::AuditLog::query_page`] (SEC-301) rather than fetching
+/// every matching entry and slicing in Rust: `FileAuditSink` serves this from a
+/// bounded backward scan of the log instead of the whole-file read the old
+/// `query()`-based implementation paid on every call. `total_estimate` is
+/// deliberately `null` here (unlike every other paginated route) — computing an
+/// exact count would require exactly the full scan this route exists to avoid.
 #[utoipa::path(
     get,
     path = "/api/v1/audit",
@@ -99,6 +112,8 @@ pub(crate) struct AuditQuery {
     params(
         ("principal" = Option<String>, Query, description = "Filter to a principal."),
         ("action" = Option<String>, Query, description = "Filter to an action."),
+        ("after_ms" = Option<u64>, Query, description = "Only entries at or after this epoch-ms timestamp."),
+        ("before_ms" = Option<u64>, Query, description = "Only entries at or before this epoch-ms timestamp."),
         ("limit" = Option<usize>, Query, description = "Max items per page (default 25, max 100)."),
         ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from a prior page's next_cursor."),
     ),
@@ -114,15 +129,28 @@ pub(crate) async fn list_audit(
         tenant: Some(tenant),
         principal: q.principal,
         action: q.action,
-        // Fetch every matching entry; pagination slices it (RM-GA-P4 API-701 —
-        // the standard envelope, matching every other list route).
+        after_ms: q.after_ms,
+        before_ms: q.before_ms,
         limit: None,
     };
-    let mut entries = state.audit.query(&filter)?;
-    entries.reverse(); // most-recent first
-    let items: Vec<Value> = entries
+    let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let before_seq = q
+        .cursor
+        .as_deref()
+        .and_then(decode_cursor)
+        .map(|c| c as u64);
+
+    let page = state.audit.query_page(&filter, before_seq, limit)?;
+    let data: Vec<Value> = page
+        .entries
         .into_iter()
         .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
         .collect();
-    Ok(Json(paginate(items, &q.page.page())))
+    let has_more = page.next_cursor.is_some();
+    Ok(Json(json!({
+        "data": data,
+        "has_more": has_more,
+        "next_cursor": page.next_cursor.map(|c| encode_cursor(c as usize)),
+        "total_estimate": Value::Null,
+    })))
 }
