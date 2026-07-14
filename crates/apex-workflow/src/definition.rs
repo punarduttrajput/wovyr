@@ -91,6 +91,141 @@ pub struct ActivityDef {
     pub compensate: Option<String>,
 }
 
+/// Whether an activity type is the engine-native for-each expansion
+/// (WFL-301/302) — `for_each`, with `map` as an alias.
+pub fn is_for_each(activity_type: &str) -> bool {
+    matches!(activity_type, "for_each" | "map")
+}
+
+/// Default cap on how many of a `for_each`'s item instances run concurrently.
+pub const DEFAULT_FOR_EACH_CONCURRENCY: usize = 8;
+
+/// Default hard bound on how many items one `for_each` may expand to — a
+/// runtime collection larger than this fails the activity closed rather than
+/// silently truncating or unboundedly fanning out.
+pub const DEFAULT_FOR_EACH_MAX_ITEMS: usize = 1000;
+
+/// Parsed inputs of a `for_each`/`map` activity (WFL-301/302): the collection
+/// to expand over, the per-item body, and the expansion bounds.
+///
+/// Wire shape (under the activity's `inputs`):
+///
+/// ```yaml
+/// - id: summarize_all
+///   type: for_each
+///   inputs:
+///     items: "${fetch.docs}"        # a ${...} reference, or a literal array
+///     max_concurrent: 4             # optional; default 8
+///     max_items: 500                # optional; default 1000 (fail-closed bound)
+///     activity:                     # the per-item body template
+///       type: tool
+///       name: summarize
+///       inputs: { doc: "${item}" }  # `item`/`item_index` are injected per instance
+/// ```
+#[derive(Debug, Clone)]
+pub struct ForEachSpec {
+    /// The collection: a `${...}` reference string or a literal array
+    /// (elements may themselves contain `${...}` references). Resolved against
+    /// the live workflow variables at expansion time.
+    pub items: Value,
+    /// The per-item activity template.
+    pub body: ForEachBody,
+    /// How many item instances may run concurrently (≥ 1).
+    pub max_concurrent: usize,
+    /// Fail-closed bound on the resolved collection's size.
+    pub max_items: usize,
+}
+
+/// The per-item activity a `for_each` runs: an inline activity template
+/// executed once per element, with `item` and `item_index` exposed as
+/// variables to each instance.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForEachBody {
+    /// Activity type (`function`, `tool`, `ai`, `agent`, …). Engine-native
+    /// types (`wait`/`workflow`/`for_each`/`map`) cannot nest here.
+    #[serde(rename = "type")]
+    pub activity_type: String,
+    /// Activity name (e.g. the tool id), if any.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Static inputs passed to each instance (typically referencing `${item}`).
+    #[serde(default)]
+    pub inputs: Value,
+    /// Per-item retry override (else the workflow default applies).
+    #[serde(default)]
+    pub retry: Option<RetryPolicy>,
+}
+
+/// Raw wire shape of a `for_each` activity's `inputs`.
+#[derive(Deserialize)]
+struct ForEachInputs {
+    items: Value,
+    activity: ForEachBody,
+    #[serde(default)]
+    max_concurrent: Option<u64>,
+    #[serde(default)]
+    max_items: Option<u64>,
+}
+
+impl ForEachSpec {
+    /// Parse and validate a `for_each` activity's inputs, fail-closed — run at
+    /// definition load so a malformed loop is a load error, not a runtime one.
+    pub fn parse(activity: &ActivityDef) -> Result<Self> {
+        let parsed: ForEachInputs =
+            serde_json::from_value(activity.inputs.clone()).map_err(|e| {
+                Error::invalid(format!(
+                    "for_each activity `{}` has invalid inputs ({e}); expected \
+                     {{items: <${{...}} or array>, activity: {{type, ...}}}}",
+                    activity.id
+                ))
+            })?;
+        match &parsed.items {
+            Value::String(_) | Value::Array(_) => {}
+            _ => {
+                return Err(Error::invalid(format!(
+                    "for_each activity `{}`: `items` must be a `${{...}}` reference \
+                     or a literal array",
+                    activity.id
+                )));
+            }
+        }
+        let body_type = parsed.activity.activity_type.as_str();
+        if is_for_each(body_type) || matches!(body_type, "wait" | "workflow") {
+            return Err(Error::invalid(format!(
+                "for_each activity `{}`: body type `{body_type}` is engine-native and \
+                 cannot run as a per-item body",
+                activity.id
+            )));
+        }
+        let max_concurrent = match parsed.max_concurrent {
+            Some(0) => {
+                return Err(Error::invalid(format!(
+                    "for_each activity `{}`: max_concurrent must be at least 1",
+                    activity.id
+                )));
+            }
+            Some(n) => n as usize,
+            None => DEFAULT_FOR_EACH_CONCURRENCY,
+        };
+        let max_items = match parsed.max_items {
+            Some(0) => {
+                return Err(Error::invalid(format!(
+                    "for_each activity `{}`: max_items must be at least 1",
+                    activity.id
+                )));
+            }
+            Some(n) => n as usize,
+            None => DEFAULT_FOR_EACH_MAX_ITEMS,
+        };
+        Ok(Self {
+            items: parsed.items,
+            body: parsed.activity,
+            max_concurrent,
+            max_items,
+        })
+    }
+}
+
 /// A directed edge between two activities.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Transition {
@@ -195,8 +330,24 @@ impl Definition {
             if a.id.trim().is_empty() {
                 return Err(Error::invalid("activity id must not be empty"));
             }
+            // Brackets are reserved for `for_each` instance ids (`<id>[<index>]`,
+            // WFL-301) — a declared id using them could collide with one.
+            if a.id.contains('[') || a.id.contains(']') {
+                return Err(Error::invalid(format!(
+                    "activity id `{}` must not contain `[`/`]` (reserved for for_each \
+                     item-instance ids)",
+                    a.id
+                )));
+            }
             if !ids.insert(a.id.as_str()) {
                 return Err(Error::invalid(format!("duplicate activity id `{}`", a.id)));
+            }
+        }
+
+        // `for_each` inputs are structurally validated at load, fail-closed.
+        for a in &self.spec.activities {
+            if is_for_each(&a.activity_type) {
+                ForEachSpec::parse(a)?;
             }
         }
 
@@ -324,5 +475,83 @@ spec:
         let yaml = "metadata:\n  name: x\nspec:\n  activities:\n    - {id: a, type: function}\n    - {id: b, type: function}\n  transitions:\n    - {from: a, to: b}\n    - {from: b, to: a}\n";
         let err = Definition::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("cycle"));
+    }
+
+    // -----------------------------------------------------------------
+    // WFL-301/302 — for_each/map: definition-load-time validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn for_each_with_a_reference_and_a_literal_array_both_parse() {
+        let by_ref = "metadata:\n  name: x\nspec:\n  activities:\n    - {id: fetch, type: function}\n    - {id: loop, type: for_each, inputs: {items: \"${fetch}\", activity: {type: function}}}\n  transitions:\n    - {from: fetch, to: loop}\n";
+        assert!(Definition::from_yaml(by_ref).is_ok());
+
+        let literal = "metadata:\n  name: x\nspec:\n  activities:\n    - {id: loop, type: for_each, inputs: {items: [1, 2, 3], activity: {type: function}}}\n";
+        assert!(Definition::from_yaml(literal).is_ok());
+    }
+
+    #[test]
+    fn map_is_accepted_as_an_alias_for_for_each() {
+        let yaml = "metadata:\n  name: x\nspec:\n  activities:\n    - {id: loop, type: map, inputs: {items: [1], activity: {type: function}}}\n";
+        assert!(Definition::from_yaml(yaml).is_ok());
+    }
+
+    #[test]
+    fn for_each_rejects_missing_inputs() {
+        let yaml = "metadata:\n  name: x\nspec:\n  activities:\n    - {id: loop, type: for_each}\n";
+        let err = Definition::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("loop"));
+    }
+
+    #[test]
+    fn for_each_rejects_a_non_array_non_reference_items_value() {
+        // A bare number is neither a `${...}` reference string nor a literal array.
+        let yaml = "metadata:\n  name: x\nspec:\n  activities:\n    - {id: loop, type: for_each, inputs: {items: 5, activity: {type: function}}}\n";
+        let err = Definition::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("must be a"), "{err}");
+    }
+
+    #[test]
+    fn for_each_rejects_an_engine_native_body_type() {
+        for body_type in ["wait", "workflow", "for_each", "map"] {
+            let yaml = format!(
+                "metadata:\n  name: x\nspec:\n  activities:\n    - {{id: loop, type: for_each, inputs: {{items: [1], activity: {{type: {body_type}}}}}}}\n"
+            );
+            let result = Definition::from_yaml(&yaml);
+            assert!(result.is_err(), "body type `{body_type}` must be rejected");
+            assert!(result.unwrap_err().to_string().contains("engine-native"));
+        }
+    }
+
+    #[test]
+    fn for_each_rejects_zero_max_concurrent() {
+        let yaml = "metadata:\n  name: x\nspec:\n  activities:\n    - {id: loop, type: for_each, inputs: {items: [1], max_concurrent: 0, activity: {type: function}}}\n";
+        let err = Definition::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("max_concurrent"), "{err}");
+    }
+
+    #[test]
+    fn for_each_rejects_zero_max_items() {
+        let yaml = "metadata:\n  name: x\nspec:\n  activities:\n    - {id: loop, type: for_each, inputs: {items: [1], max_items: 0, activity: {type: function}}}\n";
+        let err = Definition::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("max_items"), "{err}");
+    }
+
+    #[test]
+    fn for_each_defaults_are_the_documented_constants() {
+        let yaml = "metadata:\n  name: x\nspec:\n  activities:\n    - {id: loop, type: for_each, inputs: {items: [1], activity: {type: function}}}\n";
+        let def = Definition::from_yaml(yaml).unwrap();
+        let spec = ForEachSpec::parse(def.activity("loop").unwrap()).unwrap();
+        assert_eq!(spec.max_concurrent, DEFAULT_FOR_EACH_CONCURRENCY);
+        assert_eq!(spec.max_items, DEFAULT_FOR_EACH_MAX_ITEMS);
+    }
+
+    #[test]
+    fn activity_id_with_brackets_is_rejected() {
+        // Reserved for for_each's `<id>[<index>]` instance ids.
+        let yaml =
+            "metadata:\n  name: x\nspec:\n  activities:\n    - {id: \"a[0]\", type: function}\n";
+        let err = Definition::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("["), "{err}");
     }
 }

@@ -7,8 +7,8 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.2.0
-**Status:** In progress — ECO-301, ECO-302 done; everything else planned
+**Version:** 1.3.0
+**Status:** In progress — ECO-301, ECO-302, WFL-301, WFL-302 done; everything else planned
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
 **Last Updated:** 2026-07-14
 
@@ -263,7 +263,7 @@ is refused, not silently unrestricted.
 
 # WS-H — Workflow Expressiveness & Scale
 
-## WFL-301 `[P1]` — Loop / for-each activity
+## WFL-301 `[P1]` — Loop / for-each activity — **DONE (2026-07-14)**
 
 **Problem.** The DAG is strictly acyclic with a static activity list
 (`crates/apex-workflow/src/definition.rs:62,236`); no map-over-collection. (PRD-004
@@ -278,7 +278,7 @@ N results deterministically.
 **Files.** `crates/apex-workflow/src/{definition.rs,engine.rs}`. **Size.** L.
 **Depends on:** none.
 
-## WFL-302 `[P1]` — Dynamic (data-driven) fan-out
+## WFL-302 `[P1]` — Dynamic (data-driven) fan-out — **DONE (2026-07-14)**
 
 **Problem.** The concurrent `ready_batch` is only over statically-declared activities
 (`engine.rs:686,1099-1121`); K can't be derived from data. (PRD-004 R-H.6; audit High.)
@@ -289,6 +289,46 @@ N results deterministically.
 **Acceptance criteria.** A workflow fans out to a data-determined K and joins.
 
 **Files.** `crates/apex-workflow/src/engine.rs`. **Size.** L. **Depends on:** WFL-301.
+
+**Implementation notes (2026-07-14).** `is_for_each`/`ForEachSpec` in
+`definition.rs` recognize `for_each` (with `map` as an alias) as a third
+engine-native activity type alongside `wait`/`workflow`. Wire shape (under
+`inputs`): `items` (a `${...}` reference or a literal array), `activity` (the
+per-item body — any non-engine-native type; `wait`/`workflow`/`for_each`/`map`
+are rejected as a nested body at *load* time, fail-closed), and optional
+`max_concurrent` (default 8) / `max_items` (default 1000, a hard fail-closed
+bound against unbounded fan-out). Declared activity ids may not contain
+`[`/`]` — reserved for the per-item instance id `<parent_id>[<index>]` this
+introduces. `Engine::run_for_each` resolves `items` **once**, on first
+encounter, and durably pins the resolved array into the checkpoint (a
+`__for_each.<id>` variable) exactly like a durable timer pins its `fire_at` —
+it is never recomputed on resume, even if the source variable a `${...}`
+reference pointed at has since changed. Each element becomes its own durable
+`ActivityRecord` under `<id>[<index>]`, run to a terminal outcome
+concurrency-capped at `max_concurrent` (a sliding window over `JoinSet`, the
+same isolate-then-commit shape `run_ready_batch` already used for static
+parallel branches), then committed to the event log/checkpoint in **item
+order** regardless of completion order — so a resume re-drives only the
+instances that never reached `Completed`, and the joined output is
+reproducible. An item's permanent failure fails the `for_each` (and thus the
+workflow, subject to saga compensation like any other activity) but still
+durably commits the *other* items launched in the same phase rather than
+discarding their completed work; an item that interrupts resets just that
+instance to `Ready` and keeps the parent `for_each` itself `Ready` too, so a
+resume re-enters and only relaunches the pending instance(s). Proven by 9
+integration tests in `crates/apex-workflow/tests/engine.rs` (referenced vs.
+literal-array `items`; empty-collection short-circuit with zero instances
+spawned; `max_items` fail-closed before any instance is created; a
+non-array-resolving `items` fail-closed; the `max_concurrent` cap actually
+reached — not just never exceeded — under a timeout; partial-failure commits
+completed siblings; durable resume re-runs only the incomplete instance,
+proven by registering no handler for the already-completed ones so a re-run
+would panic the test; and the pinned-collection guarantee, proven by
+mutating the source variable directly in the checkpoint between runs and
+asserting the resumed instance still sees the originally-resolved item) plus
+9 definition-load-time unit tests in `definition.rs` (nested engine-native
+body types, zero `max_concurrent`/`max_items`, non-array/non-reference
+`items`, the reserved `[`/`]` id characters, and the documented defaults).
 
 ## WFL-303 `[P2]` — Checkpoint size cap + out-of-line large outputs
 
@@ -777,3 +817,4 @@ lint and load.
 | 1.0.0 | 2026-07-09 | Initial Phase-3 tickets from PRD-004 / the 2026-07-09 engineering audit (ecosystem, scale, DX, UI, operability) |
 | 1.1.0 | 2026-07-14 | ECO-301 (MCP client tool-source: stdio + streamable-HTTP transports, handshake/paginated discovery/`tools/call` proxying into `ToolRegistry` as permissioned `Tool` impls, fail-closed error mapping + timeouts) implemented and marked DONE with implementation notes — Phase 3 started |
 | 1.2.0 | 2026-07-14 | ECO-302 (plugin authoring SDK: new `apex-plugin-sdk` crate with typed `run_tool` stdin/stdout entry point + secret helpers; `apex plugin new` scaffold + `apex plugin build` digest-computing wasm32-wasip1 build step; real scaffold→build→sign→install acceptance round trip, wasm target added to CI) implemented and marked DONE with implementation notes |
+| 1.3.0 | 2026-07-14 | WFL-301/302 (engine-native `for_each`/`map` fan-out: runtime-collection expansion into concurrency-capped, durably-resumable per-item instances joined in item order; `max_items` fail-closed bound; collection pinned into the checkpoint on first encounter, never recomputed on resume) implemented and marked DONE with implementation notes — 18 new tests (9 engine integration + 9 definition-load unit) |

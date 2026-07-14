@@ -612,3 +612,368 @@ async fn cancel_fails_closed_on_unknown_or_already_terminal_executions() {
         "cancelling an already-cancelled execution must not silently succeed again"
     );
 }
+
+// ---------------------------------------------------------------------------
+// WFL-301/302 — engine-native for_each/map fan-out
+// ---------------------------------------------------------------------------
+
+/// A referenced collection (`${fetch}`) expands into one instance per element, and
+/// the joined output preserves **item order** regardless of anything else.
+#[tokio::test]
+async fn for_each_expands_a_referenced_collection_and_joins_outputs_in_order() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-basic\nspec:\n  activities:\n    - {id: fetch, type: function}\n    - {id: doubled, type: for_each, inputs: {items: \"${fetch}\", activity: {type: function}}}\n  transitions:\n    - {from: fetch, to: doubled}\n",
+    )
+    .unwrap();
+
+    let executor = ClosureExecutor::new()
+        .on("fetch", |_| async { Ok(json!([1, 2, 3])) })
+        .on("doubled[0]", |ctx| async move {
+            Ok(json!(ctx.variables["item"].as_i64().unwrap() * 2))
+        })
+        .on("doubled[1]", |ctx| async move {
+            Ok(json!(ctx.variables["item"].as_i64().unwrap() * 2))
+        })
+        .on("doubled[2]", |ctx| async move {
+            Ok(json!(ctx.variables["item"].as_i64().unwrap() * 2))
+        });
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, state) = engine
+        .run(&def, "wf-foreach-basic-1", json!({}))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, RunOutcome::Completed);
+    assert_eq!(state.variables.get("doubled"), Some(&json!([2, 4, 6])));
+    assert_eq!(state.activities["doubled"].state, ActivityState::Completed);
+    for i in 0..3 {
+        assert_eq!(
+            state.activities[&format!("doubled[{i}]")].state,
+            ActivityState::Completed
+        );
+    }
+}
+
+/// `items` may also be a literal array (no upstream activity involved), and
+/// `item_index` is exposed alongside `item` to each instance.
+#[tokio::test]
+async fn for_each_accepts_a_literal_array_and_exposes_item_index() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-literal\nspec:\n  activities:\n    - {id: tagged, type: for_each, inputs: {items: [\"a\", \"b\"], activity: {type: function}}}\n",
+    )
+    .unwrap();
+
+    let executor = ClosureExecutor::new()
+        .on("tagged[0]", |ctx| async move {
+            Ok(json!(format!(
+                "{}-{}",
+                ctx.variables["item_index"],
+                ctx.variables["item"].as_str().unwrap()
+            )))
+        })
+        .on("tagged[1]", |ctx| async move {
+            Ok(json!(format!(
+                "{}-{}",
+                ctx.variables["item_index"],
+                ctx.variables["item"].as_str().unwrap()
+            )))
+        });
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, state) = engine
+        .run(&def, "wf-foreach-literal-1", json!({}))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, RunOutcome::Completed);
+    assert_eq!(state.variables.get("tagged"), Some(&json!(["0-a", "1-b"])));
+}
+
+/// An empty collection completes the `for_each` immediately with an empty joined
+/// output — no item instances are ever created.
+#[tokio::test]
+async fn for_each_over_an_empty_collection_completes_immediately() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-empty\nspec:\n  activities:\n    - {id: none, type: for_each, inputs: {items: [], activity: {type: function}}}\n",
+    )
+    .unwrap();
+
+    // No handlers registered — any spawned instance would panic on lookup.
+    let engine = engine_with(InMemoryStore::new(), ClosureExecutor::new());
+    let (outcome, state) = engine
+        .run(&def, "wf-foreach-empty-1", json!({}))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, RunOutcome::Completed);
+    assert_eq!(state.variables.get("none"), Some(&json!([])));
+    assert_eq!(state.activities["none"].state, ActivityState::Completed);
+}
+
+/// A resolved collection larger than `max_items` fails the `for_each` closed,
+/// before any item instance is created — no unbounded fan-out.
+#[tokio::test]
+async fn for_each_fails_closed_when_the_collection_exceeds_max_items() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-bound\nspec:\n  activities:\n    - {id: bounded, type: for_each, inputs: {items: [1, 2, 3], max_items: 2, activity: {type: function}}}\n",
+    )
+    .unwrap();
+
+    // No handlers registered — if any instance were spawned, it would panic.
+    let engine = engine_with(InMemoryStore::new(), ClosureExecutor::new());
+    let (outcome, _) = engine
+        .run(&def, "wf-foreach-bound-1", json!({}))
+        .await
+        .unwrap();
+
+    match outcome {
+        RunOutcome::Failed(msg) => assert!(msg.contains("max_items"), "{msg}"),
+        other => panic!("expected Failed(..), got {other:?}"),
+    }
+}
+
+/// `items` resolving to something other than an array (an object, here) fails
+/// closed with a clear message rather than silently treating it as zero/one item.
+#[tokio::test]
+async fn for_each_fails_closed_when_items_does_not_resolve_to_an_array() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-badtype\nspec:\n  activities:\n    - {id: fetch, type: function}\n    - {id: loopy, type: for_each, inputs: {items: \"${fetch}\", activity: {type: function}}}\n  transitions:\n    - {from: fetch, to: loopy}\n",
+    )
+    .unwrap();
+
+    let executor = ClosureExecutor::new().on("fetch", |_| async { Ok(json!({"not": "an array"})) });
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, _) = engine
+        .run(&def, "wf-foreach-badtype-1", json!({}))
+        .await
+        .unwrap();
+
+    match outcome {
+        RunOutcome::Failed(msg) => assert!(msg.contains("array"), "{msg}"),
+        other => panic!("expected Failed(..), got {other:?}"),
+    }
+}
+
+/// At most `max_concurrent` item instances run at once — proven the same way
+/// `parallel_branches_run_concurrently` proves DAG-level concurrency: an
+/// in-flight counter that must never exceed the cap, wrapped in a timeout so a
+/// scheduler bug that serializes everything (or over-parallelizes) is caught
+/// rather than silently passing.
+#[tokio::test]
+async fn for_each_respects_the_max_concurrent_cap() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-cap\nspec:\n  activities:\n    - {id: capped, type: for_each, inputs: {items: [1, 2, 3, 4, 5, 6], max_concurrent: 2, activity: {type: function}}}\n",
+    )
+    .unwrap();
+
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let observed_max = Arc::new(AtomicUsize::new(0));
+    let mut executor = ClosureExecutor::new();
+    for i in 0..6 {
+        let in_flight = in_flight.clone();
+        let observed_max = observed_max.clone();
+        executor = executor.on(format!("capped[{i}]"), move |_| {
+            let in_flight = in_flight.clone();
+            let observed_max = observed_max.clone();
+            async move {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                observed_max.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(Value::Null)
+            }
+        });
+    }
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let run = engine.run(&def, "wf-foreach-cap-1", json!({}));
+    let (outcome, _) = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("must not hang")
+        .unwrap();
+
+    assert_eq!(outcome, RunOutcome::Completed);
+    assert!(
+        observed_max.load(Ordering::SeqCst) <= 2,
+        "max_concurrent: 2 was exceeded (observed {})",
+        observed_max.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        observed_max.load(Ordering::SeqCst),
+        2,
+        "the cap should actually be reached with 6 items, not just never exceeded"
+    );
+}
+
+/// One item failing permanently fails the `for_each` (and the workflow), but the
+/// *other* items launched in the same phase still commit their completed outputs
+/// durably — a partial success is not silently discarded.
+#[tokio::test]
+async fn for_each_item_failure_fails_the_for_each_but_commits_completed_siblings() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-itemfail\nspec:\n  activities:\n    - {id: risky, type: for_each, inputs: {items: [1, 2, 3], activity: {type: function}}}\n",
+    )
+    .unwrap();
+
+    let executor = ClosureExecutor::new()
+        .on("risky[0]", |_| async { Ok(json!("ok-0")) })
+        .on("risky[1]", |_| async {
+            Err(ActivityError::Permanent("item 1 rejected".into()))
+        })
+        .on("risky[2]", |_| async { Ok(json!("ok-2")) });
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, state) = engine
+        .run(&def, "wf-foreach-itemfail-1", json!({}))
+        .await
+        .unwrap();
+
+    match outcome {
+        RunOutcome::Failed(msg) => assert!(msg.contains("item 1"), "{msg}"),
+        other => panic!("expected Failed(..), got {other:?}"),
+    }
+    assert_eq!(state.activities["risky[0]"].state, ActivityState::Completed);
+    assert_eq!(state.activities["risky[1]"].state, ActivityState::Failed);
+    assert_eq!(state.activities["risky[2]"].state, ActivityState::Completed);
+    assert_eq!(state.activities["risky"].state, ActivityState::Failed);
+}
+
+/// Durable resume re-drives only the item instances that never completed — the
+/// `for_each` analogue of `durable_resume_does_not_reexecute_completed_activities`.
+/// Engine 1 completes items 0 and 2 but is interrupted on item 1 (simulating a
+/// crash mid-fan-out); a fresh engine over the same store resumes and must not
+/// re-run 0 or 2 (registering no handlers for them — any call would panic).
+#[tokio::test]
+async fn for_each_resume_reexecutes_only_incomplete_items() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-resume\nspec:\n  activities:\n    - {id: items3, type: for_each, inputs: {items: [10, 20, 30], activity: {type: function}}}\n",
+    )
+    .unwrap();
+
+    let dir = std::env::temp_dir().join(format!("apex-wf-foreach-resume-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let exec_id = "wf-foreach-resume-1";
+
+    // --- Engine 1: items 0 and 2 complete; item 1 interrupts (simulated crash). ---
+    {
+        let store = FileStore::new(&dir).unwrap();
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
+        let executor = ClosureExecutor::new()
+            .on("items3[0]", |ctx| async move {
+                Ok(json!(ctx.variables["item"].as_i64().unwrap() * 10))
+            })
+            .on("items3[1]", |_| async {
+                Err(ActivityError::Interrupted("worker crash mid-item".into()))
+            })
+            .on("items3[2]", |ctx| async move {
+                Ok(json!(ctx.variables["item"].as_i64().unwrap() * 10))
+            });
+
+        let engine = Engine::new(events, checkpoints, Arc::new(executor));
+        let (outcome, state) = engine.run(&def, exec_id, json!({})).await.unwrap();
+        assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+        assert_eq!(
+            state.activities["items3[0]"].state,
+            ActivityState::Completed
+        );
+        assert_ne!(
+            state.activities["items3[1]"].state,
+            ActivityState::Completed
+        );
+        assert_eq!(
+            state.activities["items3[2]"].state,
+            ActivityState::Completed
+        );
+    }
+
+    // --- Engine 2: a fresh instance resumes; items 0/2 must not re-run. ---
+    {
+        let store = FileStore::new(&dir).unwrap();
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store.clone());
+        let executor = ClosureExecutor::new().on("items3[1]", |ctx| async move {
+            Ok(json!(ctx.variables["item"].as_i64().unwrap() * 10))
+        });
+        // No handlers for items3[0]/items3[2] — a re-run would panic on lookup.
+
+        let engine = Engine::new(events, checkpoints, Arc::new(executor));
+        let (outcome, state) = engine.resume(&def, exec_id).await.unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert_eq!(
+            state.variables.get("items3"),
+            Some(&json!([100, 200, 300])),
+            "joined output must preserve item order regardless of which item resumed"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The resolved collection is pinned into the checkpoint on first encounter and
+/// never recomputed — even if the referenced source variable is mutated directly
+/// in the durable checkpoint before a resume (the same "recovery model" property
+/// [`human_task_suspends_and_resumes_durably`] exercises for a decision variable).
+#[tokio::test]
+async fn for_each_pins_the_resolved_collection_across_resume() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: foreach-pin\nspec:\n  activities:\n    - {id: fetch, type: function}\n    - {id: pinned, type: for_each, inputs: {items: \"${fetch}\", activity: {type: function}}}\n  transitions:\n    - {from: fetch, to: pinned}\n",
+    )
+    .unwrap();
+
+    let dir = std::env::temp_dir().join(format!("apex-wf-foreach-pin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let exec_id = "wf-foreach-pin-1";
+    let store = FileStore::new(&dir).unwrap();
+
+    // Engine 1: fetch resolves [1, 2], then the for_each interrupts on item 1.
+    {
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store.clone());
+        let executor = ClosureExecutor::new()
+            .on("fetch", |_| async { Ok(json!([1, 2])) })
+            .on("pinned[0]", |ctx| async move {
+                Ok(json!(ctx.variables["item"].as_i64().unwrap()))
+            })
+            .on("pinned[1]", |_| async {
+                Err(ActivityError::Interrupted("pause before item 1".into()))
+            });
+        let engine = Engine::new(events, checkpoints, Arc::new(executor));
+        let (outcome, _) = engine.run(&def, exec_id, json!({})).await.unwrap();
+        assert!(matches!(outcome, RunOutcome::Interrupted(_)));
+    }
+
+    // Mutate the durable checkpoint's `fetch` variable directly — simulating a
+    // source that would resolve differently if the for_each ever recomputed it.
+    {
+        let mut cp = store.latest(exec_id).await.unwrap().unwrap();
+        cp.variables
+            .insert("fetch".to_string(), json!([99, 98, 97, 96, 95]));
+        store.save(&cp).await.unwrap();
+    }
+
+    // Engine 2: resumes. If the collection were recomputed from the mutated
+    // `fetch`, this would expand to 5 items (and `pinned[1]`'s item would be 98,
+    // not 2) — instead the pinned 2-item collection from engine 1 must be used.
+    {
+        let events: Arc<dyn EventLog> = Arc::new(store.clone());
+        let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store.clone());
+        let executor = ClosureExecutor::new().on("pinned[1]", |ctx| async move {
+            assert_eq!(
+                ctx.variables["item"],
+                json!(2),
+                "must resume against the originally pinned collection, not a recomputed one"
+            );
+            Ok(json!(ctx.variables["item"].as_i64().unwrap()))
+        });
+        let engine = Engine::new(events, checkpoints, Arc::new(executor));
+        let (outcome, state) = engine.resume(&def, exec_id).await.unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert_eq!(state.variables.get("pinned"), Some(&json!([1, 2])));
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

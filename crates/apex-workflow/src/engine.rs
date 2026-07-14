@@ -15,7 +15,7 @@
 //! so each runs against the same pre-batch variable snapshot. A lone ready activity
 //! (or a `wait` suspension point) takes the simple sequential path.
 
-use crate::definition::{ActivityDef, Definition};
+use crate::definition::{ActivityDef, Definition, ForEachSpec, is_for_each};
 use crate::event::WorkflowEvent;
 use crate::executor::{ActivityContext, ActivityError, ActivityExecutor};
 use crate::state::{ActivityState, WorkflowState};
@@ -280,6 +280,25 @@ async fn run_attempts(
                 tokio::time::sleep(delay).await;
             }
         }
+    }
+}
+
+/// The durable id of one `for_each`/`map` item instance: `<parent_id>[<index>]`.
+/// Brackets are reserved from declared activity ids in [`Definition::validate`]
+/// specifically so this can never collide with one.
+fn instance_id(parent_id: &str, index: usize) -> String {
+    format!("{parent_id}[{index}]")
+}
+
+/// A short, human-readable name for a JSON value's kind, for error messages.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 
@@ -711,6 +730,9 @@ impl Engine {
                     // `workflow` activities drive a child execution (and may suspend);
                     // they take the sequential path, not the concurrent batch.
                     && a.activity_type != "workflow"
+                    // `for_each` manages its own item-level concurrency (WFL-301)
+                    // and commits heavily; it takes the sequential path too.
+                    && !is_for_each(&a.activity_type)
                     && self.is_ready(def, state, &a.id)
             })
             .map(|a| a.id.clone())
@@ -826,6 +848,12 @@ impl Engine {
         // `workflow` activities run a child execution and expose its result (G5).
         if activity.activity_type == "workflow" {
             return self.run_subworkflow(state, &activity).await;
+        }
+
+        // `for_each`/`map` activities expand a runtime collection into per-item
+        // instances and join their results (WFL-301/302).
+        if is_for_each(&activity.activity_type) {
+            return self.run_for_each(def, state, &activity).await;
         }
 
         let policy = def.retry_for(id);
@@ -1102,6 +1130,244 @@ impl Engine {
                 )))
             }
         }
+    }
+
+    /// Handle a `for_each`/`map` activity (WFL-301/302): expand a **runtime**
+    /// collection into one instance of the body activity per element, run the
+    /// instances concurrency-capped, and complete with their outputs joined
+    /// **in item order** — so the fan-out width is data-determined, not
+    /// statically declared.
+    ///
+    /// Durability mirrors the engine's other native types: the resolved
+    /// collection is recorded into the checkpoint on first encounter (like a
+    /// timer's `fire_at` — never recomputed on resume, so a drifting upstream
+    /// variable can't change the expansion mid-flight), and each item instance
+    /// has its own durable [`ActivityRecord`] under `<id>[<index>]`, so a
+    /// resume re-runs only the instances that never completed. Every launched
+    /// instance runs to a terminal outcome before anything commits, then the
+    /// results commit in item order — the same two-phase shape as
+    /// [`run_ready_batch`](Self::run_ready_batch), so the persisted history is
+    /// deterministic regardless of completion timing.
+    async fn run_for_each(
+        &self,
+        def: &Definition,
+        state: &mut ExecutionState,
+        activity: &ActivityDef,
+    ) -> Result<Step> {
+        let id = activity.id.clone();
+        // Validated at definition load; parse again here defensively (a
+        // programmatically-built definition may not have gone through validate).
+        let spec = ForEachSpec::parse(activity)?;
+
+        // Resolve the collection once, durably.
+        let marker = format!("__for_each.{id}");
+        let items: Vec<Value> = match state.variables.get(&marker) {
+            Some(Value::Array(items)) => items.clone(),
+            _ => {
+                let probe = ActivityContext {
+                    id: id.clone(),
+                    activity_type: activity.activity_type.clone(),
+                    name: activity.name.clone(),
+                    inputs: Value::Null,
+                    variables: state.variables.clone(),
+                    attempt: state.activities[&id].attempts + 1,
+                };
+                let resolved = crate::template::resolve(&spec.items, &probe);
+                let Value::Array(items) = resolved else {
+                    let attempt = state.activities[&id].attempts + 1;
+                    let msg = format!(
+                        "for_each `items` must resolve to an array, got {}",
+                        json_kind(&resolved)
+                    );
+                    return self
+                        .terminal_activity_failure(state, &id, attempt, msg)
+                        .await;
+                };
+                if items.len() > spec.max_items {
+                    let attempt = state.activities[&id].attempts + 1;
+                    let msg = format!(
+                        "for_each `items` resolved to {} elements, over the max_items \
+                         bound of {} — raise `max_items` if this fan-out is intended",
+                        items.len(),
+                        spec.max_items
+                    );
+                    return self
+                        .terminal_activity_failure(state, &id, attempt, msg)
+                        .await;
+                }
+                state
+                    .variables
+                    .insert(marker.clone(), Value::Array(items.clone()));
+                self.checkpoint(state).await?;
+                items
+            }
+        };
+
+        if items.is_empty() {
+            state.variables.remove(&marker);
+            return self.complete_for_each(state, &id, Vec::new()).await;
+        }
+
+        // Durable per-item instance records.
+        for index in 0..items.len() {
+            state.activities.entry(instance_id(&id, index)).or_default();
+        }
+        let pending: Vec<usize> = (0..items.len())
+            .filter(|i| state.activities[&instance_id(&id, *i)].state != ActivityState::Completed)
+            .collect();
+
+        // Phase 1: run pending instances to terminal outcomes, at most
+        // `max_concurrent` in flight — a sliding window over the item order.
+        let policy = spec
+            .body
+            .retry
+            .clone()
+            .or_else(|| def.spec.retry.clone())
+            .unwrap_or_default();
+        let snapshot = state.variables.clone();
+        let spawn_instance = |set: &mut JoinSet<(usize, IsolatedOutcome)>, index: usize| {
+            let inst = instance_id(&id, index);
+            let body = ActivityDef {
+                id: inst.clone(),
+                activity_type: spec.body.activity_type.clone(),
+                name: spec.body.name.clone(),
+                inputs: spec.body.inputs.clone(),
+                retry: None,
+                compensate: None,
+            };
+            let mut vars = snapshot.clone();
+            vars.insert("item".to_string(), items[index].clone());
+            vars.insert("item_index".to_string(), json!(index));
+            let executor = self.executor.clone();
+            let policy = policy.clone();
+            let base = state.activities[&inst].attempts;
+            set.spawn(async move {
+                (
+                    index,
+                    run_attempts(executor, inst, body, policy, vars, base).await,
+                )
+            });
+        };
+
+        let mut set = JoinSet::new();
+        let mut queue = pending.into_iter();
+        for _ in 0..spec.max_concurrent {
+            if let Some(index) = queue.next() {
+                spawn_instance(&mut set, index);
+            }
+        }
+        let mut slots: BTreeMap<usize, IsolatedOutcome> = BTreeMap::new();
+        while let Some(joined) = set.join_next().await {
+            let (index, outcome) =
+                joined.map_err(|e| Error::Runtime(format!("for_each item task panicked: {e}")))?;
+            slots.insert(index, outcome);
+            if let Some(next) = queue.next() {
+                spawn_instance(&mut set, next);
+            }
+        }
+
+        // Phase 2: commit deterministically in item order.
+        let mut failure: Option<String> = None;
+        let mut interrupt: Option<String> = None;
+        for (index, outcome) in slots {
+            let inst = outcome.id.clone();
+            let attempts = outcome.attempts;
+            self.set_activity(state, &inst, ActivityState::Running);
+            for event in outcome.events {
+                self.emit(state, event).await?;
+            }
+            match outcome.result {
+                IsolatedResult::Completed(output) => {
+                    let record = state.activities.get_mut(&inst).expect("record exists");
+                    record.attempts = attempts;
+                    record.state = ActivityState::Completed;
+                    record.output = Some(output.clone());
+                    self.emit(state, WorkflowEvent::ActivityCompleted { id: inst, output })
+                        .await?;
+                    self.checkpoint(state).await?;
+                }
+                IsolatedResult::Failed(msg) => {
+                    let record = state.activities.get_mut(&inst).expect("record exists");
+                    record.attempts = attempts;
+                    record.state = ActivityState::Failed;
+                    record.last_error = Some(msg.clone());
+                    self.emit(
+                        state,
+                        WorkflowEvent::ActivityFailed {
+                            id: inst,
+                            error: msg.clone(),
+                        },
+                    )
+                    .await?;
+                    self.checkpoint(state).await?;
+                    if failure.is_none() {
+                        failure = Some(format!("item {index} failed: {msg}"));
+                    }
+                }
+                IsolatedResult::Interrupted(msg) => {
+                    // Reset so a resume re-runs this (uncompleted) instance.
+                    self.set_activity(state, &inst, ActivityState::Ready);
+                    self.checkpoint(state).await?;
+                    if interrupt.is_none() {
+                        interrupt = Some(format!("item {index} suspended: {msg}"));
+                    }
+                }
+            }
+        }
+
+        if let Some(msg) = failure {
+            let attempt = state.activities[&id].attempts + 1;
+            return self
+                .terminal_activity_failure(state, &id, attempt, msg)
+                .await;
+        }
+        if let Some(msg) = interrupt {
+            // Keep the for_each runnable: a resume re-enters it and re-drives
+            // only the instances that never completed.
+            self.set_activity(state, &id, ActivityState::Ready);
+            self.checkpoint(state).await?;
+            return Ok(Step::Interrupted(format!("for_each `{id}`: {msg}")));
+        }
+
+        // Every instance completed → join the outputs in item order.
+        let outputs: Vec<Value> = (0..items.len())
+            .map(|i| {
+                state.activities[&instance_id(&id, i)]
+                    .output
+                    .clone()
+                    .unwrap_or(Value::Null)
+            })
+            .collect();
+        state.variables.remove(&marker);
+        self.complete_for_each(state, &id, outputs).await
+    }
+
+    /// Complete a `for_each` activity with the joined per-item outputs.
+    async fn complete_for_each(
+        &self,
+        state: &mut ExecutionState,
+        id: &str,
+        outputs: Vec<Value>,
+    ) -> Result<Step> {
+        let output = Value::Array(outputs);
+        {
+            let record = state.activities.get_mut(id).expect("record exists");
+            record.attempts += 1;
+            record.state = ActivityState::Completed;
+            record.output = Some(output.clone());
+        }
+        state.variables.insert(id.to_string(), output.clone());
+        state.completed_order.push(id.to_string());
+        self.emit(
+            state,
+            WorkflowEvent::ActivityCompleted {
+                id: id.to_string(),
+                output,
+            },
+        )
+        .await?;
+        self.checkpoint(state).await?;
+        Ok(Step::Completed)
     }
 
     /// Mark an activity as terminally failed and record the event.
