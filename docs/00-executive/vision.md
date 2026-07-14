@@ -1,6 +1,6 @@
-**Document Version:** 1.0
+**Document Version:** 2.0
 
-**Status:** Draft
+**Status:** Active — repositioned per [ADR-0011](../17-adr/ADR-0011-generative-ui-repositioning.md) (2026-07-14)
 
 **Owner:** Apex AI Platform Team
 
@@ -43,15 +43,49 @@ Rather than offering another AI framework, Apex provides a complete enterprise p
 
 ---
 
+# Product Focus (2026 Repositioning)
+
+As of 2026-07-14 ([ADR-0011](../17-adr/ADR-0011-generative-ui-repositioning.md),
+[PRD-005](../01-product/prd-generative-ui-runtime.md)), the platform is the
+**engine**; the **product** is the **Generative UI Trust Runtime** — the
+infrastructure that lets AI agents render rich, interactive interfaces to humans
+**safely, auditable, and with a durable human-in-the-loop decision cycle**.
+
+Software interfaces are shifting from hard-coded pages to interfaces generated at
+runtime around user intent. That shift breaks the web's security assumptions: a
+generated form can be a hallucinated phishing vector, prompt injection can
+manifest as UI, and no system of record can prove what an AI actually showed a
+user. Apex owns that missing layer, as three combined plays:
+
+1. **The trust & security layer for generative UI** — every generated frame is
+   policy-validated, constrained to a declarative component vocabulary,
+   sandboxed, and recorded in a tamper-evident audit chain before a human sees it.
+2. **Generative UI for enterprise internal tools** — the beachhead vertical:
+   governed, self-generating operational surfaces on the platform's tenancy,
+   RBAC, and audit.
+3. **The UI runtime for the agent economy** — the embeddable, MCP-addressable
+   runtime any agent uses to show a human something and durably await a decision.
+
+Everything below — the platform vision, subsystems, and principles — remains the
+foundation this product is built on, prioritized strictly by what the trust
+runtime needs. Building a consumer browser is an explicit non-goal.
+
+---
+
 # Vision Statement
 
-To become the world's most powerful open-source platform for developing, deploying, and operating autonomous AI systems.
+To be the trust layer of the generative-interface era: every interface an AI
+shows a human is safe, provable, and accountable — powered by the world's most
+production-grade open-source runtime for autonomous AI systems.
 
 ---
 
 # Mission
 
-Provide developers with a production-grade platform that makes building AI applications as straightforward as building modern web applications.
+Enable organizations to let AI agents interact with humans through rich,
+generated interfaces — without giving up security, auditability, or human
+control — on a platform that makes building AI applications as straightforward
+as building modern web applications.
 
 ---
 
@@ -197,6 +231,9 @@ The platform is not intended to:
 - Be tied to a single cloud vendor.
 - Require proprietary infrastructure.
 - Lock users into specific technologies.
+- Build a consumer web browser ([ADR-0011](../17-adr/ADR-0011-generative-ui-repositioning.md) §4: distribution economics make this unwinnable; the trust-layer value is capturable without owning the chrome).
+- Invent a proprietary generative-UI standard (open shapes are adopted and mapped; the runtime and enforcement point are the product).
+- Render raw model-authored HTML/JavaScript (the constrained component vocabulary is the load-bearing security decision).
 
 ---
 
