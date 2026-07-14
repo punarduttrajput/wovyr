@@ -442,9 +442,23 @@ mod tests {
     #[cfg(feature = "redis")]
     #[tokio::test]
     async fn unreachable_redis_degrades_to_local_limiting_not_unlimited() {
-        // Port 9 (discard) on loopback: connection refused, immediately.
-        let client = redis::Client::open("redis://127.0.0.1:9").unwrap();
-        let limiter = RateLimiter::new(1, 60).with_redis(client, "apex:rl:test-degrade");
+        // A local TCP listener nothing ever accepts on: the connection attempt
+        // fails reliably rather than being refused immediately, so this exercises
+        // the `REDIS_BUDGET` timeout path the same way regardless of platform (a
+        // fixed "connection refused" port, e.g. 9/discard, was found to behave
+        // inconsistently on Windows — see `tenancy::redis_tests`' equivalent test,
+        // which uses this identical technique). Each `check()` call now pays close
+        // to the full `REDIS_BUDGET` (1s) before falling back locally, so — unlike
+        // the old port-9 version, where the connection failed near-instantly — real
+        // time genuinely elapses between the two calls below; `1/min` (not `1/60`,
+        // i.e. 60/min) keeps the refill far too slow for that elapsed time to hand
+        // back a token, the same "refills far too slowly to matter" convention
+        // `sweep_does_not_drop_a_still_exhausted_bucket` above already uses.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = redis::Client::open(format!("redis://{addr}")).unwrap();
+        let limiter = RateLimiter::new(1, 1).with_redis(client, "apex:rl:test-degrade");
         assert!(limiter.check("alice").await.is_ok(), "degraded first token");
         assert!(
             limiter.check("alice").await.is_err(),
