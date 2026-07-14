@@ -374,10 +374,19 @@ enum PluginCommand {
         id: String,
     },
 
-    /// Publish a signed package to the marketplace registry.
+    /// Publish a package to the marketplace registry. With `--key`, also
+    /// finishes preparing it first: fills in real artifact digests, signs it,
+    /// and prints the trust line an operator pastes — one command instead of
+    /// hand-editing digests, `sign`, and a separate `trust` step.
     Publish {
-        /// Package directory or `.apexpkg` file to publish.
+        /// Package directory (required with `--key`) or a pre-signed `.apexpkg` file.
         source: String,
+
+        /// PKCS#8 ed25519 signing key (from `keygen`). When given, `source` must
+        /// be a directory: its artifact digests are recomputed from disk,
+        /// `plugin.yaml` is rewritten, and `plugin.sig` is (re)written.
+        #[arg(long)]
+        key: Option<String>,
 
         /// Channel to publish to (default `stable`).
         #[arg(long)]
@@ -883,9 +892,10 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
             PluginCommand::Uninstall { id } => plugin::uninstall_cmd(&id),
             PluginCommand::Publish {
                 source,
+                key,
                 channel,
                 categories,
-            } => plugin::publish_cmd(&source, channel, categories).await,
+            } => plugin::publish_cmd(&source, key, channel, categories).await,
             PluginCommand::Search {
                 query,
                 category,

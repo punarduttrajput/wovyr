@@ -718,16 +718,29 @@ fn parse_capability_kind(s: &str) -> Option<CapabilityKind> {
     }
 }
 
-/// `apex plugin publish <source> [--channel <c>] [--category <cat>]` — publish a signed
-/// package (directory or `.apexpkg`) to the local marketplace registry. The signature
-/// must verify against a trusted publisher.
+/// `apex plugin publish <source> [--key <priv-key-file>] [--channel <c>]
+/// [--category <cat>]` — publish a package (directory or `.apexpkg`) to the local
+/// marketplace registry.
+///
+/// Without `--key`, `source` must already be signed (`plugin.sig` present), as
+/// before. With `--key` (ECO-304 — the one-shot `keygen` → hand-edit digests →
+/// `sign` → operator `trust` sequence, collapsed into one command), `source`
+/// must be a package **directory**: [`prepare_and_sign`] recomputes every
+/// declared artifact's real digest from disk, rewrites `plugin.yaml`, signs the
+/// digest-complete manifest, and writes the publisher's public key alongside
+/// the package so the printed trust line is immediately actionable — before
+/// this function proceeds to publish exactly as it always has.
 pub async fn publish_cmd(
     source: &str,
+    key: Option<String>,
     channel: Option<String>,
     categories: Vec<String>,
 ) -> Result<()> {
     let source = source.to_string();
     blocking(move || {
+        if let Some(key_path) = &key {
+            prepare_and_sign(&source, key_path)?;
+        }
         let (package, _manifest) = load_package(&source)?;
         let bytes = package.to_apexpkg()?;
         let out = marketplace_registry()?.publish(&bytes, &categories, channel.as_deref())?;
@@ -742,6 +755,77 @@ pub async fn publish_cmd(
         Ok(())
     })
     .await
+}
+
+/// The digest-fill + sign half of the one-shot publish flow (ECO-304), factored
+/// out so it's independently testable without a marketplace registry. Recomputes
+/// every artifact declared in `<dir>/plugin.yaml` from the real file on disk
+/// (whatever digest was hand-authored there is discarded, not validated — this
+/// is the fix for "manual digest embedding"), rewrites `plugin.yaml`, signs the
+/// resulting bytes with `key_path` (PKCS#8 ed25519), writes `plugin.sig`, and
+/// derives + writes the publisher's public key to `<dir>/<publisher>.pub` — so
+/// it travels with the package and the trust line printed is directly usable by
+/// whoever receives it, not just the signer.
+fn prepare_and_sign(dir: &str, key_path: &str) -> Result<()> {
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    let dir = Path::new(dir);
+    if !dir.is_dir() {
+        return Err(Error::config(format!(
+            "`--key` requires a package directory (to rewrite plugin.yaml + plugin.sig \
+             in place), not a file: {}",
+            dir.display()
+        )));
+    }
+    let manifest_path = dir.join("plugin.yaml");
+    let manifest_yaml = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| Error::config(format!("could not read {}: {e}", manifest_path.display())))?;
+    let mut manifest = PluginManifest::from_yaml(&manifest_yaml)?;
+
+    for artifact in &mut manifest.artifacts {
+        let path = dir.join(&artifact.path);
+        let bytes = std::fs::read(&path).map_err(|e| {
+            Error::config(format!("could not read artifact {}: {e}", path.display()))
+        })?;
+        artifact.digest = format!("sha256:{}", sha256_hex(&bytes));
+    }
+
+    let rendered = serde_yaml::to_string(&manifest)
+        .map_err(|e| Error::invalid(format!("could not render the manifest: {e}")))?;
+    std::fs::write(&manifest_path, &rendered)?;
+
+    let pkcs8 = std::fs::read(key_path)
+        .map_err(|e| Error::config(format!("could not read signing key {key_path}: {e}")))?;
+    let kp = Ed25519KeyPair::from_pkcs8(&pkcs8)
+        .map_err(|_| Error::config(format!("`{key_path}` is not a valid PKCS#8 ed25519 key")))?;
+    let signature = kp.sign(rendered.as_bytes());
+    std::fs::write(dir.join("plugin.sig"), signature.as_ref())?;
+
+    let pub_path = dir.join(format!("{}.pub", manifest.metadata.publisher));
+    std::fs::write(&pub_path, kp.public_key().as_ref())?;
+
+    println!(
+        "Signed {} ({} artifact(s), digest{} computed from disk).",
+        manifest.reference(),
+        manifest.artifacts.len(),
+        if manifest.artifacts.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+    println!(
+        "Trust line for operators: `apex plugin trust {} --key {}`",
+        manifest.metadata.publisher,
+        pub_path.display()
+    );
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `apex plugin search [<query>] [--category <cat>] [--capability <kind>]` — discover
@@ -900,3 +984,128 @@ fn restrict(path: &Path) {
 
 #[cfg(not(unix))]
 fn restrict(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("apex_cli_plugin_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const MANIFEST_WITH_PLACEHOLDER_DIGEST: &str = r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata:
+  name: greeter
+  version: 0.1.0
+  publisher: acme
+capabilities:
+  - { kind: tool, id: greeter.run, entry: module.bin, sandbox: wasm }
+artifacts:
+  - { path: module.bin, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+"#;
+
+    /// The ECO-304 acceptance round trip, without needing a marketplace
+    /// registry (or the wasm toolchain — `prepare_and_sign` hashes whatever
+    /// bytes are declared, wasm or not): a hand-authored `plugin.yaml` with a
+    /// deliberately **wrong** placeholder digest is prepared + signed in one
+    /// call, and the result installs cleanly through the real engine trusting
+    /// exactly the `.pub` file the printed trust line references — proving
+    /// the digest actually used is the real one computed from disk, the
+    /// signature verifies, and the trust line is directly actionable.
+    #[test]
+    fn prepare_and_sign_fills_the_real_digest_and_produces_an_installable_signed_package() {
+        let dir = scratch("publish-ok");
+        std::fs::write(dir.join("module.bin"), b"not actually wasm, just bytes").unwrap();
+        std::fs::write(dir.join("plugin.yaml"), MANIFEST_WITH_PLACEHOLDER_DIGEST).unwrap();
+
+        keygen_cmd("acme", dir.to_str().unwrap()).unwrap();
+        prepare_and_sign(
+            dir.to_str().unwrap(),
+            dir.join("acme.key").to_str().unwrap(),
+        )
+        .unwrap();
+
+        // plugin.yaml now carries the *real* digest, not the hand-authored placeholder.
+        let manifest =
+            PluginManifest::from_yaml(&std::fs::read_to_string(dir.join("plugin.yaml")).unwrap())
+                .unwrap();
+        let real_bytes = std::fs::read(dir.join("module.bin")).unwrap();
+        assert_eq!(
+            manifest.artifacts[0].digest,
+            format!("sha256:{}", sha256_hex(&real_bytes)),
+            "the placeholder digest must be discarded, not validated or kept"
+        );
+
+        // A signature was produced, and a public key was derived and written
+        // alongside the package — the file the printed trust line points at.
+        assert!(dir.join("plugin.sig").is_file());
+        let pub_path = dir.join("acme.pub");
+        assert!(pub_path.is_file());
+
+        // Installs cleanly through the real engine, trusting exactly that .pub
+        // file — the acceptance bar: "a signed, digest-complete package + the
+        // trust line an operator pastes."
+        let (package, installed_manifest) = read_package_dir(&dir).unwrap();
+        let mut trust = TrustStore::new();
+        trust.trust("acme", std::fs::read(&pub_path).unwrap());
+        let mut engine =
+            PluginEngine::new(platform_api(), trust).with_staging_dir(dir.join("staging"));
+        let installed = engine.install(&package, &[]).unwrap();
+        assert_eq!(installed.manifest.reference(), "acme/greeter@0.1.0");
+        assert_eq!(installed_manifest.reference(), "acme/greeter@0.1.0");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_and_sign_rejects_a_non_directory_source() {
+        let dir = scratch("publish-file");
+        let file = dir.join("package.apexpkg");
+        std::fs::write(&file, b"not a directory").unwrap();
+
+        let err = prepare_and_sign(file.to_str().unwrap(), "irrelevant.key").unwrap_err();
+        assert!(err.to_string().contains("directory"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_and_sign_fails_closed_on_a_missing_artifact_file() {
+        let dir = scratch("publish-missing-artifact");
+        // No module.bin written — the declared artifact path doesn't exist.
+        std::fs::write(dir.join("plugin.yaml"), MANIFEST_WITH_PLACEHOLDER_DIGEST).unwrap();
+        keygen_cmd("acme", dir.to_str().unwrap()).unwrap();
+
+        let err = prepare_and_sign(
+            dir.to_str().unwrap(),
+            dir.join("acme.key").to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("module.bin"), "{err}");
+        // Nothing partially written: a failed digest pass must not sign or
+        // rewrite the manifest.
+        assert!(!dir.join("plugin.sig").is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_and_sign_rejects_an_invalid_signing_key() {
+        let dir = scratch("publish-badkey");
+        std::fs::write(dir.join("module.bin"), b"bytes").unwrap();
+        std::fs::write(dir.join("plugin.yaml"), MANIFEST_WITH_PLACEHOLDER_DIGEST).unwrap();
+        std::fs::write(dir.join("bad.key"), b"not a pkcs8 key").unwrap();
+
+        let err = prepare_and_sign(dir.to_str().unwrap(), dir.join("bad.key").to_str().unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("ed25519"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

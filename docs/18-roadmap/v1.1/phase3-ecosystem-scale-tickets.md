@@ -7,8 +7,8 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.3.0
-**Status:** In progress — ECO-301, ECO-302, WFL-301, WFL-302 done; everything else planned
+**Version:** 1.4.0
+**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301, WFL-302 done; everything else planned
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
 **Last Updated:** 2026-07-14
 
@@ -173,7 +173,7 @@ runtime.rs:20-33}`). (PRD-004 R-F.3; audit Med.)
 
 **Files.** `crates/apex-plugin/src/runtime.rs`. **Size.** M. **Depends on:** SBX-101.
 
-## ECO-304 `[P2]` — One-shot `apex plugin publish`
+## ECO-304 `[P2]` — One-shot `apex plugin publish` — **DONE (2026-07-14)**
 
 **Problem.** Publishing is multi-step and manual: `keygen` → `sign` → operator
 `trust`, with manual digest embedding (`apps/apex-cli/src/plugin.rs:163-208`). (PRD-004
@@ -186,6 +186,36 @@ trust snippet.
 trust line an operator pastes.
 
 **Files.** `apps/apex-cli/src/plugin.rs`. **Size.** M. **Depends on:** ECO-302.
+
+**Implementation notes (2026-07-14).** Extended the existing `apex plugin
+publish <source>` (registry upload) with an optional `--key <pkcs8-file>`
+flag rather than adding a new verb — non-breaking, since without `--key`
+publish behaves exactly as before (source must already be signed). With
+`--key`, a new `prepare_and_sign` helper runs first: `source` must be a
+package **directory** (a clear error otherwise, since there's nowhere to
+rewrite); every artifact `path` the manifest declares is read from disk and
+its real sha256 recomputed — whatever digest was hand-authored in
+`plugin.yaml` is discarded, not validated, which is the actual fix for
+"manual digest embedding" (a placeholder like `sha256:000…0` is fine as
+input). The digest-complete manifest is rewritten to `plugin.yaml`, signed
+with the given key (ed25519 over the rewritten bytes, so the signature
+always matches what's on disk), `plugin.sig` written, and — the part that
+makes the printed trust line self-contained — the public key is derived from
+the private key and written to `<dir>/<publisher>.pub` *inside the package
+directory*, so it travels with the package to whoever receives it rather
+than depending on `keygen`'s separate `.pub` file still being around.
+Prints `apex plugin trust <publisher> --key <path>` referencing that exact
+file. Deliberately fails closed before writing anything if any declared
+artifact is missing (loop reads all artifacts before either file is
+touched), so a partial run never leaves a `plugin.sig` that doesn't match
+`plugin.yaml`. Proven by 4 unit tests in `apps/apex-cli/src/plugin.rs`
+(`prepare_and_sign_*`): the happy path — a hand-authored placeholder digest
+is discarded, the real one is computed, and the produced package/`.pub` file
+install cleanly through the real `PluginEngine` (the full acceptance bar,
+without needing a marketplace registry); a non-directory source rejected; a
+missing artifact file rejected before anything is written; an invalid
+signing key rejected. All offline, no wasm toolchain needed (hashes
+arbitrary bytes, not specifically a compiled module).
 
 ## ECO-305 `[P3]` — Marketplace OSV/CVE feed
 
@@ -818,3 +848,4 @@ lint and load.
 | 1.1.0 | 2026-07-14 | ECO-301 (MCP client tool-source: stdio + streamable-HTTP transports, handshake/paginated discovery/`tools/call` proxying into `ToolRegistry` as permissioned `Tool` impls, fail-closed error mapping + timeouts) implemented and marked DONE with implementation notes — Phase 3 started |
 | 1.2.0 | 2026-07-14 | ECO-302 (plugin authoring SDK: new `apex-plugin-sdk` crate with typed `run_tool` stdin/stdout entry point + secret helpers; `apex plugin new` scaffold + `apex plugin build` digest-computing wasm32-wasip1 build step; real scaffold→build→sign→install acceptance round trip, wasm target added to CI) implemented and marked DONE with implementation notes |
 | 1.3.0 | 2026-07-14 | WFL-301/302 (engine-native `for_each`/`map` fan-out: runtime-collection expansion into concurrency-capped, durably-resumable per-item instances joined in item order; `max_items` fail-closed bound; collection pinned into the checkpoint on first encounter, never recomputed on resume) implemented and marked DONE with implementation notes — 18 new tests (9 engine integration + 9 definition-load unit) |
+| 1.4.0 | 2026-07-14 | ECO-304 (one-shot `apex plugin publish --key`: recomputes real artifact digests from disk, rewrites `plugin.yaml`, signs it, and writes the publisher's `.pub` alongside the package so the printed trust line is directly actionable — collapsing `keygen`→hand-edit-digests→`sign`→operator-`trust` into one command) implemented and marked DONE with implementation notes — 4 new unit tests, no marketplace or wasm toolchain needed to run them |
