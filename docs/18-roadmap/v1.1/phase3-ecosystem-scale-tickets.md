@@ -7,8 +7,8 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.7.0
-**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G) done; everything else planned
+**Version:** 1.8.0
+**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), DEP-301 done; everything else planned
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
 **Last Updated:** 2026-07-14
 
@@ -1166,7 +1166,7 @@ contract gate.
 
 # WS-L — Operability
 
-## DEP-301 `[P1]` — systemd unit + install script for the appliance
+## DEP-301 `[P1]` — systemd unit + install script for the appliance — **DONE (2026-07-14)**
 
 **Problem.** The README markets a single-binary appliance but there is no `*.service`,
 `install.sh`, or distro package under `deployment/`; only container/K8s paths exist.
@@ -1180,6 +1180,41 @@ working install on a clean host (documented, ideally smoke-tested in CI on Linux
 
 **Files.** `deployment/systemd/*`, `deployment/install.sh`. **Size.** M.
 **Depends on:** none.
+
+**Resolution.** `deployment/systemd/apex.service` runs the one real production
+entrypoint (`apex dev --addr $APEX_BIND_ADDR` — there is no separate `apex
+serve` command; `serve()` in `crates/apex-server/src/lib.rs` already handles
+graceful SIGTERM shutdown and refuses a non-loopback bind without TLS per
+SEC-202, so the unit doesn't duplicate either) as a dedicated `apex` system
+user, with a real (not decorative) systemd sandbox —
+`ProtectSystem=strict`/`ReadWritePaths=/var/lib/apex`/`NoNewPrivileges`/
+`PrivateTmp`/`ProtectHome`/etc. — documented as a moderate default an
+operator enabling the (off-by-default) `shell`/`code_execute` tool builtins
+without a container/gVisor backend may need to relax.
+`deployment/install.sh` is idempotent (safe to re-run after building a new
+binary): creates the system user/group (home `/var/lib/apex`, no login
+shell), `/var/lib/apex/.apex` (`0700`), installs the binary + unit +
+`deployment/systemd/apex.env.example` → `/etc/apex/apex.env` (**only** if
+that file doesn't already exist, so operator edits survive a re-run/upgrade),
+and runs `systemctl daemon-reload` — deliberately without enabling/starting
+the service, so `/etc/apex/apex.env` (shipped default: loopback-only,
+`disabled-loopback` auth) gets a review first. New doc
+`docs/12-deployment/systemd.md` covers install/config/sandboxing/backup/
+upgrade/uninstall, linked from `docs/12-deployment/index.md`'s topology table
+and doc map (→1.1.0). A `.gitattributes` was added alongside this (`*.sh`/
+`*.service` forced to LF) after this session's own Windows dev box warned it
+would rewrite the just-authored script's line endings to CRLF on a future
+checkout — which would have broken the shebang on a real Linux host
+(`bad interpreter`) — the exact class of bug this ticket's own artifacts are
+otherwise most exposed to. **The "ideally smoke-tested in CI on Linux" half
+of the acceptance criterion is real, not aspirational**: a new
+`systemd-install` CI job (`.github/workflows/ci.yml`) runs on a genuine
+`ubuntu-latest` VM (systemd actually works there, unlike inside a Docker
+container) — builds the release binary, runs `install.sh`, `systemctl enable
+--now apex`, polls `/healthz` until healthy (or dumps `journalctl`/`systemctl
+status` and fails), **then re-runs `install.sh` and asserts
+`/etc/apex/apex.env`'s checksum is unchanged** — the idempotency/never-clobber
+claim, checked mechanically rather than left as an unverified comment.
 
 ## DEP-302 `[P2]` — Operator upgrade/migration runbook + Helm/Terraform
 
@@ -1258,4 +1293,5 @@ lint and load.
 | 1.4.0 | 2026-07-14 | ECO-304 (one-shot `apex plugin publish --key`: recomputes real artifact digests from disk, rewrites `plugin.yaml`, signs it, and writes the publisher's `.pub` alongside the package so the printed trust line is directly actionable — collapsing `keygen`→hand-edit-digests→`sign`→operator-`trust` into one command) implemented and marked DONE with implementation notes — 4 new unit tests, no marketplace or wasm toolchain needed to run them |
 | 1.5.0 | 2026-07-14 | WFL-303..308 (all remaining WS-H tickets) implemented and marked DONE with implementation notes, closing out WS-H entirely: WFL-303 fail-closed activity-output size cap (permanent failure via the saga path, not a hard abort); WFL-304 event-log paging (`history_page`, real bounded `FileStore`/`PostgresStore` implementations) + explicit opt-in retention (`compact_history`), plus a proof that `resume` already never reads the log at all; WFL-305 indexed `workflow_name`/`status` Postgres columns + SQL-side filtering/pagination (migration V3), proven via a deliberately-corrupt non-matching row that would fail to decode if `list()` ever fell back to scanning; WFL-306 a `fire_at`-sorted `BTreeSet` index for `InMemoryTimerStore` + `TimerDispatcher`/`ScheduleDispatcher::run_adaptive` (sleep until the next deadline, capped at a max interval), proven with a real wall-clock near-deadline-timer test; WFL-307 an `ActivityContext.progress` channel + `ActivityProgress` event, live on the sequential activity path via `tokio::select!`; WFL-308 a versioned event wire envelope (`encode_event`/`decode_event`, fail-closed on an unknown future version) now used by every store. 30 new tests total; full `apex-workflow` suite + whole-workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
 | 1.6.0 | 2026-07-14 | SBX-301..304 (all of WS-E) implemented and marked DONE with implementation notes, closing out WS-E entirely: SBX-301 a confined `fs_write` builtin (opt-in like `shell`) with a write-specific symlink-escape guard beyond `fs_read`'s existing confinement; SBX-302 a sandboxed `code_execute` tool (Python/Node) routed through the identical SBX-101/SEC-305 backend selection `ShellTool` uses, resource-limited and egress-controlled, including a real Windows "app execution alias" false-positive found and fixed in the test gating itself; SBX-303 a new `apex-tool-macros` proc-macro crate (`#[derive(Tool)]`) generating `ToolMetadata`/JSON-Schema (via `schemars`)/typed-parse boilerplate so a tool author never hand-writes a schema literal or a `.get().and_then()` chain; SBX-304 an explicit, documented platform-matrix fail-closed check (Linux+Docker only) in `ContainerSandbox::execute`, replacing what used to be only an *accidental* fail-closed side effect of a missing `nsenter` binary, and additionally closing a real, previously-unguarded Podman gap. 27 new tests total (8 fs_write + 9 code_execute + 4 derive(Tool) + 2 registry opt-in + 4 egress-lockdown-gate); full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
-| 1.7.0 | 2026-07-14 | SRV-302..307 (all of WS-G) implemented and marked DONE with implementation notes, closing out WS-G entirely: SRV-302 an mtime-stamped in-memory cache for `FileApiKeyStore` (one `stat()` replaces a full read+parse per request in the common case); SRV-303 a real generated OpenAPI spec (`#[utoipa::path]` on all ~65 routes + `ToSchema` request/error types, served at `GET /openapi.json`, verified live end-to-end via a real `apex dev` server + `redocly lint` at 0 errors, with the CI contract gate repointed at the live document instead of the hand-written `openapi.yaml`); SRV-304 `lib.rs`'s inline test suite moved to a file-backed `tests.rs` submodule (2,842 → 444 lines, same crate-internal visibility, no `pub` widening); SRV-305 the idempotency store rewritten from a per-`put` full-file rewrite to an append-only JSON-lines log with periodic compaction (O(1) amortized instead of O(entries) per call); SRV-306 an 11-file audit finding zero attacker-triggerable unwraps in production handler code, plus a real `cfg_attr(not(test), warn(...))`-gated clippy lint (verified to actually fire) guarding regressions; SRV-307 Redis-shared concurrency slots mirroring SRV-201's `RateLimiter` design (atomic Lua increment-if-under-limit, `Drop`-triggered fire-and-forget async release, a documented 24h crash-recovery safety-net TTL), `admit_run` converted to `async fn` across all call sites. 8 new tests total (2 SRV-302 + 2 SRV-305 + 3 SRV-307 capability-gated); a pre-existing, unrelated flaky test in `rate_limit.rs` was found (not fixed — flagged separately) on this Windows dev machine while validating SRV-307; full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout, incl. the `redis` feature build |
+| 1.7.0 | 2026-07-14 | SRV-302..307 (all of WS-G) implemented and marked DONE with implementation notes, closing out WS-G entirely: SRV-302 an mtime-stamped in-memory cache for `FileApiKeyStore` (one `stat()` replaces a full read+parse per request in the common case); SRV-303 a real generated OpenAPI spec (`#[utoipa::path]` on all ~65 routes + `ToSchema` request/error types, served at `GET /openapi.json`, verified live end-to-end via a real `apex dev` server + `redocly lint` at 0 errors, with the CI contract gate repointed at the live document instead of the hand-written `openapi.yaml`); SRV-304 `lib.rs`'s inline test suite moved to a file-backed `tests.rs` submodule (2,842 → 444 lines, same crate-internal visibility, no `pub` widening); SRV-305 the idempotency store rewritten from a per-`put` full-file rewrite to an append-only JSON-lines log with periodic compaction (O(1) amortized instead of O(entries) per call); SRV-306 an 11-file audit finding zero attacker-triggerable unwraps in production handler code, plus a real `cfg_attr(not(test), warn(...))`-gated clippy lint (verified to actually fire) guarding regressions; SRV-307 Redis-shared concurrency slots mirroring SRV-201's `RateLimiter` design (atomic Lua increment-if-under-limit, `Drop`-triggered fire-and-forget async release, a documented 24h crash-recovery safety-net TTL), `admit_run` converted to `async fn` across all call sites. 8 new tests total (2 SRV-302 + 2 SRV-305 + 3 SRV-307 capability-gated); a pre-existing, unrelated flaky test in `rate_limit.rs` was found (and, in a same-day follow-up, fixed) on this Windows dev machine while validating SRV-307; full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout, incl. the `redis` feature build |
+| 1.8.0 | 2026-07-14 | DEP-301 (systemd unit + install script for the appliance) implemented and marked DONE with implementation notes: `deployment/systemd/apex.service` (real sandboxing — `ProtectSystem=strict` etc. — not decorative) + `apex.env.example`, idempotent `deployment/install.sh` (dedicated system user, `/var/lib/apex/.apex` at `0700`, never overwrites an existing env file), new `docs/12-deployment/systemd.md`, a `.gitattributes` forcing LF on `*.sh`/`*.service` (a real corruption risk caught before it shipped, not hypothetical), and a `systemd-install` CI job that runs the actual install on a genuine systemd VM, polls `/healthz`, and re-runs `install.sh` to mechanically check the idempotency claim rather than trust a comment |

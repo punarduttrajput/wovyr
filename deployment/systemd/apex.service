@@ -1,0 +1,70 @@
+# systemd unit for the Apex AI Platform single-node appliance (RM-AIM-P3
+# DEP-301, ADR-0010 Path A). Installed by ../install.sh, which also creates the
+# `apex` system user/group and /etc/apex/apex.env this unit requires.
+#
+# `apex dev --addr <addr>` is the single production entrypoint (there is no
+# separate `apex serve` command) — see crates/apex-server/src/lib.rs's
+# `serve()`. It already handles graceful shutdown on SIGTERM/SIGINT (draining
+# in-flight requests within APEX_SHUTDOWN_GRACE_SECS) and refuses to bind a
+# non-loopback address without TLS configured or APEX_TLS_TERMINATED_UPSTREAM=1
+# (SEC-202) — this unit does not need to duplicate either behavior.
+#
+# Manual install/management (see ../../docs/12-deployment/systemd.md for the
+# full walkthrough):
+#   sudo ./deployment/install.sh
+#   sudo systemctl enable --now apex
+#   sudo systemctl status apex
+#   journalctl -u apex -f
+
+[Unit]
+Description=Apex AI Platform server (single-node appliance)
+Documentation=https://github.com/punarduttrajput/Apex
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=apex
+Group=apex
+
+# `apex-config` resolves all durable state under `$HOME/.apex` — set
+# explicitly rather than relying on systemd's User=-derived HOME, so this unit
+# behaves identically regardless of how /etc/passwd's home field is set.
+Environment=HOME=/var/lib/apex
+
+# Required, not optional (no `-` prefix): APEX_BIND_ADDR below is substituted
+# straight into ExecStart, so a missing file would start the binary with no
+# --addr value at all. install.sh always creates this file on first install.
+EnvironmentFile=/etc/apex/apex.env
+
+ExecStart=/usr/local/bin/apex dev --addr ${APEX_BIND_ADDR}
+
+Restart=on-failure
+RestartSec=5s
+# Longer than the default APEX_SHUTDOWN_GRACE_SECS (30s, see
+# crates/apex-server/src/lib.rs) so systemd's own SIGKILL escalation never
+# preempts the application's own graceful drain.
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+
+# --- Sandboxing (a reasonable default, not a one-size-fits-all guarantee) ---
+# `apex-tools`' `shell`/`code_execute` builtins (opt-in only, see
+# with_privileged_builtins()/APEX_ENABLE_SHELL_TOOL) spawn native child
+# processes when no container/gVisor sandbox backend is available on the
+# node — an operator enabling either against this unit's default confinement
+# should relax ReadWritePaths (and possibly ProtectSystem) to whatever
+# scratch space those tools actually need; the appliance's own state lives
+# entirely under /var/lib/apex regardless.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/apex
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+
+[Install]
+WantedBy=multi-user.target

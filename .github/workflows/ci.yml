@@ -30,6 +30,11 @@
 # PyPI SDK was written against. Both suites skip cleanly (not fail) when no server
 # answers, so the job boots a real `apex dev` and waits for `/healthz` before
 # running them, rather than relying on that offline fallback ever exercising them.
+# RM-AIM-P3 DEP-301 adds `systemd-install`: runs `deployment/install.sh` for real
+# on a genuine systemd host (the ubuntu-latest runner is a full VM, not a
+# container, so `systemctl` works), then enables/starts the unit and curls
+# `/healthz` — the ticket's own "smoke-tested in CI on Linux" acceptance
+# criterion, not just a lint over the shell script.
 name: ci
 
 on:
@@ -461,4 +466,55 @@ jobs:
           image-ref: apex:ci
           severity: HIGH,CRITICAL
           exit-code: "1"
+
+  systemd-install:
+    name: systemd install smoke test (DEP-301)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the apex-cli release binary
+        run: cargo build --release -p apex-cli
+
+      - name: Run the install script
+        run: sudo ./deployment/install.sh
+
+      - name: Enable and start the service
+        run: |
+          sudo systemctl enable --now apex
+          # Give the unit a moment before asserting it's actually up, rather
+          # than racing the very first health check.
+          sleep 2
+          sudo systemctl is-active apex
+
+      - name: Wait for /healthz
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/healthz > /dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "::error::apex.service never became healthy" >&2
+          sudo systemctl status apex --no-pager || true
+          sudo journalctl -u apex --no-pager || true
+          exit 1
+
+      - name: Re-run install.sh (idempotency: must not clobber the env file)
+        run: |
+          sudo md5sum /etc/apex/apex.env > /tmp/env-before.md5
+          sudo ./deployment/install.sh
+          sudo md5sum -c /tmp/env-before.md5
+
+      - name: Service log (always shown for debugging)
+        if: always()
+        run: sudo journalctl -u apex --no-pager || true
+
+      - name: Stop the service
+        if: always()
+        run: sudo systemctl disable --now apex || true
           ignore-unfixed: true

@@ -139,7 +139,7 @@ apex/
     apex-server/         # the Axum single-node server
     apex-eval/           # a deterministic AI-eval harness (prototype spike)
   dashboard/              # Angular SPA (direct to apex-server)
-  deployment/             # Docker/Compose/Helm artifacts for what's actually built
+  deployment/             # systemd/Docker/Compose/Helm artifacts for what's actually built
   docs/                   # spec-driven documentation (source of truth)
   examples/               # runnable agent/workflow YAML manifests
   sdks/                   # TypeScript + Python API clients
@@ -195,6 +195,9 @@ Observability
 
 Deployment
 
+- Bare-metal / systemd (real, working — [`deployment/install.sh`](deployment/install.sh) +
+  [`deployment/systemd/`](deployment/systemd/), smoke-tested in CI; see
+  [docs/12-deployment/systemd.md](docs/12-deployment/systemd.md))
 - Docker, Docker Compose (real, working — [`deployment/docker-compose.yml`](deployment/docker-compose.yml))
 - Kubernetes/Helm (a real single-replica chart exists at
   [`deployment/helm/apex/`](deployment/helm/apex/README.md); a multi-service,

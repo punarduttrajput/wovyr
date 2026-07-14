@@ -7,10 +7,10 @@ Document ID: DEP-INDEX-001
 
 **Document ID:** DEP-INDEX-001  
 **File Path:** `docs/12-deployment/index.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Active  
 **Owner:** Platform Operations Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-14
 
 ---
 
@@ -25,6 +25,7 @@ This document is the **central navigation** for deploying the Apex AI Platform. 
 | Topology | Use | Guide |
 |----------|-----|-------|
 | Single binary | Local dev / evaluation | [docker.md](docker.md) |
+| Bare-metal / systemd | Single-node appliance, no container runtime | [systemd.md](systemd.md) |
 | Compose stack | Team / small self-host | [docker-compose.md](docker-compose.md) |
 | Kubernetes | Production, scalable | [kubernetes.md](kubernetes.md) / [helm.md](helm.md) |
 | Cloud infra | Managed datastores + K8s | [terraform.md](terraform.md) |
@@ -67,6 +68,7 @@ exposes `/healthz` and `/metrics` directly.
 | Document | Responsibility |
 |----------|----------------|
 | [docker.md](docker.md) | Images, single-binary container, build/run |
+| [systemd.md](systemd.md) | Bare-metal appliance install: systemd unit, `install.sh`, env-file config |
 | [docker-compose.md](docker-compose.md) | Full local/self-host stack |
 | [kubernetes.md](kubernetes.md) | Manifests, scaling, probes, networking |
 | [helm.md](helm.md) | Helm chart, values, upgrades |
@@ -103,4 +105,5 @@ exposes `/healthz` and `/metrics` directly.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-14 | Added the bare-metal/systemd topology (RM-AIM-P3 DEP-301): `deployment/install.sh` + `deployment/systemd/*`, new [systemd.md](systemd.md) |
 | 1.0.0 | 2026-06-27 | Initial Deployment Index |
