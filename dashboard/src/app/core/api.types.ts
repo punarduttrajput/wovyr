@@ -88,8 +88,8 @@ export interface Membership {
 
 export interface QuotaLimits {
   llm_cost_per_day_usd?: number | null;
-  tool_executions_per_minute?: number | null;
-  memory_records?: number | null;
+  /** LLM tokens (prompt + completion) per rolling day (SRV-202). */
+  llm_tokens_per_day?: number | null;
   concurrent_agent_runs?: number | null;
 }
 

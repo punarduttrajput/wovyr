@@ -21,21 +21,6 @@ impl QuotaLimits {
         )
     }
 
-    /// Admit `adding` new memory records given `current` already stored.
-    pub fn check_memory_records(&self, current: u64, adding: u64) -> Result<()> {
-        check_count("memory_records", self.memory_records, current, adding)
-    }
-
-    /// Admit `adding` tool executions given `in_window` already run this minute.
-    pub fn check_tool_executions(&self, in_window: u64, adding: u64) -> Result<()> {
-        check_count(
-            "tool_executions_per_minute",
-            self.tool_executions_per_minute,
-            in_window,
-            adding,
-        )
-    }
-
     /// Admit `adding` USD of LLM spend given `spent_today` already this rolling day.
     pub fn check_llm_cost(&self, spent_today: f64, adding: f64) -> Result<()> {
         match self.llm_cost_per_day_usd {
@@ -45,6 +30,17 @@ impl QuotaLimits {
             ))),
             _ => Ok(()),
         }
+    }
+
+    /// Admit `adding` LLM tokens given `used_today` already this rolling day
+    /// (RM-AIM-P2 SRV-202).
+    pub fn check_llm_tokens(&self, used_today: u64, adding: u64) -> Result<()> {
+        check_count(
+            "llm_tokens_per_day",
+            self.llm_tokens_per_day,
+            used_today,
+            adding,
+        )
     }
 }
 
@@ -88,5 +84,38 @@ mod tests {
         };
         assert!(q.check_llm_cost(9.5, 0.5).is_ok());
         assert!(q.check_llm_cost(9.5, 1.0).is_err());
+    }
+
+    #[test]
+    fn enforces_token_budget_at_the_threshold() {
+        let q = QuotaLimits {
+            llm_tokens_per_day: Some(1_000),
+            ..Default::default()
+        };
+        assert!(q.check_llm_tokens(900, 100).is_ok()); // exactly at the limit
+        let err = q.check_llm_tokens(900, 101).unwrap_err();
+        assert!(matches!(err, Error::QuotaExceeded(_)));
+        // Unset = unlimited, same contract as every other dimension.
+        assert!(
+            QuotaLimits::default()
+                .check_llm_tokens(u64::MAX / 2, 1)
+                .is_ok()
+        );
+    }
+
+    /// SRV-202: a stored quota written before the dead dimensions were removed
+    /// still deserializes — the unknown fields are ignored, not an error.
+    #[test]
+    fn legacy_quota_json_with_removed_fields_still_loads() {
+        let legacy = r#"{
+            "llm_cost_per_day_usd": 10.0,
+            "tool_executions_per_minute": 60,
+            "memory_records": 1000,
+            "concurrent_agent_runs": 5
+        }"#;
+        let q: QuotaLimits = serde_json::from_str(legacy).unwrap();
+        assert_eq!(q.llm_cost_per_day_usd, Some(10.0));
+        assert_eq!(q.concurrent_agent_runs, Some(5));
+        assert_eq!(q.llm_tokens_per_day, None);
     }
 }

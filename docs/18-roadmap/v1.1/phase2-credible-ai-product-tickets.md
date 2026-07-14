@@ -7,8 +7,8 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.18.0
-**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), WS-D (EVL-201..203), and WS-A/runtime (AIC-201/202, RUN-201/202) fully done; SRV-201 done
+**Version:** 1.19.0
+**Status:** In progress — WS-B (PRV-201..205), WS-C (RAG-201..205), WS-D (EVL-201..203), and WS-A/runtime (AIC-201/202, RUN-201/202) fully done; SRV-201/202 done
 **Owner:** Engineering (AI / Platform)
 **Last Updated:** 2026-07-13
 
@@ -833,7 +833,7 @@ refill; and the full 129-test server suite run `--features redis` against a
 real Redis 7 container locally — all green. CI's service-container job gained
 `run_gated cargo test -p apex-server --features redis --lib rate_limit`.
 
-## SRV-202 `[P1]` — Per-tenant token quotas; enforce/remove dead dimensions
+## SRV-202 `[P1]` — Per-tenant token quotas; enforce/remove dead dimensions — **DONE (2026-07-14)**
 
 **Problem.** `QuotaLimits` declares `tool_executions_per_minute` and `memory_records`
 but `admit_run` enforces only concurrent runs + daily USD cost
@@ -849,6 +849,51 @@ previously-dead dimensions are either enforced or gone.
 
 **Files.** `crates/apex-tenancy/src/{model.rs,quota.rs}`, `apex-server/src/tenancy.rs`.
 **Size.** M. **Depends on:** PRV-101 (real token accounting).
+
+**Implementation notes (2026-07-14).** Three parts. **Token budget:**
+`QuotaLimits.llm_tokens_per_day` (+ pure `check_llm_tokens`) — the
+vendor-bill-independent twin of the cost budget (a local model is $0/token but
+still burns capacity). The server's `QuotaTracker` accumulates tokens alongside
+cost (`record_run_cost` → `record_run_usage(cost, tokens)`;
+`AgentResolver::record` in `apex-runtime` now takes the full
+`apex_common::Usage` so every platform's hook sees tokens without a second
+method), `admit_run` checks it with the same observe-then-enforce boundary as
+cost (admitted while within budget; the *next* run after crossing is refused
+`429`), and the accumulator's persisted entries grew `[day, usd]` →
+`[day, usd, tokens]` with an untagged-enum loader that still accepts the old
+shape (tokens default 0) — an upgrade must not treat the old file as corrupt
+and silently reset every project's spend to $0, the exact DUR-404 failure mode
+(proven by `pre_token_quota_file_loads_with_spend_preserved`). **Dead
+dimensions: removed, not enforced** — `tool_executions_per_minute` (tool
+executions happen inside the agent loop where no per-project window tracker
+exists; request-level abuse is the rate limiter's job) and `memory_records`
+(records are *tenant*-namespaced, quotas are *project*-scoped — "a project's
+record count" was never well-defined). Dead config an operator could set and
+reasonably believe was protecting them is worse than an honest absence; a
+stored quota still carrying the old fields deserializes fine (serde ignores
+unknown fields, proven by `legacy_quota_json_with_removed_fields_still_loads`).
+Neither field was ever in `openapi.yaml` or the SDKs — only the dashboard's
+settings form, updated in lockstep (`llm_tokens_per_day` input added, dead
+inputs removed; `openapi.yaml`'s quota PATCH schema and
+`docs/09-api/projects.md` §5 updated too). **Per-tenant rate tier:**
+`APEX_RATE_LIMIT_TENANT_PER_MIN` (opt-in; unset = no tier, exactly the old
+behavior) enables a third `RateLimiter` keyed `tenant:{X-Apex-Tenant}` (falling
+back to `default`, so anonymous traffic is bounded too), checked in the same
+`enforce` middleware after the per-principal bucket so the tenant budget is
+only consumed by requests the caller's own budget admitted — and shareable
+across a fleet via SRV-201's Redis path like the other tiers. Documented
+caveat (same spirit as the existing `X-Forwarded-For` note): the tenant header
+is client-asserted and only *authorization*-checked downstream, so an
+authenticated caller spoofing another tenant's id burns that tenant's rate
+budget even though the request itself 403s at `tenant_authorize`. Proven by
+`quota.rs::enforces_token_budget_at_the_threshold` (pure, exact boundary),
+`tenancy.rs::token_budget_blocks_admission_at_threshold` (admission refuses
+`429` with `llm_tokens_per_day` named once usage crosses the limit; other
+projects unaffected), the extended PRV-101/DUR-404/RUN-202 accumulator tests
+(tokens accumulate, survive restart, and land from real workflow sub-agent
+runs), and `lib.rs::tenant_rate_tier_is_shared_across_principals_and_isolated_
+by_tenant` (two principals under one tenant exhaust the shared budget, a third
+429s, another tenant is untouched).
 
 ## SRV-203 `[P2]` — Tenant-configurable daily-cost reset boundary
 
@@ -1161,3 +1206,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.16.0 | 2026-07-13 | RUN-201 (`ai` activity honors model/temperature/max_tokens/response_format; gateway errors classify Retryable-vs-Permanent by kind) implemented and marked DONE with implementation notes |
 | 1.17.0 | 2026-07-13 | RUN-202 (sub-agent runs get a TracingSink instead of NullSink; non-zero run cost proven to reach the project's daily accumulator end to end) implemented and marked DONE with implementation notes — all of WS-A / WS-runtime is now done |
 | 1.18.0 | 2026-07-14 | SRV-201 (Redis-shared rate limiting: atomic Lua token bucket, per-tier prefixes, degrade-to-per-node on Redis failure, `APEX_RATE_LIMIT_REDIS_URL` + `redis` feature, gated combined-budget test wired into CI) implemented and marked DONE with implementation notes |
+| 1.19.0 | 2026-07-14 | SRV-202 (`llm_tokens_per_day` budget with back-compat accumulator persistence; dead `tool_executions_per_minute`/`memory_records` dimensions removed; opt-in per-tenant rate tier) implemented and marked DONE with implementation notes |

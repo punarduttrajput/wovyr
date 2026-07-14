@@ -145,7 +145,12 @@ async fn run_async_inner(
         let _permit = permit; // held for the run's duration, not the HTTP connection
         match run_agent(&def, &state2.gateway, &state2.registry, opts, &mut NullSink).await {
             Ok(out) => {
-                tenancy::record_run_cost(&state2.quota, project.as_deref(), out.usage.cost_usd);
+                tenancy::record_run_usage(
+                    &state2.quota,
+                    project.as_deref(),
+                    out.usage.cost_usd,
+                    u64::from(out.usage.total_tokens),
+                );
                 crate::audit::audit(&state2, &headers, &tenant, "agent.run", "agent", &run_id2);
                 webhooks::emit(
                     &state2,
@@ -304,7 +309,12 @@ pub(crate) async fn run_stream_handler(
         let mut sink = ChannelSink { tx: tx.clone() };
         let frame = match run_agent(&def, &state.gateway, &state.registry, opts, &mut sink).await {
             Ok(out) => {
-                tenancy::record_run_cost(&state.quota, project.as_deref(), out.usage.cost_usd);
+                tenancy::record_run_usage(
+                    &state.quota,
+                    project.as_deref(),
+                    out.usage.cost_usd,
+                    u64::from(out.usage.total_tokens),
+                );
                 Event::default().event("result").data(
                     json!({ "status": "succeeded", "output": { "message": out.text }, "steps": out.steps })
                         .to_string(),
@@ -353,7 +363,12 @@ async fn run_definition(
             return Err(ApiError::from(e));
         }
     };
-    tenancy::record_run_cost(&state.quota, project, out.usage.cost_usd);
+    tenancy::record_run_usage(
+        &state.quota,
+        project,
+        out.usage.cost_usd,
+        u64::from(out.usage.total_tokens),
+    );
 
     let run_id = format!("run_{}", state.run_counter.fetch_add(1, Ordering::SeqCst));
     crate::audit::audit(state, headers, tenant, "agent.run", "agent", &run_id);

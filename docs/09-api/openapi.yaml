@@ -1457,6 +1457,13 @@ paths:
               properties:
                 concurrent_agent_runs: { type: integer, nullable: true }
                 llm_cost_per_day_usd: { type: number, nullable: true }
+                llm_tokens_per_day:
+                  type: integer
+                  nullable: true
+                  description: >-
+                    Max LLM tokens (prompt + completion) per rolling day
+                    (SRV-202) — the vendor-bill-independent twin of
+                    llm_cost_per_day_usd.
       responses:
         '200':
           description: Updated quota

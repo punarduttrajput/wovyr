@@ -53,7 +53,7 @@ use crate::{AgentStore, ApiError, AppState, tenancy};
 ///   network-facing default).
 /// - **Quota admission** — when the submission also carried an in-scope project
 ///   (`__project`, from `X-Apex-Project`), the run is admitted through the same
-///   [`tenancy::admit_run`]/[`tenancy::record_run_cost`] gate a direct
+///   [`tenancy::admit_run`]/[`tenancy::record_run_usage`] gate a direct
 ///   `agents:run` call goes through, so a workflow that fans out to N
 ///   sub-agents draws from one shared project budget (concurrent runs + daily
 ///   LLM spend) instead of N independent, unmetered ones. The returned
@@ -118,8 +118,13 @@ impl AgentResolver for StoredAgentResolver {
             .map_err(|e| e.message)
     }
 
-    fn record(&self, ctx: &ActivityContext, cost_usd: f64) {
-        tenancy::record_run_cost(&self.quota, Self::project(ctx), cost_usd);
+    fn record(&self, ctx: &ActivityContext, usage: &apex_common::Usage) {
+        tenancy::record_run_usage(
+            &self.quota,
+            Self::project(ctx),
+            usage.cost_usd,
+            u64::from(usage.total_tokens),
+        );
     }
 }
 
@@ -1417,13 +1422,17 @@ metadata:\n  name: agent-wf-quota\nspec:\n  activities:\n    - id: greet\n      
             "the agent workflow should complete: {detail}"
         );
 
-        let spent = state
+        let (spent, tokens) = state
             .quota
-            .spent_today("prj-run202-cost")
-            .expect("the project must have a spend entry for today");
+            .used_today("prj-run202-cost")
+            .expect("the project must have a usage entry for today");
         assert!(
             spent > 0.0,
             "the sub-agent run's cost must land in the project's daily accumulator, got {spent}"
+        );
+        assert!(
+            tokens > 0,
+            "the sub-agent run's token usage must land there too (SRV-202), got {tokens}"
         );
     }
 }

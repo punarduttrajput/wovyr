@@ -98,9 +98,10 @@ pub trait AgentResolver: Send + Sync {
         Ok(Box::new(()))
     }
 
-    /// Record a successful run's cost against a platform-specific accounting
-    /// system (the server's daily project budget). Default: no-op.
-    fn record(&self, _ctx: &ActivityContext, _cost_usd: f64) {}
+    /// Record a successful run's usage (cost + tokens, RM-AIM-P2 SRV-202) against
+    /// a platform-specific accounting system (the server's daily project
+    /// budgets). Default: no-op.
+    fn record(&self, _ctx: &ActivityContext, _usage: &apex_common::Usage) {}
 }
 
 /// Map a gateway/agent-run failure onto workflow retry semantics (RM-AIM-P2
@@ -361,7 +362,7 @@ impl ActivityExecutor for PlatformActivityExecutor {
                 let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
                     .await
                     .map_err(classify_gateway_error)?;
-                self.agents.record(ctx, output.usage.cost_usd);
+                self.agents.record(ctx, &output.usage);
                 Ok(json!({ "message": output.text, "steps": output.steps }))
             }
 
@@ -721,7 +722,7 @@ mod tests {
     #[tokio::test]
     async fn agent_activity_records_a_non_zero_run_cost() {
         struct CostRecorder {
-            recorded: Arc<Mutex<Vec<f64>>>,
+            recorded: Arc<Mutex<Vec<(f64, u64)>>>,
         }
         #[async_trait]
         impl AgentResolver for CostRecorder {
@@ -735,8 +736,11 @@ mod tests {
                 ))
                 .map_err(|e| e.to_string())
             }
-            fn record(&self, _ctx: &ActivityContext, cost_usd: f64) {
-                self.recorded.lock().unwrap().push(cost_usd);
+            fn record(&self, _ctx: &ActivityContext, usage: &apex_common::Usage) {
+                self.recorded
+                    .lock()
+                    .unwrap()
+                    .push((usage.cost_usd, u64::from(usage.total_tokens)));
             }
         }
         let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -754,10 +758,14 @@ mod tests {
 
         let recorded = recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1, "exactly one run recorded");
+        let (cost, tokens) = recorded[0];
         assert!(
-            recorded[0] > 0.0,
-            "the run's cost must be non-zero and reach the accounting hook, got {}",
-            recorded[0]
+            cost > 0.0,
+            "the run's cost must be non-zero and reach the accounting hook, got {cost}"
+        );
+        assert!(
+            tokens > 0,
+            "the run's token usage must reach the accounting hook too (SRV-202), got {tokens}"
         );
     }
 

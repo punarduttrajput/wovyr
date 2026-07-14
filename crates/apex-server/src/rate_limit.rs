@@ -334,6 +334,24 @@ fn rate_limit_key(headers: &HeaderMap, req: &Request) -> String {
     "anonymous".to_string()
 }
 
+/// The tenant-tier key (RM-AIM-P2 SRV-202): the asserted `X-Apex-Tenant`, falling
+/// back to the same `default` tenant the tenancy layer resolves absent the header —
+/// so anonymous/default-tenant traffic is bounded too. Caveat (documented, same
+/// spirit as the `X-Forwarded-For` note above): the tenant header is
+/// client-asserted and only *authorization*-checked downstream, so an
+/// authenticated caller spoofing another tenant's id burns that tenant's rate
+/// budget even though the request itself will 403 at `tenant_authorize`. The
+/// per-principal tier (keyed by the *verified* principal) still bounds the spoofing
+/// caller; this tier adds a shared ceiling for a tenant's legitimate principals.
+fn tenant_key(headers: &HeaderMap) -> String {
+    let tenant = headers
+        .get("x-apex-tenant")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("default");
+    format!("tenant:{tenant}")
+}
+
 fn rate_limited_response(retry_after: Duration) -> Response {
     let mut resp = ApiError::new(
         StatusCode::TOO_MANY_REQUESTS,
@@ -348,21 +366,30 @@ fn rate_limited_response(retry_after: Duration) -> Response {
 }
 
 /// The middleware `router()` mounts per tier (via `axum::middleware::from_fn` over a
-/// closure capturing `limiter` — not `from_fn_with_state`, so the limiter lives
-/// wherever the caller already keeps it, here `AppState`, rather than needing its own
-/// place in axum's state-extraction machinery): check the caller's bucket, admit or
-/// `429` with `Retry-After`.
+/// closure capturing the limiters — not `from_fn_with_state`, so they live wherever
+/// the caller already keeps them, here `AppState`, rather than needing their own
+/// place in axum's state-extraction machinery): check the caller's per-principal
+/// bucket and, when the deployment configured one (`APEX_RATE_LIMIT_TENANT_PER_MIN`,
+/// RM-AIM-P2 SRV-202), the shared per-tenant bucket; admit or `429` with
+/// `Retry-After`. The per-tenant check runs second so its budget is only consumed
+/// by requests the caller's own budget admitted.
 pub(crate) async fn enforce(
     limiter: Arc<RateLimiter>,
+    tenant_limiter: Option<Arc<RateLimiter>>,
     headers: HeaderMap,
     req: Request,
     next: Next,
 ) -> Response {
     let key = rate_limit_key(&headers, &req);
-    match limiter.check(&key).await {
-        Ok(()) => next.run(req).await,
-        Err(retry_after) => rate_limited_response(retry_after),
+    if let Err(retry_after) = limiter.check(&key).await {
+        return rate_limited_response(retry_after);
     }
+    if let Some(tenant_limiter) = tenant_limiter
+        && let Err(retry_after) = tenant_limiter.check(&tenant_key(&headers)).await
+    {
+        return rate_limited_response(retry_after);
+    }
+    next.run(req).await
 }
 
 #[cfg(test)]

@@ -415,6 +415,10 @@ pub struct AppState {
     /// A tighter per-key rate limiter for expensive/sensitive routes — the direct
     /// agent-run endpoints, KMS, and secrets ([SEC-203]).
     pub(crate) rate_limiter_sensitive: Arc<rate_limit::RateLimiter>,
+    /// An optional *per-tenant* ceiling shared by all of a tenant's principals
+    /// (RM-AIM-P2 SRV-202), enabled by `APEX_RATE_LIMIT_TENANT_PER_MIN` — `None`
+    /// (the default) means no tenant tier, exactly the pre-SRV-202 behavior.
+    pub(crate) rate_limiter_tenant: Option<Arc<rate_limit::RateLimiter>>,
     /// `APEX_CORS_ALLOWED_ORIGINS` (comma-separated) — an explicit cross-origin
     /// allow-list ([SEC-204]). Empty (the default) means no `CorsLayer` at all: the
     /// browser's own same-origin policy already blocks cross-origin reads with no
@@ -550,6 +554,15 @@ impl AppState {
                 crate::config::env_u64("APEX_RATE_LIMIT_SENSITIVE_PER_MIN", 30) as u32,
                 crate::config::env_u64("APEX_RATE_LIMIT_SENSITIVE_PER_MIN", 30) as u32,
             )),
+            // Opt-in per-tenant tier (SRV-202): only when the env var is set.
+            rate_limiter_tenant: std::env::var("APEX_RATE_LIMIT_TENANT_PER_MIN")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .map(|per_min| {
+                    Arc::new(rate_limit::RateLimiter::from_env(
+                        "tenant", per_min, per_min,
+                    ))
+                }),
             cors_allowed_origins: std::env::var("APEX_CORS_ALLOWED_ORIGINS")
                 .unwrap_or_default()
                 .split(',')
@@ -685,6 +698,14 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn with_rate_limiter_standard(mut self, limiter: rate_limit::RateLimiter) -> Self {
         self.rate_limiter_standard = Arc::new(limiter);
+        self
+    }
+
+    /// Enable the per-tenant rate tier (SRV-202) without mutating the process-global
+    /// `APEX_RATE_LIMIT_TENANT_PER_MIN`.
+    #[cfg(test)]
+    pub(crate) fn with_rate_limiter_tenant(mut self, limiter: rate_limit::RateLimiter) -> Self {
+        self.rate_limiter_tenant = Some(Arc::new(limiter));
         self
     }
 

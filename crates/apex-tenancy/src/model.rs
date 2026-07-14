@@ -121,17 +121,26 @@ pub struct Membership {
 
 /// Resource/cost limits for an org or project
 /// ([Projects API §5](../../docs/09-api/projects.md#5-quotas)). `None` = unlimited.
+///
+/// RM-AIM-P2 SRV-202 removed two dimensions that were declared but never enforced
+/// anywhere (`tool_executions_per_minute`, `memory_records` — dead config an
+/// operator could set and reasonably believe was protecting them): tool
+/// executions happen inside the agent loop where no per-project window tracker
+/// exists (request-level abuse is the rate limiter's job), and memory records are
+/// *tenant*-namespaced while quotas are *project*-scoped, so "a project's record
+/// count" was never well-defined. A stored quota that still carries the old
+/// fields deserializes fine (serde ignores unknown fields) — they simply no
+/// longer pretend to exist.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct QuotaLimits {
     /// Max LLM spend per rolling day, USD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_cost_per_day_usd: Option<f64>,
-    /// Max tool executions per minute.
+    /// Max LLM tokens (prompt + completion) per rolling day (RM-AIM-P2 SRV-202) —
+    /// the vendor-bill-independent twin of `llm_cost_per_day_usd`: a local model
+    /// costs $0/token but still burns capacity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_executions_per_minute: Option<u64>,
-    /// Max stored memory records.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_records: Option<u64>,
+    pub llm_tokens_per_day: Option<u64>,
     /// Max concurrent agent runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrent_agent_runs: Option<u64>,

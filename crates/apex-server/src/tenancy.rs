@@ -430,8 +430,30 @@ async fn set_quota(
 struct QuotaUsage {
     /// In-flight agent runs, by project id.
     concurrent: BTreeMap<String, u64>,
-    /// `(day, usd)` LLM spend for the current rolling day, by project id.
-    cost: BTreeMap<String, (u64, f64)>,
+    /// `(day, usd, tokens)` LLM usage for the current rolling day, by project id
+    /// (tokens since RM-AIM-P2 SRV-202 — prompt + completion, the observe half of
+    /// the `llm_tokens_per_day` budget).
+    cost: BTreeMap<String, (u64, f64, u64)>,
+}
+
+/// One persisted day entry. The pre-SRV-202 accumulator stored `[day, usd]`; an
+/// upgraded binary must keep loading that shape (tokens default to 0) rather than
+/// treating the file as corrupt and silently resetting every project's spend to
+/// $0 — the exact failure DUR-404 exists to prevent.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StoredDayUsage {
+    V2(u64, f64, u64),
+    V1(u64, f64),
+}
+
+impl From<StoredDayUsage> for (u64, f64, u64) {
+    fn from(v: StoredDayUsage) -> Self {
+        match v {
+            StoredDayUsage::V2(day, usd, tokens) => (day, usd, tokens),
+            StoredDayUsage::V1(day, usd) => (day, usd, 0),
+        }
+    }
 }
 
 /// Tracks per-project quota usage for the run path ([Projects API §5](../../docs/09-api/projects.md#5-quotas)).
@@ -460,7 +482,10 @@ impl QuotaTracker {
         let cost = path
             .as_deref()
             .and_then(|p| std::fs::read(p).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|bytes| {
+                serde_json::from_slice::<BTreeMap<String, StoredDayUsage>>(&bytes).ok()
+            })
+            .map(|stored| stored.into_iter().map(|(k, v)| (k, v.into())).collect())
             .unwrap_or_default();
         Self {
             usage: Mutex::new(QuotaUsage {
@@ -471,23 +496,24 @@ impl QuotaTracker {
         }
     }
 
-    /// The project's LLM spend recorded for the current rolling day, if any —
-    /// the read half of [`record_run_cost`] (RM-AIM-P2 RUN-202: lets tests
-    /// observe that a sub-agent run's cost actually landed in the accumulator).
-    /// Test-only until a route needs it (e.g. a future usage endpoint).
+    /// The project's `(usd, tokens)` LLM usage recorded for the current rolling
+    /// day, if any — the read half of [`record_run_usage`] (RM-AIM-P2 RUN-202/
+    /// SRV-202: lets tests observe that a run's cost/tokens actually landed in
+    /// the accumulator). Test-only until a route needs it (e.g. a future usage
+    /// endpoint).
     #[cfg(test)]
-    pub(crate) fn spent_today(&self, project: &str) -> Option<f64> {
+    pub(crate) fn used_today(&self, project: &str) -> Option<(f64, u64)> {
         let usage = self.usage.lock().expect("quota mutex poisoned");
         usage
             .cost
             .get(project)
-            .filter(|(day, _)| *day == current_day())
-            .map(|(_, usd)| *usd)
+            .filter(|(day, _, _)| *day == current_day())
+            .map(|(_, usd, tokens)| (*usd, *tokens))
     }
 
     /// Persist the daily-cost accumulator (best-effort — logged, not propagated,
     /// since the in-memory update this follows has already succeeded either way).
-    fn persist(&self, cost: &BTreeMap<String, (u64, f64)>) {
+    fn persist(&self, cost: &BTreeMap<String, (u64, f64, u64)>) {
         let Some(path) = &self.path else { return };
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
@@ -565,13 +591,15 @@ pub(crate) fn admit_run(
     let mut u = quota.usage.lock().expect("quota mutex poisoned");
     let current = u.concurrent.get(project).copied().unwrap_or(0);
     limits.check_concurrent_runs(current)?;
-    let spent = match u.cost.get(project) {
-        Some((d, c)) if *d == day => *c,
-        _ => 0.0,
+    let (spent, tokens_used) = match u.cost.get(project) {
+        Some((d, c, t)) if *d == day => (*c, *t),
+        _ => (0.0, 0),
     };
-    // Admit while the day's spend is still within budget; the run's own cost is
-    // recorded afterwards, so the *next* run is blocked once the limit is crossed.
+    // Admit while the day's spend/token usage is still within budget; the run's
+    // own usage is recorded afterwards, so the *next* run is blocked once a limit
+    // is crossed.
     limits.check_llm_cost(spent, 0.0)?;
+    limits.check_llm_tokens(tokens_used, 0)?;
     *u.concurrent.entry(project.to_string()).or_insert(0) += 1;
     Ok(RunPermit {
         quota: quota.clone(),
@@ -580,21 +608,28 @@ pub(crate) fn admit_run(
     })
 }
 
-/// Record `cost` USD of LLM spend against `project`'s current-day budget (after a
-/// run), persisting the accumulator (RM-GA-P2 DUR-404) so it survives a restart
-/// within the same UTC day.
-pub(crate) fn record_run_cost(quota: &Arc<QuotaTracker>, project: Option<&str>, cost: f64) {
+/// Record a run's LLM usage — `cost` USD and `tokens` (prompt + completion) —
+/// against `project`'s current-day budgets (after a run), persisting the
+/// accumulator (RM-GA-P2 DUR-404) so it survives a restart within the same UTC
+/// day. Tokens joined cost in RM-AIM-P2 SRV-202 (`llm_tokens_per_day`).
+pub(crate) fn record_run_usage(
+    quota: &Arc<QuotaTracker>,
+    project: Option<&str>,
+    cost: f64,
+    tokens: u64,
+) {
     let Some(project) = project else {
         return;
     };
     let day = current_day();
     let snapshot = {
         let mut u = quota.usage.lock().expect("quota mutex poisoned");
-        let entry = u.cost.entry(project.to_string()).or_insert((day, 0.0));
+        let entry = u.cost.entry(project.to_string()).or_insert((day, 0.0, 0));
         if entry.0 != day {
-            *entry = (day, 0.0);
+            *entry = (day, 0.0, 0);
         }
         entry.1 += cost;
+        entry.2 = entry.2.saturating_add(tokens);
         u.cost.clone()
     };
     quota.persist(&snapshot);
@@ -895,8 +930,9 @@ mod tests {
 
     /// RM-AIM-P1 PRV-101 acceptance: a real, price-book-computed `cost_usd` (the exact
     /// value `OpenAiProvider` now stamps onto `output.usage.cost_usd`, which
-    /// `apex-runtime` feeds to `record_run_cost`) advances a project's daily accumulator
+    /// `apex-runtime` feeds to `record_run_usage`) advances a project's daily accumulator
     /// by that amount — not the old hardcoded $0 that silently disabled quota enforcement.
+    /// Token usage accumulates alongside it (RM-AIM-P2 SRV-202).
     #[test]
     fn priced_run_cost_advances_the_daily_accumulator() {
         use apex_common::Usage;
@@ -913,14 +949,81 @@ mod tests {
 
         // Record it against a project, twice, exactly as a two-run day would.
         let quota = Arc::new(QuotaTracker::new(None));
-        record_run_cost(&quota, Some("prj-priced"), cost);
-        record_run_cost(&quota, Some("prj-priced"), cost);
+        record_run_usage(&quota, Some("prj-priced"), cost, 1500);
+        record_run_usage(&quota, Some("prj-priced"), cost, 1500);
 
-        let spent = quota.usage.lock().unwrap().cost["prj-priced"].1;
+        let (spent, tokens) = quota.used_today("prj-priced").unwrap();
         assert!(
             (spent - 2.0 * cost).abs() < 1e-12,
             "the accumulator must advance by the computed cost each run, got {spent}"
         );
+        assert_eq!(tokens, 3000, "token usage accumulates alongside cost");
+    }
+
+    /// RM-AIM-P2 SRV-202 acceptance: once a project's recorded token usage crosses
+    /// `llm_tokens_per_day`, the next run is refused at admission — even with no
+    /// cost limit set (a $0-per-token local model still burns capacity).
+    #[test]
+    fn token_budget_blocks_admission_at_threshold() {
+        let st = apex_tenancy::InMemoryTenancyStore::default();
+        st.set_quota(
+            "prj-tokens",
+            QuotaLimits {
+                llm_tokens_per_day: Some(1_000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let tenancy: Arc<dyn TenancyStore> = Arc::new(st);
+        let quota = Arc::new(QuotaTracker::new(None));
+
+        // Under budget: admitted (999 < 1000).
+        record_run_usage(&quota, Some("prj-tokens"), 0.0, 999);
+        assert!(
+            admit_run(&tenancy, &quota, Some("prj-tokens")).is_ok(),
+            "under the token budget the run is admitted"
+        );
+
+        // Crossed budget (1001 > 1000): refused with the quota error — same
+        // observe-then-enforce boundary as the cost budget (a run is admitted
+        // while usage is within the limit; the *next* run after crossing is
+        // blocked). Unmetered projects stay unaffected.
+        record_run_usage(&quota, Some("prj-tokens"), 0.0, 2);
+        let err = match admit_run(&tenancy, &quota, Some("prj-tokens")) {
+            Err(e) => e,
+            Ok(_) => panic!("an exhausted token budget must refuse admission"),
+        };
+        assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            err.message.contains("llm_tokens_per_day"),
+            "{}",
+            err.message
+        );
+        assert!(admit_run(&tenancy, &quota, Some("prj-other")).is_ok());
+    }
+
+    /// SRV-202's persistence-compat guarantee: a `quota.json` written by a
+    /// pre-token binary (`[day, usd]` entries) still loads — spend is preserved
+    /// and tokens default to 0 — instead of being treated as corrupt and silently
+    /// resetting every project to a fresh budget.
+    #[test]
+    fn pre_token_quota_file_loads_with_spend_preserved() {
+        let dir =
+            std::env::temp_dir().join(format!("apex_server_quota_compat_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("quota.json");
+        let day = current_day();
+        std::fs::write(&path, format!(r#"{{"prj-legacy": [{day}, 7.25]}}"#)).unwrap();
+
+        let quota = QuotaTracker::new(Some(path));
+        let (spent, tokens) = quota
+            .used_today("prj-legacy")
+            .expect("the legacy entry must load");
+        assert_eq!(spent, 7.25, "pre-upgrade spend must be preserved");
+        assert_eq!(tokens, 0, "tokens default to zero for a legacy entry");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// RM-GA-P2 DUR-404 acceptance: a daily-cost accumulator survives a restart within
@@ -937,15 +1040,19 @@ mod tests {
 
         {
             let quota = Arc::new(QuotaTracker::new(Some(path.clone())));
-            record_run_cost(&quota, Some("prj-restart"), 3.5);
-            record_run_cost(&quota, Some("prj-restart"), 1.5);
+            record_run_usage(&quota, Some("prj-restart"), 3.5, 100);
+            record_run_usage(&quota, Some("prj-restart"), 1.5, 200);
         }
 
         // A fresh tracker — no in-memory state carried over — reopened against the
         // same path, the same shape a server restart takes. The prior $5.00 spend is
         // still enforced: a $4.00/day limit now rejects a run that would exceed it.
         let reopened = QuotaTracker::new(Some(path));
-        let spent = reopened.usage.lock().unwrap().cost["prj-restart"].1;
+        let (spent, tokens) = reopened.used_today("prj-restart").unwrap();
+        assert_eq!(
+            tokens, 300,
+            "token usage survives the restart too (SRV-202)"
+        );
         assert_eq!(
             spent, 5.0,
             "the prior $3.50 + $1.50 spend must round-trip exactly"

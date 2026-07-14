@@ -83,16 +83,20 @@ pub fn router(state: Arc<AppState>) -> Router {
     let metrics = state.metrics.clone();
     let cors = cors_layer(&state.cors_allowed_origins);
     let auth = || axum::middleware::from_fn_with_state(state.clone(), auth::authenticate);
+    // Both tiers also apply the optional per-tenant ceiling (SRV-202) when the
+    // deployment configured one (`APEX_RATE_LIMIT_TENANT_PER_MIN`).
     let rate_limit_sensitive = || {
         let limiter = state.rate_limiter_sensitive.clone();
+        let tenant_limiter = state.rate_limiter_tenant.clone();
         axum::middleware::from_fn(move |headers: HeaderMap, req: Request, next: Next| {
-            rate_limit::enforce(limiter.clone(), headers, req, next)
+            rate_limit::enforce(limiter.clone(), tenant_limiter.clone(), headers, req, next)
         })
     };
     let rate_limit_standard = || {
         let limiter = state.rate_limiter_standard.clone();
+        let tenant_limiter = state.rate_limiter_tenant.clone();
         axum::middleware::from_fn(move |headers: HeaderMap, req: Request, next: Next| {
-            rate_limit::enforce(limiter.clone(), headers, req, next)
+            rate_limit::enforce(limiter.clone(), tenant_limiter.clone(), headers, req, next)
         })
     };
     // `Idempotency-Key` replay (overview §9, RM-GA-P4 API-703) for every mutating
@@ -2653,6 +2657,58 @@ mod tests {
             "GET",
             "/api/v1/tools",
             &[("x-apex-principal", "bob")],
+            Value::Null,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// RM-AIM-P2 SRV-202: the opt-in per-tenant tier bounds all of a tenant's
+    /// principals with one shared bucket — two different callers under one tenant
+    /// draw from the same budget, while another tenant's bucket is untouched.
+    #[tokio::test]
+    async fn tenant_rate_tier_is_shared_across_principals_and_isolated_by_tenant() {
+        let state = Arc::new(
+            AppState::from_env()
+                .await
+                // Generous per-principal buckets: only the tenant ceiling binds.
+                .with_rate_limiter_standard(rate_limit::RateLimiter::new(100, 100))
+                .with_rate_limiter_tenant(rate_limit::RateLimiter::new(2, 2)),
+        );
+
+        // alice and bob (same tenant) together exhaust acme's shared budget…
+        for principal in ["alice", "bob"] {
+            let resp = raw(
+                &state,
+                "GET",
+                "/api/v1/tools",
+                &[("x-apex-principal", principal), ("x-apex-tenant", "acme")],
+                Value::Null,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK, "{principal} admitted");
+        }
+        let resp = raw(
+            &state,
+            "GET",
+            "/api/v1/tools",
+            &[("x-apex-principal", "carol"), ("x-apex-tenant", "acme")],
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "a third principal under the same tenant hits the shared ceiling"
+        );
+        assert!(resp.headers().get("retry-after").is_some());
+
+        // …while another tenant's bucket is untouched.
+        let resp = raw(
+            &state,
+            "GET",
+            "/api/v1/tools",
+            &[("x-apex-principal", "dave"), ("x-apex-tenant", "globex")],
             Value::Null,
         )
         .await;

@@ -7,10 +7,10 @@ Document ID: API-008
 
 **Document ID:** API-008  
 **File Path:** `docs/09-api/projects.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Draft  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-14
 
 ---
 
@@ -98,18 +98,30 @@ Projects and organizations carry quotas enforced across subsystems:
   "scope": "project",
   "limits": {
     "llm_cost_per_day_usd": 250,
-    "tool_executions_per_minute": 600,
-    "memory_records": 5000000,
+    "llm_tokens_per_day": 5000000,
     "concurrent_agent_runs": 50
   }
 }
 ```
 
-These map to per-subsystem enforcement:
-[LLM Gateway quotas](../05-llm-gateway/token-management.md#7-quotas-rolling),
-[Tool Runtime fair scheduling](../07-tool-runtime/worker-pool.md#5-fair-scheduling--concurrency),
-and Memory quotas. Breaches return `429`/`402` per the
+All three are enforced at the agent-run admission boundary (`X-Apex-Project`):
+concurrent runs, the rolling day's USD spend, and — RM-AIM-P2 SRV-202 — the
+rolling day's token usage (`llm_tokens_per_day`, the vendor-bill-independent
+twin of the cost budget: a local model costs $0/token but still burns
+capacity). Breaches return `429`/`402` per the
 [error model](overview.md#8-error-model).
+
+Two dimensions this section originally speculated (`tool_executions_per_minute`,
+`memory_records`) were **removed in SRV-202 rather than enforced**: they were
+declared but checked nowhere — dead config an operator could set and reasonably
+believe was protecting them. Tool executions happen inside the agent loop where
+no per-project window tracker exists (request-level abuse is the
+[rate limiter](../18-roadmap/v1.0/phase1-security-floor-tickets.md)'s job, which
+since SRV-202 also has an opt-in **per-tenant tier**,
+`APEX_RATE_LIMIT_TENANT_PER_MIN`), and memory records are *tenant*-namespaced
+while quotas are *project*-scoped, so "a project's record count" was never
+well-defined. A stored quota still carrying the old fields deserializes fine —
+they are simply ignored.
 
 ---
 
@@ -186,3 +198,4 @@ Uses the [standard error envelope](overview.md#8-error-model). Notable codes:
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-06-27 | Initial Projects API specification |
+| 1.1.0 | 2026-07-14 | §5: `llm_tokens_per_day` budget added; dead `tool_executions_per_minute`/`memory_records` dimensions removed (RM-AIM-P2 SRV-202) |
