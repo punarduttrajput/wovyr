@@ -424,6 +424,12 @@ pub struct AppState {
     /// browser's own same-origin policy already blocks cross-origin reads with no
     /// CORS headers present, so "no config" correctly means same-origin-only.
     pub(crate) cors_allowed_origins: Vec<String>,
+    /// Bounds tenant/project metric-label cardinality (RM-AIM-P2 OBS-201), shared
+    /// between the RED-metric middleware and the LLM usage-metric call sites so both
+    /// agree on which tenants/projects are "known" vs. folded into `"other"`. Fresh
+    /// per `AppState` — each test gets its own isolated cap, not a process-global one
+    /// other tests' tenant strings could contaminate.
+    pub(crate) tenant_label_cap: hardening::TenantLabelCap,
 }
 
 impl AppState {
@@ -486,6 +492,11 @@ impl AppState {
         // background dispatcher loops `serve()` spawns (RM-GA-P2 EXE-601).
         let timers = crate::config::default_timer_store();
         let schedules = crate::config::default_schedule_store();
+        // Shared across the RED-metric middleware and every LLM usage-metric call
+        // site (RM-AIM-P2 OBS-201), including sub-agent workflow activities below, so
+        // they all agree on which tenants/projects are "known" vs. folded into
+        // `"other"`.
+        let tenant_label_cap = hardening::TenantLabelCap::default();
         // Thread gateway + registry + the agent store + tenancy/quota into the workflow
         // engine so the shared executor can actually drive function/ai/agent activities
         // when the submit route runs a workflow (an `agent` activity looks up a stored
@@ -497,6 +508,10 @@ impl AppState {
             tenancy_store.clone(),
             quota.clone(),
             timers.clone(),
+            hardening::MetricsState {
+                metrics: metrics.clone(),
+                tenant_labels: tenant_label_cap.clone(),
+            },
         );
         let workflow_owners_path = crate::config::workflows_dir().map(|d| d.join("owners.json"));
         let workflow_owners = crate::config::load_owners(workflow_owners_path.as_deref());
@@ -570,6 +585,7 @@ impl AppState {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect(),
+            tenant_label_cap,
         }
     }
 

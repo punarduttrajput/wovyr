@@ -152,6 +152,14 @@ async fn run_async_inner(
                     out.usage.cost_usd,
                     u64::from(out.usage.total_tokens),
                 );
+                crate::hardening::record_llm_usage_metrics(
+                    &state2.metrics,
+                    &state2.tenant_label_cap,
+                    &tenant,
+                    project.as_deref(),
+                    out.usage.cost_usd,
+                    u64::from(out.usage.total_tokens),
+                );
                 crate::audit::audit(&state2, &headers, &tenant, "agent.run", "agent", &run_id2);
                 webhooks::emit(
                     &state2,
@@ -298,7 +306,9 @@ pub(crate) async fn run_stream_handler(
         Err(e) => return e.into_response(),
     };
 
-    let mut opts = RunOptions::new(input).with_tenant(tenant).with_hosted(true);
+    let mut opts = RunOptions::new(input)
+        .with_tenant(tenant.clone())
+        .with_hosted(true);
     // An explicit per-run override wins; otherwise fall back to the agent's own default.
     if let Some(n) = req.max_steps.or(def.spec.max_steps) {
         opts = opts.with_max_steps(n);
@@ -313,6 +323,14 @@ pub(crate) async fn run_stream_handler(
                 tenancy::record_run_usage(
                     &state.tenancy,
                     &state.quota,
+                    project.as_deref(),
+                    out.usage.cost_usd,
+                    u64::from(out.usage.total_tokens),
+                );
+                crate::hardening::record_llm_usage_metrics(
+                    &state.metrics,
+                    &state.tenant_label_cap,
+                    &tenant,
                     project.as_deref(),
                     out.usage.cost_usd,
                     u64::from(out.usage.total_tokens),
@@ -368,6 +386,14 @@ async fn run_definition(
     tenancy::record_run_usage(
         &state.tenancy,
         &state.quota,
+        project,
+        out.usage.cost_usd,
+        u64::from(out.usage.total_tokens),
+    );
+    crate::hardening::record_llm_usage_metrics(
+        &state.metrics,
+        &state.tenant_label_cap,
+        tenant,
         project,
         out.usage.cost_usd,
         u64::from(out.usage.total_tokens),

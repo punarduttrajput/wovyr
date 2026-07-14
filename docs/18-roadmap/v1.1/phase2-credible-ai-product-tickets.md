@@ -7,10 +7,10 @@ Document ID: RM-AIM-P2
 
 **Document ID:** RM-AIM-P2
 **File Path:** `docs/18-roadmap/v1.1/phase2-credible-ai-product-tickets.md`
-**Version:** 1.21.0
-**Status:** In progress — WS-B, WS-C, WS-D, WS-A/runtime, and WS-G fully done; SAF-201 done; remaining: SAF-202, OBS-201
+**Version:** 1.22.0
+**Status:** In progress — WS-B, WS-C, WS-D, WS-A/runtime, WS-G, and WS-L fully done; SAF-201 done; remaining: SAF-202
 **Owner:** Engineering (AI / Platform)
-**Last Updated:** 2026-07-13
+**Last Updated:** 2026-07-14
 
 ---
 
@@ -1225,7 +1225,7 @@ version across runs.
 
 # WS-L — Per-Tenant Metrics
 
-## OBS-201 `[P1]` — Per-tenant / per-project metric labels
+## OBS-201 `[P1]` — Per-tenant / per-project metric labels — **DONE (2026-07-14)**
 
 **Problem.** RED metrics are labeled only `route`/`method`/`status`
 (`crates/apex-server/src/hardening.rs:1008-1020`); LLM cost/token metrics are labeled
@@ -1240,6 +1240,47 @@ that cardinality stays bounded (a capped/hashed label set).
 
 **Files.** `crates/apex-server/src/{hardening.rs,config.rs}`. **Size.** M.
 **Depends on:** PRV-101 (real cost to label).
+
+**Implementation notes.** Took the ticket's "separate aggregate" branch rather than
+adding `tenant` directly to the existing `apex_api_requests_total`/
+`_duration_seconds` (labeled `route`/`method`/`status`) — multiplying that
+dimension by a tenant count would have made an already sizeable route × method ×
+status series count multiply further. Instead: a new `TenantLabelCap`
+(`hardening.rs`) bounds cardinality by capping the first `MAX_TENANT_LABELS` (200)
+distinct tenant/project identifiers seen with their real name, folding every value
+past that into `"other"` — mirroring how `route_label` already falls back to
+`"unmatched"` for a path outside `ROUTE_LABELS`, just data-driven instead of a fixed
+table. One `TenantLabelCap` instance lives on `AppState` (fresh per instance — no
+process-global static, so tests stay isolated) and is shared by both new metrics so
+they agree on which tenants/projects are "known":
+- `apex_api_requests_by_tenant_total{tenant, status_class}` — wired into
+  `track_metrics`, the existing whole-app RED-metrics middleware; reads
+  `X-Apex-Tenant` (unverified at this outer, pre-auth layer, the same caveat as the
+  tenant rate-limit tier). Deliberately coarse on the second dimension
+  (`status_class` = `2xx`/`3xx`/`4xx`/`5xx`/`other`, not the full route/status) to
+  keep the worst case `tenant(≤201) × status_class(5)` rather than multiplying every
+  route.
+- `apex_llm_cost_usd_by_tenant_total{tenant, project}` /
+  `apex_llm_tokens_by_tenant_total{tenant, project}` — a new
+  `record_llm_usage_metrics` fn, called at every site that already resolves
+  `tenancy::record_run_usage` (three in `agents.rs`: the sync, async-submit, and SSE
+  run paths; one in `workflow_runner.rs`'s `StoredAgentResolver::record`, so a
+  sub-agent workflow activity's cost is attributed too) — the natural point where
+  `tenant`/`project` and the run's `Usage` are already both in scope, rather than
+  threading tenant context down through the gateway's shared, per-process
+  `CostObserver` (which has no per-request context to label by, and stays
+  model-labeled-only as before — untouched). An absent project renders `"none"`,
+  distinguishable from a real project id that overflowed the cap.
+
+Proven by `hardening::tests::track_metrics_labels_the_per_tenant_aggregate_from_the_request_header`,
+`tenant_label_cap_bounds_cardinality_by_folding_overflow_into_other` (fills the cap,
+asserts the 201st distinct value folds to `"other"` while already-tracked values keep
+their real name), `record_llm_usage_metrics_labels_cost_and_tokens_by_tenant_and_project`,
+and `record_llm_usage_metrics_shares_the_cap_with_track_metrics_bounding` (the same cap
+instance filled via one metric's call site still bounds the other — proving the sharing
+is load-bearing, not incidental); end to end via `tests::metrics_endpoint_reflects_a_run`
+and `workflow_runner::tests::agent_activity_cost_is_charged_to_the_project_accumulator`
+(extended to also assert the per-tenant LLM metrics land for a sub-agent workflow run).
 
 ---
 
@@ -1283,3 +1324,4 @@ that cardinality stays bounded (a capped/hashed label set).
 | 1.19.0 | 2026-07-14 | SRV-202 (`llm_tokens_per_day` budget with back-compat accumulator persistence; dead `tool_executions_per_minute`/`memory_records` dimensions removed; opt-in per-tenant rate tier) implemented and marked DONE with implementation notes |
 | 1.20.0 | 2026-07-14 | SRV-203 (per-quota `day_reset_offset_minutes` daily-reset boundary; pure `day_bucket` math; admission/recording bucket agreement) implemented and marked DONE with implementation notes — all of WS-G (Multi-Node Quotas) is now done |
 | 1.21.0 | 2026-07-14 | SAF-201 (pluggable `Guardrail` trait on input/output: block/redact, fail-closed, buffered streaming; blocklist/PII-redactor/LLM-moderator implementations) implemented and marked DONE with implementation notes |
+| 1.22.0 | 2026-07-14 | OBS-201 (bounded per-tenant/per-project metric labels: `TenantLabelCap` cardinality bound shared between a new low-cardinality `apex_api_requests_by_tenant_total` RED aggregate and new `apex_llm_{cost_usd,tokens}_by_tenant_total` LLM usage metrics, wired into every `record_run_usage` call site including the workflow sub-agent path) implemented and marked DONE with implementation notes — all of WS-L (Per-Tenant Metrics) is now done; only SAF-202 remains in Phase 2 |

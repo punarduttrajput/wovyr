@@ -80,7 +80,10 @@ use tower::ServiceBuilder;
 /// KMS/secrets, a looser one for everything else.
 pub fn router(state: Arc<AppState>) -> Router {
     let limits = state.http_limits;
-    let metrics = state.metrics.clone();
+    let metrics_state = hardening::MetricsState {
+        metrics: state.metrics.clone(),
+        tenant_labels: state.tenant_label_cap.clone(),
+    };
     let cors = cors_layer(&state.cors_allowed_origins);
     let auth = || axum::middleware::from_fn_with_state(state.clone(), auth::authenticate);
     // Both tiers also apply the optional per-tenant ceiling (SRV-202) when the
@@ -202,7 +205,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // `request_id`/`deprecation_headers` so it also counts requests a handler
         // never sees (an auth 401, a rate-limit 429, an idempotency replay).
         .layer(axum::middleware::from_fn_with_state(
-            metrics,
+            metrics_state,
             hardening::track_metrics,
         ))
         // Deprecation/Sunset headers (deprecation-policy.md §4, RM-GA-P4 API-705) —
@@ -884,6 +887,23 @@ mod tests {
         assert!(text.contains("apex_api_request_duration_seconds_count"));
         // The mock provider reports a cost, so an LLM cost metric is present.
         assert!(text.contains("apex_llm_cost_usd_total"), "metrics:\n{text}");
+        // RM-AIM-P2 OBS-201: per-tenant visibility for both the RED aggregate and the
+        // LLM cost/token metrics — none of these requests set `X-Apex-Tenant`, so
+        // they're all attributed to the "default" tenant.
+        assert!(
+            text.contains(
+                r#"apex_api_requests_by_tenant_total{status_class="2xx",tenant="default"}"#
+            ),
+            "metrics:\n{text}"
+        );
+        assert!(
+            text.contains(r#"apex_llm_cost_usd_by_tenant_total{project="none",tenant="default"}"#),
+            "metrics:\n{text}"
+        );
+        assert!(
+            text.contains(r#"apex_llm_tokens_by_tenant_total{project="none",tenant="default"}"#),
+            "metrics:\n{text}"
+        );
     }
 
     #[tokio::test]

@@ -148,9 +148,16 @@ pub(crate) fn default_workflows_engine(
     tenancy: Arc<dyn TenancyStore>,
     quota: Arc<tenancy::QuotaTracker>,
     timers: Arc<dyn TimerStore>,
+    metrics_state: crate::hardening::MetricsState,
 ) -> Engine {
     let executor = Arc::new(workflow_runner::server_executor(
-        gateway, registry, agents, tenancy, quota,
+        gateway,
+        registry,
+        agents,
+        tenancy,
+        quota,
+        metrics_state.metrics,
+        metrics_state.tenant_labels,
     ));
     if let Some(dir) = workflows_dir()
         && let Ok(store) = FileStore::new(dir)

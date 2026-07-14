@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -570,6 +570,100 @@ fn stamp_deprecation(mut response: Response, sunset_http_date: &str) -> Response
     response
 }
 
+// --- bounded per-tenant/per-project metric labels (RM-AIM-P2 OBS-201) ------------
+
+/// Distinct tenant/project label values a [`TenantLabelCap`] keeps their real name
+/// before folding overflow into `"other"`. Generous enough that a real deployment's
+/// whole tenant/project roster fits without collapsing, while still bounding what a
+/// caller flooding `X-Apex-Tenant`/`X-Apex-Project` with arbitrary values — this
+/// layer runs *before* auth verifies those headers, see [`track_metrics`] — can do to
+/// the metrics registry's series count.
+const MAX_TENANT_LABELS: usize = 200;
+
+/// Bounds tenant/project metric-label cardinality: the first [`MAX_TENANT_LABELS`]
+/// distinct identifiers seen through a given instance keep their real name as a label
+/// value; anything after that folds into `"other"` — the same fallback shape
+/// [`route_label`] uses for a path outside [`ROUTE_LABELS`], just data-driven instead
+/// of a fixed table, since tenants/projects aren't known ahead of time. One instance
+/// lives on [`AppState`](crate::AppState) and is shared between the RED-metric
+/// middleware ([`track_metrics`]) and the LLM usage-metric call sites
+/// (`record_llm_usage_metrics`) so both agree on which tenants/projects are "known" —
+/// a value could otherwise read as exact in one metric and `"other"` in the other
+/// depending purely on which happened to observe it first.
+#[derive(Clone, Default)]
+pub(crate) struct TenantLabelCap {
+    seen: Arc<Mutex<HashSet<String>>>,
+}
+
+impl TenantLabelCap {
+    /// The bounded label for `value` (a tenant or project id). An empty string — e.g.
+    /// an unset `X-Apex-Project` — is never bucketed; it renders as `"none"` so a
+    /// caller can tell "not scoped to a project" apart from a real identifier that
+    /// overflowed the cap.
+    pub(crate) fn label(&self, value: &str) -> String {
+        if value.is_empty() {
+            return "none".to_string();
+        }
+        let mut seen = self.seen.lock().expect("tenant label cap mutex poisoned");
+        if seen.contains(value) {
+            return value.to_string();
+        }
+        if seen.len() < MAX_TENANT_LABELS {
+            seen.insert(value.to_string());
+            value.to_string()
+        } else {
+            "other".to_string()
+        }
+    }
+}
+
+/// The coarse `2xx`/`3xx`/`4xx`/`5xx` status class used by the per-tenant request
+/// aggregate below — bounding a second dimension so `route × tenant` never has to be
+/// multiplied out; only `status_class × tenant` is.
+fn status_class(status: u16) -> &'static str {
+    match status / 100 {
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        5 => "5xx",
+        _ => "other",
+    }
+}
+
+/// Per-tenant/per-project LLM cost + token visibility (RM-AIM-P2 OBS-201). The
+/// existing `apex_llm_tokens_total`/`apex_llm_cost_usd_total`
+/// ([`crate::config::MetricsCostObserver`]) are labeled by `model` only — they come
+/// from a [`CostObserver`](apex_provider::CostObserver) attached once to the shared
+/// `Gateway`, with no per-request context to label by. Rather than thread tenant
+/// context down through the gateway's cost-event pipeline, this is called directly at
+/// every site that already resolves a run's usage against a project's quota
+/// (`agents.rs`'s three call sites, `workflow_runner.rs`'s `StoredAgentResolver::record`)
+/// — the natural point where `tenant`/`project` and the run's [`apex_common::Usage`]
+/// are already both in scope. Labels are bounded via the shared [`TenantLabelCap`], so
+/// this and [`track_metrics`]'s per-tenant aggregate agree on which tenants/projects
+/// are "known".
+pub(crate) fn record_llm_usage_metrics(
+    metrics: &Metrics,
+    tenant_labels: &TenantLabelCap,
+    tenant: &str,
+    project: Option<&str>,
+    cost_usd: f64,
+    tokens: u64,
+) {
+    let tenant = tenant_labels.label(tenant);
+    let project = tenant_labels.label(project.unwrap_or(""));
+    metrics.counter_add(
+        "apex_llm_cost_usd_by_tenant_total",
+        &[("tenant", &tenant), ("project", &project)],
+        cost_usd,
+    );
+    metrics.counter_add(
+        "apex_llm_tokens_by_tenant_total",
+        &[("tenant", &tenant), ("project", &project)],
+        tokens as f64,
+    );
+}
+
 // --- RED metrics for every route (RM-GA-P4 OBS-801) ------------------------------
 
 /// One route's method + path template + the bounded label its RED metrics use.
@@ -980,6 +1074,15 @@ const ROUTE_LABELS: &[RouteLabel] = &[
     },
 ];
 
+/// [`track_metrics`]'s middleware state: the registry plus the shared
+/// [`TenantLabelCap`] (RM-AIM-P2 OBS-201) so the per-tenant aggregate it records
+/// agrees with the LLM usage-metric call sites on which tenants are "known".
+#[derive(Clone)]
+pub(crate) struct MetricsState {
+    pub(crate) metrics: Metrics,
+    pub(crate) tenant_labels: TenantLabelCap,
+}
+
 /// RED metrics for every route, in one middleware layer. Previously only
 /// `agents:run`/`agents/{id}/run` recorded `apex_api_requests_total`/
 /// `apex_api_request_duration_seconds` — via two hand-rolled, near-duplicate
@@ -994,17 +1097,33 @@ const ROUTE_LABELS: &[RouteLabel] = &[
 /// the error-rate visibility RED metrics exist for. `MatchedPath` isn't resolved at
 /// this position (the same constraint documented on [`PathPattern`]), so the route
 /// label comes from the hand-maintained [`ROUTE_LABELS`] table instead.
+///
+/// **Per-tenant visibility (RM-AIM-P2 OBS-201):** `apex_api_requests_total`/
+/// `_duration_seconds` stay labeled `route`/`method`/`status` only — adding a
+/// per-tenant dimension there would multiply an already route×method×status series
+/// count by the tenant count. Instead, a **separate**, deliberately low-cardinality
+/// aggregate — `apex_api_requests_by_tenant_total{tenant, status_class}` — answers
+/// the actual problem ("a noisy tenant is invisible"): traffic volume and coarse
+/// error rate per tenant, bounded to `tenant(≤`[`MAX_TENANT_LABELS`]`+1) ×
+/// status_class(5)` series regardless of route count. Tenant is read straight off
+/// `X-Apex-Tenant` — unverified at this outer layer, same caveat as the tenant
+/// rate-limit tier and the idempotency cache's tenant scoping.
 pub(crate) async fn track_metrics(
-    State(metrics): State<Metrics>,
+    State(MetricsState {
+        metrics,
+        tenant_labels,
+    }): State<MetricsState>,
     request: Request,
     next: Next,
 ) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    let tenant = tenant_labels.label(&crate::tenancy::run_tenant(request.headers()));
     let start = Instant::now();
     let response = next.run(request).await;
     let label = route_label(&method, &path);
-    let status = response.status().as_u16().to_string();
+    let status_code = response.status().as_u16();
+    let status = status_code.to_string();
     metrics.counter_inc(
         "apex_api_requests_total",
         &[
@@ -1017,6 +1136,13 @@ pub(crate) async fn track_metrics(
         "apex_api_request_duration_seconds",
         &[("route", label), ("method", method.as_str())],
         start.elapsed().as_secs_f64(),
+    );
+    metrics.counter_inc(
+        "apex_api_requests_by_tenant_total",
+        &[
+            ("tenant", &tenant),
+            ("status_class", status_class(status_code)),
+        ],
     );
     response
 }
@@ -1409,11 +1535,15 @@ mod tests {
         use tower::ServiceExt;
 
         let metrics = Metrics::new();
+        let state = MetricsState {
+            metrics: metrics.clone(),
+            tenant_labels: TenantLabelCap::default(),
+        };
         let build = || {
             Router::new()
                 .route("/healthz", get(|| async { "ok" }))
                 .layer(axum::middleware::from_fn_with_state(
-                    metrics.clone(),
+                    state.clone(),
                     track_metrics,
                 ))
         };
@@ -1437,6 +1567,14 @@ mod tests {
         assert!(out.contains(
             "apex_api_request_duration_seconds_count{method=\"GET\",route=\"healthz\"} 1"
         ));
+        // The new low-cardinality per-tenant aggregate (OBS-201): no `X-Apex-Tenant`
+        // header on this request, so it's labeled the default tenant.
+        assert!(
+            out.contains(
+                r#"apex_api_requests_by_tenant_total{status_class="2xx",tenant="default"} 1"#
+            ),
+            "got:\n{out}"
+        );
 
         // A path not in `ROUTE_LABELS` (here, unregistered on this throwaway router
         // too, so axum itself 404s it) still gets counted — under "unmatched" rather
@@ -1457,6 +1595,118 @@ mod tests {
             out.contains(
                 r#"apex_api_requests_total{method="GET",route="unmatched",status="404"} 1"#
             ),
+            "got:\n{out}"
+        );
+        // A distinct status class is a distinct series from the earlier 2xx request,
+        // even though the tenant label is the same "default".
+        assert!(
+            out.contains(
+                r#"apex_api_requests_by_tenant_total{status_class="4xx",tenant="default"} 1"#
+            ),
+            "got:\n{out}"
+        );
+    }
+
+    // --- RM-AIM-P2 OBS-201: bounded per-tenant/per-project metric labels ----------
+
+    #[tokio::test]
+    async fn track_metrics_labels_the_per_tenant_aggregate_from_the_request_header() {
+        use axum::{Router, body::Body, routing::get};
+        use tower::ServiceExt;
+
+        let metrics = Metrics::new();
+        let state = MetricsState {
+            metrics: metrics.clone(),
+            tenant_labels: TenantLabelCap::default(),
+        };
+        let router = Router::new()
+            .route("/healthz", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state, track_metrics));
+
+        router
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header("x-apex-tenant", "acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let out = metrics.render_prometheus();
+        assert!(
+            out.contains(
+                r#"apex_api_requests_by_tenant_total{status_class="2xx",tenant="acme"} 1"#
+            ),
+            "got:\n{out}"
+        );
+        // The default-tenant series from an earlier request in this test binary must
+        // not exist here — this router has its own fresh `Metrics`.
+        assert!(!out.contains(r#"tenant="default""#), "got:\n{out}");
+    }
+
+    #[test]
+    fn tenant_label_cap_bounds_cardinality_by_folding_overflow_into_other() {
+        let cap = TenantLabelCap::default();
+        // The first MAX_TENANT_LABELS distinct values keep their real name.
+        for i in 0..MAX_TENANT_LABELS {
+            let tenant = format!("tenant-{i}");
+            assert_eq!(cap.label(&tenant), tenant);
+        }
+        // Every one of those is still resolved by its real name — capping affects only
+        // *new* values, not ones already tracked.
+        assert_eq!(cap.label("tenant-0"), "tenant-0");
+        // The cap+1'th distinct value folds into "other" instead of growing the set
+        // further, bounding cardinality regardless of how many more distinct values
+        // a caller throws at it.
+        assert_eq!(cap.label("tenant-overflow-1"), "other");
+        assert_eq!(cap.label("tenant-overflow-2"), "other");
+        // An empty value (no header set) is never bucketed as "other" — it has its own
+        // stable "none" label so it's distinguishable from a real overflowed tenant.
+        assert_eq!(cap.label(""), "none");
+    }
+
+    #[test]
+    fn record_llm_usage_metrics_labels_cost_and_tokens_by_tenant_and_project() {
+        let metrics = Metrics::new();
+        let cap = TenantLabelCap::default();
+        record_llm_usage_metrics(&metrics, &cap, "acme", Some("prj-1"), 0.5, 1200);
+        // A second call with no project (e.g. an unscoped direct agent run) is labeled
+        // "none" for project rather than colliding with a real project id.
+        record_llm_usage_metrics(&metrics, &cap, "acme", None, 0.25, 300);
+
+        let out = metrics.render_prometheus();
+        assert!(
+            out.contains(r#"apex_llm_cost_usd_by_tenant_total{project="prj-1",tenant="acme"} 0.5"#),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains(r#"apex_llm_tokens_by_tenant_total{project="prj-1",tenant="acme"} 1200"#),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains(r#"apex_llm_cost_usd_by_tenant_total{project="none",tenant="acme"} 0.25"#),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn record_llm_usage_metrics_shares_the_cap_with_track_metrics_bounding() {
+        // The same `TenantLabelCap` instance is what `AppState` shares between the RED
+        // middleware and this call site — proving that sharing actually keeps them in
+        // agreement: filling the cap via one, then asking the other for a fresh value,
+        // must yield the same "other" fallback rather than each independently deciding
+        // a value is "known".
+        let cap = TenantLabelCap::default();
+        for i in 0..MAX_TENANT_LABELS {
+            cap.label(&format!("tenant-{i}"));
+        }
+        let metrics = Metrics::new();
+        record_llm_usage_metrics(&metrics, &cap, "brand-new-tenant", None, 1.0, 10);
+        let out = metrics.render_prometheus();
+        assert!(
+            out.contains(r#"apex_llm_cost_usd_by_tenant_total{project="none",tenant="other"} 1"#),
             "got:\n{out}"
         );
     }

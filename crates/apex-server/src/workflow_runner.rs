@@ -64,6 +64,11 @@ pub struct StoredAgentResolver {
     agents: Arc<AgentStore>,
     tenancy: Arc<dyn TenancyStore>,
     quota: Arc<tenancy::QuotaTracker>,
+    /// Per-tenant/per-project LLM cost+token visibility (RM-AIM-P2 OBS-201) — a
+    /// sub-agent run's usage is metered here the same way a direct `agents:run` call
+    /// is metered in `agents.rs`.
+    metrics: apex_telemetry::Metrics,
+    tenant_label_cap: crate::hardening::TenantLabelCap,
 }
 
 impl StoredAgentResolver {
@@ -71,11 +76,15 @@ impl StoredAgentResolver {
         agents: Arc<AgentStore>,
         tenancy: Arc<dyn TenancyStore>,
         quota: Arc<tenancy::QuotaTracker>,
+        metrics: apex_telemetry::Metrics,
+        tenant_label_cap: crate::hardening::TenantLabelCap,
     ) -> Self {
         Self {
             agents,
             tenancy,
             quota,
+            metrics,
+            tenant_label_cap,
         }
     }
 
@@ -126,6 +135,14 @@ impl AgentResolver for StoredAgentResolver {
             usage.cost_usd,
             u64::from(usage.total_tokens),
         );
+        crate::hardening::record_llm_usage_metrics(
+            &self.metrics,
+            &self.tenant_label_cap,
+            Self::tenant(ctx),
+            Self::project(ctx),
+            usage.cost_usd,
+            u64::from(usage.total_tokens),
+        );
     }
 }
 
@@ -138,11 +155,19 @@ pub(crate) fn server_executor(
     agents: Arc<AgentStore>,
     tenancy: Arc<dyn TenancyStore>,
     quota: Arc<tenancy::QuotaTracker>,
+    metrics: apex_telemetry::Metrics,
+    tenant_label_cap: crate::hardening::TenantLabelCap,
 ) -> PlatformActivityExecutor {
     PlatformActivityExecutor::new(
         registry,
         gateway,
-        Arc::new(StoredAgentResolver::new(agents, tenancy, quota)),
+        Arc::new(StoredAgentResolver::new(
+            agents,
+            tenancy,
+            quota,
+            metrics,
+            tenant_label_cap,
+        )),
     )
 }
 
@@ -509,6 +534,8 @@ mod tests {
             agents.clone(),
             state.tenancy.clone(),
             state.quota.clone(),
+            state.metrics.clone(),
+            state.tenant_label_cap.clone(),
         ));
         let store = InMemoryStore::new();
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
@@ -756,6 +783,8 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
             agents.clone(),
             base.tenancy.clone(),
             base.quota.clone(),
+            base.metrics.clone(),
+            base.tenant_label_cap.clone(),
         ));
         let store = InMemoryStore::new();
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
@@ -1434,6 +1463,23 @@ metadata:\n  name: agent-wf-quota\nspec:\n  activities:\n    - id: greet\n      
         assert!(
             tokens > 0,
             "the sub-agent run's token usage must land there too (SRV-202), got {tokens}"
+        );
+
+        // RM-AIM-P2 OBS-201: the same sub-agent run also lands in the per-tenant LLM
+        // usage metric — proving the workflow `agent`-activity path (StoredAgentResolver)
+        // records it, not just the direct `agents:run` call sites.
+        let out = state.metrics.render_prometheus();
+        assert!(
+            out.contains(
+                r#"apex_llm_cost_usd_by_tenant_total{project="prj-run202-cost",tenant="default"}"#
+            ),
+            "got:\n{out}"
+        );
+        assert!(
+            out.contains(
+                r#"apex_llm_tokens_by_tenant_total{project="prj-run202-cost",tenant="default"}"#
+            ),
+            "got:\n{out}"
         );
     }
 }
