@@ -66,6 +66,9 @@ apex-secrets.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 serde.workspace = true
 serde_json.workspace = true
+# Rendering the digest-complete `plugin.yaml` that `apex plugin build` stages
+# (RM-AIM-P3 ECO-302) — same version the manifest parser itself uses.
+serde_yaml.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true

@@ -7,8 +7,8 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.1.0
-**Status:** In progress — ECO-301 done; everything else planned
+**Version:** 1.2.0
+**Status:** In progress — ECO-301, ECO-302 done; everything else planned
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
 **Last Updated:** 2026-07-14
 
@@ -96,7 +96,7 @@ stance as SAF-201/202): no agent-manifest/server/CLI configuration surface
 for MCP connections yet, and the `RemoteWorker` sandbox variant is untouched
 — follow-ons.
 
-## ECO-302 `[P1]` — Plugin authoring SDK + `apex plugin new` scaffold
+## ECO-302 `[P1]` — Plugin authoring SDK + `apex plugin new` scaffold — **DONE (2026-07-14)**
 
 **Problem.** No authoring SDK/scaffold — only format docs; authors hand-write
 `plugin.yaml`, compile `wasm32-wasi`, and hand-embed `sha256:` digests
@@ -112,6 +112,54 @@ round-trips with no hand-edited digests.
 
 **Files.** new `crates/apex-plugin-sdk`, `apps/apex-cli/src/plugin.rs`. **Size.** L.
 **Depends on:** none.
+
+**Implementation notes (2026-07-14).** Two halves. **`crates/apex-plugin-sdk`**
+(new workspace crate, deliberately tiny — serde + serde_json only, no
+apex-common, so a plugin author's dependency tree stays clean and everything
+compiles to `wasm32-wasip1`): `run_tool(handler)` is the typed entry point
+wrapping the platform's capability ABI (request JSON on stdin → typed
+handler → response JSON on stdout; a handler error prints to stderr and
+exits non-zero, which the WASI loader surfaces as the tool failure's
+detail), built on a pure `respond(input, handler)` core so handlers
+unit-test on the host with no wasm build or stdin pipe; `secret(name)` /
+`secret_env_var(name)` read platform-injected secrets with the exact
+`APEX_SECRET_<UPPER_SNAKE>` mangling `apex-plugin`'s `resolve_secret_env`
+uses (mirrored in a test). **The scaffold + build step**
+(`apps/apex-cli/src/scaffold.rs`, wired as `apex plugin new` / `apex plugin
+build`): `new` generates a buildable project — `Cargo.toml` (SDK dependency;
+`--sdk-path` emits a local `path` dep, needed until the SDK is published to
+crates.io), a typed greeter `src/main.rs`, a valid `plugin.yaml` whose
+`artifacts` list is deliberately **empty** (digests are computed, never
+hand-edited), `.gitignore`, and a README walking sign → trust → install →
+enable → run; it fails closed on an existing directory and validates the
+name `[a-z][a-z0-9_-]*` (it doubles as the crate name and capability-id
+prefix). `build` compiles the project (`cargo build --release --target
+wasm32-wasip1`, explicit `--target-dir` so a caller's `CARGO_TARGET_DIR`
+can't hide the artifact; a missing-target failure gets a `rustup target add`
+hint), locates the module (package-name parse with a single-`.wasm`-glob
+fallback), and stages `dist/`: the module beside a rewritten `plugin.yaml`
+carrying the computed `sha256:` digest — exactly one distinct wasm entry
+per project is supported (shared entries across capabilities are fine),
+fail-closed otherwise. The existing supply chain then applies unchanged:
+`sign` → `trust` → `install`. **The acceptance round trip runs for real**,
+not mocked (`scaffold::tests::scaffolded_project_builds_signs_and_installs_
+with_no_hand_edited_digests`): scaffold → real nested `cargo build` to wasm
+(offline-safe: warm registry cache + path SDK dep) → `keygen_cmd`/`sign_cmd`
+(the real CLI signing commands) → `read_package_dir` + `PluginEngine::
+install` (the same verify-signature → verify-digest → stage → register core
+`install_cmd` runs), against scratch directories so the test never touches
+the real `~/.apex`; the staged digest is asserted equal to a recomputed
+digest of the staged module. Under `--features plugin-wasi` the same test
+additionally enables the plugin and executes it through `ToolRegistry`,
+proving the scaffolded, SDK-built module really answers (`{"greeting":
+"Hello, Apex!"}` through a real Wasmtime run — verified locally, 24 s).
+Skips cleanly when the wasm target/cargo are unavailable (the established
+capability-gated pattern); CI's rust job now installs `wasm32-wasip1` via
+the toolchain action so the round trip runs on every PR (the Windows leg
+skips — no double-build cost). Not done here (later slices): `apex plugin
+publish` one-shotting sign+digest+trust output (ECO-304, which depends on
+this), SBOM/provenance auto-fill in `build`, and publishing the SDK crate
+to crates.io.
 
 ## ECO-303 `[P2]` — Container capability loader
 
@@ -728,3 +776,4 @@ lint and load.
 |---------|------|-------------|
 | 1.0.0 | 2026-07-09 | Initial Phase-3 tickets from PRD-004 / the 2026-07-09 engineering audit (ecosystem, scale, DX, UI, operability) |
 | 1.1.0 | 2026-07-14 | ECO-301 (MCP client tool-source: stdio + streamable-HTTP transports, handshake/paginated discovery/`tools/call` proxying into `ToolRegistry` as permissioned `Tool` impls, fail-closed error mapping + timeouts) implemented and marked DONE with implementation notes — Phase 3 started |
+| 1.2.0 | 2026-07-14 | ECO-302 (plugin authoring SDK: new `apex-plugin-sdk` crate with typed `run_tool` stdin/stdout entry point + secret helpers; `apex plugin new` scaffold + `apex plugin build` digest-computing wasm32-wasip1 build step; real scaffold→build→sign→install acceptance round trip, wasm target added to CI) implemented and marked DONE with implementation notes |

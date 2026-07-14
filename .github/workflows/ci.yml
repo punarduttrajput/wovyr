@@ -51,6 +51,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          # ECO-302: the plugin-scaffold round-trip test compiles a generated
+          # project to wasm32-wasip1; without the target it skips silently.
+          targets: wasm32-wasip1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

@@ -215,6 +215,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "tokio",
 ]
@@ -335,6 +336,14 @@ dependencies = [
  "tokio",
  "tracing",
  "wat",
+]
+
+[[package]]
+name = "apex-plugin-sdk"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

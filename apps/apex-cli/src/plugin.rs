@@ -26,7 +26,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// The platform-API version the engine checks plugin `compatibility` ranges against.
-fn platform_api() -> semver::Version {
+pub(crate) fn platform_api() -> semver::Version {
     semver::Version::new(1, 0, 0)
 }
 
@@ -410,7 +410,7 @@ fn load_package(source: &str) -> Result<(Package, PluginManifest)> {
 /// Read a package directory (`plugin.yaml` + `plugin.sig` and/or
 /// `plugin.keyless.json` + declared artifacts). At least one signing mode must be
 /// present: the detached publisher-key signature, or a keyless bundle ([ADR-0009]).
-fn read_package_dir(dir: &Path) -> Result<(Package, PluginManifest)> {
+pub(crate) fn read_package_dir(dir: &Path) -> Result<(Package, PluginManifest)> {
     let manifest_yaml = std::fs::read_to_string(dir.join("plugin.yaml"))
         .map_err(|e| Error::config(format!("could not read {}/plugin.yaml: {e}", dir.display())))?;
     let keyless: Option<apex_plugin::KeylessBundle> =

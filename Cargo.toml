@@ -10,6 +10,7 @@ members = [
     "crates/apex-memory",
     "crates/apex-telemetry",
     "crates/apex-plugin",
+    "crates/apex-plugin-sdk",
     "crates/apex-marketplace",
     "crates/apex-tenancy",
     "crates/apex-events",
@@ -43,6 +44,7 @@ apex-runtime = { path = "crates/apex-runtime" }
 apex-memory = { path = "crates/apex-memory" }
 apex-telemetry = { path = "crates/apex-telemetry" }
 apex-plugin = { path = "crates/apex-plugin" }
+apex-plugin-sdk = { path = "crates/apex-plugin-sdk" }
 apex-marketplace = { path = "crates/apex-marketplace" }
 apex-tenancy = { path = "crates/apex-tenancy" }
 apex-events = { path = "crates/apex-events" }

@@ -1,0 +1,16 @@
+[package]
+name = "apex-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Authoring SDK for Apex plugin capabilities: typed wasm32-wasip1 tool entry points."
+
+# Deliberately tiny: a plugin author's dependency tree is serde + serde_json and
+# nothing else (no apex-common — its Error type, fs primitives, and their deps
+# have no business inside a wasm guest). Everything here compiles cleanly to
+# wasm32-wasip1.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

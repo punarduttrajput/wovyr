@@ -8,7 +8,7 @@ Document ID: RM-AIM-INDEX
 **Document ID:** RM-AIM-INDEX
 **File Path:** `docs/18-roadmap/v1.1/index.md`
 **Version:** 1.1.0
-**Status:** In progress — Phase 1 done (WFL-104 lease fencing deferred), Phase 2 done, Phase 3 started (ECO-301 done)
+**Status:** In progress — Phase 1 done (WFL-104 lease fencing deferred), Phase 2 done, Phase 3 started (ECO-301/302 done)
 **Owner:** Product / AI Engineering
 **Last Updated:** 2026-07-14
 

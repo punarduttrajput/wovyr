@@ -21,6 +21,7 @@ mod kms;
 mod memory;
 mod plugin;
 mod s3;
+mod scaffold;
 mod stream;
 mod workflow;
 
@@ -203,6 +204,40 @@ enum KmsCommand {
 
 #[derive(Subcommand)]
 enum PluginCommand {
+    /// Scaffold a new plugin project: a buildable wasm tool + manifest
+    /// (digests are computed by `apex plugin build`, never hand-edited).
+    New {
+        /// Plugin name (lowercase [a-z][a-z0-9_-]*; names the crate and the
+        /// capability id).
+        name: String,
+
+        /// Publisher identity recorded in the manifest (the signing namespace).
+        #[arg(long, default_value = "dev")]
+        publisher: String,
+
+        /// Parent directory to create the project under.
+        #[arg(long, default_value = ".")]
+        dir: String,
+
+        /// Path to a local apex-plugin-sdk checkout, emitted as a `path`
+        /// dependency (use `<apex-repo>/crates/apex-plugin-sdk` until the SDK
+        /// is published to crates.io).
+        #[arg(long)]
+        sdk_path: Option<String>,
+    },
+
+    /// Compile a plugin project to wasm32-wasip1 and stage a digest-complete
+    /// package directory ready for `sign` + `install`.
+    Build {
+        /// Plugin project directory (from `apex plugin new`).
+        #[arg(default_value = ".")]
+        project: String,
+
+        /// Output package directory (defaults to `<project>/dist`).
+        #[arg(long)]
+        out: Option<String>,
+    },
+
     /// Generate an ed25519 signing keypair for a publisher.
     Keygen {
         /// Publisher name the keypair signs for.
@@ -819,6 +854,13 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
             } => memory::compact_cmd(&namespace, max_importance, keep_recent).await,
         },
         Command::Plugin { command } => match command {
+            PluginCommand::New {
+                name,
+                publisher,
+                dir,
+                sdk_path,
+            } => scaffold::new_cmd(&name, &publisher, &dir, sdk_path.as_deref()),
+            PluginCommand::Build { project, out } => scaffold::build_cmd(&project, out.as_deref()),
             PluginCommand::Keygen { publisher, dir } => plugin::keygen_cmd(&publisher, &dir),
             PluginCommand::Sign { key, manifest, out } => plugin::sign_cmd(&key, &manifest, out),
             PluginCommand::KeylessInit { allow } => plugin::keyless_init_cmd(allow),
