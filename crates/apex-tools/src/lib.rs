@@ -20,6 +20,7 @@
 mod builtin;
 mod egress;
 mod egress_lockdown;
+mod mcp;
 mod pool;
 mod registry;
 mod sandbox;
@@ -28,6 +29,9 @@ mod tool;
 
 pub use builtin::{EchoTool, FsReadTool, HttpGetTool, ImageGenTool, ShellTool};
 pub use egress::EgressProxy;
+pub use mcp::{
+    HttpTransport, MCP_PROTOCOL_VERSION, McpClient, McpToolInfo, McpTransport, StdioTransport,
+};
 pub use pool::{AutoscalePolicy, PooledSandbox, SandboxFactory, SandboxPool};
 pub use registry::ToolRegistry;
 #[cfg(feature = "wasi")]

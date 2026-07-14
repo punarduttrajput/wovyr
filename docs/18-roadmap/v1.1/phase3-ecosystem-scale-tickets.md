@@ -7,10 +7,10 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.0.0
-**Status:** Planned — not started
+**Version:** 1.1.0
+**Status:** In progress — ECO-301 done; everything else planned
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
-**Last Updated:** 2026-07-09
+**Last Updated:** 2026-07-14
 
 ---
 
@@ -32,7 +32,7 @@ mostly independent; group by team and land in any order after Phases 1–2.
 
 # WS-F — Ecosystem & Extensibility
 
-## ECO-301 `[P1]` — MCP (Model Context Protocol) client tool-source
+## ECO-301 `[P1]` — MCP (Model Context Protocol) client tool-source — **DONE (2026-07-14)**
 
 **Problem.** No MCP or external tool-server client exists; the `RemoteWorker` sandbox
 backend is an unimplemented enum variant (`crates/apex-tools/src/sandbox/types.rs:19`);
@@ -47,6 +47,54 @@ permission model.
 invokes one through `ToolRegistry`; permissions are enforced.
 
 **Files.** `crates/apex-tools/src/` (new `mcp.rs`). **Size.** L. **Depends on:** none.
+
+**Implementation notes (2026-07-14).** New `crates/apex-tools/src/mcp.rs`, zero
+new dependencies (reqwest/tokio/serde were already in the crate). An
+`McpTransport` trait (JSON-RPC 2.0 `request`/`notify`) with two impls:
+**`StdioTransport`** — spawns a child process (`kill_on_drop`), speaks
+newline-delimited JSON-RPC over its stdin/stdout, serialized behind a lock;
+unsolicited server *notifications* are skipped and server→client *requests*
+(sampling etc.) are answered `-32601 method not found` so a compliant server
+isn't left hanging; built generically over `AsyncRead`/`AsyncWrite`
+(`from_streams`), so the framing is unit-tested against an in-memory
+`tokio::io::duplex` pair with no real process — and **`HttpTransport`** —
+JSON-RPC POSTs in the streamable-HTTP *plain-JSON* mode, capturing the
+server-assigned `Mcp-Session-Id` from any response and echoing it on every
+subsequent request; a notification's empty-body `202` ack is accepted; a
+server answering `text/event-stream` (the spec's optional SSE mode,
+deliberately out of scope) gets a clear "not supported" error, never a hang
+or a mangled parse. **`McpClient::connect`** runs the `initialize` handshake
+(protocol `2025-03-26`) + `notifications/initialized`; the server name is
+validated `[A-Za-z0-9_-]+` fail-closed since it namespaces ids and
+permissions. `list_tools` drains `tools/list` cursor pagination (capped at 64
+pages — a server that keeps returning a cursor is refused rather than spun
+on); `call_tool` passes the MCP result object through as the payload with
+`isError: true` mapped to an *unsuccessful* `ToolResponse` — a tool-level
+failure the model should see, distinct from a JSON-RPC protocol error, which
+maps onto the platform's standard categories (`-32600`/`-32602` →
+permanent `Validation`; anything else → retryable `Internal`; transport
+failures → `Network`) so workflow retry classification (RUN-201) applies
+sensibly to remote tools. Every request is bounded by a timeout
+(`with_timeout`, default 30 s). **Registry integration:**
+`discover_tools`/`register_into` proxy each discovered tool as an `McpTool`
+with id `mcp__<server>__<tool>` (sanitized to model-callable chars; the
+namespace means a remote tool can never silently shadow a built-in),
+category `mcp`, the server's declared version, and declared permissions
+`["mcp:<server>"]` by default (`with_tool_permissions` overrides) — enforced
+by the existing `ToolRegistry::execute` fail-closed path, no new enforcement
+code. Proven by 9 unit tests (duplex-scripted stdio server: handshake +
+paginated list + call round-trip, noise-skipping, error mapping, `isError`
+mapping, name validation, pagination guard, id sanitization) and the
+acceptance integration test `crates/apex-tools/tests/mcp_tools.rs` — a
+hand-rolled HTTP/1.1 mock MCP server over a real `TcpListener` (the S3-signer
+stance: no test-framework dependency) that *rejects any post-initialize
+request missing the session id*, against which the client discovers, lists,
+and invokes through `ToolRegistry` with the grant present, and — the
+fail-closed half — an ungranted call is denied with the mock's request log
+proving **no `tools/call` ever reached the wire**. Programmatic only (same
+stance as SAF-201/202): no agent-manifest/server/CLI configuration surface
+for MCP connections yet, and the `RemoteWorker` sandbox variant is untouched
+— follow-ons.
 
 ## ECO-302 `[P1]` — Plugin authoring SDK + `apex plugin new` scaffold
 
@@ -679,3 +727,4 @@ lint and load.
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-07-09 | Initial Phase-3 tickets from PRD-004 / the 2026-07-09 engineering audit (ecosystem, scale, DX, UI, operability) |
+| 1.1.0 | 2026-07-14 | ECO-301 (MCP client tool-source: stdio + streamable-HTTP transports, handshake/paginated discovery/`tools/call` proxying into `ToolRegistry` as permissioned `Tool` impls, fail-closed error mapping + timeouts) implemented and marked DONE with implementation notes — Phase 3 started |
