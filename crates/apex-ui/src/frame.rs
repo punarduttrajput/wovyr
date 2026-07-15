@@ -360,13 +360,24 @@ impl UiFrame {
     }
 
     /// Content hash over the canonical serialized form (UIP-102): SHA-256 hex
-    /// of the frame's JSON. `serde_json` maps are key-sorted, so serialization
-    /// is canonical for equal frames. The provenance block is *included* — the
-    /// hash identifies exactly what was presented, origin stamp and all.
+    /// of the frame's JSON, hashed via [`serde_json::Value`] rather than the
+    /// struct's own `Serialize` impl. This matters: a directly-serialized
+    /// struct emits fields in **declaration order**, but every consumer of a
+    /// frame over the wire (the server's `Json(...)` response bodies, this
+    /// crate's own `from_value`) sees it as a `Value::Object`, whose map is a
+    /// `BTreeMap` absent the `preserve_order` feature — **alphabetically
+    /// key-sorted**. Hashing the struct directly would silently diverge from
+    /// what a renderer actually receives, defeating client-side integrity
+    /// verification (RDR-403) the instant a struct's field order isn't already
+    /// alphabetical. Going through `Value` first guarantees the hash matches
+    /// the canonical form every consumer observes. The provenance block is
+    /// *included* — the hash identifies exactly what was presented, origin
+    /// stamp and all.
     pub fn content_hash(&self) -> String {
-        // A UiFrame always serializes (no non-string map keys, no NaN floats
+        // A UiFrame always converts (no non-string map keys, no NaN floats
         // survive validation of authored input; and this is a value we built).
-        let canonical = serde_json::to_string(self).unwrap_or_else(|_| format!("{self:?}"));
+        let value = serde_json::to_value(self).unwrap_or(Value::Null);
+        let canonical = serde_json::to_string(&value).unwrap_or_else(|_| format!("{self:?}"));
         let mut hasher = Sha256::new();
         hasher.update(canonical.as_bytes());
         hex(&hasher.finalize())
@@ -689,6 +700,42 @@ mod tests {
         changed["title"] = json!("Confirm order — updated");
         let c = UiFrame::from_value(&changed).unwrap();
         assert_ne!(a.content_hash(), c.content_hash());
+    }
+
+    /// RDR-403's client-side integrity check only works if `content_hash`
+    /// matches what a consumer actually receives — a `Value::Object`, whose
+    /// map is alphabetically key-sorted (no `preserve_order` feature). Proven
+    /// two ways: (1) hashing the frame's already-alphabetical `Value` form
+    /// directly reproduces `content_hash()` exactly; (2) hashing the struct's
+    /// own `Serialize` impl directly (declaration order — `schema_version`,
+    /// `title`, `provenance`, `root`, not alphabetical) does **not** match,
+    /// which is the bug this test guards against regressing to.
+    #[test]
+    fn content_hash_matches_the_canonical_value_form_a_consumer_receives() {
+        let frame = UiFrame::from_value(&confirm_frame()).unwrap();
+
+        let value = serde_json::to_value(&frame).unwrap();
+        let via_value = {
+            let mut hasher = Sha256::new();
+            hasher.update(serde_json::to_string(&value).unwrap().as_bytes());
+            hex(&hasher.finalize())
+        };
+        assert_eq!(
+            frame.content_hash(),
+            via_value,
+            "content_hash must match hashing the Value form a wire consumer sees"
+        );
+
+        let via_struct_declaration_order = {
+            let mut hasher = Sha256::new();
+            hasher.update(serde_json::to_string(&frame).unwrap().as_bytes());
+            hex(&hasher.finalize())
+        };
+        assert_ne!(
+            via_value, via_struct_declaration_order,
+            "this frame's fields aren't already alphabetical — if this ever \
+             passes, the regression this test guards against is moot, not fixed"
+        );
     }
 
     #[test]

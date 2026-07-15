@@ -12,6 +12,7 @@ import type {
   Page,
   PageParams,
   PluginSummary,
+  PendingUiFrame,
   PublishResult,
   PutMemoryRequest,
   QueryMemoryRequest,
@@ -22,6 +23,8 @@ import type {
   SecretMetadata,
   SubmitWorkflowRequest,
   ToolSummary,
+  UiDecisionRequest,
+  UiDecisionResult,
   WorkflowListParams,
   WorkflowValidation,
 } from "./types.js";
@@ -64,6 +67,7 @@ export class ApexClient {
   readonly webhooks: WebhooksResource;
   readonly audit: AuditResource;
   readonly tools: ToolsResource;
+  readonly ui: UiResource;
 
   constructor(options: ApexClientOptions) {
     this.http = new HttpClient(options);
@@ -78,6 +82,7 @@ export class ApexClient {
     this.webhooks = new WebhooksResource(this.http);
     this.audit = new AuditResource(this.http);
     this.tools = new ToolsResource(this.http);
+    this.ui = new UiResource(this.http);
   }
 
   /** `GET /healthz`. */
@@ -641,5 +646,39 @@ class ToolsResource {
   /** `GET /api/v1/tools` — built-ins + enabled plugin tools. Unauthenticated. */
   async list(params?: PageParams): Promise<Page<ToolSummary>> {
     return this.http.request("GET", "/api/v1/tools", undefined, { query: params });
+  }
+}
+
+/** Generative UI (PRD-005 RM-GUI-P1): pending validated frames and typed human
+ * decisions. `@apex/ui-react` builds on these same three routes — reach for it
+ * instead of hand-rolling a renderer against this resource directly. */
+class UiResource {
+  constructor(private readonly http: HttpClient) {}
+
+  /** `GET /api/v1/ui/frames` — the caller's tenant's pending validated frames. */
+  async list(): Promise<{ data: PendingUiFrame[] }> {
+    return this.http.request("GET", "/api/v1/ui/frames");
+  }
+
+  /** `GET /api/v1/ui/frames/{frame_id}` — one pending frame. */
+  async get(frameId: string): Promise<PendingUiFrame> {
+    return this.http.request("GET", `/api/v1/ui/frames/${encodeURIComponent(frameId)}`);
+  }
+
+  /** `POST /api/v1/ui/decisions/{frame_id}` (HIL-302/303) — validated
+   * fail-closed against the frame it answers before anything reaches the
+   * workflow; an undeclared action or a constraint violation is a `400`
+   * ({@link ApexApiError}), not a silently-accepted decision. */
+  async decide(
+    frameId: string,
+    req: UiDecisionRequest,
+    opts?: IdempotentOpts,
+  ): Promise<UiDecisionResult> {
+    return this.http.request(
+      "POST",
+      `/api/v1/ui/decisions/${encodeURIComponent(frameId)}`,
+      req,
+      { headers: idemHeaders(opts) },
+    );
   }
 }

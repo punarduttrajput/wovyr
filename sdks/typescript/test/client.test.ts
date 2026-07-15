@@ -15,10 +15,19 @@
  * tenancy management routes have no anonymous-default-tenant back-compat
  * bypass — see `adminClient()` below); it skips gracefully, rather than
  * failing, if that wasn't configured.
+ *
+ * The `ui:` suite needs `APEX_PLATFORM_ADMINS=sdk-test-admin` too (`workflows:
+ * run`/`workflows:read` have the same no-anonymous-bypass posture as
+ * organizations/projects) — same graceful skip. Its approve test additionally
+ * needs `APEX_UI_POLICY=examples/policies/default-ui-policy.yaml` (GRD-207:
+ * absent a policy, the hosted floor denies *every* interactive frame,
+ * including a legitimate one). The block test needs no such setup: the
+ * hosted floor already denies its frame the same way a real policy's
+ * sensitive-input rule would.
  */
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
-import { ApexClient, ApexApiError, paginateAll } from "../src/index.js";
+import { ApexClient, ApexApiError, paginateAll, type PendingUiFrame } from "../src/index.js";
 
 const baseUrl = process.env.APEX_TEST_BASE_URL ?? "http://127.0.0.1:8080";
 
@@ -251,6 +260,137 @@ describe("ApexClient (integration)", () => {
     } finally {
       await Promise.all(created.map((id) => c.agents.delete(id).catch(() => {})));
     }
+  });
+});
+
+describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
+  // GRD-207: with no ui policy configured, the hosted floor denies *every*
+  // interactive frame — including this legitimate approve flow. Point the
+  // server at examples/policies/default-ui-policy.yaml (`APEX_UI_POLICY=...`)
+  // to exercise the real policy path (allows this frame; blocks the
+  // credential one below via the sensitive-input rule) rather than the floor.
+  const APPROVE_MANIFEST =
+    "metadata:\n  name: sdk-ui-approve-test\nspec:\n  activities:\n    - id: confirm\n      type: ui\n      inputs:\n        frame:\n          schema_version: 1.0.0\n          title: Confirm order\n          root:\n            type: column\n            children:\n              - {type: text, text: Reorder 3 boxes?}\n              - {type: text_input, name: po_number, label: PO number, required: true}\n              - type: row\n                children:\n                  - {type: button, action: approve, label: Approve, class: approve}\n                  - {type: button, action: cancel, label: Cancel, class: cancel}\n";
+
+  const BLOCK_MANIFEST =
+    "metadata:\n  name: sdk-ui-block-test\nspec:\n  activities:\n    - id: confirm\n      type: ui\n      inputs:\n        frame:\n          schema_version: 1.0.0\n          root:\n            type: column\n            children:\n              - {type: text_input, name: card_number, label: Card number}\n              - {type: button, action: pay, label: Continue, class: submit}\n";
+
+  /** Polls until either a pending frame for `executionId` appears, or the
+   * execution reaches a terminal status first — distinguishing "the frame is
+   * on its way" from "policy denied it" (the hosted floor, absent
+   * `APEX_UI_POLICY`) without a fixed race between the two. */
+  async function waitForPendingFrameOrTerminal(
+    c: ApexClient,
+    executionId: string,
+  ): Promise<{ frame: PendingUiFrame } | { terminalStatus: string }> {
+    for (let i = 0; i < 100; i++) {
+      const { data } = await c.ui.list();
+      const found = data.find((f) => f.execution_id === executionId);
+      if (found) return { frame: found };
+      const { execution } = await c.workflows.get(executionId);
+      const status = (execution as { status?: string }).status ?? "";
+      if (!["created", "validated", "scheduled", "running", "resumed"].includes(status)) {
+        return { terminalStatus: status };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`execution ${executionId} settled into neither a pending frame nor a terminal status`);
+  }
+
+  async function waitForWorkflowStatus(c: ApexClient, executionId: string, status: string): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      const { execution } = await c.workflows.get(executionId);
+      if ((execution as { status?: string }).status === status) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`execution ${executionId} did not reach ${status} in time`);
+  }
+
+  // `workflows:run` (SEC-105) has no anonymous-default-tenant back-compat
+  // bypass, same as organizations/projects — these need a real platform-admin
+  // credential (`adminClient()`), and skip gracefully without one.
+  test("UC1: a pending frame renders, an out-of-vocabulary decision 400s, a valid approval resumes the workflow", async (t) => {
+    if (!serverAvailable) return t.skip("no server");
+    const c = adminClient();
+    const executionId = `sdk-ui-approve-${Date.now()}`;
+    let submitStatus: string;
+    try {
+      ({ status: submitStatus } = await c.workflows.submit({
+        manifest: APPROVE_MANIFEST,
+        execution_id: executionId,
+      }));
+    } catch (err) {
+      if (err instanceof ApexApiError && err.status === 403) {
+        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      }
+      throw err;
+    }
+    assert.equal(submitStatus, "submitted");
+
+    const outcome = await waitForPendingFrameOrTerminal(c, executionId);
+    if ("terminalStatus" in outcome) {
+      return t.skip(
+        "no ui policy configured (server started without APEX_UI_POLICY) — the hosted " +
+          "floor denies this legitimate frame too; see examples/policies/default-ui-policy.yaml",
+      );
+    }
+    const pending = outcome.frame;
+    assert.equal(pending.activity_id, "confirm");
+    assert.ok(pending.frame_hash.length > 0);
+
+    // The client can fetch the same frame by id (RDR-104's pull path).
+    const fetched = await c.ui.get(pending.frame_id);
+    assert.equal(fetched.frame_hash, pending.frame_hash);
+
+    // HIL-302, fail-closed at the boundary: an undeclared action never
+    // reaches the workflow.
+    await assert.rejects(
+      () => c.ui.decide(pending.frame_id, { action: "launch" }),
+      (err: unknown) => err instanceof ApexApiError && err.status === 400,
+    );
+
+    // The valid approval resumes the execution to completion.
+    const decided = await c.ui.decide(pending.frame_id, {
+      action: "approve",
+      values: { po_number: "PO-9" },
+    });
+    assert.equal(decided.status, "decided");
+    await waitForWorkflowStatus(c, executionId, "completed");
+  });
+
+  test("UC4: a credential-harvesting frame is blocked and never appears as a pending frame", async (t) => {
+    if (!serverAvailable) return t.skip("no server");
+    const c = adminClient();
+    const executionId = `sdk-ui-block-${Date.now()}`;
+    try {
+      await c.workflows.submit({ manifest: BLOCK_MANIFEST, execution_id: executionId });
+    } catch (err) {
+      if (err instanceof ApexApiError && err.status === 403) {
+        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      }
+      throw err;
+    }
+
+    await waitForWorkflowStatus(c, executionId, "failed");
+    const { data } = await c.ui.list();
+    assert.ok(
+      !data.some((f) => f.execution_id === executionId),
+      "a blocked frame must never become visible on the pending-frames surface",
+    );
+  });
+
+  test("deciding against an unknown frame id is a 404", async (t) => {
+    if (!serverAvailable) return t.skip("no server");
+    await assert.rejects(
+      () => adminClient().ui.decide("uif-does-not-exist", { action: "approve" }),
+      (err: unknown) => {
+        if (err instanceof ApexApiError && err.status === 403) {
+          t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+          return true;
+        }
+        return err instanceof ApexApiError && err.status === 404;
+      },
+    );
   });
 });
 

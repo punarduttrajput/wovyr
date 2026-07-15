@@ -23,6 +23,7 @@ mod plugin;
 mod s3;
 mod scaffold;
 mod stream;
+mod ui_present;
 mod workflow;
 
 use apex_agent::{AgentDefinition, NullSink, RunOptions, run_agent, run_agent_with_memory};
@@ -523,6 +524,16 @@ enum AgentsCommand {
         /// weights — see APEX_MISTRALRS_GGUF_REPO/_GGUF_FILE/_TOK_MODEL_ID).
         #[arg(long, default_value = "auto")]
         provider: String,
+
+        /// Register the `ui_present` tool (PRD-005 HIL-304) so the agent can show
+        /// the human a generative-UI frame via an interactive stdin prompt and get
+        /// a decision back — local mode only. This is the CLI's trusted-first-party
+        /// context, so frames render unrestricted (no policy required); a hosted
+        /// deployment never uses this presenter. Bare agent runs have no checkpoint
+        /// to resume from at all, so this is not durable the way a workflow `ui`
+        /// activity is — see `apex-tools`' `ui_present` module docs.
+        #[arg(long)]
+        interactive_ui: bool,
     },
 }
 
@@ -781,9 +792,18 @@ async fn run(cli: Cli) -> apex_common::Result<()> {
                 tenant,
                 max_steps,
                 provider,
+                interactive_ui,
             } => {
                 run_agent_cmd(
-                    &file, &input, local, server, stream, tenant, max_steps, &provider,
+                    &file,
+                    &input,
+                    local,
+                    server,
+                    stream,
+                    tenant,
+                    max_steps,
+                    &provider,
+                    interactive_ui,
                 )
                 .await
             }
@@ -1008,16 +1028,29 @@ async fn run_agent_cmd(
     tenant: Option<String>,
     max_steps: Option<usize>,
     provider: &str,
+    interactive_ui: bool,
 ) -> apex_common::Result<()> {
     // Accept JSON input, or fall back to treating the argument as plain text.
     let input_value: Value =
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
 
     if local {
-        return run_local(file, input_value, stream, tenant, max_steps, provider).await;
+        return run_local(
+            file,
+            input_value,
+            stream,
+            tenant,
+            max_steps,
+            provider,
+            interactive_ui,
+        )
+        .await;
     }
     if provider != "auto" {
         eprintln!("note: --provider is local-only; ignoring for a remote run");
+    }
+    if interactive_ui {
+        eprintln!("note: --interactive-ui is local-only; ignoring for a remote run");
     }
     run_remote(file, input_value, server, stream, max_steps).await
 }
@@ -1054,6 +1087,7 @@ async fn build_local_gateway(provider: &str) -> apex_common::Result<Gateway> {
 }
 
 /// Run the agent in-process with the embedded runtime.
+#[allow(clippy::too_many_arguments)]
 async fn run_local(
     file: &str,
     input: Value,
@@ -1061,6 +1095,7 @@ async fn run_local(
     tenant: Option<String>,
     max_steps: Option<usize>,
     provider: &str,
+    interactive_ui: bool,
 ) -> apex_common::Result<()> {
     let def = AgentDefinition::from_file(file)?;
     let gateway = std::sync::Arc::new(build_local_gateway(provider).await?);
@@ -1075,6 +1110,16 @@ async fn run_local(
         registry.register(std::sync::Arc::new(apex_tools::ImageGenTool::new(
             gateway.clone(),
         )));
+    }
+    // `ui_present` (PRD-005 HIL-304): opt-in only, since it needs a real
+    // UiInteraction to reach a human — unrestricted here, matching this
+    // command's own trusted-first-party stance (see the flag's help text for
+    // the durability caveat: a bare agent run has no checkpoint at all).
+    if interactive_ui {
+        registry.register(std::sync::Arc::new(
+            apex_tools::UiPresentTool::new(std::sync::Arc::new(ui_present::StdinUiPresenter))
+                .unrestricted(),
+        ));
     }
     // Make enabled plugins' tool capabilities callable by the agent.
     plugin::engine()?.register_enabled(&mut registry);

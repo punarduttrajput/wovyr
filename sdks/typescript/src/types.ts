@@ -79,6 +79,11 @@ export type AgentStreamEvent =
   | { type: "tool_call_delta"; index: number; name: string; arguments: string }
   | { type: "tool_call"; [key: string]: unknown }
   | { type: "tool_result"; [key: string]: unknown }
+  /** A validated generative-UI frame presented mid-run (PRD-005 UIP-104) —
+   * only trust-layer-checked frames are ever emitted. `frame` is left
+   * `unknown` here (a generic API client shouldn't parse the vocabulary);
+   * `@apex/ui-react` owns the typed `UiFrame` shape and rendering. */
+  | { type: "ui_frame"; frame_id: string; frame: unknown }
   | { type: "done"; usage: Usage }
   | ({ type: "result" } & RunResult)
   | { type: "error"; message: string };
@@ -238,4 +243,38 @@ export interface ToolSummary {
   description: string;
   category: string;
   permissions: string[] | null;
+}
+
+/** A pending, already-validated generative-UI frame awaiting a human decision
+ * (PRD-005 RM-GUI-P1). `frame` is left `unknown` — a generic API client
+ * shouldn't need to parse the component vocabulary; `@apex/ui-react` owns the
+ * typed `UiFrame` shape and rendering, and can consume this envelope
+ * directly (its `frame`/`frame_hash` fields are exactly what
+ * `verifyFrame`/`UiFrameView` expect). */
+export interface PendingUiFrame {
+  frame_id: string;
+  execution_id: string;
+  activity_id: string;
+  frame: unknown;
+  frame_hash: string;
+  /** Which policy judged the frame: `name@vN`, `hosted-floor`, or
+   * `unrestricted` (GRD-206). */
+  policy_ref: string;
+  created_at_ms: number;
+}
+
+/** `POST /api/v1/ui/decisions/{frame_id}` request body (HIL-302/303): `action`
+ * must be one of the frame's declared button actions, and `values` must match
+ * declared inputs — the server rejects anything else at the boundary without
+ * touching the workflow. */
+export interface UiDecisionRequest {
+  action: string;
+  values?: Record<string, unknown>;
+}
+
+export interface UiDecisionResult {
+  frame_id: string;
+  execution_id: string;
+  activity_id: string;
+  status: "decided";
 }

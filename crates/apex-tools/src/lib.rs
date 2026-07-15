@@ -27,6 +27,7 @@ mod registry;
 mod sandbox;
 mod scheduler;
 mod tool;
+mod ui_present;
 
 pub use builtin::{
     CodeExecuteTool, EchoTool, FsReadTool, FsWriteTool, HttpGetTool, ImageGenTool, ShellTool,
@@ -48,3 +49,4 @@ pub use scheduler::FairScheduler;
 pub use tool::{
     Tool, ToolContext, ToolError, ToolMetadata, ToolRequest, ToolResponse, check_permissions,
 };
+pub use ui_present::{UiInteraction, UiPresentTool};

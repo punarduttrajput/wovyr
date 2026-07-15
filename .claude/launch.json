@@ -12,6 +12,12 @@
       "runtimeExecutable": "cargo",
       "runtimeArgs": ["run", "-p", "apex-cli", "--", "dev", "--addr", "127.0.0.1:8080"],
       "port": 8080
+    },
+    {
+      "name": "checkout-demo",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "examples/ui/checkout-demo", "run", "dev"],
+      "port": 5173
     }
   ]
 }

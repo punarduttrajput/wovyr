@@ -1,0 +1,99 @@
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #0f1115;
+  color: #f0f0f2;
+}
+
+.demo-shell {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+}
+
+.demo-subtitle {
+  color: #b0b0b8;
+  line-height: 1.5;
+}
+
+.demo-config {
+  display: flex;
+  gap: 16px;
+  margin: 20px 0;
+}
+.demo-config label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  color: #b0b0b8;
+  flex: 1;
+}
+.demo-config input {
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #3d3d42;
+  background: #1c1c1f;
+  color: #f0f0f2;
+}
+
+.demo-actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.demo-actions button {
+  font: inherit;
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid #3d3d42;
+  background: #22242a;
+  color: #f0f0f2;
+  cursor: pointer;
+}
+.demo-actions button:hover {
+  background: #2c2f36;
+}
+
+.demo-frames h2,
+.demo-log h2 {
+  font-size: 1rem;
+  color: #b0b0b8;
+  margin-bottom: 8px;
+}
+
+.demo-empty {
+  color: #6f6f78;
+  font-style: italic;
+}
+
+.demo-frame-card {
+  border: 1px solid #3d3d42;
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+  background: #17181c;
+}
+
+.demo-frame-meta {
+  font-size: 0.8rem;
+  color: #6f6f78;
+  margin: 0 0 12px;
+}
+
+.demo-log ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.85rem;
+  color: #b0b0b8;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.demo-log-ts {
+  color: #6f6f78;
+  margin-right: 8px;
+}
