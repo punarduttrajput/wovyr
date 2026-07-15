@@ -29,6 +29,36 @@ for details.
 
 ---
 
+## Developer Certificate of Origin (DCO)
+
+Apex is licensed under [Apache 2.0](LICENSE). To keep the provenance of every
+contribution clear, we require the [Developer Certificate of Origin](https://developercertificate.org/)
+instead of a CLA: by signing off a commit you certify you have the right to
+submit it under the project's license.
+
+Sign off every commit:
+
+```bash
+git commit -s
+```
+
+which appends a line like:
+
+```
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+Use your real name and a reachable email (GitHub's `users.noreply.github.com`
+addresses are fine). Pull requests with unsigned commits can't be merged;
+`git rebase --signoff HEAD~N` retrofits sign-offs onto existing commits.
+
+## Security issues
+
+Never report vulnerabilities in public issues or PRs — see
+[SECURITY.md](SECURITY.md) for the private reporting channel.
+
+---
+
 ## Ground rules (summary)
 
 - **Match the surrounding code.** Consistency over preference.

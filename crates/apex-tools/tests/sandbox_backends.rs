@@ -530,8 +530,8 @@ async fn container_workspace_mount_does_not_expose_host_sibling_directory() {
     let secret_dir = base.join("secret");
     std::fs::create_dir_all(&workdir).expect("create workdir");
     std::fs::create_dir_all(&secret_dir).expect("create secret dir");
-    let token = "apex_host_secret_2b6f9a";
-    std::fs::write(secret_dir.join("marker.txt"), token).expect("write marker");
+    let marker = "host-sibling-marker-2b6f9a";
+    std::fs::write(secret_dir.join("marker.txt"), marker).expect("write marker");
 
     let sb = ContainerSandbox::docker(IMAGE);
     // Only `workdir` is bind-mounted at `/workspace`; its host sibling `secret/` was
@@ -548,7 +548,7 @@ async fn container_workspace_mount_does_not_expose_host_sibling_directory() {
     .await;
 
     assert!(
-        !out.stdout.contains(token),
+        !out.stdout.contains(marker),
         "a sibling host directory outside the bind mount must not be readable via `..`, got: {:?}",
         out.stdout
     );

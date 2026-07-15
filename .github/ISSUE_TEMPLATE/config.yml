@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/punarduttrajput/Apex/security/advisories/new
+    about: Please report security issues privately — never as a public issue.
+  - name: Documentation
+    url: https://github.com/punarduttrajput/Apex/blob/main/docs/SUMMARY.md
+    about: The documentation index — check a doc's status header before filing gaps as bugs.

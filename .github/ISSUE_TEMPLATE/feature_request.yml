@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a capability or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [roadmap](../../tree/main/docs/18-roadmap) first — many gaps are
+        already tracked with a status, and a doc marked *target-state* or *planned*
+        describes intended-but-unbuilt behavior by design.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that you can't today? Concrete use case beats abstract capability.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: If you have a shape in mind (CLI flag, manifest field, API route, trait), sketch it.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

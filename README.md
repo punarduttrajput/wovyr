@@ -175,9 +175,10 @@ apex/
   sdks/                   # TypeScript + Python API clients, + ui-react/ (the generative-UI renderer, PRD-005 RDR-4xx)
 ```
 
-See [`CLAUDE.md`](CLAUDE.md) for what each crate actually implements today —
-`docs/` still describes future milestones not yet built, and `CLAUDE.md` is
-kept in sync with the shipping code, not the aspiration.
+Each crate's `lib.rs` doc comment links the `docs/` section it implements, and
+every doc's status header says whether it describes shipped or target-state
+behavior — `docs/` still contains future milestones not yet built; check the
+status header before assuming a described feature exists.
 
 ---
 
@@ -401,9 +402,9 @@ library code), a **memory engine** (hybrid vector+keyword retrieval,
 encryption, ABAC), a **secret vault**, **envelope-encryption KMS**,
 **tamper-evident audit logging**, a **plugin engine + marketplace**,
 **multi-tenancy** (RBAC + quota), a single-node Axum server, an Angular
-dashboard, TypeScript/Python SDKs, and the `apex` CLI. See
-[`CLAUDE.md`](CLAUDE.md) for the authoritative, kept-current description of
-what each crate actually does.
+dashboard, TypeScript/Python SDKs, and the `apex` CLI. The per-crate doc
+comments and each `docs/` section's status header are the kept-current
+description of what each crate actually does.
 
 Current Version
 

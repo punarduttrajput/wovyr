@@ -7,7 +7,8 @@
 //!
 //! Known gap (tracked, not asserted here): a container on `bridge` networking can
 //! bypass the proxy entirely by ignoring `HTTPS_PROXY` and dialing out directly —
-//! this is the documented "L3 egress bypass-blocking" item in CLAUDE.md, deferred
+//! this is the documented "L3 egress bypass-blocking" item in
+//! docs/07-tool-runtime/security-isolation.md §5, deferred
 //! past v0.3. These tests instead confirm the proxy itself — the boundary that
 //! *is* implemented — can't be tricked into tunneling to a host its policy denies.
 
