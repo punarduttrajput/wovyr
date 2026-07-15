@@ -344,6 +344,31 @@ pub struct Engine {
     /// rest of the run, not just the one it's produced in. Default
     /// [`DEFAULT_MAX_ACTIVITY_OUTPUT_BYTES`].
     max_activity_output_bytes: usize,
+    /// Per-execution async locks serializing every same-process caller that can
+    /// drive an execution (`resume`/`deliver` — and by extension `signal_event`/
+    /// `fire_timer` — plus `run`'s own drive). **Why this exists**: `resume`/
+    /// `deliver` each independently do read-checkpoint → drive → write-checkpoint
+    /// with no atomicity across that whole sequence; two concurrent callers for
+    /// the *same* `execution_id` (e.g. the server's fire-and-forget post-`start`
+    /// background resume racing an immediate `signal`/`approve`/decide call) can
+    /// each read the same stale checkpoint and independently drive it, and
+    /// whichever finishes its own write *last* wins — silently reverting an
+    /// already-completed execution back to "still running" if the slower drive
+    /// was working from stale, pre-decision state. [`Engine::cancel`]'s doc
+    /// comment names this exact class of race and accepts it as a property of a
+    /// *distributed* lease-based worker model (the v1.1 "Scale-Out" milestone,
+    /// [ADR-0010](../../docs/17-adr/ADR-0010-ga-deployment-topology.md) Path B) —
+    /// but the shipped single-node appliance (Path A) has no lease/queue wired in
+    /// to prevent it for same-process callers, which is exactly the shape
+    /// `apex-server`'s submit-then-background-resume plus a same-node `ui`/
+    /// `signal`/`approve` handler produces. This map closes that gap in-process;
+    /// it says nothing about cross-node safety, which a future distributed
+    /// worker still owns. Proven by `tests/engine.rs`'s
+    /// `concurrent_resume_and_signal_do_not_lose_a_completed_state` — reproduces
+    /// the lost-update deterministically (no wall-clock race) and asserts it's
+    /// gone with this lock in place.
+    execution_locks:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 /// Default cap on sub-workflow nesting depth (WFL-102): generous enough for any
@@ -375,7 +400,27 @@ impl Engine {
             subworkflows: None,
             max_subworkflow_depth: DEFAULT_MAX_SUBWORKFLOW_DEPTH,
             max_activity_output_bytes: DEFAULT_MAX_ACTIVITY_OUTPUT_BYTES,
+            execution_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Acquire the per-execution async lock for `execution_id`, serializing every
+    /// same-process caller that drives this execution against each other — see
+    /// the `execution_locks` field doc comment for why this exists. The sync
+    /// `Mutex` guarding the map itself is held only long enough to get-or-insert
+    /// the per-execution `Arc`, never across an `.await`.
+    async fn lock_execution(&self, execution_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let per_execution = {
+            let mut locks = self
+                .execution_locks
+                .lock()
+                .expect("execution lock map poisoned");
+            locks
+                .entry(execution_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        per_execution.lock_owned().await
     }
 
     /// Override the time source (tests inject a `ManualClock` for determinism).
@@ -465,7 +510,11 @@ impl Engine {
     }
 
     /// Start a new execution of `def` with id `execution_id` and JSON `input`, and
-    /// drive it to completion (or its first suspend point).
+    /// drive it to completion (or its first suspend point). Holds `execution_id`'s
+    /// lock across the drive (defense in depth: nothing can yet know a
+    /// caller-chosen id before `start` returns, but a caller racing a second
+    /// `resume`/`signal_event` against the same id immediately after is safe
+    /// either way).
     pub async fn run(
         &self,
         def: &Definition,
@@ -473,6 +522,7 @@ impl Engine {
         input: Value,
     ) -> Result<(RunOutcome, ExecutionState)> {
         let state = self.start(def, execution_id, input).await?;
+        let _guard = self.lock_execution(execution_id).await;
         self.drive(def, state).await
     }
 
@@ -553,7 +603,23 @@ impl Engine {
     }
 
     /// Resume a previously-started execution from its latest checkpoint.
+    /// Serialized per `execution_id` against every other same-process caller
+    /// that can drive this execution (see the `execution_locks` field doc
+    /// comment) — a concurrent `resume`/`signal_event`/`fire_timer` call for
+    /// the same id blocks until this one finishes, rather than racing it.
     pub async fn resume(
+        &self,
+        def: &Definition,
+        execution_id: &str,
+    ) -> Result<(RunOutcome, ExecutionState)> {
+        let _guard = self.lock_execution(execution_id).await;
+        self.resume_unlocked(def, execution_id).await
+    }
+
+    /// The actual resume logic, assuming the caller already holds
+    /// `execution_id`'s lock — never call this directly; go through
+    /// [`resume`](Self::resume) or [`deliver`](Self::deliver).
+    async fn resume_unlocked(
         &self,
         def: &Definition,
         execution_id: &str,
@@ -657,6 +723,12 @@ impl Engine {
     }
 
     /// Inject a delivered signal into the durable checkpoint, then resume.
+    /// Holds `execution_id`'s lock across the *entire* read-inject-write-drive
+    /// sequence (via [`resume_unlocked`](Self::resume_unlocked), not the public
+    /// [`resume`](Self::resume) — re-entering the same non-reentrant lock here
+    /// would deadlock) so a concurrent `resume`/another `deliver` for the same
+    /// id can't interleave with this one — see the `execution_locks` field doc
+    /// comment for why that matters.
     async fn deliver(
         &self,
         def: &Definition,
@@ -664,6 +736,7 @@ impl Engine {
         key: &str,
         payload: Value,
     ) -> Result<(RunOutcome, ExecutionState)> {
+        let _guard = self.lock_execution(execution_id).await;
         let mut state = self
             .checkpoints
             .latest(execution_id)
@@ -673,7 +746,7 @@ impl Engine {
             })?;
         state.variables.insert(key.to_string(), payload);
         self.checkpoints.save(&state).await?;
-        self.resume(def, execution_id).await
+        self.resume_unlocked(def, execution_id).await
     }
 
     /// The scheduling loop: run ready activities until the workflow ends.

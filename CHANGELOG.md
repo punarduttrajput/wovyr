@@ -61,6 +61,22 @@ Phases 1–2 complete) — see [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
   audited).
 
 ### Fixed
+- **A real lost-update race in the workflow engine's `resume`/`deliver`
+  path** (`apex-workflow`): with no per-execution serialization, two
+  same-process callers driving the same `execution_id` concurrently — the
+  exact shape `apex-server`'s `submit_handler` produces (a fire-and-forget
+  background `resume()` right after `start()`, racing an immediate
+  `signal`/`approve`/`ui`-decide call) — could each read the same stale
+  checkpoint and independently drive it; whichever finished its write *last*
+  won, silently reverting an already-**completed** execution back to "still
+  running". Found investigating an intermittent flake in the RM-GUI-P1
+  `ui:` SDK test suite; reproduced deterministically (no wall-clock race,
+  confirmed to fail pre-fix and pass post-fix) in
+  `crates/apex-workflow/tests/engine.rs`'s
+  `concurrent_resume_and_signal_do_not_lose_a_completed_state`. Fixed with
+  an in-process per-execution async lock shared by `resume`/`deliver`
+  (`signal_event`/`fire_timer`)/`run`. `Engine::cancel`'s racy-tolerant
+  behavior is unrelated and deliberately untouched.
 - **`UiFrame::content_hash` canonicalization (RM-GUI-P2):** hashed the
   struct's own field-declaration-order serialization instead of the
   alphabetically key-sorted `Value` form every real consumer (the server's

@@ -342,6 +342,116 @@ async fn human_task_suspends_and_resumes_durably() {
 }
 
 #[tokio::test]
+async fn concurrent_resume_and_signal_do_not_lose_a_completed_state() {
+    // Models a real race found running the generative-UI trust runtime
+    // (PRD-005 RM-GUI-P1) against a live server: `submit_handler` spawns a
+    // fire-and-forget background `resume()` right after `start()`, and a
+    // client that reacts quickly (e.g. `decide_handler`'s `signal_event`) can
+    // call in *while that background resume is still mid-flight* — both read
+    // the same pre-decision checkpoint. Without per-execution serialization,
+    // whichever drive's checkpoint write lands *last* wins, even if it's the
+    // slower drive's stale, pre-decision conclusion — silently reverting an
+    // already-*completed* workflow back to "still waiting". Reproduced here
+    // deterministically (no wall-clock race) via two synchronization points,
+    // instead of relying on real timing to occasionally hit the window.
+    let def = Definition::from_yaml(
+        "metadata:\n  name: race\nspec:\n  activities:\n    - {id: confirm, type: human}\n",
+    )
+    .unwrap();
+
+    let reached_wait = Arc::new(tokio::sync::Notify::new());
+    let release_drive_a = Arc::new(tokio::sync::Notify::new());
+    let interrupted_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let executor = {
+        let reached_wait = reached_wait.clone();
+        let release_drive_a = release_drive_a.clone();
+        let interrupted_once = interrupted_once.clone();
+        ClosureExecutor::new().on("confirm", move |ctx| {
+            let reached_wait = reached_wait.clone();
+            let release_drive_a = release_drive_a.clone();
+            let interrupted_once = interrupted_once.clone();
+            async move {
+                if let Some(decision) = ctx
+                    .variables
+                    .get("confirm")
+                    .or_else(|| ctx.variables.get("event.confirm"))
+                {
+                    return Ok(decision.clone());
+                }
+                if !interrupted_once.swap(true, Ordering::SeqCst) {
+                    // First interrupt: tell the test we're about to suspend,
+                    // then park until explicitly released — simulating a
+                    // slow background drive (Drive A) that hasn't yet
+                    // persisted its "still waiting" checkpoint.
+                    reached_wait.notify_one();
+                    release_drive_a.notified().await;
+                }
+                Err(ActivityError::Interrupted("awaiting decision".into()))
+            }
+        })
+    };
+
+    let engine = engine_with(InMemoryStore::new(), executor);
+    engine.start(&def, "wf-race-1", json!({})).await.unwrap();
+
+    // Drive A: the fire-and-forget background resume (mirrors the server's
+    // post-submit spawn) — parks inside the executor on its first interrupt,
+    // *holding this execution's lock* once the fix is in place.
+    let engine_a = engine.clone();
+    let def_a = def.clone();
+    let drive_a = tokio::spawn(async move { engine_a.resume(&def_a, "wf-race-1").await });
+
+    // Wait until Drive A has genuinely reached its parked point (not merely
+    // been scheduled) before racing Drive B in.
+    reached_wait.notified().await;
+
+    // Drive B: the decide()-triggered signal. Spawned rather than awaited
+    // inline — with the fix in place it legitimately blocks acquiring the
+    // same execution's lock until Drive A finishes, so inlining it here
+    // would deadlock the test itself against Drive A's park.
+    let engine_b = engine.clone();
+    let def_b = def.clone();
+    let drive_b = tokio::spawn(async move {
+        engine_b
+            .signal_event(&def_b, "wf-race-1", "confirm", json!({"approved": true}))
+            .await
+    });
+    // Give Drive B's task its first poll — with the fix, this is the moment
+    // it attempts (and fails) to acquire the lock Drive A holds, registering
+    // as a waiter, *before* Drive A is released. Without the fix, this same
+    // yield lets Drive B race straight through to completion while Drive A
+    // is still parked — reproducing the original corruption.
+    tokio::task::yield_now().await;
+
+    // Release Drive A: it resumes from *its own* (possibly now-stale) view,
+    // finds no decision, and persists a checkpoint reflecting that. Without
+    // per-execution locking, this can land *after* Drive B's completed
+    // checkpoint and silently clobber it.
+    release_drive_a.notify_one();
+    let (outcome_a, _) = drive_a.await.unwrap().unwrap();
+    assert!(matches!(outcome_a, RunOutcome::Interrupted(_)));
+
+    let (outcome_b, state_b) = drive_b.await.unwrap().unwrap();
+    assert_eq!(
+        outcome_b,
+        RunOutcome::Completed,
+        "drive B should complete the workflow"
+    );
+    assert_eq!(state_b.status, WorkflowState::Completed);
+
+    // The execution's *final*, durable state must reflect the real
+    // completion — not silently revert to "still waiting" because a slower,
+    // stale concurrent drive wrote last.
+    let final_state = engine.query("wf-race-1").await.unwrap().unwrap();
+    assert_eq!(
+        final_state.status,
+        WorkflowState::Completed,
+        "a slower, stale concurrent drive must not clobber an already-completed execution"
+    );
+}
+
+#[tokio::test]
 async fn event_wait_suspends_then_resumes_on_signal() {
     // start -> gate (wait for event 'approval') -> finish. The wait is handled by
     // the engine: it suspends durably until `signal_event` delivers the event.

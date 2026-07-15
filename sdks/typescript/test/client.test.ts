@@ -10,20 +10,31 @@
  * `APEX_TEST_BASE_URL` (default `http://127.0.0.1:8080`), so this suite
  * doesn't fail an offline CI run that never started one.
  *
- * The org/project test additionally needs the server started with
- * `APEX_PLATFORM_ADMINS=sdk-test-admin` (unlike agents/workflows/memory,
- * tenancy management routes have no anonymous-default-tenant back-compat
- * bypass — see `adminClient()` below); it skips gracefully, rather than
- * failing, if that wasn't configured.
+ * **Almost every mutating/tenant-scoped route needs
+ * `APEX_PLATFORM_ADMINS=sdk-test-admin`** (SEC-105: nothing tenant-scoped is
+ * reachable "for free" via anonymity alone — see
+ * `crates/apex-server/src/tenancy.rs`'s `tenant_authorize` doc comment).
+ * Concretely: `health()` and `tools.list()` are the only two tests in this
+ * file that work fully anonymously; `workflows.validate()` (parse-only, no
+ * side effects) also needs no credential. Every other test below —
+ * `agents.run()`/`agents.stream()` (these two apparently tolerate an
+ * anonymous caller for the run-only path, unlike listing/managing stored
+ * agents), `workflows: submit then poll`, `memory:`, `secrets:`,
+ * `projects:`, both `pagination:` tests, and the whole `ui:` suite — uses
+ * `adminClient()` and skips gracefully (not a hard failure) if the server
+ * wasn't started with that principal granted. Start the server with:
  *
- * The `ui:` suite needs `APEX_PLATFORM_ADMINS=sdk-test-admin` too (`workflows:
- * run`/`workflows:read` have the same no-anonymous-bypass posture as
- * organizations/projects) — same graceful skip. Its approve test additionally
- * needs `APEX_UI_POLICY=examples/policies/default-ui-policy.yaml` (GRD-207:
- * absent a policy, the hosted floor denies *every* interactive frame,
- * including a legitimate one). The block test needs no such setup: the
- * hosted floor already denies its frame the same way a real policy's
- * sensitive-input rule would.
+ * ```bash
+ * APEX_PLATFORM_ADMINS=sdk-test-admin APEX_ALLOW_ANONYMOUS=1 \
+ *   cargo run -p apex-cli -- dev
+ * ```
+ *
+ * The `ui:` suite's approve test additionally needs
+ * `APEX_UI_POLICY=examples/policies/default-ui-policy.yaml` (GRD-207: absent
+ * a policy, the hosted floor denies *every* interactive frame, including a
+ * legitimate one). The block test needs no such setup: the hosted floor
+ * already denies its frame the same way a real policy's sensitive-input
+ * rule would.
  */
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
@@ -146,16 +157,37 @@ describe("ApexClient (integration)", () => {
 
   test("workflows: submit then poll to completion", async (t) => {
     if (!serverAvailable) return t.skip("no server");
+    const c = adminClient();
     // A `function`-type activity needs a `name` naming a registered tool (the
     // server dispatches it through the ToolRegistry) — `echo` is a built-in.
     const manifest =
       "metadata:\n  name: sdk-submit-test\n  version: 1.0.0\nspec:\n  activities:\n    - {id: a, type: function, name: echo, inputs: {message: hi}}\n";
-    const { execution_id, status } = await client().workflows.submit({ manifest, input: {} });
+    // An explicit, randomized execution id (matching every other test's own
+    // convention below) rather than relying on the server's auto-incrementing
+    // counter: that counter resets to 1 on every server boot, but the durable
+    // `~/.apex/workflows` store persists forever — across repeated local `dev`
+    // restarts, an un-randomized id collides with a prior run's real on-disk
+    // event history and can surface as a stale-data deserialization error,
+    // not a bug in this test or the route it exercises.
+    let execution_id: string;
+    let status: string;
+    try {
+      ({ execution_id, status } = await c.workflows.submit({
+        manifest,
+        input: {},
+        execution_id: `sdk-submit-test-${Date.now()}`,
+      }));
+    } catch (err) {
+      if (err instanceof ApexApiError && err.status === 403) {
+        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      }
+      throw err;
+    }
     assert.equal(status, "submitted");
 
     let completed = false;
     for (let i = 0; i < 20; i++) {
-      const { execution } = await client().workflows.get(execution_id);
+      const { execution } = await c.workflows.get(execution_id);
       // RM-GA-P4 API-702: WorkflowState now serializes snake_case ("completed",
       // "failed"), matching the `?status=` filter's casing (previously
       // PascalCase — a wart API-702 fixed by construction).
@@ -170,13 +202,21 @@ describe("ApexClient (integration)", () => {
 
   test("memory: put then query round-trips a record", async (t) => {
     if (!serverAvailable) return t.skip("no server");
+    const c = adminClient();
     const namespace = `sdk-test-${Date.now()}`;
-    await client().memory.put({
-      namespace,
-      content: "The Apex TypeScript SDK integration test wrote this record.",
-      tags: ["sdk-test"],
-    });
-    const { data } = await client().memory.query({
+    try {
+      await c.memory.put({
+        namespace,
+        content: "The Apex TypeScript SDK integration test wrote this record.",
+        tags: ["sdk-test"],
+      });
+    } catch (err) {
+      if (err instanceof ApexApiError && err.status === 403) {
+        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      }
+      throw err;
+    }
+    const { data } = await c.memory.query({
       text: "Apex TypeScript SDK integration test",
       namespace,
       strategy: "keyword",
@@ -188,8 +228,16 @@ describe("ApexClient (integration)", () => {
   test("secrets: create, get, rotate, delete round-trip (value never returned)", async (t) => {
     if (!serverAvailable) return t.skip("no server");
     const name = `sdk-test-secret-${Date.now()}`;
-    const c = client();
-    const created = await c.secrets.create(name, "s3cr3t-v1");
+    const c = adminClient();
+    let created: Awaited<ReturnType<typeof c.secrets.create>>;
+    try {
+      created = await c.secrets.create(name, "s3cr3t-v1");
+    } catch (err) {
+      if (err instanceof ApexApiError && err.status === 403) {
+        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      }
+      throw err;
+    }
     assert.equal(created.version, 1);
     assert.equal((created as Record<string, unknown>).value, undefined);
 
@@ -236,20 +284,35 @@ describe("ApexClient (integration)", () => {
 
   test("pagination: agents.list() honors limit", async (t) => {
     if (!serverAvailable) return t.skip("no server");
-    const page = await client().agents.list({ limit: 1 });
+    let page: Awaited<ReturnType<ApexClient["agents"]["list"]>>;
+    try {
+      page = await adminClient().agents.list({ limit: 1 });
+    } catch (err) {
+      if (err instanceof ApexApiError && err.status === 403) {
+        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      }
+      throw err;
+    }
     assert.ok(page.data.length <= 1);
     assert.equal(typeof page.has_more, "boolean");
   });
 
   test("pagination: paginateAll() drains every stored agent across pages", async (t) => {
     if (!serverAvailable) return t.skip("no server");
-    const c = client();
+    const c = adminClient();
     const created: string[] = [];
-    for (let i = 0; i < 3; i++) {
-      const { id } = await c.agents.create(
-        `apiVersion: agent.apex.io/v1\nkind: Agent\nmetadata:\n  name: paginate-test-${i}-${Date.now()}\nspec:\n  model_selector: { capability: chat, class: fast }\n  instructions: hi\n`,
-      );
-      created.push(id);
+    try {
+      for (let i = 0; i < 3; i++) {
+        const { id } = await c.agents.create(
+          `apiVersion: agent.apex.io/v1\nkind: Agent\nmetadata:\n  name: paginate-test-${i}-${Date.now()}\nspec:\n  model_selector: { capability: chat, class: fast }\n  instructions: hi\n`,
+        );
+        created.push(id);
+      }
+    } catch (err) {
+      if (err instanceof ApexApiError && err.status === 403) {
+        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      }
+      throw err;
     }
     try {
       const seen = new Set<string>();
