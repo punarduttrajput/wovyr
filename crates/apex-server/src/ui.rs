@@ -161,14 +161,27 @@ impl UiFrameStore {
         removed
     }
 
+    /// Ordered by presentation time (ties broken by `frame_id` for full
+    /// determinism), **not** raw `BTreeMap` iteration — the map is keyed by a
+    /// content-hash-derived `frame_id` (`frame_id_for`), so iterating it
+    /// directly sorts by that hash rather than chronologically. A renderer
+    /// polling this list would otherwise see already-displayed frames jump
+    /// position every time an unrelated new frame landed at an earlier hash.
     pub(crate) fn list(&self, tenant: &str) -> Vec<PendingFrame> {
-        self.inner
+        let mut frames: Vec<PendingFrame> = self
+            .inner
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|f| f.tenant == tenant)
             .cloned()
-            .collect()
+            .collect();
+        frames.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.frame_id.cmp(&b.frame_id))
+        });
+        frames
     }
 }
 

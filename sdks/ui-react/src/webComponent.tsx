@@ -39,12 +39,13 @@ export interface ApexUiFrameDecideDetail {
  * into light DOM, not a shadow root, so host-level styling still applies). */
 export class ApexUiFrameElement extends HTMLElement {
   static readonly tagName = "apex-ui-frame";
-  static readonly observedAttributes = ["disabled"];
+  static readonly observedAttributes = ["disabled", "theme"];
 
   #root: Root | null = null;
   #frame: UiFrame | null = null;
   #expectedHash: string | undefined;
   #disabled = false;
+  #theme: "light" | "dark" | undefined;
 
   get frame(): UiFrame | null {
     return this.#frame;
@@ -70,6 +71,18 @@ export class ApexUiFrameElement extends HTMLElement {
     this.#render();
   }
 
+  /** Mirrors {@link UiFrameView}'s `theme` prop — a `theme="dark"`/`"light"`
+   * attribute (or the matching JS property) forces `.apex-ui`'s tokens
+   * instead of following the browser's `prefers-color-scheme`. Useful for a
+   * host page with its own fixed (not OS-linked) light/dark mode. */
+  get theme(): "light" | "dark" | undefined {
+    return this.#theme;
+  }
+  set theme(value: "light" | "dark" | undefined) {
+    this.#theme = value;
+    this.#render();
+  }
+
   connectedCallback(): void {
     this.#root ??= createRoot(this);
     this.#render();
@@ -87,6 +100,9 @@ export class ApexUiFrameElement extends HTMLElement {
     if (name === "disabled") {
       this.#disabled = newValue !== null;
       this.#render();
+    } else if (name === "theme") {
+      this.#theme = newValue === "light" || newValue === "dark" ? newValue : undefined;
+      this.#render();
     }
   }
 
@@ -97,6 +113,7 @@ export class ApexUiFrameElement extends HTMLElement {
         frame={this.#frame}
         expectedHash={this.#expectedHash}
         disabled={this.#disabled}
+        theme={this.#theme}
         onDecide={(decision) => this.#emitDecide(decision)}
       />,
     );

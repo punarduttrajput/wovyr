@@ -21,6 +21,22 @@ export interface UsePendingFramesResult {
   decide: (frameId: string, decision: UiDecision) => Promise<void>;
 }
 
+/** Every poll parses a fresh response body, so an unchanged frame still
+ * arrives as a brand-new object each cycle. Reusing the previous object
+ * reference for anything whose `frame_hash` hasn't changed keeps referential
+ * stability across polls — otherwise `UiFrameView`'s integrity-check effect
+ * (keyed on the `frame` prop's identity) re-fires on every poll for frames
+ * that never actually changed, flashing "Verifying frame integrity…" over
+ * already-rendered content. New/changed frames still get their fresh object,
+ * so their effect runs exactly when it should. */
+function reconcile(prev: PendingUiFrame[], next: PendingUiFrame[]): PendingUiFrame[] {
+  const prevByFrameId = new Map(prev.map((f) => [f.frame_id, f]));
+  return next.map((f) => {
+    const existing = prevByFrameId.get(f.frame_id);
+    return existing && existing.frame_hash === f.frame_hash ? existing : f;
+  });
+}
+
 /** Polls `GET /api/v1/ui/frames` (RDR-104's pull path) and exposes a `decide`
  * that posts to `/api/v1/ui/decisions/{id}`. For a host already consuming an
  * `agents:stream` SSE connection, extract `ui_frame` events directly instead —
@@ -39,7 +55,7 @@ export function usePendingFrames(
   const refresh = useCallback(async () => {
     try {
       const data = await clientRef.current.listFrames();
-      setFrames(data);
+      setFrames((prev) => reconcile(prev, data));
       setError(undefined);
     } catch (err) {
       setError(err);

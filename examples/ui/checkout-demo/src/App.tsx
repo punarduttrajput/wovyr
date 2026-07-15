@@ -160,6 +160,7 @@ export function App() {
             <UiFrameView
               frame={f.frame}
               expectedHash={f.frame_hash}
+              theme="dark"
               onDecide={async (decision) => {
                 await decide(f.frame_id, decision);
                 appendLog(`decided "${decision.action}" on ${f.frame_id}`);
