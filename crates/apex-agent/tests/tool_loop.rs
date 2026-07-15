@@ -94,6 +94,7 @@ impl RunEventSink for Capture {
             RunEvent::ReasoningDelta { .. } => "reasoning".to_string(),
             RunEvent::ToolCall { name, .. } => format!("toolcall:{name}"),
             RunEvent::ToolResult { name, ok } => format!("toolresult:{name}:{ok}"),
+            RunEvent::UiFrame { frame_id, .. } => format!("frame:{frame_id}"),
             RunEvent::Done { .. } => "done".to_string(),
         };
         self.events.push(line);

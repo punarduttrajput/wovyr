@@ -57,6 +57,12 @@ impl RunEventSink for StreamSink {
             RunEvent::ToolResult { name, ok } => {
                 println!("result · {name} {}", if ok { "ok" } else { "err" });
             }
+            RunEvent::UiFrame { frame_id, frame } => {
+                // A validated generative-UI frame awaiting a decision (PRD-005
+                // UIP-104); the CLI renders the raw JSON — a visual renderer is
+                // the SDK's job (RDR-4xx).
+                println!("frame  · {frame_id} {frame}");
+            }
             RunEvent::Done { usage } => {
                 println!(
                     "done   · tokens: {}, cost_usd: {:.6}",

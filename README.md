@@ -163,6 +163,8 @@ apex/
     apex-kms/            # envelope-encryption key management
     apex-plugin/         # plugin lifecycle (install/enable/upgrade/rollback)
     apex-marketplace/    # plugin marketplace registry
+    apex-ui/             # the generative-UI frame protocol (PRD-005 UIP-1xx)
+    apex-ui-guard/       # the UI trust layer: UiPolicy evaluation (GRD-2xx)
     apex-server/         # the Axum single-node server
     apex-eval/           # a deterministic AI-eval harness (prototype spike)
   dashboard/              # Angular SPA (direct to apex-server)

@@ -493,6 +493,17 @@ impl Engine {
         if let Value::Object(map) = input {
             variables.extend(map);
         }
+        // The engine's own identity marker: `ActivityContext` carries no execution
+        // id, but an executor that suspends for an out-of-band resume (the server's
+        // `ui` activity keys its pending decision by execution) needs one. Stamped
+        // as a reserved `__` variable — the same convention the server uses for
+        // `__tenant` — *after* the input flatten, so a caller-supplied value can
+        // never spoof it. Child workflows pass through here too, with their
+        // derived `<parent>::<activity>` id.
+        variables.insert(
+            "__execution_id".to_string(),
+            Value::String(execution_id.to_string()),
+        );
 
         let mut state = ExecutionState {
             execution_id: execution_id.to_string(),

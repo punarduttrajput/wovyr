@@ -159,7 +159,11 @@ impl AgentResolver for StoredAgentResolver {
 
 /// Build the shared executor for the server: `StoredAgentResolver` for `agent`
 /// activities; `tool`/`function`/`ai`/`human` dispatch is identical to the CLI's
-/// and eval's — see [`apex_runtime::PlatformActivityExecutor`].
+/// and eval's — see [`apex_runtime::PlatformActivityExecutor`]. Wrapped in the
+/// [`crate::ui::UiActivityExecutor`] decorator (RM-GUI-P1 HIL-301), which adds
+/// the server-only `ui` activity type: present a policy-checked frame, suspend
+/// durably, resume on a validated decision.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn server_executor(
     gateway: Arc<apex_provider::Gateway>,
     registry: ToolRegistry,
@@ -168,17 +172,21 @@ pub(crate) fn server_executor(
     quota: Arc<tenancy::QuotaTracker>,
     metrics: apex_telemetry::Metrics,
     tenant_label_cap: crate::hardening::TenantLabelCap,
-) -> PlatformActivityExecutor {
-    PlatformActivityExecutor::new(
-        registry,
-        gateway,
-        Arc::new(StoredAgentResolver::new(
-            agents,
-            tenancy,
-            quota,
-            metrics,
-            tenant_label_cap,
-        )),
+    ui: Arc<crate::ui::UiRuntime>,
+) -> crate::ui::UiActivityExecutor<PlatformActivityExecutor> {
+    crate::ui::UiActivityExecutor::new(
+        PlatformActivityExecutor::new(
+            registry,
+            gateway,
+            Arc::new(StoredAgentResolver::new(
+                agents,
+                tenancy,
+                quota,
+                metrics,
+                tenant_label_cap,
+            )),
+        ),
+        ui,
     )
 }
 
@@ -356,7 +364,7 @@ pub(crate) async fn submit_handler(
 /// `submit_handler` persists every submitted manifest there, so the common case
 /// (signal/approve an execution this server itself started) needs only the
 /// execution id and event/decision payload, no manifest re-upload.
-async fn resolve_definition(
+pub(crate) async fn resolve_definition(
     state: &AppState,
     execution_id: &str,
     manifest: Option<&str>,
@@ -594,6 +602,10 @@ mod tests {
     async fn isolated_state() -> Arc<AppState> {
         let state = AppState::from_env().await;
         let agents = Arc::new(AgentStore::new(None));
+        // An isolated, in-memory UI runtime sharing the state's audit log —
+        // handed to both the engine's executor and (via `with_ui`) the routes,
+        // so a `ui` activity's pending frame is visible to `/api/v1/ui/*`.
+        let ui = Arc::new(crate::ui::UiRuntime::in_memory(state.audit.clone()));
         let executor = Arc::new(server_executor(
             state.gateway.clone(),
             state.registry.clone(),
@@ -602,6 +614,7 @@ mod tests {
             state.quota.clone(),
             state.metrics.clone(),
             state.tenant_label_cap.clone(),
+            ui.clone(),
         ));
         let store = InMemoryStore::new();
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
@@ -613,7 +626,8 @@ mod tests {
             state
                 .with_agents(agents)
                 .with_workflows(engine)
-                .with_timers(timers),
+                .with_timers(timers)
+                .with_ui(ui),
         )
     }
 
@@ -843,6 +857,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
 
         let base = AppState::from_env().await;
         let agents = Arc::new(AgentStore::new(None));
+        let ui = Arc::new(crate::ui::UiRuntime::in_memory(base.audit.clone()));
         let executor = Arc::new(server_executor(
             base.gateway.clone(),
             base.registry.clone(),
@@ -851,6 +866,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
             base.quota.clone(),
             base.metrics.clone(),
             base.tenant_label_cap.clone(),
+            ui,
         ));
         let store = InMemoryStore::new();
         let events: Arc<dyn EventLog> = Arc::new(store.clone());

@@ -412,6 +412,8 @@ dependencies = [
  "apex-telemetry",
  "apex-tenancy",
  "apex-tools",
+ "apex-ui",
+ "apex-ui-guard",
  "apex-workflow",
  "async-trait",
  "axum 0.8.9",
@@ -487,6 +489,29 @@ dependencies = [
  "wasmtime-wasi",
  "wat",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "apex-ui"
+version = "0.3.0"
+dependencies = [
+ "apex-common",
+ "schemars 1.2.1",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "apex-ui-guard"
+version = "0.3.0"
+dependencies = [
+ "apex-common",
+ "apex-ui",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

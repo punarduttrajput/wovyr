@@ -35,6 +35,18 @@ pub enum RunEvent<'a> {
     ToolCall { name: &'a str, arguments: &'a str },
     /// A tool finished.
     ToolResult { name: &'a str, ok: bool },
+    /// A **validated** generative-UI frame presented to the human (PRD-005
+    /// UIP-104): the JSON serialization of an `apex_ui::UiFrame` that has
+    /// already passed the trust layer — raw/unchecked frames must never reach
+    /// a sink (the GRD-202 buffering stance). `frame_id` is the handle a
+    /// decision is posted against. Carried as JSON (not the typed frame) so
+    /// this crate stays protocol-agnostic; emission from the agent loop
+    /// itself arrives with HIL-304 (P2) — today the server's workflow path
+    /// emits it.
+    UiFrame {
+        frame_id: &'a str,
+        frame: &'a serde_json::Value,
+    },
     /// Run finished; carries cumulative usage.
     Done { usage: Usage },
 }
