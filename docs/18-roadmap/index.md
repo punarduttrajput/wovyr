@@ -7,7 +7,7 @@ Document ID: RM-INDEX-001
 
 **Document ID:** RM-INDEX-001  
 **File Path:** `docs/18-roadmap/index.md`  
-**Version:** 1.2.0  
+**Version:** 1.3.0  
 **Status:** Active  
 **Owner:** Product Team  
 **Last Updated:** 2026-07-15
@@ -18,7 +18,12 @@ Document ID: RM-INDEX-001
 
 This section describes the planned evolution of the Apex AI Platform — milestone releases and their themes. It complements the high-level phases in the [README roadmap](../../README.md) with per-release detail.
 
-The platform is currently in the **Planning / Documentation** phase (v0.1.0).
+Current position (2026-07-15): **v0.3.0 is tagged**; the v1.0 GA-hardening
+engineering scope ([PRD-003](../01-product/prd-ga-hardening.md), all four phases)
+is complete, with the Tier-A GA-completion validation workstreams still open —
+see [v1.0.md](v1.0.md); **v1.1 is in progress** (Phases 1–2 done, Phase 3
+partial); **v1.2 (Generative UI Trust Runtime) and v1.3 (MCP Connection
+Management) are shipped**.
 
 ---
 
@@ -92,6 +97,7 @@ learning. ADRs ([section 17](../17-adr/index.md)) record decisions that reshape 
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.3.0 | 2026-07-15 | Status-truth pass: replaced the stale "Planning / Documentation phase (v0.1.0)" claim with the real current position — v0.3.0 tagged, PRD-003 engineering scope complete, v1.1 P3 partial, v1.2/v1.3 shipped |
 | 1.2.0 | 2026-07-15 | Added v1.3 (MCP Connection Management, PRD-006/ADR-0012) — a scoped, committed milestone narrower than FUT-005's exploratory outbound MCP-gateway bet |
 | 1.1.0 | 2026-07-14 | Added v1.2 (Generative UI Trust Runtime, PRD-005/ADR-0011); noted the v1.1-P3 re-scope |
 | 1.0.0 | 2026-06-27 | Initial Roadmap index |

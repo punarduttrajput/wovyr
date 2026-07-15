@@ -12,12 +12,19 @@ API (no gRPC, no WebSocket transport); an Angular SPA talking to it directly
 no message broker (no NATS — `apex-events` is a custom in-process event
 system); and file-based storage under `~/.apex` by default, with PostgreSQL/
 Redis/Qdrant as optional, feature-gated backends rather than the "primary
-storage" §10 implies. See [`CLAUDE.md`](../../CLAUDE.md) for the
-kept-current architecture. Technologies named below with no implementation
+storage" §10 implies. See the [README](../../README.md)'s architecture
+section for the kept-current architecture. Technologies named below with no implementation
 and no tracked future work are now tracked — see
 [`prd.md` §25](prd.md#25-technology-gaps-tracked-for-future-versions).
+**Positioning note (2026-07-15):** this overview also predates
+[ADR-0011](../17-adr/ADR-0011-generative-ui-repositioning.md)'s repositioning
+(the product is now the Generative UI Trust Runtime,
+[PRD-005](prd-generative-ui-runtime.md), with the platform as its engine) and
+the since-shipped generative-UI runtime (`apex-ui`/`apex-ui-guard`, the server's
+`ui` activity + frame routes) and MCP connection layer
+([PRD-006](prd-mcp-connections.md)), which don't appear in its domain map.
 **Owner:** Architecture Team
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -457,5 +464,6 @@ These documents provide progressively deeper technical detail.
 
 | Version | Date       | Description             |
 | ------- | ---------- | ----------------------- |
+| 1.0.2   | 2026-07-15 | Added a positioning note: predates ADR-0011's repositioning and the shipped generative-UI runtime (v1.2) + MCP connection layer (v1.3), absent from the domain map; no content changed |
 | 1.0.1   | 2026-07-07 | Added a header divergence note: this doc's six-layer, multi-service, NATS/gRPC/NestJS topology was never built and diverges from ADR-0010's Path A decision. Found during a project-wide doc review; no content changed |
 | 1.0.0   | 2026-06-26 | Initial system overview |

@@ -16,14 +16,19 @@ middleware before any handler runs, selected via `APEX_AUTH_MODE` —
 `jwt` (HS256 via `APEX_JWT_HS_SECRET` or RS256 via `APEX_JWT_RS_PUBLIC_KEY`,
 with optional issuer/audience checks; the verified `sub` claim becomes the
 principal) or `apikey` (a bearer token SHA-256-hashed and looked up in a
-file-backed store, minted via `apex auth create-key`). No OAuth2 authorization
-flow, no refresh tokens, no mTLS, no per-key IP allowlist, and no token
-revocation blocklist exist yet — a verified credential simply overwrites the
-request's `X-Apex-Principal` header before RBAC runs. See
+file-backed store, minted via `apex auth create-key`). **API keys now have a
+full lifecycle** (RM-AIM-P1 SRV-104, 2026-07-14): create-with-TTL, list,
+**revoke**, and rotate-with-grace (`apex auth create-key --ttl-days |
+list-keys | revoke <id> | rotate <id> --grace-hours`), with revocation and
+expiry enforced on every lookup and `last_used` tracking. Still not
+implemented: OAuth2 authorization flows, refresh tokens, mTLS, per-key IP
+allowlists, and any revocation mechanism for **JWTs** (a JWT stays valid to
+expiry) — a verified credential simply overwrites the request's
+`X-Apex-Principal` header before RBAC runs. See
 `crates/apex-server/src/auth.rs` and
 [`phase1-security-floor-tickets.md`](../18-roadmap/v1.0/phase1-security-floor-tickets.md).  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -235,5 +240,6 @@ These use the standard [error envelope](overview.md#8-error-model).
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-15 | Status note refreshed for RM-AIM-P1 SRV-104: API keys now have TTL/revoke/rotate-with-grace lifecycle; clarified the remaining gap is JWT revocation + OAuth2/mTLS/IP allowlists. No design content changed |
 | 1.1.0 | 2026-07-07 | Added a top note distinguishing this doc's target-state design from what's actually implemented (RM-GA-P1 SEC-101: JWT/API-key bearer auth, no OAuth2 flow/mTLS/refresh tokens yet). Found during a project-wide status review; no design content changed |
 | 1.0.0 | 2026-06-27 | Initial API Authentication & Authorization specification |

@@ -4,8 +4,9 @@
 **Version:** 1.0.1
 **Status:** Draft — Day-1 target-state component diagram, unrevised since
 project inception. **Corrected 2026-07-07:** the components below are real
-(as in-process Rust modules within one `apex-server` binary — see
-[`CLAUDE.md`](../../CLAUDE.md) for the kept-current, per-crate description),
+(as in-process Rust modules within one `apex-server` binary — see the
+[README](../../README.md)'s architecture section and each crate's own doc
+comments for the kept-current, per-crate description),
 but the "Cross-container" communication row using gRPC does not exist (no
 gRPC anywhere in the codebase) and "Event notification" is not NATS
 JetStream (no message broker exists — `apex-events` is a custom in-process

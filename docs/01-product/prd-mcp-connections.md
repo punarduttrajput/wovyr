@@ -7,8 +7,9 @@ Document ID: PRD-006
 
 **Document ID:** PRD-006
 **File Path:** `docs/01-product/prd-mcp-connections.md`
-**Version:** 1.0.0
-**Status:** Draft — planning input, not a commitment
+**Version:** 1.0.1
+**Status:** Shipped — all three phases (RM-MCX-P1–P3) complete per the
+[v1.3 roadmap](../18-roadmap/v1.3-mcp-connections.md) (2026-07-15)
 **Owner:** Product / Founder
 **Last Updated:** 2026-07-15
 
@@ -335,4 +336,5 @@ the demo second.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.0.1 | 2026-07-15 | Status updated Draft → Shipped: all three phases (RM-MCX-P1–P3) landed per the [v1.3 roadmap](../18-roadmap/v1.3-mcp-connections.md); no content changed |
 | 1.0.0 | 2026-07-15 | Initial PRD: a persisted, UI-managed connection layer over the already-shipped MCP client (ECO-301) — connection store, agent-manifest wiring, dashboard panel. Scoped inbound-only, explicitly distinct from FUT-005/EMB-702's outbound ambitions |

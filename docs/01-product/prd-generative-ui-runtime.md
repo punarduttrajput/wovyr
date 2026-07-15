@@ -7,10 +7,12 @@ Document ID: PRD-005
 
 **Document ID:** PRD-005
 **File Path:** `docs/01-product/prd-generative-ui-runtime.md`
-**Version:** 1.0.0
-**Status:** Draft — planning input, not a commitment
+**Version:** 1.0.1
+**Status:** Shipped (v1.2 scope) — RM-GUI Phases 1–3 complete (2026-07-15) per the
+[v1.2 roadmap](../18-roadmap/v1.2-generative-ui.md); deliberately deferred slices
+(the GRD-203 LLM-judge variant, EMB-702's outbound MCP tools) remain open per §10
 **Owner:** Product / Founder
-**Last Updated:** 2026-07-14
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -419,4 +421,5 @@ and a sales asset second.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.0.1 | 2026-07-15 | Status updated Draft → Shipped (v1.2 scope): RM-GUI Phases 1–3 all landed per the [v1.2 roadmap](../18-roadmap/v1.2-generative-ui.md); no content changed |
 | 1.0.0 | 2026-07-14 | Initial PRD: repositioning Apex as the Generative UI Trust Runtime — trust layer + internal-tools beachhead + agent UI runtime |

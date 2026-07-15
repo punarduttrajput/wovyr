@@ -7,10 +7,14 @@ Document ID: RM-AIM-INDEX
 
 **Document ID:** RM-AIM-INDEX
 **File Path:** `docs/18-roadmap/v1.1/index.md`
-**Version:** 1.1.0
-**Status:** In progress — Phase 1 done (WFL-104 lease fencing deferred), Phase 2 done, Phase 3 started (ECO-301/302 done)
+**Version:** 1.2.0
+**Status:** In progress — Phase 1 done (WFL-104 lease fencing deferred), Phase 2
+done, Phase 3 well underway: ECO-301/302/304, all of WS-H (WFL-301..308), all of
+WS-E (SBX-301..304), SRV-302..307, and DEP-301 are done; the UI (UI-301..306),
+DX (DX-301..306), and observability (OBS-301/302) tracks plus ECO-303/305 and
+DEP-302 remain
 **Owner:** Product / AI Engineering
-**Last Updated:** 2026-07-14
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -81,4 +85,5 @@ not committed, pending that decision. See
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-07-09 | Initial v1.1 milestone index: three phase ticket docs derived from PRD-004 / the 2026-07-09 engineering audit |
+| 1.2.0 | 2026-07-15 | Status refresh to match the Phase 3 ticket doc: 22 of 39 P3 tickets done (ecosystem, workflow-scale, sandbox, server tracks + DEP-301); UI/DX/OBS tracks, ECO-303/305, DEP-302 remain |
 | 1.1.0 | 2026-07-14 | Status refresh: Phase 1 complete (WFL-104 lease fencing deferred within its ticket), Phase 2 complete (SAF-202 was the last ticket); Phase 3 remains planned |

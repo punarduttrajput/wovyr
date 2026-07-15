@@ -15,11 +15,13 @@ handler runs, fail-closed by default — the `disabled-loopback` mode (no
 verification, today's back-compat behavior) requires an explicit
 `APEX_ALLOW_ANONYMOUS=1` opt-in that a startup check
 (`auth::refuse_anonymous_on_non_loopback`) refuses to honor on any
-non-loopback bind. Not yet implemented: OAuth2/OIDC SSO, mTLS, MFA/step-up,
-browser session cookies, token revocation blocklists, and key rotation
-schedules — the rest of this document's design.  
+non-loopback bind. **API-key lifecycle is now real** (RM-AIM-P1 SRV-104,
+2026-07-14): create-with-TTL, list, revoke, and rotate-with-grace, with
+revocation/expiry enforced on every lookup. Not yet implemented: OAuth2/OIDC
+SSO, mTLS, MFA/step-up, browser session cookies, and any revocation for
+**JWTs** (valid to expiry) — the rest of this document's design.  
 **Owner:** Security Team  
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -130,5 +132,6 @@ per [audit.md](audit.md) with principal, method, and source.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-15 | Status note refreshed for RM-AIM-P1 SRV-104 (API-key TTL/revoke/rotate lifecycle shipped); remaining gap narrowed to SSO/mTLS/MFA/sessions/JWT revocation. No design content changed |
 | 1.1.0 | 2026-07-07 | Added a top note distinguishing this doc's target-state design from the real, fail-closed-by-default implementation (RM-GA-P1 SEC-101/SEC-102). Found during a project-wide status review; no design content changed |
 | 1.0.0 | 2026-06-27 | Initial Security Authentication specification |

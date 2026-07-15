@@ -5,8 +5,8 @@ since project inception. It has not been reconciled with
 [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md) (2026-07-06), which
 ratified **Path A**: GA ships as a single-node appliance, not the
 multi-service, horizontally-scaled platform implied below. **Current reality
-vs. §2 "Primary Technologies"** (corrected 2026-07-07; see
-[`CLAUDE.md`](../../CLAUDE.md) for the authoritative, kept-current
+vs. §2 "Primary Technologies"** (corrected 2026-07-07; see the
+[README](../../README.md)'s architecture section for the kept-current
 architecture description): Rust and Angular are real. **NestJS is not
 built** — the dashboard SPA talks directly to `apex-server`; the NestJS BFF
 is explicitly deferred until production auth needs it
@@ -24,9 +24,14 @@ to a live cluster. **Docker** is real (`deployment/docker-compose.yml`).
 Anything described here that isn't built and isn't yet tracked in
 [`18-roadmap/v1.0/`](../18-roadmap/v1.0/index.md) (GA) or
 [`18-roadmap/future/`](../18-roadmap/future/index.md) (post-GA) has been
-added to the latter as of this revision — see §25 below.
+added to the latter as of this revision — see §25 below. **Positioning note
+(2026-07-15):** the product framing below also predates
+[ADR-0011](../17-adr/ADR-0011-generative-ui-repositioning.md)'s repositioning —
+the current product is the **Generative UI Trust Runtime**
+([PRD-005](prd-generative-ui-runtime.md), shipped v1.2 scope) with this
+platform as its engine; see the updated [vision](../00-executive/vision.md).
 **Owner:** Apex AI Platform Team
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -504,5 +509,6 @@ dropped:
 
 | Version | Date       | Description        |
 | ------- | ---------- | ------------------ |
+| 1.0.2   | 2026-07-15 | Added a positioning note: the framing predates ADR-0011's Generative-UI-Trust-Runtime repositioning (PRD-005, shipped v1.2 scope); no content changed |
 | 1.0.1   | 2026-07-07 | Added a header divergence note correcting §2's tech-stack claims against ADR-0010/reality (NestJS and NATS were never built; Postgres/Redis/Qdrant are optional feature-gated backends, not primary dependencies), plus new §25 tracking the three technologies (NATS distributed event bus, gRPC, S3 object storage) that had no implementation *and* no tracked future work item until now. Found during a project-wide doc review; no product scope changed |
 | 1.0.0   | 2026-06-26 | Initial master PRD |

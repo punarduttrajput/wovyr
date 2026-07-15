@@ -7,10 +7,18 @@ Document ID: PRD-003
 
 **Document ID:** PRD-003
 **File Path:** `docs/01-product/prd-ga-hardening.md`
-**Version:** 1.0.0
-**Status:** Draft — planning input, not a commitment
+**Version:** 1.0.1
+**Status:** Shipped — all four phased ticket docs derived from this PRD are done
+([P1](../18-roadmap/v1.0/phase1-security-floor-tickets.md) security floor ·
+[P2](../18-roadmap/v1.0/phase2-durability-execution-tickets.md)
+durability/execution ·
+[P3](../18-roadmap/v1.0/phase3-scale-distribution-tickets.md) Track A, with
+Track B deferred to v1.1 by design ·
+[P4](../18-roadmap/v1.0/phase4-contract-operability-tickets.md)
+contract/operability); see [v1.0.md](../18-roadmap/v1.0.md) for the remaining
+Tier-A GA-completion validation work that gates the v1.0 tag itself
 **Owner:** Product Team
-**Last Updated:** 2026-07-06
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -551,4 +559,5 @@ GA is defensible when:
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.0.1 | 2026-07-15 | Status updated Draft → Shipped: all four RM-GA phase ticket docs report Done (P3 Track B deferred to v1.1 by design); no content changed |
 | 1.0.0 | 2026-07-06 | Initial GA-hardening PRD: 21 solution-architecture review findings mapped to 10 workstreams / testable requirements, with the Path A/B strategic decision, phased sequencing, sharpened GA exit criteria, and a findings→requirements traceability matrix |

@@ -7,10 +7,14 @@ Document ID: PRD-004
 
 **Document ID:** PRD-004
 **File Path:** `docs/01-product/prd-ai-platform-maturity.md`
-**Version:** 1.0.0
-**Status:** Draft — planning input, not a commitment
+**Version:** 1.0.1
+**Status:** In delivery — Phases 1–2 of the derived ticket docs are complete and
+Phase 3 is partial (22 of 39 tickets done; see the
+[v1.1 index](../18-roadmap/v1.1/index.md)); Phase 3's remaining ecosystem items
+are re-prioritized through [PRD-005](prd-generative-ui-runtime.md)'s lens per
+the [v1.2 milestone](../18-roadmap/v1.2-generative-ui.md)
 **Owner:** Product / AI Engineering
-**Last Updated:** 2026-07-09
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -465,4 +469,5 @@ implement exactly these.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.0.1 | 2026-07-15 | Status updated Draft → In delivery: Phases 1–2 complete, Phase 3 partial (22/39), remainder re-prioritized through PRD-005; no content changed |
 | 1.0.0 | 2026-07-09 | Initial AI-platform-maturity PRD: a 2026-07-09 five-front engineering audit's ~90 findings mapped to 12 workstreams / testable requirements, phased into three ticket docs (RM-AIM-P1/P2/P3), with the distributed Scale-Out fold-in and a full findings→requirements→ticket traceability matrix |

@@ -1,17 +1,23 @@
 # Apex AI Platform — Documentation Index
 
-> Apex — an enterprise AI agent platform built with Rust
+> Apex — the Generative UI Trust Runtime, built on an enterprise AI agent
+> platform written in Rust
 
-Version: **0.1.0**
-Status: **Planning / Documentation phase**
+Version: **1.18.0**
+Status: **Active** — v0.3.0 tagged; the v1.0 GA-hardening engineering scope is
+complete (Tier-A validation work open — see the
+[roadmap index](18-roadmap/index.md)); v1.1 in progress; v1.2 (Generative UI
+Trust Runtime) and v1.3 (MCP Connection Management) shipped
 
 ---
 
 ## How to read this index
 
 * **Available** documents link directly to the file on disk.
-* **Planned** documents are scoped but not yet written.
-* Section numbers match the folder layout under `docs/` (`00-` through `05-` exist today).
+* Where a document tracks delivery work, its row carries the **work's** status
+  (Planned / In progress / Done) rather than plain Available.
+* Section numbers match the folder layout under `docs/` — all sections `00-`
+  through `19-` exist.
 
 New contributors should follow the [Reading Order](#reading-order) at the bottom.
 
@@ -78,7 +84,7 @@ New contributors should follow the [Reading Order](#reading-order) at the bottom
 | [Persistence Layer](03-workflow-engine/persistence-layer.md) | Available |
 | [Distributed Execution](03-workflow-engine/distributed-execution.md) | Available |
 | [Agent Runtime (in-workflow)](03-workflow-engine/agent-runtime.md) | Available |
-| [Temporal Gap Closure (next phase)](03-workflow-engine/temporal-gap-analysis.md) | Planned |
+| [Temporal Gap Closure (next phase)](03-workflow-engine/temporal-gap-analysis.md) | Substantially done (G1–G4/G6/G7 shipped, G5 prototype) |
 
 ---
 
@@ -364,10 +370,10 @@ Directional, per-release evolution of the platform.
 | [GA-001 — Scale & Performance Validation](18-roadmap/v1.0/A1-scale-performance.md) | Planned |
 | [GA-002 — Reliability: HA, DR & Deployment](18-roadmap/v1.0/A2-reliability-ha-dr.md) | In progress |
 | [GA-003 — Security: Root-of-Trust, PII & External Validation](18-roadmap/v1.0/A3-security-completion.md) | In progress |
-| [GA-004 — Marketplace Economics & Safety](18-roadmap/v1.0/A4-marketplace-economics.md) | Planned |
+| [GA-004 — Marketplace Economics & Safety](18-roadmap/v1.0/A4-marketplace-economics.md) | In progress (abuse workflow shipped) |
 | [GA-005 — SDK Distribution & Migration Guides](18-roadmap/v1.0/A5-sdk-distribution.md) | In progress |
 | [v1.2 — Generative UI Trust Runtime](18-roadmap/v1.2-generative-ui.md) | Done (all 3 phases, 2026-07-15) |
-| [v1.3 — MCP Connection Management](18-roadmap/v1.3-mcp-connections.md) | Planned |
+| [v1.3 — MCP Connection Management](18-roadmap/v1.3-mcp-connections.md) | Done (all 3 phases, 2026-07-15) |
 | [Future — Beyond 1.0](18-roadmap/future.md) | Available |
 | [Future Research Bets (Tier B) — Index](18-roadmap/future/index.md) | Available |
 | [FUT-001 — Autonomous Multi-Agent Systems](18-roadmap/future/B1-multi-agent-systems.md) | Exploratory |
@@ -440,6 +446,7 @@ New contributors should read the documentation in the following sequence:
 
 | Version | Date       | Description                                              |
 | ------- | ---------- | ------------------------------------------------------- |
+| 1.18.0  | 2026-07-15 | Status-truth pass: header no longer claims "Planning phase (v0.1.0)" — reflects v0.3.0 tagged / v1.1 in progress / v1.2+v1.3 shipped; v1.3 row Planned → Done; GA-004 row → In progress (abuse workflow); temporal-gap row → Substantially done; legend clarified (work status vs document availability) |
 | 1.17.0  | 2026-07-15 | Added PRD-006 (MCP Connection Management), ADR-0012, and the v1.3 roadmap milestone; marked v1.2 (Generative UI Trust Runtime) Done — all 3 phases shipped |
 | 1.16.0  | 2026-07-14 | Added PRD-005 (Generative UI Trust Runtime), ADR-0011, and the v1.2 roadmap milestone |
 | 1.15.0  | 2026-06-27 | Added 19 Implementation Guide section (6 docs) — all sections 00–19 now Available |

@@ -7,10 +7,13 @@ Document ID: TRT-GAP-001
 
 **Document ID:** TRT-GAP-001
 **File Path:** `docs/07-tool-runtime/e2b-gap-analysis.md`
-**Version:** 1.0.0
-**Status:** Planned
+**Version:** 1.0.1
+**Status:** Planned — not started as scoped. The v1.1 P3 sandbox tickets
+(SBX-301 `fs_write`, SBX-302 `code_execute`) shipped adjacent **tool-surface**
+capabilities, not this doc's sandbox-**session** APIs (persistent sessions,
+filesystem/process APIs, streaming) — those all remain open
 **Owner:** AI Platform Team
-**Last Updated:** 2026-06-29
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -254,8 +257,8 @@ existing image/rootfs plumbing; no marketplace — that stays a
   detection and the guest-agent channel do ambient I/O.
 - Sessions respect `TrustClass` floors — an untrusted tool's session still runs
   in gVisor/Firecracker, never relaxed for convenience.
-- `CLAUDE.md`, the [README](../../README.md) status, and the roadmap exit criteria
-  are updated as each gap lands.
+- The [README](../../README.md) status, this doc's own status table, and the
+  roadmap exit criteria are updated as each gap lands.
 
 ---
 
@@ -296,4 +299,5 @@ positioning or are pure hosted-product surface, not because they were overlooked
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.0.1 | 2026-07-15 | Status clarified: still not started as scoped; noted that SBX-301/302 shipped adjacent tool-surface builtins, distinct from these sandbox-session APIs |
 | 1.0.0 | 2026-06-29 | Initial E2B gap-closure scope for the next phase |

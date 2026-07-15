@@ -7,10 +7,13 @@ Document ID: WF-GAP-001
 
 **Document ID:** WF-GAP-001
 **File Path:** `docs/03-workflow-engine/temporal-gap-analysis.md`
-**Version:** 1.0.0
-**Status:** Planned
+**Version:** 1.1.0
+**Status:** Substantially done — G1–G4, G6, and G7 are shipped (see the §3
+status column, kept current), G5 (child workflows) shipped as a prototype
+([ADR-0008](../17-adr/ADR-0008-subworkflows.md)); the v1.1 P3 scale-hardening
+tickets (WFL-301..308) later extended the engine beyond this doc's scope
 **Owner:** Workflow Engine Team
-**Last Updated:** 2026-06-29
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -273,8 +276,8 @@ in flight; a resumed old execution runs its original DAG.
   isolate the clock at the dispatcher boundary and record fired timestamps in the
   event log so replay stays deterministic
   ([coding-standards §7](../19-implementation-guide/coding-standards.md)).
-- `CLAUDE.md`, the [README](../../README.md) status, and the roadmap exit criteria
-  are updated as each gap lands.
+- The [README](../../README.md) status, this doc's own status table, and the
+  roadmap exit criteria are updated as each gap lands.
 
 ---
 
@@ -311,4 +314,5 @@ declarative DAG model or the positioning, not because they were overlooked:
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-15 | Header status Planned → Substantially done, matching the long-current §3 table (G1–G4/G6/G7 Done, G5 prototype); no gap content changed |
 | 1.0.0 | 2026-06-29 | Initial Temporal gap-closure scope for the next phase |

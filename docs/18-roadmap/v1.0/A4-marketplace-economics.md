@@ -7,10 +7,13 @@ Document ID: GA-004
 
 **Document ID:** GA-004
 **File Path:** `docs/18-roadmap/v1.0/A4-marketplace-economics.md`
-**Version:** 1.0.0
-**Status:** Planned — GA-completion work, not started
+**Version:** 1.1.0
+**Status:** In progress — the abuse-report + takedown workflow (§4.1) has
+shipped (`Registry::report_abuse`/`resolve_abuse_report`/`dismiss_abuse_report`,
+with resolve-time delisting, over server routes + CLI commands, audited);
+monetization and the dashboard browse UI remain open
 **Owner:** Ecosystem Team
-**Last Updated:** 2026-07-05
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -35,17 +38,25 @@ frontier in [FUT-005](../future/B5-ecosystem-interop.md).
   (`scan.rs`), and the full human-review/verified-badge workflow.
 - **Multi-node ready.** A capability-gated `PostgresRegistryStore` lets a fleet
   share one durable catalog; both server and CLI select it at runtime.
-- **No economics, no abuse handling, no browse UI.** There is no monetization or
-  revenue share, no abuse-report/takedown workflow, and the dashboard SPA covers
-  every core surface *except* a marketplace browse experience.
+- **Abuse handling is now shipped.** Any principal can file an `AbuseReport`
+  against a listing; a moderator resolves (optionally **delisting** — hidden from
+  search/get, download refused, like a policy blocklist entry but as a dynamic
+  moderation decision) or dismisses it — over server routes
+  (`.../report`, `.../reports`, `.../reports/{id}/resolve|dismiss`) and the
+  matching `apex plugin report|reports|resolve-abuse|dismiss-abuse` CLI commands,
+  emitting `plugin.abuse_reported`/`plugin.delisted`.
+- **No economics, no browse UI.** There is still no monetization or revenue
+  share, and the dashboard SPA covers every core surface *except* a marketplace
+  browse experience.
 
 ---
 
 # 3. Gap
 
-The marketplace can publish, govern, and install plugins, but there is **no
-incentive loop** (monetization) and **no safety valve** (abuse handling) to grow
-and police a third-party ecosystem, and **no consumer-facing browse UI**.
+The marketplace can publish, govern, install, and now police plugins (the abuse
+workflow is its safety valve), but there is still **no incentive loop**
+(monetization) to grow a third-party ecosystem, and **no consumer-facing browse
+UI**.
 
 ---
 
@@ -112,4 +123,5 @@ and police a third-party ecosystem, and **no consumer-facing browse UI**.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-15 | Status Planned → In progress: the abuse-report/takedown workflow shipped (registry + server routes + CLI, with delisting + audit events); Current State/Gap updated to match. Monetization and the browse UI remain open |
 | 1.0.0 | 2026-07-05 | Initial GA-completion delivery doc for marketplace economics & safety (monetization, abuse workflow, browse UI) |
