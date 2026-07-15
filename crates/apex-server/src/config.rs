@@ -141,6 +141,7 @@ pub(crate) fn default_webhook_store(kms: Arc<dyn apex_kms::Kms>) -> Arc<dyn Webh
 /// EXE-601) so a `wait: {timer: ...}}` activity can actually register a durable
 /// deadline — before this the server's engine had no timer store at all, so any such
 /// activity failed immediately with "no timer store" rather than suspending.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn default_workflows_engine(
     gateway: Arc<Gateway>,
     registry: ToolRegistry,
@@ -149,6 +150,7 @@ pub(crate) fn default_workflows_engine(
     quota: Arc<tenancy::QuotaTracker>,
     timers: Arc<dyn TimerStore>,
     metrics_state: crate::hardening::MetricsState,
+    ui: Arc<crate::ui::UiRuntime>,
 ) -> Engine {
     let executor = Arc::new(workflow_runner::server_executor(
         gateway,
@@ -158,6 +160,7 @@ pub(crate) fn default_workflows_engine(
         quota,
         metrics_state.metrics,
         metrics_state.tenant_labels,
+        ui,
     ));
     if let Some(dir) = workflows_dir()
         && let Ok(store) = FileStore::new(dir)

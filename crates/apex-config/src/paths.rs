@@ -71,6 +71,12 @@ pub fn auth_dir() -> Result<PathBuf> {
     Ok(crate::root::apex_dir()?.join("auth"))
 }
 
+/// `~/.apex/ui` — the generative-UI runtime's durable state (pending frames
+/// awaiting a human decision, tenant policy documents), server-only.
+pub fn ui_dir() -> Result<PathBuf> {
+    Ok(crate::root::apex_dir()?.join("ui"))
+}
+
 /// `~/.apex/server` — server-local state never shared with or read by the
 /// CLI (the idempotency cache, the daily quota accumulator).
 pub fn server_state_dir() -> Result<PathBuf> {

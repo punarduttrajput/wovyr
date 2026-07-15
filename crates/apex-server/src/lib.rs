@@ -40,9 +40,11 @@ mod secrets;
 mod state;
 mod tenancy;
 mod tools;
+mod ui;
 mod webhook_outbox;
 mod webhooks;
 mod workflow_runner;
+pub use ui::UiRuntime;
 
 use agents::*;
 use config::*;
@@ -175,6 +177,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(marketplace::routes())
         // Audit trail: read the tenant's tamper-evident security records.
         .merge(audit::routes())
+        // Generative UI (PRD-005 P1): pull pending validated frames, post decisions.
+        .merge(ui::routes())
         // Tool discovery: list registered tools (built-ins + enabled plugin tools).
         .merge(tools::routes())
         .layer(idempotency())

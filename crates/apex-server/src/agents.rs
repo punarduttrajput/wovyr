@@ -310,6 +310,12 @@ impl RunEventSink for ChannelSink {
             RunEvent::ToolResult { name, ok } => {
                 json!({ "type": "tool_result", "name": name, "ok": ok })
             }
+            RunEvent::UiFrame { frame_id, frame } => {
+                // A validated generative-UI frame (PRD-005 UIP-104) — only
+                // trust-layer-checked frames are ever emitted, so this is a
+                // pass-through, not an enforcement point.
+                json!({ "type": "ui_frame", "frame_id": frame_id, "frame": frame })
+            }
             RunEvent::Done { usage } => json!({
                 "type": "done",
                 "usage": { "total_tokens": usage.total_tokens, "cost_usd": usage.cost_usd }

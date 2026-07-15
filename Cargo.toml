@@ -20,6 +20,8 @@ members = [
     "crates/apex-kms",
     "crates/apex-config",
     "crates/apex-eval",
+    "crates/apex-ui",
+    "crates/apex-ui-guard",
     "crates/apex-server",
     "apps/apex-cli",
 ]
@@ -55,6 +57,8 @@ apex-audit = { path = "crates/apex-audit" }
 apex-kms = { path = "crates/apex-kms" }
 apex-config = { path = "crates/apex-config" }
 apex-eval = { path = "crates/apex-eval" }
+apex-ui = { path = "crates/apex-ui" }
+apex-ui-guard = { path = "crates/apex-ui-guard" }
 apex-server = { path = "crates/apex-server" }
 
 # External

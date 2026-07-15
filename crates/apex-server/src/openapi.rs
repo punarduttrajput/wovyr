@@ -159,6 +159,9 @@ pub(crate) struct ApiErrorDetail {
         crate::workflow_runner::signal_handler,
         crate::workflow_runner::approve_handler,
         crate::workflow_runner::cancel_handler,
+        crate::ui::list_frames_handler,
+        crate::ui::get_frame_handler,
+        crate::ui::decide_handler,
         openapi_json_handler,
     ),
     components(schemas(ApiErrorBody, ApiErrorDetail)),
@@ -174,6 +177,7 @@ pub(crate) struct ApiErrorDetail {
         (name = "tools", description = "Registered tool discovery."),
         (name = "secrets", description = "The tenant-scoped secret vault."),
         (name = "kms", description = "Tenant key lifecycle (rotate/destroy)."),
+        (name = "ui", description = "Generative UI: pending validated frames and typed human decisions (PRD-005)."),
         (name = "system", description = "Health, metrics, and this document."),
     ),
 )]
@@ -281,6 +285,9 @@ mod tests {
             ("/api/v1/workflows/{id}/signal", "post"),
             ("/api/v1/workflows/{id}/approve", "post"),
             ("/api/v1/workflows/{id}", "delete"),
+            ("/api/v1/ui/frames", "get"),
+            ("/api/v1/ui/frames/{frame_id}", "get"),
+            ("/api/v1/ui/decisions/{frame_id}", "post"),
         ];
 
         for (path, method) in expected {

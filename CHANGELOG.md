@@ -11,11 +11,31 @@ each release links its own.
 
 ## [Unreleased]
 
-v1.0 "GA hardening" (PRD-003, complete) and v1.1 "AI Platform Maturity" Phase 1
-(PRD-004, in progress) — see [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/) and
-[docs/18-roadmap/v1.1/](docs/18-roadmap/v1.1/).
+v1.0 "GA hardening" (PRD-003, complete), v1.1 "AI Platform Maturity" (PRD-004,
+Phases 1–2 complete), and v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
+Phase 1 complete) — see [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
+[docs/18-roadmap/v1.1/](docs/18-roadmap/v1.1/), and
+[docs/18-roadmap/v1.2-generative-ui.md](docs/18-roadmap/v1.2-generative-ui.md).
 
 ### Added
+- **Generative UI Trust Runtime — Protocol & Trust Core (RM-GUI-P1, PRD-005):**
+  the `apex-ui` frame protocol (constrained component vocabulary — no raw
+  HTML/script, no credential-input component; fail-closed parsing; semver'd
+  schema version with newer-than-understood rejection; runtime-stamped
+  provenance; canonical content hashes; typed decision validation) and the
+  `apex-ui-guard` trust layer (declarative YAML `UiPolicy`:
+  sensitive-input-name blocking, destructive-action gating, intent-mismatch
+  deception checks, media-origin allow-lists, text redaction, tighten-only
+  budgets; `hosted_floor` denies interactive frames when no policy exists;
+  `APEX_UNRESTRICTED_UI=1` escape hatch). Server: the `ui` workflow activity
+  (present a policy-checked frame → suspend durably → resume on a validated
+  decision), a durable pending-frame store under `~/.apex/ui`,
+  `GET /api/v1/ui/frames[/{id}]` + `POST /api/v1/ui/decisions/{id}`, every
+  verdict and decision recorded in the tamper-evident audit chain paired with
+  the frame hash, and a `RunEvent::UiFrame` SSE event. Proven end-to-end by
+  UC1 (present → kill/restart → deterministic re-present → decide → resume)
+  and UC4 (an injected credential-harvesting frame is blocked, never visible,
+  audited).
 - **Security floor (RM-GA-P1):** real request authentication (`APEX_AUTH_MODE` —
   HS256/RS256 JWT or hashed API keys) replacing trusted headers; TLS-or-refuse on
   non-loopback binds; per-principal rate limiting; CORS allow-list; HTTP limits;

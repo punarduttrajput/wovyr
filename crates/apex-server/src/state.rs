@@ -396,8 +396,15 @@ pub struct AppState {
     /// the same instance that backs `secrets` and `memory`'s encrypting stores, also
     /// exposed directly for the `/api/v1/kms/*` tenant-key-management routes.
     pub(crate) kms: Arc<dyn apex_kms::Kms>,
-    /// Tamper-evident audit log; security-sensitive routes append to it.
-    pub(crate) audit: apex_audit::AuditLog,
+    /// Tamper-evident audit log; security-sensitive routes append to it. An `Arc`
+    /// (RM-GUI-P1): the generative-UI runtime records frame verdicts from the
+    /// workflow-executor side, where no `AppState` exists yet, so both share one
+    /// log through this handle.
+    pub(crate) audit: Arc<apex_audit::AuditLog>,
+    /// The generative-UI runtime (PRD-005 P1): pending validated frames + policy
+    /// resolution, shared between the workflow engine's `ui` activity executor
+    /// and the `/api/v1/ui/*` routes — they must see the same frame store.
+    pub(crate) ui: Arc<crate::ui::UiRuntime>,
     /// API-key store backing `APEX_AUTH_MODE=apikey` ([SEC-101]).
     pub(crate) api_keys: Arc<dyn auth::ApiKeyStore>,
     /// Whether the anonymous default-tenant identity is granted a role set at all
@@ -500,6 +507,12 @@ impl AppState {
         // they all agree on which tenants/projects are "known" vs. folded into
         // `"other"`.
         let tenant_label_cap = hardening::TenantLabelCap::default();
+        // Audit + the generative-UI runtime are built before the engine: the
+        // engine's `ui`-activity executor records frame verdicts into the same
+        // audit chain the routes use, and shares the same pending-frame store
+        // the `/api/v1/ui/*` routes read (RM-GUI-P1).
+        let audit = Arc::new(crate::config::default_audit_log());
+        let ui = Arc::new(crate::ui::UiRuntime::from_env(audit.clone()));
         // Thread gateway + registry + the agent store + tenancy/quota into the workflow
         // engine so the shared executor can actually drive function/ai/agent activities
         // when the submit route runs a workflow (an `agent` activity looks up a stored
@@ -515,6 +528,7 @@ impl AppState {
                 metrics: metrics.clone(),
                 tenant_labels: tenant_label_cap.clone(),
             },
+            ui.clone(),
         );
         let workflow_owners_path = crate::config::workflows_dir().map(|d| d.join("owners.json"));
         let workflow_owners = crate::config::load_owners(workflow_owners_path.as_deref());
@@ -564,7 +578,8 @@ impl AppState {
             memory_store,
             secrets,
             kms,
-            audit: crate::config::default_audit_log(),
+            audit,
+            ui,
             api_keys: auth::default_api_key_store(),
             anonymous_allowed: auth::resolve_anonymous_allowed(),
             auth_mode: auth::AuthMode::from_env(),
@@ -672,9 +687,31 @@ impl AppState {
         self
     }
 
-    /// Override the audit log (tests inject an in-memory log).
+    /// Override the audit log (tests inject an in-memory log). Rebuilds the UI
+    /// runtime around the new log too — the frame store and policies carry
+    /// over, so `state.audit` and the UI runtime's verdict records never
+    /// diverge within a test.
     #[cfg(test)]
     pub(crate) fn with_audit(mut self, audit: apex_audit::AuditLog) -> Self {
+        self.audit = Arc::new(audit);
+        self.ui = Arc::new(self.ui.with_audit_log(self.audit.clone()));
+        self
+    }
+
+    /// Override the generative-UI runtime (tests build one sharing the audit
+    /// log and hand the same instance to an isolated engine's executor, so the
+    /// executor's pending frames are visible to the `/api/v1/ui/*` routes).
+    #[cfg(test)]
+    pub(crate) fn with_ui(mut self, ui: Arc<crate::ui::UiRuntime>) -> Self {
+        self.ui = ui;
+        self
+    }
+
+    /// Share an existing audit-log handle (tests that assert one chain across
+    /// both the route-side records and the UI runtime's executor-side records
+    /// need the *same* `Arc`, which `with_audit`'s owned parameter can't give).
+    #[cfg(test)]
+    pub(crate) fn with_audit_arc(mut self, audit: Arc<apex_audit::AuditLog>) -> Self {
         self.audit = audit;
         self
     }

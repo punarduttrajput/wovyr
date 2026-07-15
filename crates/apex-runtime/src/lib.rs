@@ -175,6 +175,13 @@ impl RunEventSink for TracingSink<'_> {
                 cost_usd = usage.cost_usd,
                 "sub-agent run finished"
             ),
+            RunEvent::UiFrame { frame_id, .. } => tracing::info!(
+                target: "apex.runtime.agent",
+                activity = self.activity_id,
+                agent = self.agent,
+                frame_id,
+                "sub-agent presented a ui frame"
+            ),
             RunEvent::Delta { .. }
             | RunEvent::ToolCallDelta { .. }
             | RunEvent::ReasoningDelta { .. } => {}
