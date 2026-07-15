@@ -42,24 +42,35 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+/// Hard cap on the standalone decided-outcomes registry (`DecidedOutcomeStore`)
+/// — see its doc comment for why this is a cap-only, no-TTL v1.
+const MAX_DECIDED_OUTCOMES: usize = 10_000;
 
 /// A validated frame awaiting a human decision. Only frames that passed the
 /// trust layer are ever stored — `frame` is the exact JSON a renderer shows,
 /// redactions already applied.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct PendingFrame {
-    /// Deterministic handle (`uif-…`), derived from `(execution_id, activity_id)`
-    /// so a resume re-presenting the same activity converges on the same id.
+    /// Deterministic handle (`uif-…`) — derived from `(execution_id, activity_id)`
+    /// for a workflow-backed frame (so a resume re-presenting the same activity
+    /// converges on the same id), or from `(tenant, a monotonic counter,
+    /// content_hash)` for a standalone one (EMB-701, `present_standalone`).
     pub frame_id: String,
     /// Owning tenant — decisions and reads are scoped to it.
     pub tenant: String,
-    /// The suspended execution a decision resumes.
-    pub execution_id: String,
-    /// The suspended `ui` activity within it.
-    pub activity_id: String,
+    /// The suspended execution a decision resumes, and the suspended `ui`
+    /// activity within it — `None`/`None` for a **standalone** frame
+    /// (EMB-701, `POST /api/v1/ui/present`): presented with no
+    /// workflow/agent involvement at all, so there is nothing to signal.
+    /// Always both-`Some` or both-`None` together (never one alone) — see
+    /// `present_standalone`/`execute_ui_activity`, the only two constructors.
+    pub execution_id: Option<String>,
+    pub activity_id: Option<String>,
     /// The validated (possibly redacted) `apex_ui::UiFrame` JSON.
     pub frame: Value,
     /// Content hash of `frame` — the audit chain pairs decisions with it (HIL-306).
@@ -161,6 +172,71 @@ impl UiFrameStore {
     }
 }
 
+/// A recorded decision for a **standalone** frame (EMB-701, `present_standalone`)
+/// — a workflow-backed frame's outcome is reflected in the workflow's own
+/// state/output instead, via `signal_event`. This store exists purely so a
+/// standalone caller (no workflow to poll) can retrieve what was decided
+/// after the pending-frame record is gone (`GET /api/v1/ui/decisions/{id}`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct DecidedOutcome {
+    pub frame_id: String,
+    pub tenant: String,
+    pub action: String,
+    pub values: BTreeMap<String, Value>,
+    pub decided_by: String,
+    pub decided_at_ms: u64,
+    pub frame_hash: String,
+}
+
+/// Bounded, in-memory registry of standalone decision outcomes — the same
+/// "cap + evict oldest" shape `apex-server`'s `RunStore`/`IdempotencyStore`
+/// use elsewhere (DUR-404/SEC-205's discipline), since this is exactly the
+/// same kind of short-lived, non-source-of-truth record. **Known limitation**
+/// (documented, not solved this pass): no durability across a restart and no
+/// TTL, only a hard entry cap — acceptable for a v1 of a feature nothing
+/// depends on yet; a caller that actually wants a decision polls promptly.
+pub(crate) struct DecidedOutcomeStore {
+    inner: std::sync::Mutex<DecidedOutcomeInner>,
+    max_entries: usize,
+}
+
+#[derive(Default)]
+struct DecidedOutcomeInner {
+    entries: BTreeMap<String, DecidedOutcome>,
+    order: VecDeque<String>,
+}
+
+impl DecidedOutcomeStore {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(DecidedOutcomeInner::default()),
+            max_entries,
+        }
+    }
+
+    pub(crate) fn record(&self, outcome: DecidedOutcome) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !inner.entries.contains_key(&outcome.frame_id) {
+            inner.order.push_back(outcome.frame_id.clone());
+        }
+        inner.entries.insert(outcome.frame_id.clone(), outcome);
+        while inner.order.len() > self.max_entries {
+            if let Some(oldest) = inner.order.pop_front() {
+                inner.entries.remove(&oldest);
+            }
+        }
+    }
+
+    pub(crate) fn get(&self, frame_id: &str) -> Option<DecidedOutcome> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .get(frame_id)
+            .cloned()
+    }
+}
+
 /// How a tenant's frames are judged (GRD-206/207).
 enum PolicySource {
     /// `APEX_UNRESTRICTED_UI=1` — the documented trusted-first-party escape
@@ -189,6 +265,13 @@ pub struct UiRuntime {
     /// `APEX_UNRESTRICTED_UI=1` at startup.
     unrestricted: bool,
     audit: Arc<AuditLog>,
+    /// Standalone (EMB-701) decision outcomes, retrievable after the pending
+    /// record is gone — see [`DecidedOutcomeStore`].
+    decisions: Arc<DecidedOutcomeStore>,
+    /// Monotonic counter feeding standalone frame id generation
+    /// (`present_standalone`) — a workflow-backed frame's id is derived from
+    /// `(execution_id, activity_id)` instead, so it has no need of this.
+    standalone_seq: AtomicU64,
 }
 
 impl UiRuntime {
@@ -227,6 +310,8 @@ impl UiRuntime {
                 .map(|v| v == "1")
                 .unwrap_or(false),
             audit,
+            decisions: Arc::new(DecidedOutcomeStore::new(MAX_DECIDED_OUTCOMES)),
+            standalone_seq: AtomicU64::new(0),
         }
     }
 
@@ -240,12 +325,15 @@ impl UiRuntime {
             default_policy: None,
             unrestricted: false,
             audit,
+            decisions: Arc::new(DecidedOutcomeStore::new(MAX_DECIDED_OUTCOMES)),
+            standalone_seq: AtomicU64::new(0),
         }
     }
 
-    /// The same runtime (shared frame store and policies) reporting into a
-    /// different audit log — used by `AppState::with_audit` so the state's log
-    /// and the UI runtime's never diverge in tests.
+    /// The same runtime (shared frame store, policies, and decided-outcomes
+    /// store) reporting into a different audit log — used by
+    /// `AppState::with_audit` so the state's log and the UI runtime's never
+    /// diverge in tests.
     #[cfg(test)]
     pub(crate) fn with_audit_log(&self, audit: Arc<AuditLog>) -> Self {
         Self {
@@ -255,6 +343,8 @@ impl UiRuntime {
             default_policy: self.default_policy.clone(),
             unrestricted: self.unrestricted,
             audit,
+            decisions: self.decisions.clone(),
+            standalone_seq: AtomicU64::new(self.standalone_seq.load(Ordering::SeqCst)),
         }
     }
 
@@ -269,6 +359,10 @@ impl UiRuntime {
 
     pub(crate) fn frames(&self) -> &UiFrameStore {
         &self.frames
+    }
+
+    pub(crate) fn decisions(&self) -> &DecidedOutcomeStore {
+        &self.decisions
     }
 
     /// Resolve how `tenant`'s frames are judged. A malformed on-disk tenant
@@ -307,6 +401,61 @@ impl UiRuntime {
     fn record_audit(&self, event: AuditEvent) {
         if let Err(e) = self.audit.record(event) {
             tracing::warn!("ui audit record failed: {e}");
+        }
+    }
+
+    /// The shared trust-layer pipeline (GRD-202): protocol-validate
+    /// `frame_value` fail-closed, let `stamp` set provenance, judge it against
+    /// `tenant`'s policy (or the hosted floor, or the unrestricted escape
+    /// hatch), and audit a reject/block verdict. Used by **both** the
+    /// workflow `ui` activity and the standalone `present_standalone` route
+    /// (EMB-701) so there is exactly one code path enforcing the trust layer
+    /// — never two that could quietly drift apart. Returns the validated
+    /// (possibly redacted) frame plus the policy reference that judged it, or
+    /// a [`PresentError`] naming why it was rejected (already audited either
+    /// way, same as before this was factored out).
+    fn judge_frame(
+        &self,
+        tenant: &str,
+        frame_value: &Value,
+        audit_id: &str,
+        stamp: impl FnOnce(&mut UiFrame),
+    ) -> Result<(UiFrame, String), PresentError> {
+        let mut frame = UiFrame::from_value(frame_value).map_err(|e| {
+            self.record_audit(
+                system_event(tenant, "ui.frame.reject", audit_id)
+                    .denied(format!("protocol validation failed: {e}")),
+            );
+            PresentError::Invalid(e.to_string())
+        })?;
+        stamp(&mut frame);
+
+        let source = self
+            .policy_for(tenant)
+            .map_err(PresentError::PolicyResolution)?;
+        let (verdict, policy_ref) = match source {
+            PolicySource::Unrestricted => (Verdict::Allow, "unrestricted".to_string()),
+            PolicySource::Floor => (hosted_floor(&frame), "hosted-floor".to_string()),
+            PolicySource::Policy(policy) => {
+                let reference = policy.reference();
+                (evaluate(&policy, &frame), reference)
+            }
+        };
+
+        match verdict {
+            Verdict::Allow => Ok((frame, policy_ref)),
+            Verdict::Redact { frame, .. } => Ok((*frame, policy_ref)),
+            Verdict::Block { rule, reason } => {
+                self.record_audit(
+                    system_event(tenant, "ui.frame.block", audit_id)
+                        .denied(format!("policy `{policy_ref}` rule `{rule}`: {reason}")),
+                );
+                // The caller-visible error names the rule, not the reason —
+                // the blocklist stance: detail lives in the audit chain, not
+                // in an error message a model (or end user) might see echoed
+                // back.
+                Err(PresentError::Blocked { rule })
+            }
         }
     }
 
@@ -349,59 +498,14 @@ impl UiRuntime {
             )));
         };
 
-        // Protocol validation (UIP-101/106), fail-closed; a reject is audited —
-        // a malformed frame in a hosted deployment is a signal worth keeping.
-        let mut frame = match UiFrame::from_value(frame_value) {
-            Ok(frame) => frame,
-            Err(e) => {
-                self.record_audit(
-                    system_event(&tenant, "ui.frame.reject", &frame_id)
-                        .denied(format!("protocol validation failed: {e}")),
-                );
-                return Err(ActivityError::Permanent(format!(
-                    "activity `{}`: invalid ui frame ({e})",
-                    ctx.id
-                )));
-            }
-        };
-
-        // Provenance is runtime-stamped (UIP-102), never author-trusted.
-        frame.provenance.execution_id = Some(execution_id.clone());
-        frame.provenance.activity_id = Some(ctx.id.clone());
-
-        // Trust layer (GRD-202): policy, floor, or the explicit escape hatch.
-        let source = self.policy_for(&tenant).map_err(|e| {
-            ActivityError::Permanent(format!(
-                "activity `{}`: ui policy resolution failed ({e}); failing closed",
-                ctx.id
-            ))
-        })?;
-        let (verdict, policy_ref) = match source {
-            PolicySource::Unrestricted => (Verdict::Allow, "unrestricted".to_string()),
-            PolicySource::Floor => (hosted_floor(&frame), "hosted-floor".to_string()),
-            PolicySource::Policy(policy) => {
-                let reference = policy.reference();
-                (evaluate(&policy, &frame), reference)
-            }
-        };
-
-        let final_frame = match verdict {
-            Verdict::Allow => frame,
-            Verdict::Redact { frame, .. } => *frame,
-            Verdict::Block { rule, reason } => {
-                self.record_audit(
-                    system_event(&tenant, "ui.frame.block", &frame_id)
-                        .denied(format!("policy `{policy_ref}` rule `{rule}`: {reason}")),
-                );
-                // The workflow-visible error names the rule, not the reason —
-                // the blocklist stance: detail lives in the audit chain, not in
-                // an error message a model (or end user) might see echoed back.
-                return Err(ActivityError::Permanent(format!(
-                    "activity `{}`: ui frame blocked by policy `{policy_ref}` rule `{rule}`",
-                    ctx.id
-                )));
-            }
-        };
+        let activity_id = ctx.id.clone();
+        let (final_frame, policy_ref) = self
+            .judge_frame(&tenant, frame_value, &frame_id, |frame| {
+                // Provenance is runtime-stamped (UIP-102), never author-trusted.
+                frame.provenance.execution_id = Some(execution_id.clone());
+                frame.provenance.activity_id = Some(activity_id.clone());
+            })
+            .map_err(|e| e.into_activity_error(&ctx.id))?;
 
         let frame_hash = final_frame.content_hash();
         let frame_json = serde_json::to_value(&final_frame).map_err(|e| {
@@ -433,8 +537,8 @@ impl UiRuntime {
         let fresh = self.frames.upsert(PendingFrame {
             frame_id: frame_id.clone(),
             tenant: tenant.clone(),
-            execution_id,
-            activity_id: ctx.id.clone(),
+            execution_id: Some(execution_id),
+            activity_id: Some(ctx.id.clone()),
             frame: frame_json,
             frame_hash: frame_hash.clone(),
             policy_ref,
@@ -455,14 +559,114 @@ impl UiRuntime {
             ctx.id
         )))
     }
+
+    /// EMB-701: present a frame with **no workflow/agent involvement at
+    /// all** — the definitional standalone-middleware entry point. Runs the
+    /// exact same trust-layer pipeline as the workflow `ui` activity
+    /// (`judge_frame`), then persists the validated frame as a standalone
+    /// [`PendingFrame`] (`execution_id`/`activity_id` both `None`) so
+    /// `GET`/`POST .../decisions` work identically to the workflow-backed
+    /// path — deciding it just records a [`DecidedOutcome`] instead of
+    /// signaling a workflow that doesn't exist. Unlike the workflow path,
+    /// a display-only (no-action) frame is still persisted as pending rather
+    /// than auto-completing — there's no "activity" here to complete; the
+    /// caller decides for itself when it's done consulting `GET
+    /// /api/v1/ui/frames/{id}` (a known, documented limitation: nothing
+    /// evicts an abandoned standalone frame yet, same class of gap as
+    /// `execution_locks`' unbounded growth elsewhere in this workspace).
+    pub(crate) fn present_standalone(
+        &self,
+        tenant: &str,
+        frame_value: &Value,
+    ) -> Result<PendingFrame, PresentError> {
+        let seq = self.standalone_seq.fetch_add(1, Ordering::SeqCst);
+        let audit_id = format!("standalone:{tenant}:{seq}");
+        // No provenance to stamp — this frame was never generated by an
+        // Apex-native run at all (EMB-701's whole point).
+        let (final_frame, policy_ref) = self.judge_frame(tenant, frame_value, &audit_id, |_| {})?;
+
+        let frame_hash = final_frame.content_hash();
+        let frame_id = frame_id_for_standalone(tenant, seq, &frame_hash);
+        let frame_json = serde_json::to_value(&final_frame).map_err(|e| {
+            PresentError::Invalid(format!("failed to serialize validated frame: {e}"))
+        })?;
+
+        let pending = PendingFrame {
+            frame_id: frame_id.clone(),
+            tenant: tenant.to_string(),
+            execution_id: None,
+            activity_id: None,
+            frame: frame_json,
+            frame_hash: frame_hash.clone(),
+            policy_ref,
+            created_at_ms: crate::audit::now_ms(),
+        };
+        self.frames.upsert(pending.clone());
+        self.record_audit(system_event(
+            tenant,
+            "ui.frame.present",
+            &format!("{frame_id}:{frame_hash}"),
+        ));
+        Ok(pending)
+    }
 }
 
-/// A workflow-engine audit event: the platform acted (presented/blocked a
-/// frame), not a request principal.
+/// Why [`UiRuntime::judge_frame`]/[`present_standalone`](UiRuntime::present_standalone)
+/// rejected a frame — already audited by the time this is returned.
+pub(crate) enum PresentError {
+    /// Failed protocol validation (UIP-101/106).
+    Invalid(String),
+    /// The tenant's policy document couldn't be resolved (fail-closed).
+    PolicyResolution(apex_common::Error),
+    /// The trust layer blocked it; the rule id, not the reason (the
+    /// blocklist stance — detail lives in the audit chain).
+    Blocked { rule: String },
+}
+
+impl PresentError {
+    /// The workflow `ui` activity's error shape — a permanent
+    /// `ActivityError` naming `activity_id`.
+    fn into_activity_error(self, activity_id: &str) -> ActivityError {
+        match self {
+            PresentError::Invalid(msg) => ActivityError::Permanent(format!(
+                "activity `{activity_id}`: invalid ui frame ({msg})"
+            )),
+            PresentError::PolicyResolution(err) => ActivityError::Permanent(format!(
+                "activity `{activity_id}`: ui policy resolution failed ({err}); failing closed"
+            )),
+            PresentError::Blocked { rule } => ActivityError::Permanent(format!(
+                "activity `{activity_id}`: ui frame blocked by policy rule `{rule}`"
+            )),
+        }
+    }
+
+    /// The HTTP shape for `POST /api/v1/ui/present` (EMB-701).
+    fn into_api_error(self) -> ApiError {
+        match self {
+            PresentError::Invalid(msg) => {
+                ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", msg)
+            }
+            PresentError::PolicyResolution(err) => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                err.to_string(),
+            ),
+            PresentError::Blocked { rule } => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "blocked",
+                format!("ui frame blocked by policy rule `{rule}`"),
+            ),
+        }
+    }
+}
+
+/// A platform-actor audit event: the trust layer itself acted (presented/
+/// rejected/blocked a frame, from either the workflow `ui` activity or the
+/// standalone `present` route), not a request principal.
 fn system_event(tenant: &str, action: &str, resource_id: &str) -> AuditEvent {
     AuditEvent::new(
         crate::audit::now_ms(),
-        "workflow-engine",
+        "apex-ui",
         tenant,
         action,
         "ui_frame",
@@ -485,6 +689,24 @@ pub(crate) fn frame_id_for(execution_id: &str, activity_id: &str) -> String {
     hasher.update(execution_id.as_bytes());
     hasher.update([0x1f]);
     hasher.update(activity_id.as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("uif-{hex}")
+}
+
+/// `uif-<16 hex>` for a **standalone** frame (EMB-701) — no execution/activity
+/// to derive from, so this hashes `(tenant, a monotonic per-runtime counter,
+/// content_hash)` instead. The counter alone would already guarantee
+/// uniqueness within one runtime's lifetime; folding in the tenant and
+/// content hash too just keeps the id from trivially leaking the raw
+/// sequence number.
+fn frame_id_for_standalone(tenant: &str, seq: u64, content_hash: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(tenant.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(seq.to_le_bytes());
+    hasher.update([0x1f]);
+    hasher.update(content_hash.as_bytes());
     let digest = hasher.finalize();
     let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
     format!("uif-{hex}")
@@ -533,9 +755,13 @@ impl<E: ActivityExecutor> ActivityExecutor for UiActivityExecutor<E> {
 
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/v1/ui/present", post(present_handler))
         .route("/api/v1/ui/frames", get(list_frames_handler))
         .route("/api/v1/ui/frames/{frame_id}", get(get_frame_handler))
-        .route("/api/v1/ui/decisions/{frame_id}", post(decide_handler))
+        .route(
+            "/api/v1/ui/decisions/{frame_id}",
+            post(decide_handler).get(get_decision_handler),
+        )
 }
 
 fn frame_body(frame: &PendingFrame) -> Value {
@@ -550,6 +776,55 @@ fn frame_body(frame: &PendingFrame) -> Value {
     })
 }
 
+/// The frame document a `POST /api/v1/ui/present` (EMB-701) call submits.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct PresentRequest {
+    /// A UiFrame document: `{schema_version, title?, root}`. See the
+    /// generative-UI protocol docs.
+    frame: Value,
+}
+
+/// `POST /api/v1/ui/present` — EMB-701's standalone middleware entry point:
+/// present a frame with **no workflow or agent adoption required at all**.
+/// Runs the identical trust-layer pipeline the workflow `ui` activity uses
+/// (fail-closed protocol validation, tenant policy or the hosted floor,
+/// audited verdict), then persists the validated frame exactly like a
+/// workflow-presented one — `GET /api/v1/ui/frames[/{id}]` and
+/// `POST /api/v1/ui/decisions/{id}` work identically either way. Any agent
+/// stack that can make an HTTP call can use the trust runtime this way,
+/// without adopting `apex-workflow`/`apex-agent` at all.
+#[utoipa::path(
+    post,
+    path = "/api/v1/ui/present",
+    tag = "ui",
+    request_body = PresentRequest,
+    responses(
+        (status = 200, description = "The frame passed the trust layer and is now pending a decision."),
+        (status = 400, description = "The frame failed protocol validation.", body = crate::openapi::ApiErrorBody),
+        (status = 403, description = "The trust layer blocked the frame.", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn present_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<PresentRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "ui:write")?;
+    let pending = state
+        .ui
+        .present_standalone(&tenant, &req.frame)
+        .map_err(PresentError::into_api_error)?;
+    crate::audit::audit(
+        &state,
+        &headers,
+        &tenant,
+        "ui.frame.present.standalone",
+        "ui_frame",
+        &pending.frame_id,
+    );
+    Ok(Json(frame_body(&pending)))
+}
+
 /// `GET /api/v1/ui/frames` — the caller's tenant's pending (validated) frames,
 /// the pull half of UIP-104 for renderers that don't hold an SSE stream.
 #[utoipa::path(
@@ -562,7 +837,7 @@ pub(crate) async fn list_frames_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:read")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "ui:read")?;
     let data: Vec<Value> = state
         .ui
         .frames()
@@ -591,7 +866,7 @@ pub(crate) async fn get_frame_handler(
     headers: HeaderMap,
     Path(frame_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:read")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "ui:read")?;
     match state.ui.frames().get(&frame_id) {
         Some(frame) if frame.tenant == tenant => Ok(Json(frame_body(&frame))),
         _ => Err(ApiError::new(
@@ -612,10 +887,12 @@ pub(crate) struct DecideRequest {
     values: BTreeMap<String, Value>,
 }
 
-/// `POST /api/v1/ui/decisions/{frame_id}` — validate the typed decision against
-/// the frame it answers and resume the suspended execution (HIL-303). The
-/// decision payload delivered to the workflow carries the decision-taker and
-/// the frame hash it answered, and the audit record pairs both (HIL-306).
+/// `POST /api/v1/ui/decisions/{frame_id}` — validate the typed decision
+/// against the frame it answers, then either resume the suspended workflow
+/// execution (HIL-303) or, for a **standalone** frame (EMB-701, no
+/// `execution_id`/`activity_id`), record the outcome for later retrieval via
+/// `GET /api/v1/ui/decisions/{frame_id}`. Either way the audit record pairs
+/// the decision-taker and the frame hash it answered (HIL-306).
 #[utoipa::path(
     post,
     path = "/api/v1/ui/decisions/{frame_id}",
@@ -623,7 +900,7 @@ pub(crate) struct DecideRequest {
     params(("frame_id" = String, Path, description = "The pending frame id (`uif-…`).")),
     request_body = DecideRequest,
     responses(
-        (status = 200, description = "Decision accepted; execution resumed."),
+        (status = 200, description = "Decision accepted; execution resumed (or, for a standalone frame, recorded)."),
         (status = 400, description = "Decision fails validation against the frame.", body = crate::openapi::ApiErrorBody),
         (status = 404, description = "Unknown frame (or not the caller's tenant's).", body = crate::openapi::ApiErrorBody),
     ),
@@ -634,7 +911,7 @@ pub(crate) async fn decide_handler(
     Path(frame_id): Path<String>,
     Json(req): Json<DecideRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "workflows:run")?;
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "ui:write")?;
     let Some(pending) = state.ui.frames().get(&frame_id) else {
         return Err(not_found(&frame_id));
     };
@@ -657,25 +934,47 @@ pub(crate) async fn decide_handler(
         values: req.values,
     };
     // HIL-302: fail-closed at the boundary — an out-of-vocabulary decision is
-    // never delivered to the workflow.
+    // never delivered to the workflow (or recorded standalone).
     validate_decision(&frame, &decision)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "validation_failed", e.to_string()))?;
 
-    let def =
-        crate::workflow_runner::resolve_definition(&state, &pending.execution_id, None).await?;
-    let payload = json!({
-        "action": decision.action,
-        "values": decision.values,
-        "decided_by": crate::tenancy::principal(&headers),
-        "decided_at_ms": crate::audit::now_ms(),
-        "frame_id": pending.frame_id,
-        "frame_hash": pending.frame_hash,
-    });
-    state
-        .workflows
-        .signal_event(&def, &pending.execution_id, &pending.activity_id, payload)
-        .await
-        .map_err(ApiError::from)?;
+    let decided_by = crate::tenancy::principal(&headers);
+    let decided_at_ms = crate::audit::now_ms();
+
+    match (&pending.execution_id, &pending.activity_id) {
+        (Some(execution_id), Some(activity_id)) => {
+            let def =
+                crate::workflow_runner::resolve_definition(&state, execution_id, None).await?;
+            let payload = json!({
+                "action": decision.action,
+                "values": decision.values,
+                "decided_by": decided_by,
+                "decided_at_ms": decided_at_ms,
+                "frame_id": pending.frame_id,
+                "frame_hash": pending.frame_hash,
+            });
+            state
+                .workflows
+                .signal_event(&def, execution_id, activity_id, payload)
+                .await
+                .map_err(ApiError::from)?;
+        }
+        _ => {
+            // Standalone (EMB-701): there's no workflow to signal — record
+            // the outcome so an external, non-Apex-native caller can retrieve
+            // what was decided.
+            state.ui.decisions().record(DecidedOutcome {
+                frame_id: pending.frame_id.clone(),
+                tenant: tenant.clone(),
+                action: decision.action.clone(),
+                values: decision.values.clone(),
+                decided_by: decided_by.clone(),
+                decided_at_ms,
+                frame_hash: pending.frame_hash.clone(),
+            });
+        }
+    }
+
     state.ui.frames().remove(&frame_id);
     crate::audit::audit(
         &state,
@@ -692,6 +991,44 @@ pub(crate) async fn decide_handler(
         "activity_id": pending.activity_id,
         "status": "decided",
     })))
+}
+
+/// `GET /api/v1/ui/decisions/{frame_id}` — retrieve a **standalone** frame's
+/// recorded decision (EMB-701) after the pending record is gone. A
+/// workflow-backed frame's outcome lives in the workflow's own state/output
+/// instead (`GET /api/v1/workflows/{id}`) — this route only ever has
+/// something to return for a frame presented via `POST /api/v1/ui/present`.
+#[utoipa::path(
+    get,
+    path = "/api/v1/ui/decisions/{frame_id}",
+    tag = "ui",
+    params(("frame_id" = String, Path, description = "The frame id (`uif-…`) a decision was submitted for.")),
+    responses(
+        (status = 200, description = "The recorded decision for a standalone frame."),
+        (status = 404, description = "No recorded decision (unknown, still pending, workflow-backed, or a different tenant).", body = crate::openapi::ApiErrorBody),
+    ),
+)]
+pub(crate) async fn get_decision_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(frame_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let tenant = crate::tenancy::tenant_authorize(&state, &headers, "ui:read")?;
+    match state.ui.decisions().get(&frame_id) {
+        Some(outcome) if outcome.tenant == tenant => Ok(Json(json!({
+            "frame_id": outcome.frame_id,
+            "action": outcome.action,
+            "values": outcome.values,
+            "decided_by": outcome.decided_by,
+            "decided_at_ms": outcome.decided_at_ms,
+            "frame_hash": outcome.frame_hash,
+        }))),
+        _ => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("no recorded decision for frame `{frame_id}`"),
+        )),
+    }
 }
 
 fn not_found(frame_id: &str) -> ApiError {
@@ -927,8 +1264,8 @@ metadata:\n  name: ui-uc1-approve\nspec:\n  activities:\n    - id: confirm\n    
 
         // The validated frame is pending, provenance-stamped, policy-recorded.
         let pending = wait_for_pending_frame(&ui1).await;
-        assert_eq!(pending.execution_id, "uc1-restart-test");
-        assert_eq!(pending.activity_id, "confirm");
+        assert_eq!(pending.execution_id.as_deref(), Some("uc1-restart-test"));
+        assert_eq!(pending.activity_id.as_deref(), Some("confirm"));
         assert_eq!(pending.policy_ref, "test@v1");
         assert_eq!(
             pending.frame["provenance"]["execution_id"],
@@ -1058,6 +1395,148 @@ metadata:\n  name: ui-floor-display\nspec:\n  activities:\n    - id: show\n     
         audit.verify().expect("audit chain verifies");
     }
 
+    /// EMB-701: the definitional standalone-middleware claim, proven for
+    /// real — present a frame via `POST /api/v1/ui/present` with **zero**
+    /// workflow or agent involvement (no `apex-workflow`/`apex-agent` call
+    /// anywhere in this test), decide it, and retrieve the recorded decision
+    /// via `GET /api/v1/ui/decisions/{id}` — the same trust layer, the same
+    /// audit chain, none of the workflow machinery.
+    #[tokio::test]
+    async fn emb701_standalone_present_decide_and_retrieve_with_no_workflow_at_all() {
+        let store = InMemoryStore::new();
+        let (audit, ui) = ui_runtime(true);
+        let state = ui_state(&store, &ui, &audit).await;
+        let router = crate::router(state.clone());
+
+        let frame = json!({
+            "schema_version": "1.0.0",
+            "title": "Approve refund",
+            "root": {
+                "type": "column",
+                "children": [
+                    { "type": "text", "text": "Refund $42.00 to the customer?" },
+                    { "type": "button", "action": "approve", "label": "Approve", "class": "approve" },
+                    { "type": "button", "action": "deny", "label": "Deny", "class": "reject" }
+                ]
+            }
+        });
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/ui/present",
+            json!({ "frame": frame }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let frame_id = body["frame_id"].as_str().expect("frame_id").to_string();
+        // No execution/activity — this frame was never a workflow at all.
+        assert_eq!(body["execution_id"], Value::Null);
+        assert_eq!(body["activity_id"], Value::Null);
+        let frame_hash = body["frame_hash"].as_str().expect("frame_hash").to_string();
+
+        // It's genuinely pending, visible on the same pull surface a
+        // workflow-backed frame uses.
+        let (st, list_body) = get_json(router.clone(), "/api/v1/ui/frames").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            list_body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["frame_id"] == json!(frame_id))
+        );
+
+        // No decision recorded yet.
+        let (st, _) = get_json(router.clone(), &format!("/api/v1/ui/decisions/{frame_id}")).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+
+        // Decide it — the same endpoint a workflow-backed frame uses.
+        let (st, decide_body) = post_json(
+            router.clone(),
+            &format!("/api/v1/ui/decisions/{frame_id}"),
+            json!({ "action": "approve" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{decide_body}");
+        assert_eq!(decide_body["status"], "decided");
+        assert_eq!(decide_body["execution_id"], Value::Null);
+
+        // The frame is consumed from the pending surface…
+        let (st, list_body) = get_json(router.clone(), "/api/v1/ui/frames").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            !list_body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["frame_id"] == json!(frame_id))
+        );
+
+        // …but the decision is retrievable after the fact — the whole point
+        // of a standalone caller with no workflow to poll instead.
+        let (st, outcome) =
+            get_json(router.clone(), &format!("/api/v1/ui/decisions/{frame_id}")).await;
+        assert_eq!(st, StatusCode::OK, "{outcome}");
+        assert_eq!(outcome["action"], "approve");
+        assert_eq!(outcome["decided_by"], "root");
+        assert_eq!(outcome["frame_hash"], json!(frame_hash));
+
+        let presents = audited(&audit, "ui.frame.present");
+        assert_eq!(presents.len(), 1);
+        let decisions = audited(&audit, "ui.decision.submit");
+        assert_eq!(decisions.len(), 1);
+        audit.verify().expect("audit chain verifies");
+    }
+
+    /// EMB-701 + GRD-201: the standalone path runs through the exact same
+    /// trust layer as the workflow path — a credential-harvesting standalone
+    /// frame is blocked, never becomes pending, and is audited.
+    #[tokio::test]
+    async fn emb701_standalone_present_is_trust_layer_governed_too() {
+        let store = InMemoryStore::new();
+        let (audit, ui) = ui_runtime(true);
+        let state = ui_state(&store, &ui, &audit).await;
+        let router = crate::router(state.clone());
+
+        let frame = json!({
+            "schema_version": "1.0.0",
+            "root": {
+                "type": "column",
+                "children": [
+                    { "type": "text_input", "name": "card_number", "label": "Card number" },
+                    { "type": "button", "action": "pay", "label": "Continue", "class": "submit" }
+                ]
+            }
+        });
+        let (st, body) = post_json(
+            router.clone(),
+            "/api/v1/ui/present",
+            json!({ "frame": frame }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"]["code"], "blocked");
+
+        let (st, list_body) = get_json(router.clone(), "/api/v1/ui/frames").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            list_body["data"],
+            json!([]),
+            "a blocked frame is never pending"
+        );
+
+        let blocks = audited(&audit, "ui.frame.block");
+        assert_eq!(blocks.len(), 1);
+        assert!(
+            blocks[0]
+                .event
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains(apex_ui_guard::rules::SENSITIVE_INPUT)
+        );
+        audit.verify().expect("audit chain verifies");
+    }
+
     /// The frame handle is deterministic per `(execution, activity)` — the
     /// property the restart convergence in UC1 rests on.
     #[test]
@@ -1079,8 +1558,8 @@ metadata:\n  name: ui-floor-display\nspec:\n  activities:\n    - id: show\n     
         let frame = PendingFrame {
             frame_id: "uif-test".into(),
             tenant: "default".into(),
-            execution_id: "e1".into(),
-            activity_id: "confirm".into(),
+            execution_id: Some("e1".into()),
+            activity_id: Some("confirm".into()),
             frame: json!({"schema_version": "1.0.0"}),
             frame_hash: "abc".into(),
             policy_ref: "test@v1".into(),
@@ -1093,7 +1572,7 @@ metadata:\n  name: ui-floor-display\nspec:\n  activities:\n    - id: show\n     
         }
         let reopened = UiFrameStore::new(Some(path));
         let revived = reopened.get("uif-test").expect("frame survives reopen");
-        assert_eq!(revived.execution_id, "e1");
+        assert_eq!(revived.execution_id.as_deref(), Some("e1"));
         assert_eq!(reopened.list("default").len(), 1);
         assert!(reopened.list("acme").is_empty(), "listing is tenant-scoped");
         let _ = std::fs::remove_dir_all(&dir);

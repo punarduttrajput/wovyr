@@ -30,6 +30,7 @@ export class App {
     monitoring: { root: 'Operate', leaf: 'Monitoring' },
     workflows: { root: 'Build', leaf: 'Workflow Builder' },
     memory: { root: 'Build', leaf: 'Memory Explorer' },
+    surfaces: { root: 'Build', leaf: 'Surfaces' },
     marketplace: { root: 'Extend', leaf: 'Marketplace' },
     settings: { root: 'Administer', leaf: 'Settings' },
     executions: { root: 'Operate', leaf: 'Execution' },
@@ -69,6 +70,11 @@ export class App {
       path: '/memory',
       label: 'Memory Explorer',
       icon: '<ellipse cx="12" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="2"/><path d="M5 6v6c0 1.66 3.13 3 7 3s7-1.34 7-3V6M5 12v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6" stroke="currentColor" stroke-width="2"/>',
+    },
+    {
+      path: '/surfaces',
+      label: 'Surfaces',
+      icon: '<rect x="4" y="5" width="16" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M4 9.5h16" stroke="currentColor" stroke-width="2"/><path d="M8 14h3M8 16.5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
     },
   ];
 

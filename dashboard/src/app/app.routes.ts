@@ -36,6 +36,11 @@ export const routes: Routes = [
       import('./features/memory-explorer/memory-explorer').then((m) => m.MemoryExplorer),
   },
   {
+    path: 'surfaces',
+    title: 'Surfaces · Apex',
+    loadComponent: () => import('./features/surfaces/surfaces').then((m) => m.Surfaces),
+  },
+  {
     path: 'marketplace',
     title: 'Marketplace · Apex',
     loadComponent: () => import('./features/marketplace/marketplace').then((m) => m.Marketplace),

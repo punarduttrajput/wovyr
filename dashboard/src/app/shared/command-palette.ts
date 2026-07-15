@@ -73,6 +73,7 @@ export class CommandPalette {
     { section: 'Build', label: 'Workflow Builder', hint: 'G W', go: '/workflows' },
     { section: 'Build', label: 'Agent Studio', hint: 'G A', go: '/agents' },
     { section: 'Build', label: 'Memory Explorer', hint: 'G E', go: '/memory' },
+    { section: 'Build', label: 'Surfaces', hint: 'G U', go: '/surfaces' },
     { section: 'Extend', label: 'Marketplace', hint: 'G K', go: '/marketplace' },
     { section: 'Administer', label: 'Settings', hint: 'G S', go: '/settings' },
   ];

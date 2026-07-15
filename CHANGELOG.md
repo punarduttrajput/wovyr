@@ -13,11 +13,39 @@ each release links its own.
 
 v1.0 "GA hardening" (PRD-003, complete), v1.1 "AI Platform Maturity" (PRD-004,
 Phases 1–2 complete), and v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
-Phases 1–2 complete) — see [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
+**all three phases complete**) — see [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
 [docs/18-roadmap/v1.1/](docs/18-roadmap/v1.1/), and
 [docs/18-roadmap/v1.2-generative-ui.md](docs/18-roadmap/v1.2-generative-ui.md).
 
 ### Added
+- **Generative UI Trust Runtime — Beachhead & Embeddability (RM-GUI-P3, PRD-005):**
+  standalone middleware mode (EMB-701) — `POST /api/v1/ui/present` +
+  `GET/POST /api/v1/ui/decisions/{frame_id}` present, decide, and retrieve a
+  trust-layer-governed frame with **zero workflow or agent adoption**,
+  sharing the identical `judge_frame` policy path the workflow `ui` activity
+  uses (`PendingFrame`'s `execution_id`/`activity_id` became `Option<String>`
+  to model a standalone frame). A public, reusable conformance suite
+  (EMB-704, `apex_ui_guard::conformance`) — must-allow/must-block/must-redact
+  vectors any deployer can run against their own policy
+  (`conformance_report(&policy)`), gated in this workspace's own `cargo test
+  --workspace`. RDR-402's P2 cut ("React only") was revisited: `<apex-ui-frame>`
+  (`@apex/ui-react/web-component`) is a framework-agnostic custom element
+  wrapping `UiFrameView` via `react-dom/client`, dispatching a `decide`
+  `CustomEvent` — proven with a React-free demo page
+  (`examples/ui/checkout-demo/web-component.html`). A real dashboard Surfaces
+  panel (ITS-601/602, `dashboard/src/app/features/surfaces/`) dogfoods the
+  whole loop on Apex's own ops surface: an operator composes a real `UiFrame`,
+  presents it through the dashboard's own `HttpClient` + tenant interceptor,
+  renders it with `<apex-ui-frame>`, and decides it under their own
+  RBAC-scoped session — including a live demonstration of the trust layer
+  blocking a destructive action. A design-partner onboarding guide
+  (`docs/01-product/design-partner-onboarding.md`, PRD-005 §8) ships with
+  every quickstart command run against a real server. Cut, documented rather
+  than silently dropped: an MCP server surface (EMB-702 — no MCP server
+  subsystem exists in this codebase at all), the A2UI/MCP-Apps interop
+  mapping (UIP-105/EMB-703), destructive-action auto-gating and
+  saveable/shareable surfaces (ITS-603/604), and the design-partner program's
+  actual execution (a business activity, not a code deliverable).
 - **Generative UI Trust Runtime — Renderer & Interaction Loop (RM-GUI-P2, PRD-005):**
   `@apex/ui-react` (`sdks/ui-react`), a React renderer for the full frame
   vocabulary — themeable CSS-custom-property design tokens, an inert visible

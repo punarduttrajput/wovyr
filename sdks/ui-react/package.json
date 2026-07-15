@@ -16,6 +16,10 @@
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
     },
+    "./web-component": {
+      "types": "./dist/src/webComponent.d.ts",
+      "default": "./dist/src/webComponent.js"
+    },
     "./styles.css": "./dist/src/styles.css"
   },
   "files": [

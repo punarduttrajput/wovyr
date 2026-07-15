@@ -373,15 +373,22 @@ versioned prompt registry, per-tenant metrics) are **done**;
 (ecosystem & scale) has not started and is **re-scoped through
 [PRD-005](docs/01-product/prd-generative-ui-runtime.md)** —
 **[v1.2 "Generative UI Trust Runtime"](docs/18-roadmap/v1.2-generative-ui.md)**
-([ADR-0011](docs/17-adr/ADR-0011-generative-ui-repositioning.md)) has its first
-two phases done (2026-07-15): the UI frame protocol (`apex-ui`), the
+([ADR-0011](docs/17-adr/ADR-0011-generative-ui-repositioning.md)) is **done,
+all three phases (2026-07-15)**: the UI frame protocol (`apex-ui`), the
 trust/policy engine (`apex-ui-guard`), the durable render→decide→resume
 workflow interaction loop, the `@apex/ui-react` renderer SDK (cross-language
-hash-verified against the real server), a killer-demo app you can run and
-click through in a real browser (`examples/ui/checkout-demo`), and a scoped
+hash-verified against the real server) plus a framework-agnostic
+`<apex-ui-frame>` web component, a killer-demo app you can run and click
+through in a real browser (`examples/ui/checkout-demo`), a scoped
 non-durable path for bare agent runs (`ui_present` tool +
-`apex agents run --local --interactive-ui`). Phase 3 (beachhead &
-embeddability) is next.
+`apex agents run --local --interactive-ui`), standalone middleware mode
+(`POST /api/v1/ui/present` — present/decide/retrieve a governed frame with
+**zero workflow or agent adoption**), a public conformance suite any
+deployer can gate their own policy on (`apex_ui_guard::conformance`), a real
+dashboard Surfaces panel dogfooding the whole loop under an operator's own
+session, and a [design-partner onboarding
+guide](docs/01-product/design-partner-onboarding.md) with its quickstart run
+live end-to-end.
 
 The implemented surface spans: an agent runtime with a real model/tool loop,
 an LLM gateway (chat + streaming + embeddings, mock/OpenAI-compatible/native
