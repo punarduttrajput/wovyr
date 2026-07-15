@@ -1,0 +1,17 @@
+# A minimal, real UiPolicy (PRD-005 GRD-201/206) — every field in `rules` is
+# optional and defaults to the safe/strict setting (see apex-ui-guard's
+# `PolicyRules::default()`), so this document's only job is to *exist*: with
+# no policy configured at all, the hosted floor (GRD-207) denies every
+# interactive frame outright, which is stricter than any real policy needs to
+# be. Point a server at this file to allow a well-formed frame to render while
+# keeping the deny-by-default rules (sensitive-input names, destructive
+# actions, unapproved media origins) in force:
+#
+#   APEX_UI_POLICY=examples/policies/default-ui-policy.yaml \
+#     cargo run -p apex-cli -- dev
+#
+# This is the same policy shape (and the exact defaults) the apex-server
+# integration tests in crates/apex-server/src/ui.rs and the TypeScript SDK's
+# `ui:` test suite (sdks/typescript/test/client.test.ts) exercise.
+name: default
+version: 1

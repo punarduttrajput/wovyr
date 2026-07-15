@@ -1,0 +1,41 @@
+# The killer demo's "safe" path (PRD-005 §9, RM-GUI-P2-209): a procurement
+# agent composes a checkout confirmation. The frame renders, a human approves
+# it, and the workflow completes — durably: the execution suspends on the
+# `confirm` activity until a decision arrives at
+# POST /api/v1/ui/decisions/{frame_id}, surviving a server restart in between
+# (see crates/apex-server/src/ui.rs's `uc1_frame_survives_restart_...` test
+# for the same flow proven at the Rust layer).
+#
+# Requires a UI policy (examples/policies/default-ui-policy.yaml) — without
+# one, the hosted floor (GRD-207) denies this frame too, since it's
+# interactive. See examples/ui/checkout-demo/README.md for the full walkthrough.
+apiVersion: workflow.apex.io/v1
+kind: Workflow
+metadata:
+  name: ui-checkout-approve
+  version: 1.0.0
+spec:
+  activities:
+    - id: confirm
+      type: ui
+      inputs:
+        frame:
+          schema_version: 1.0.0
+          title: Confirm order
+          root:
+            type: column
+            children:
+              - type: text
+                text: Reorder 3 boxes of pipette tips from LabSupply Co?
+              - type: key_value
+                entries:
+                  - { key: Vendor, value: "LabSupply Co" }
+                  - { key: Total, value: "$412.80" }
+              - type: text_input
+                name: po_number
+                label: PO number
+                required: true
+              - type: row
+                children:
+                  - { type: button, action: approve, label: Approve, class: approve }
+                  - { type: button, action: cancel, label: Cancel, class: cancel }

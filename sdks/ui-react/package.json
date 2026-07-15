@@ -1,0 +1,43 @@
+{
+  "name": "@apex/ui-react",
+  "version": "0.1.0",
+  "description": "React renderer for Apex's generative-UI frame protocol (PRD-005 RDR-4xx): consumes trust-layer-validated UiFrames and turns human decisions into typed, boundary-validated API calls.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/punarduttrajput/Apex.git",
+    "directory": "sdks/ui-react"
+  },
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./styles.css": "./dist/src/styles.css"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node --eval \"require('node:fs').copyFileSync('src/styles.css','dist/src/styles.css')\"",
+    "test": "npm run build && node --test dist/test/"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

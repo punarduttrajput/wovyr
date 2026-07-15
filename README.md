@@ -26,9 +26,10 @@ can prove what an AI actually showed a user. Apex is the missing layer:
 - **Durable interaction** — "agent shows an interface → human decides → agent
   continues" runs on an event-sourced workflow engine: the decision loop survives
   crashes, restarts, and time.
-- **Embeddable runtime** — an SSE frame protocol + React/web-component renderer
-  SDK + MCP surface, adoptable as middleware by *any* agent stack; generative
-  **enterprise internal tools** are the beachhead use case. Execution is phased in
+- **Embeddable runtime** — an SSE/pull frame protocol + a React renderer SDK
+  (`@apex/ui-react`; a web-component build is a later slice) + MCP surface,
+  adoptable as middleware by *any* agent stack; generative **enterprise
+  internal tools** are the beachhead use case. Execution is phased in
   the [v1.2 roadmap](docs/18-roadmap/v1.2-generative-ui.md).
 
 **The engine**: Apex is a next-generation AI Agent Operating System designed for building, deploying, and orchestrating intelligent autonomous agents at enterprise scale.
@@ -170,8 +171,8 @@ apex/
   dashboard/              # Angular SPA (direct to apex-server)
   deployment/             # systemd/Docker/Compose/Helm artifacts for what's actually built
   docs/                   # spec-driven documentation (source of truth)
-  examples/               # runnable agent/workflow YAML manifests
-  sdks/                   # TypeScript + Python API clients
+  examples/               # runnable agent/workflow YAML manifests + examples/ui/ (the killer demo)
+  sdks/                   # TypeScript + Python API clients, + ui-react/ (the generative-UI renderer, PRD-005 RDR-4xx)
 ```
 
 See [`CLAUDE.md`](CLAUDE.md) for what each crate actually implements today —
@@ -370,12 +371,17 @@ Redis-shared rate limiting, token quotas, content-safety guardrails, a
 versioned prompt registry, per-tenant metrics) are **done**;
 [Phase 3](docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md)
 (ecosystem & scale) has not started and is **re-scoped through
-[PRD-005](docs/01-product/prd-generative-ui-runtime.md)** — the next milestone is
+[PRD-005](docs/01-product/prd-generative-ui-runtime.md)** —
 **[v1.2 "Generative UI Trust Runtime"](docs/18-roadmap/v1.2-generative-ui.md)**
-([ADR-0011](docs/17-adr/ADR-0011-generative-ui-repositioning.md)): the UI frame
-protocol (`apex-ui`), the trust/policy engine (`apex-ui-guard`), the durable
-render→decide→resume interaction loop, the renderer SDK, and the generative
-internal-tools beachhead.
+([ADR-0011](docs/17-adr/ADR-0011-generative-ui-repositioning.md)) has its first
+two phases done (2026-07-15): the UI frame protocol (`apex-ui`), the
+trust/policy engine (`apex-ui-guard`), the durable render→decide→resume
+workflow interaction loop, the `@apex/ui-react` renderer SDK (cross-language
+hash-verified against the real server), a killer-demo app you can run and
+click through in a real browser (`examples/ui/checkout-demo`), and a scoped
+non-durable path for bare agent runs (`ui_present` tool +
+`apex agents run --local --interactive-ui`). Phase 3 (beachhead &
+embeddability) is next.
 
 The implemented surface spans: an agent runtime with a real model/tool loop,
 an LLM gateway (chat + streaming + embeddings, mock/OpenAI-compatible/native

@@ -13,11 +13,34 @@ each release links its own.
 
 v1.0 "GA hardening" (PRD-003, complete), v1.1 "AI Platform Maturity" (PRD-004,
 Phases 1–2 complete), and v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
-Phase 1 complete) — see [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
+Phases 1–2 complete) — see [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
 [docs/18-roadmap/v1.1/](docs/18-roadmap/v1.1/), and
 [docs/18-roadmap/v1.2-generative-ui.md](docs/18-roadmap/v1.2-generative-ui.md).
 
 ### Added
+- **Generative UI Trust Runtime — Renderer & Interaction Loop (RM-GUI-P2, PRD-005):**
+  `@apex/ui-react` (`sdks/ui-react`), a React renderer for the full frame
+  vocabulary — themeable CSS-custom-property design tokens, an inert visible
+  placeholder for unrecognized node types, and client-side frame-hash
+  verification (canonical-JSON + Web Crypto SHA-256, cross-checked against a
+  real frame from a live server and confirmed byte-for-byte identical to the
+  Rust-computed hash — which also surfaced and fixed a real bug, see Fixed
+  below). The base TS SDK (`sdks/typescript`) gained a `ui` resource
+  (`frames.list/get`, `decisions.submit`) with an integration-test suite
+  proving UC1/UC4 against a live server. The killer demo
+  (`examples/workflows/ui-checkout-{approve,block}.yaml` +
+  `examples/ui/checkout-demo`, a runnable Vite+React app) reproduces PRD-005
+  §9 end to end in a real browser: the poisoned frame blocks and never
+  renders; the safe frame renders, is approved with a real decision POST,
+  and clears from the pending list. A scoped, explicitly non-durable
+  HIL-304 landed too: the `ui_present` tool (`apex-tools`, opt-in only) +
+  `UiInteraction` trait + `apex agents run --local --interactive-ui`'s
+  stdin presenter, so a bare agent run can present a policy-checked frame
+  outside a workflow. Deferred, documented in
+  [the roadmap](docs/18-roadmap/v1.2-generative-ui.md): a web-component
+  build, progressive/streaming frame rendering, durable frame timers and
+  audit-chain integration for the bare-agent-run path, WASI-sandboxed
+  validators, and signed UI templates.
 - **Generative UI Trust Runtime — Protocol & Trust Core (RM-GUI-P1, PRD-005):**
   the `apex-ui` frame protocol (constrained component vocabulary — no raw
   HTML/script, no credential-input component; fail-closed parsing; semver'd
@@ -36,6 +59,15 @@ Phase 1 complete) — see [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
   UC1 (present → kill/restart → deterministic re-present → decide → resume)
   and UC4 (an injected credential-harvesting frame is blocked, never visible,
   audited).
+
+### Fixed
+- **`UiFrame::content_hash` canonicalization (RM-GUI-P2):** hashed the
+  struct's own field-declaration-order serialization instead of the
+  alphabetically key-sorted `Value` form every real consumer (the server's
+  JSON responses, the renderer) actually receives — silently breaking
+  client-side integrity verification (RDR-403) the moment a struct's fields
+  weren't already alphabetical. Found while building `@apex/ui-react`'s hash
+  check and cross-verifying it against a live server, not by inspection.
 - **Security floor (RM-GA-P1):** real request authentication (`APEX_AUTH_MODE` —
   HS256/RS256 JWT or hashed API keys) replacing trusted headers; TLS-or-refuse on
   non-loopback binds; per-principal rate limiting; CORS allow-list; HTTP limits;
