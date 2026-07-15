@@ -12,12 +12,46 @@ each release links its own.
 ## [Unreleased]
 
 v1.0 "GA hardening" (PRD-003, complete), v1.1 "AI Platform Maturity" (PRD-004,
-Phases 1–2 complete), and v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
-**all three phases complete**) — see [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
-[docs/18-roadmap/v1.1/](docs/18-roadmap/v1.1/), and
-[docs/18-roadmap/v1.2-generative-ui.md](docs/18-roadmap/v1.2-generative-ui.md).
+Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
+**all three phases complete**), and v1.3 "MCP Connection Management"
+(PRD-006/ADR-0012, **all three phases complete**) — see
+[docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
+[docs/18-roadmap/v1.1/](docs/18-roadmap/v1.1/),
+[docs/18-roadmap/v1.2-generative-ui.md](docs/18-roadmap/v1.2-generative-ui.md), and
+[docs/18-roadmap/v1.3-mcp-connections.md](docs/18-roadmap/v1.3-mcp-connections.md).
 
 ### Added
+- **MCP Connection Management (RM-MCX, PRD-006/ADR-0012):** a persisted,
+  API/dashboard-managed layer over the already-shipped, programmatic-only MCP
+  client (`apex-tools::mcp`, ECO-301) — connect an external MCP server once,
+  grant it to agents declaratively, see its tools in the existing tool picker.
+  **Connection core:** a tenant-scoped, file-backed `McpConnectionStore` +
+  bounded-idle-timeout client cache (`apex-tools/src/mcp_store.rs`/
+  `mcp_cache.rs`); `POST/GET/DELETE /api/v1/mcp/connections[/{name}]` +
+  `.../refresh` (`apex-server/src/mcp.rs`); a `Stdio`-transport connection
+  (arbitrary local command execution) requires *both* the `mcp:admin` RBAC
+  scope *and* the operator's `APEX_ENABLE_MCP_STDIO=1` opt-in (the
+  `APEX_ENABLE_SHELL_TOOL` precedent) while `Http` reuses `http_get`'s SEC-304
+  SSRF guard verbatim; a credential is always a `SecretRef`, never an inline
+  value; a new `max_mcp_connections` quota dimension bounds the cache's warm
+  process pool. **Agent wiring:** `AgentDefinition.spec.mcp_servers` is a
+  declarative connection-name allow-list a run resolves into its
+  `ToolRegistry` (CLI, server, and workflow `agent` activities alike, via the
+  shared `McpClientCache::resolve_agent_mcp_tools`) — an agent naming no
+  connection can't reach its tools even if the tenant has one configured;
+  `GET /api/v1/tools` merges in the caller's tenant's live-discovered
+  `mcp__<server>__<tool>` ids for an `mcp:read`-authorized caller, alongside
+  built-ins. **SDK + dashboard:** the TypeScript SDK's `client.mcp` resource;
+  a dashboard "MCP Servers" panel (compose → call → render, mirroring the
+  Surfaces panel, hiding the `Stdio` option rather than offering-then-rejecting
+  it when disabled); Agent Studio's tool picker surfaces MCP-sourced tools and
+  auto-grants the underlying connection via `spec.mcp_servers` when one is
+  picked. Verified live end to end in a real browser against a real server and
+  a real spawned stdio MCP connection — PRD-006 §9's acceptance narrative, run
+  for real. Fixed a real pre-existing bug found along the way: the dashboard's
+  `agent.service.ts` `tools()` parsed a bare `{tools: [...]}` shape instead of
+  the actual cursor-pagination envelope `GET /api/v1/tools` returns, so the
+  live tool catalog silently never replaced the picker's hardcoded fallback.
 - **Generative UI Trust Runtime — Beachhead & Embeddability (RM-GUI-P3, PRD-005):**
   standalone middleware mode (EMB-701) — `POST /api/v1/ui/present` +
   `GET/POST /api/v1/ui/decisions/{frame_id}` present, decide, and retrieve a

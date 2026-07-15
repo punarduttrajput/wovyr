@@ -1,0 +1,106 @@
+<section class="view">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">Build / MCP Servers</div>
+      <h1>MCP Servers</h1>
+      <p>Connect an external MCP (Model Context Protocol) server once, then grant it to
+        agents by name in Agent Studio's tool picker — no Rust, no terminal. A
+        <code>stdio</code> connection (arbitrary local command execution) is gated behind
+        the operator's opt-in and the <code>mcp:admin</code> scope (ADR-0012).</p>
+    </div>
+  </div>
+
+  @if (forbidden()) {
+    <div class="status-bar err">
+      <b>403 — not authorized.</b> Your session needs <code>mcp:read</code>/<code>mcp:write</code>
+      (and <code>mcp:admin</code> for a <code>stdio</code> connection) in this tenant.
+    </div>
+  } @else if (status()) {
+    <div class="status-bar" [class.err]="status().startsWith('Error')">{{ status() }}</div>
+  }
+
+  <div class="mcp-grid">
+    <!-- compose -->
+    <div class="card pad">
+      <div class="card-h"><h3>Add a connection</h3></div>
+      <div class="field">
+        <label>Name</label>
+        <input type="text" [(ngModel)]="name" placeholder="docs" />
+      </div>
+
+      <div class="field">
+        <label>Transport</label>
+        <div class="transport-choice">
+          <label class="radio">
+            <input type="radio" name="kind" value="http" [(ngModel)]="kind" />
+            HTTP (remote server, no local execution)
+          </label>
+          <label class="radio" [class.disabled]="!stdioEnabled()">
+            <input type="radio" name="kind" value="stdio" [(ngModel)]="kind" [disabled]="!stdioEnabled()" />
+            Stdio (local command)
+            @if (!stdioEnabled()) {
+              <span class="muted mini"> — disabled: operator hasn't set APEX_ENABLE_MCP_STDIO=1</span>
+            }
+          </label>
+        </div>
+      </div>
+
+      @if (kind === 'http') {
+        <div class="field">
+          <label>URL</label>
+          <input type="text" [(ngModel)]="url" placeholder="https://mcp.example.com/mcp" />
+        </div>
+      } @else {
+        <div class="field">
+          <label>Command</label>
+          <input type="text" [(ngModel)]="command" placeholder="npx" />
+        </div>
+        <div class="field">
+          <label>Args <span class="muted">— space-separated</span></label>
+          <input type="text" [(ngModel)]="args" placeholder="-y @modelcontextprotocol/server-filesystem /data/docs" />
+        </div>
+      }
+
+      <div class="field">
+        <label>Secret reference <span class="muted">— optional, e.g. secret://acme/mcp-token</span></label>
+        <input type="text" [(ngModel)]="secretRef" placeholder="secret://<tenant>/<name>" />
+      </div>
+      @if (kind === 'stdio' && secretRef.trim()) {
+        <div class="field">
+          <label>Secret env var <span class="muted">— name the spawned server reads it as</span></label>
+          <input type="text" [(ngModel)]="secretEnvVar" placeholder="GITHUB_TOKEN" />
+        </div>
+      }
+
+      <button class="btn pri" [disabled]="busy()" (click)="create()">
+        {{ busy() ? 'Verifying…' : 'Connect' }}
+      </button>
+    </div>
+
+    <!-- list -->
+    <div class="card">
+      <div class="card-h"><h3>Configured connections</h3><span class="sub">{{ connections().length }}</span></div>
+      <table>
+        <thead><tr><th>Name</th><th>Transport</th><th>Tools</th><th></th></tr></thead>
+        <tbody>
+          @for (c of connections(); track c.name) {
+            <tr>
+              <td><b>{{ c.name }}</b></td>
+              <td>
+                <span class="role-tag">{{ c.transport.kind }}</span>
+                <div class="mono mini muted">{{ transportSummary(c.transport) }}</div>
+              </td>
+              <td>{{ toolCountLabel(c.name) }}</td>
+              <td class="num">
+                <button class="btn sub-btn mini" (click)="refresh(c)">Refresh</button>
+                <button class="btn danger mini" (click)="remove(c)">Delete</button>
+              </td>
+            </tr>
+          } @empty {
+            <tr><td colspan="4" class="muted">No MCP connections configured yet.</td></tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>

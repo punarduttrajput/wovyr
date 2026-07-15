@@ -37,6 +37,7 @@ New contributors should follow the [Reading Order](#reading-order) at the bottom
 | [GA Hardening PRD (Closing the Deployed-vs-Designed Gap)](01-product/prd-ga-hardening.md) | Available |
 | [AI Platform Maturity PRD (Post-GA capability & operability)](01-product/prd-ai-platform-maturity.md) | Available |
 | [Generative UI Trust Runtime PRD (the product repositioning — PRD-005)](01-product/prd-generative-ui-runtime.md) | Available |
+| [MCP Connection Management PRD (PRD-006)](01-product/prd-mcp-connections.md) | Available |
 | [System Overview](01-product/system-overview.md) | Available |
 | [Personas](01-product/personas.md) | Available |
 | [User Stories](01-product/user-stories.md) | Available |
@@ -344,6 +345,7 @@ The *why* behind major architectural choices, in standard ADR format.
 | [ADR-0006 — Clean Architecture + DDD](17-adr/ADR-0006-clean-architecture.md) | Accepted |
 | [ADR-0007 — Plugin system](17-adr/ADR-0007-plugin-system.md) | Accepted |
 | [ADR-0011 — Generative UI Trust Runtime repositioning](17-adr/ADR-0011-generative-ui-repositioning.md) | Accepted |
+| [ADR-0012 — Trust boundary for user-managed MCP connections](17-adr/ADR-0012-mcp-connection-trust-boundary.md) | Accepted |
 
 ---
 
@@ -364,7 +366,8 @@ Directional, per-release evolution of the platform.
 | [GA-003 — Security: Root-of-Trust, PII & External Validation](18-roadmap/v1.0/A3-security-completion.md) | In progress |
 | [GA-004 — Marketplace Economics & Safety](18-roadmap/v1.0/A4-marketplace-economics.md) | Planned |
 | [GA-005 — SDK Distribution & Migration Guides](18-roadmap/v1.0/A5-sdk-distribution.md) | In progress |
-| [v1.2 — Generative UI Trust Runtime](18-roadmap/v1.2-generative-ui.md) | Planned |
+| [v1.2 — Generative UI Trust Runtime](18-roadmap/v1.2-generative-ui.md) | Done (all 3 phases, 2026-07-15) |
+| [v1.3 — MCP Connection Management](18-roadmap/v1.3-mcp-connections.md) | Planned |
 | [Future — Beyond 1.0](18-roadmap/future.md) | Available |
 | [Future Research Bets (Tier B) — Index](18-roadmap/future/index.md) | Available |
 | [FUT-001 — Autonomous Multi-Agent Systems](18-roadmap/future/B1-multi-agent-systems.md) | Exploratory |
@@ -437,6 +440,7 @@ New contributors should read the documentation in the following sequence:
 
 | Version | Date       | Description                                              |
 | ------- | ---------- | ------------------------------------------------------- |
+| 1.17.0  | 2026-07-15 | Added PRD-006 (MCP Connection Management), ADR-0012, and the v1.3 roadmap milestone; marked v1.2 (Generative UI Trust Runtime) Done — all 3 phases shipped |
 | 1.16.0  | 2026-07-14 | Added PRD-005 (Generative UI Trust Runtime), ADR-0011, and the v1.2 roadmap milestone |
 | 1.15.0  | 2026-06-27 | Added 19 Implementation Guide section (6 docs) — all sections 00–19 now Available |
 | 1.14.0  | 2026-06-27 | Added 18 Roadmap section (6 documents)                   |

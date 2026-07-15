@@ -113,8 +113,26 @@ impl StdioTransport {
         program: &str,
         args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
     ) -> Result<Self, ToolError> {
+        Self::spawn_with_env(program, args, std::iter::empty::<(String, String)>())
+    }
+
+    /// [`Self::spawn`], additionally setting `envs` on the child process —
+    /// how a persisted connection's resolved credential (RM-MCX-P1-105)
+    /// reaches a third-party MCP server that expects it as a specific env
+    /// var (e.g. `GITHUB_TOKEN`); the var *name* is the admin's choice, since
+    /// only they know what the server they're configuring expects.
+    pub fn spawn_with_env(
+        program: &str,
+        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+        envs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Result<Self, ToolError> {
         let mut child = tokio::process::Command::new(program)
             .args(args)
+            .envs(
+                envs.into_iter()
+                    .map(|(k, v)| (k.into(), v.into()))
+                    .collect::<Vec<_>>(),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true)
@@ -241,17 +259,70 @@ pub struct HttpTransport {
     url: String,
     session: std::sync::Mutex<Option<String>>,
     next_id: AtomicU64,
+    /// A pre-formatted `Authorization` header value (e.g. `"Bearer <token>"`),
+    /// set via [`Self::with_bearer_token`] — the credential a persisted
+    /// connection's `secret_ref` resolves to (RM-MCX-P1-105).
+    auth_header: Option<String>,
 }
 
 impl HttpTransport {
-    /// A transport POSTing to `url` (the server's single MCP endpoint).
+    /// A transport POSTing to `url` (the server's single MCP endpoint). No
+    /// SSRF guard — for programmatic callers that have already vetted `url`
+    /// themselves (matching this transport's original, pre-PRD-006 contract).
+    /// A **persisted** connection (PRD-006) must use [`Self::connect_guarded`]
+    /// instead.
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             url: url.into(),
             session: std::sync::Mutex::new(None),
             next_id: AtomicU64::new(1),
+            auth_header: None,
         }
+    }
+
+    /// Send `Authorization: Bearer <token>` on every request — the resolved
+    /// value of a connection's `secret_ref` (RM-MCX-P1-105). The dominant
+    /// convention for streamable-HTTP MCP servers; a server expecting a
+    /// different scheme/header is a documented v1 limitation, not silently
+    /// mishandled (it simply won't authenticate, the same as misconfiguring
+    /// any other bearer-auth client).
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth_header = Some(format!("Bearer {}", token.into()));
+        self
+    }
+
+    /// A transport POSTing to `url`, refusing — and DNS-pinning against — an
+    /// internal/loopback/link-local/metadata target (RM-MCX-P1-104,
+    /// [ADR-0012](../../../docs/17-adr/ADR-0012-mcp-connection-trust-boundary.md)):
+    /// the *exact* SEC-304 guard `HttpGetTool` already uses
+    /// (`resolve_and_guard` + a DNS-pinned client), reused rather than
+    /// reimplemented, so the two paths can never silently diverge. No
+    /// egress allow-list narrowing applies here (that's a per-run tool-call
+    /// concept, not a per-connection one) — only the unconditional
+    /// internal/metadata block.
+    ///
+    /// The pin holds for this transport's lifetime, not per-call the way
+    /// `HttpGetTool` re-resolves on every request — a deliberate trade-off
+    /// for a *reused* connection (rebuilding a fresh client per JSON-RPC call
+    /// would defeat connection reuse). Rebinding risk is therefore bounded by
+    /// how long a connection is cached (RM-MCX-P1-106's idle eviction), not
+    /// eliminated per-call; a caller that wants a fresh resolution need only
+    /// reconnect.
+    pub async fn connect_guarded(url: impl Into<String>) -> Result<Self, ToolError> {
+        let url = url.into();
+        let (host, port) = crate::builtin::parse_http_host_port(&url)?;
+        let pinned = crate::builtin::resolve_and_guard(&host, port, None).await?;
+        let client = crate::builtin::pinned_client(&host, pinned).map_err(|e| {
+            ToolError::Internal(format!("could not build guarded HTTP client: {e}"))
+        })?;
+        Ok(Self {
+            client,
+            url,
+            session: std::sync::Mutex::new(None),
+            next_id: AtomicU64::new(1),
+            auth_header: None,
+        })
     }
 
     /// POST one JSON-RPC message; `None` for an empty-body ack (the 202 a
@@ -266,6 +337,9 @@ impl HttpTransport {
         let session = self.session.lock().expect("session lock").clone();
         if let Some(session_id) = session {
             request = request.header("mcp-session-id", session_id);
+        }
+        if let Some(auth) = &self.auth_header {
+            request = request.header("authorization", auth);
         }
         let response = request
             .send()
@@ -366,6 +440,18 @@ impl std::fmt::Debug for McpClient {
     }
 }
 
+/// Whether `name` is a valid MCP server/connection identifier: non-empty
+/// `[A-Za-z0-9_-]+`. Shared by [`McpClient::connect`] (which namespaces
+/// proxied tool ids/permissions on it) and `McpConnectionStore` (RM-MCX-P1-101,
+/// which persists it) so the two can never disagree on what name the other
+/// would accept.
+pub fn is_valid_mcp_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 impl McpClient {
     /// Connect: run the `initialize` handshake and send
     /// `notifications/initialized`. `server` names this connection — it
@@ -377,11 +463,7 @@ impl McpClient {
         transport: impl McpTransport + 'static,
     ) -> Result<Self, ToolError> {
         let server = server.into();
-        if server.is_empty()
-            || !server
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
+        if !is_valid_mcp_server_name(&server) {
             return Err(ToolError::Validation(format!(
                 "MCP server name `{server}` must be a non-empty [A-Za-z0-9_-]+ identifier — \
                  it namespaces tool ids and permissions"
@@ -438,6 +520,12 @@ impl McpClient {
     /// The connection's namespace name.
     pub fn server_name(&self) -> &str {
         &self.server
+    }
+
+    /// The server's self-reported version (from `initialize`'s `serverInfo`),
+    /// `"0"` if it didn't send one.
+    pub fn server_version(&self) -> &str {
+        &self.server_version
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, ToolError> {
@@ -874,5 +962,53 @@ mod tests {
     fn tool_ids_are_sanitized_to_model_callable_names() {
         assert_eq!(sanitize_id("get_weather"), "get_weather");
         assert_eq!(sanitize_id("files.read/write"), "files_read_write");
+    }
+
+    // --- RM-MCX-P1-104: SSRF guard reuse -----------------------------------------
+
+    /// `HttpTransport::connect_guarded` returns `Result<HttpTransport, ToolError>`,
+    /// and `HttpTransport` deliberately doesn't derive `Debug` (it holds a live
+    /// `reqwest::Client`) — so these assert via a match rather than
+    /// `unwrap_err()`, which would require the `Ok` side to be `Debug` too.
+    fn assert_refused(
+        result: Result<HttpTransport, ToolError>,
+        check: impl Fn(&ToolError) -> bool,
+    ) {
+        match result {
+            Err(e) => assert!(check(&e), "{e}"),
+            Ok(_) => panic!("expected connect_guarded to refuse this target"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_guarded_refuses_loopback_the_same_way_http_get_does() {
+        assert_refused(
+            HttpTransport::connect_guarded("http://127.0.0.1:1/mcp").await,
+            |e| matches!(e, ToolError::PermissionDenied(_)),
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_guarded_refuses_a_private_range_target() {
+        assert_refused(
+            HttpTransport::connect_guarded("http://10.1.2.3:8080/mcp").await,
+            |e| matches!(e, ToolError::PermissionDenied(_)),
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_guarded_refuses_the_cloud_metadata_address() {
+        assert_refused(
+            HttpTransport::connect_guarded("http://169.254.169.254/latest/meta-data/").await,
+            |e| matches!(e, ToolError::PermissionDenied(_)),
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_guarded_rejects_a_non_http_scheme_before_ever_resolving() {
+        assert_refused(
+            HttpTransport::connect_guarded("ftp://example.com/mcp").await,
+            |e| matches!(e, ToolError::Validation(_)),
+        );
     }
 }

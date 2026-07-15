@@ -1087,6 +1087,8 @@ mod tests {
             base.metrics.clone(),
             base.tenant_label_cap.clone(),
             ui.clone(),
+            base.mcp.clone(),
+            base.secrets.clone(),
         ));
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
         let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store.clone());

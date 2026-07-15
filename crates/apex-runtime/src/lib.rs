@@ -102,6 +102,24 @@ pub trait AgentResolver: Send + Sync {
     /// a platform-specific accounting system (the server's daily project
     /// budgets). Default: no-op.
     fn record(&self, _ctx: &ActivityContext, _usage: &apex_common::Usage) {}
+
+    /// Resolve the agent's declared `spec.mcp_servers` allow-list (PRD-006,
+    /// RM-MCX-P2-201) into live tool ids registered into `registry`, returning
+    /// those ids so the caller can extend the definition's advertised
+    /// `spec.tools` with them — an MCP server's tools are discovered live and
+    /// can't be listed in the manifest ahead of time. Default: no MCP wiring
+    /// (empty vec, `registry` untouched) — what a platform with no configured
+    /// MCP connections (e.g. `apex-eval`'s in-memory resolver) needs. An `Err`
+    /// here is permanent: an agent naming a connection that doesn't resolve is
+    /// a configuration error, not worth retrying into existing.
+    async fn resolve_mcp_tools(
+        &self,
+        _ctx: &ActivityContext,
+        _connection_names: &[String],
+        _registry: &mut ToolRegistry,
+    ) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// Map a gateway/agent-run failure onto workflow retry semantics (RM-AIM-P2
@@ -339,7 +357,7 @@ impl ActivityExecutor for PlatformActivityExecutor {
                         ctx.id
                     ))
                 })?;
-                let def = self
+                let mut def = self
                     .agents
                     .resolve(ctx, agent_id)
                     .await
@@ -352,6 +370,21 @@ impl ActivityExecutor for PlatformActivityExecutor {
                     .admit(ctx)
                     .await
                     .map_err(ActivityError::Retryable)?;
+
+                // MCX-204: an agent activity gets the same `spec.mcp_servers`
+                // resolution a bare agent run does — cloned into a per-run
+                // registry (not `self.registry` itself, which is shared across
+                // every activity this executor ever dispatches) so a
+                // different agent's MCP connections never leak into this run.
+                let mut run_registry = self.registry.clone();
+                if !def.spec.mcp_servers.is_empty() {
+                    let ids = self
+                        .agents
+                        .resolve_mcp_tools(ctx, &def.spec.mcp_servers, &mut run_registry)
+                        .await
+                        .map_err(ActivityError::Permanent)?;
+                    def = def.with_additional_tools(ids);
+                }
 
                 let input = if inputs.is_null() { json!({}) } else { inputs };
                 let mut opts = RunOptions::new(input);
@@ -366,7 +399,7 @@ impl ActivityExecutor for PlatformActivityExecutor {
                     activity_id: &ctx.id,
                     agent: agent_id,
                 };
-                let output = run_agent(&def, &self.gateway, &self.registry, opts, &mut sink)
+                let output = run_agent(&def, &self.gateway, &run_registry, opts, &mut sink)
                     .await
                     .map_err(classify_gateway_error)?;
                 self.agents.record(ctx, &output.usage);
@@ -566,6 +599,102 @@ mod tests {
             matches!(err, ActivityError::Retryable(_)),
             "a quota/admission rejection must be retryable (the slot may free up), got {err:?}"
         );
+    }
+
+    // --- RM-MCX-P2-201/204: an `agent` activity resolves `spec.mcp_servers`
+    // into a per-run registry, and the discovered tool ids are folded into
+    // the run's advertised `spec.tools` too. ---
+
+    #[tokio::test]
+    async fn agent_activity_resolves_mcp_servers_into_a_per_run_registry() {
+        struct McpResolver {
+            seen_names: Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl AgentResolver for McpResolver {
+            async fn resolve(
+                &self,
+                _ctx: &ActivityContext,
+                id: &str,
+            ) -> Result<AgentDefinition, String> {
+                AgentDefinition::from_yaml(&format!(
+                    "metadata:\n  name: {id}\nspec:\n  instructions: hi\n  mcp_servers: [docs]\n"
+                ))
+                .map_err(|e| e.to_string())
+            }
+            async fn resolve_mcp_tools(
+                &self,
+                _ctx: &ActivityContext,
+                names: &[String],
+                registry: &mut ToolRegistry,
+            ) -> Result<Vec<String>, String> {
+                self.seen_names
+                    .lock()
+                    .unwrap()
+                    .extend(names.iter().cloned());
+                // Stand in for an MCP-discovered tool: registered only into the
+                // per-run registry this call receives, never into the
+                // executor's own shared `self.registry` (built empty below).
+                registry.register(Arc::new(apex_tools::EchoTool));
+                Ok(vec!["echo".to_string()])
+            }
+        }
+        // Deliberately empty (no builtins) — if the dispatch body still used
+        // `self.registry` after resolution instead of the per-run clone, the
+        // agent's advertised `echo` tool would be missing and the run would
+        // fail closed with "agent references unknown tool".
+        let exec = PlatformActivityExecutor::new(
+            ToolRegistry::new(),
+            Arc::new(Gateway::new(Box::new(apex_provider::MockProvider::new()))),
+            Arc::new(McpResolver {
+                seen_names: Mutex::new(Vec::new()),
+            }),
+        );
+        let out = exec
+            .execute(&ctx("agent", Some("hello"), json!({"message": "hi"})))
+            .await
+            .expect("mcp-server-resolved tool must be usable by the run");
+        assert!(out.get("message").is_some());
+
+        // The executor's own shared registry is untouched by another
+        // activity's MCP resolution — proven by resolving again with a fresh
+        // (still-empty) executor-level registry and no crosstalk possible
+        // since each `execute()` clones fresh.
+        assert!(!exec.registry.contains("echo"));
+    }
+
+    #[tokio::test]
+    async fn agent_activity_without_mcp_servers_never_calls_the_resolver() {
+        struct PanicsIfCalled;
+        #[async_trait]
+        impl AgentResolver for PanicsIfCalled {
+            async fn resolve(
+                &self,
+                _ctx: &ActivityContext,
+                id: &str,
+            ) -> Result<AgentDefinition, String> {
+                AgentDefinition::from_yaml(&format!(
+                    "metadata:\n  name: {id}\nspec:\n  instructions: hi\n"
+                ))
+                .map_err(|e| e.to_string())
+            }
+            async fn resolve_mcp_tools(
+                &self,
+                _ctx: &ActivityContext,
+                _names: &[String],
+                _registry: &mut ToolRegistry,
+            ) -> Result<Vec<String>, String> {
+                panic!("must not be called when spec.mcp_servers is empty");
+            }
+        }
+        let exec = PlatformActivityExecutor::new(
+            ToolRegistry::with_builtins(),
+            Arc::new(Gateway::from_env()),
+            Arc::new(PanicsIfCalled),
+        );
+        exec.execute(&ctx("agent", Some("hello"), json!({"message": "hi"})))
+            .await
+            .expect("plain agent run without mcp_servers should succeed");
     }
 
     // --- RUN-201: `ai` steps honor model/params, and failures classify by

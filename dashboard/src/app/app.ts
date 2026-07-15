@@ -31,6 +31,7 @@ export class App {
     workflows: { root: 'Build', leaf: 'Workflow Builder' },
     memory: { root: 'Build', leaf: 'Memory Explorer' },
     surfaces: { root: 'Build', leaf: 'Surfaces' },
+    'mcp-servers': { root: 'Build', leaf: 'MCP Servers' },
     marketplace: { root: 'Extend', leaf: 'Marketplace' },
     settings: { root: 'Administer', leaf: 'Settings' },
     executions: { root: 'Operate', leaf: 'Execution' },
@@ -75,6 +76,11 @@ export class App {
       path: '/surfaces',
       label: 'Surfaces',
       icon: '<rect x="4" y="5" width="16" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M4 9.5h16" stroke="currentColor" stroke-width="2"/><path d="M8 14h3M8 16.5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    },
+    {
+      path: '/mcp-servers',
+      label: 'MCP Servers',
+      icon: '<circle cx="6" cy="6" r="2.5" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="6" r="2.5" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="18" r="2.5" stroke="currentColor" stroke-width="2"/><path d="M8.2 7.3L11 16M15.8 7.3L13 16M8.5 6h7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
     },
   ];
 

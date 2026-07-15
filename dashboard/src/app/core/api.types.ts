@@ -14,13 +14,21 @@ export interface AgentDraft {
   class: string;
   instructions: string;
   tools: string[];
+  /** Configured MCP connection names this agent may draw tools from
+   * (`spec.mcp_servers`, PRD-006 MCX-201) — an agent that doesn't name a
+   * connection can't reach its tools even if the tenant has it configured.
+   * Populated automatically when the author picks an `mcp__<server>__<tool>`
+   * entry from the tool picker (MCX-303). */
+  mcpServers: string[];
   memoryEnabled: boolean;
   namespace: string;
   /** Default model/tool iteration cap for runs of this agent; `null` = runtime default (8). */
   maxSteps: number | null;
 }
 
-/** A registered tool from `GET /api/v1/tools` (built-in or enabled plugin). */
+/** A registered tool from `GET /api/v1/tools` — built-ins, enabled plugin
+ * tools, and (MCX-202) `mcp__<server>__<tool>` entries for the caller's
+ * tenant's configured MCP connections. */
 export interface ToolInfo {
   id: string;
   description: string;
@@ -100,6 +108,40 @@ export interface Webhook {
   url: string;
   events: string[];
   active?: boolean;
+}
+
+// ---- MCP connections (PRD-006, apex-tools::mcp / apex-server mcp.rs) ----
+
+/** How to reach an external MCP server. `stdio` spawns an arbitrary local
+ * command (materially higher privilege — gated behind `mcp:admin` + the
+ * operator's `APEX_ENABLE_MCP_STDIO=1` opt-in, ADR-0012); `http` POSTs
+ * JSON-RPC to a URL (SSRF-guarded the same way `http_get` is, SEC-304). */
+export type McpTransport =
+  | { kind: 'stdio'; command: string; args: string[] }
+  | { kind: 'http'; url: string };
+
+/** A tenant's persisted MCP connection. `secret_ref` is a `SecretRef` string
+ * into the secret vault — never a resolved credential value (MCX-105). */
+export interface McpConnection {
+  name: string;
+  transport: McpTransport;
+  secret_ref?: string | null;
+  secret_env_var?: string | null;
+  tool_permissions?: string[] | null;
+  created_ms: number;
+  updated_ms: number;
+}
+
+/** One tool a connection's server currently reports via `tools/list`. */
+export interface McpToolInfo {
+  name: string;
+  description: string;
+}
+
+/** `POST /api/v1/mcp/connections`'s response: the persisted connection plus
+ * the tools discovered while verifying it dials successfully. */
+export interface McpConnectionWithTools extends McpConnection {
+  tools: McpToolInfo[];
 }
 
 // ---- memory ----

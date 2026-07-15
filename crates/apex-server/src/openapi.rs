@@ -164,6 +164,11 @@ pub(crate) struct ApiErrorDetail {
         crate::ui::get_frame_handler,
         crate::ui::decide_handler,
         crate::ui::get_decision_handler,
+        crate::mcp::create_handler,
+        crate::mcp::list_handler,
+        crate::mcp::get_handler,
+        crate::mcp::delete_handler,
+        crate::mcp::refresh_handler,
         openapi_json_handler,
     ),
     components(schemas(ApiErrorBody, ApiErrorDetail)),
@@ -180,6 +185,7 @@ pub(crate) struct ApiErrorDetail {
         (name = "secrets", description = "The tenant-scoped secret vault."),
         (name = "kms", description = "Tenant key lifecycle (rotate/destroy)."),
         (name = "ui", description = "Generative UI: pending validated frames and typed human decisions (PRD-005)."),
+        (name = "mcp", description = "MCP connection management: persisted external MCP server connections (PRD-006)."),
         (name = "system", description = "Health, metrics, and this document."),
     ),
 )]
@@ -292,6 +298,11 @@ mod tests {
             ("/api/v1/ui/frames/{frame_id}", "get"),
             ("/api/v1/ui/decisions/{frame_id}", "post"),
             ("/api/v1/ui/decisions/{frame_id}", "get"),
+            ("/api/v1/mcp/connections", "post"),
+            ("/api/v1/mcp/connections", "get"),
+            ("/api/v1/mcp/connections/{name}", "get"),
+            ("/api/v1/mcp/connections/{name}", "delete"),
+            ("/api/v1/mcp/connections/{name}/refresh", "post"),
         ];
 
         for (path, method) in expected {

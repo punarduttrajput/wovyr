@@ -7,10 +7,10 @@ Document ID: RM-INDEX-001
 
 **Document ID:** RM-INDEX-001  
 **File Path:** `docs/18-roadmap/index.md`  
-**Version:** 1.0.0  
+**Version:** 1.2.0  
 **Status:** Active  
 **Owner:** Product Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -32,6 +32,7 @@ The platform is currently in the **Planning / Documentation** phase (v0.1.0).
 | v1.0 | Production-ready, GA, enterprise | [v1.0.md](v1.0.md) |
 | v1.1 | AI Platform Maturity: capable, operable, extensible (post-GA) | [v1.1/index.md](v1.1/index.md) |
 | v1.2 | **Generative UI Trust Runtime** — the product milestone: frame protocol, trust/policy engine, durable interaction loop, renderer SDK, internal-tools beachhead | [v1.2-generative-ui.md](v1.2-generative-ui.md) |
+| v1.3 | **MCP Connection Management** — a persisted, UI-managed layer over the shipped MCP client: connection store, agent-manifest wiring, dashboard panel | [v1.3-mcp-connections.md](v1.3-mcp-connections.md) |
 | Future | Beyond 1.0 — research bets | [future.md](future.md) |
 
 **v1.1 (AI Platform Maturity)** is scoped by [PRD-004](../01-product/prd-ai-platform-maturity.md)
@@ -50,6 +51,16 @@ interfaces to humans safely, auditable, and with durable human-in-the-loop
 decisions. v1.1 Phase 3 is re-scoped through PRD-005 — ecosystem items that serve
 the trust runtime fold into v1.2 P3; purely horizontal items defer to
 [future.md](future.md).
+
+**v1.3 (MCP Connection Management)** executes
+[ADR-0012](../17-adr/ADR-0012-mcp-connection-trust-boundary.md), scoped by
+[PRD-006](../01-product/prd-mcp-connections.md): a persisted, dashboard-managed
+layer over the already-shipped, programmatic-only MCP client (v1.1 P3's
+ECO-301) — a connection store, agent-manifest wiring, and a dashboard panel, with
+`Stdio`-transport connections gated exactly like the `shell` tool and
+`Http`-transport connections reusing the existing SSRF guard. Deliberately
+narrower than [future.md](future.md)'s exploratory outbound MCP-gateway/
+federation bet (FUT-005) — this milestone is inbound-only.
 
 ---
 
@@ -81,5 +92,6 @@ learning. ADRs ([section 17](../17-adr/index.md)) record decisions that reshape 
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-15 | Added v1.3 (MCP Connection Management, PRD-006/ADR-0012) — a scoped, committed milestone narrower than FUT-005's exploratory outbound MCP-gateway bet |
 | 1.1.0 | 2026-07-14 | Added v1.2 (Generative UI Trust Runtime, PRD-005/ADR-0011); noted the v1.1-P3 re-scope |
 | 1.0.0 | 2026-06-27 | Initial Roadmap index |

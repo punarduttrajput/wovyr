@@ -7,10 +7,10 @@ Document ID: ADR-INDEX-001
 
 **Document ID:** ADR-INDEX-001  
 **File Path:** `docs/17-adr/index.md`  
-**Version:** 1.1.0  
+**Version:** 1.3.0  
 **Status:** Active  
 **Owner:** Architecture Team  
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -53,6 +53,7 @@ Status is one of: `Proposed`, `Accepted`, `Superseded by ADR-XXXX`, `Deprecated`
 | [ADR-0009](ADR-0009-keyless-signing.md) | Apex-native keyless signing (Sigstore-shaped, offline-verifiable) | Accepted |
 | [ADR-0010](ADR-0010-ga-deployment-topology.md) | GA as single-node appliance (Path A); distributed platform (Path B) as v1.1 follow-on | Accepted |
 | [ADR-0011](ADR-0011-generative-ui-repositioning.md) | Reposition the product as the Generative UI Trust Runtime (platform becomes the engine; open UI shapes adopted, not invented; constrained component vocabulary; no browser) | Accepted |
+| [ADR-0012](ADR-0012-mcp-connection-trust-boundary.md) | Trust boundary for user-managed MCP connections: `Stdio` transport gated like the `shell` tool (operator opt-in + `mcp:admin`); `Http` transport reuses the existing SSRF guard; credentials are vault references; no sandboxing of `Stdio` in v1 (stated residual risk) | Accepted |
 
 ---
 
@@ -68,6 +69,7 @@ and the design docs should be updated.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.3.0 | 2026-07-15 | Added ADR-0012 (trust boundary for user-managed MCP connections) |
 | 1.2.0 | 2026-07-14 | Added ADR-0011 (Generative UI Trust Runtime repositioning) |
 | 1.1.0 | 2026-07-07 | Annotated ADR-0003/0004/0005's Status column: none of the three were fully executed as originally decided (Postgres/Qdrant are opt-in not universal; NATS was never implemented at all). Each ADR now has its own Current Status section with detail. Found during a project-wide doc review |
 | 1.0.0 | 2026-06-27 | Initial ADR register |

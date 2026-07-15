@@ -67,7 +67,9 @@
           @if (draft.tools.length) {
             <div class="chiprow">
               @for (t of draft.tools; track t) {
-                <span class="tool-chip" [title]="toolDesc(t)">{{ t }}
+                <span class="tool-chip" [class.mcp]="isMcpTool(t)" [title]="toolDesc(t)">
+                  @if (isMcpTool(t)) { <span class="mcp-badge">MCP</span> }
+                  {{ t }}
                   <button type="button" class="x" (click)="removeTool(t)" aria-label="Remove tool">×</button>
                 </span>
               }
@@ -81,6 +83,16 @@
               }
             </select>
           </div>
+          @if (draft.mcpServers.length) {
+            <div class="chiprow mcp-servers-row">
+              <span class="muted mini">MCP connections granted:</span>
+              @for (s of draft.mcpServers; track s) {
+                <span class="tool-chip mcp">{{ s }}
+                  <button type="button" class="x" (click)="removeMcpServer(s)" aria-label="Revoke connection">×</button>
+                </span>
+              }
+            </div>
+          }
         </div>
 
         <div class="field">

@@ -476,6 +476,7 @@ version = "0.3.0"
 dependencies = [
  "apex-common",
  "apex-provider",
+ "apex-secrets",
  "apex-tool-macros",
  "apex-ui",
  "apex-ui-guard",

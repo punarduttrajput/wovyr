@@ -505,6 +505,87 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
   });
 });
 
+// PRD-006 / RM-MCX: persisted MCP connection management. The stdio lifecycle
+// test additionally needs the server started with `APEX_ENABLE_MCP_STDIO=1`
+// (ADR-0012's operator opt-in) and skips gracefully without it, the same way
+// the `ui:` suite skips without a configured policy.
+describe("mcp:", () => {
+  const stdioEchoScript = `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { serverInfo: { name: 'x', version: '1' } } }) + '\\n');
+  } else if (msg.method === 'tools/list') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'echo', description: 'echoes' }] } }) + '\\n');
+  }
+});
+`;
+
+  test("an http connection pointed at a private address is refused (SEC-304 SSRF reuse)", async (t) => {
+    if (!serverAvailable) return t.skip("no server");
+    await assert.rejects(
+      () =>
+        adminClient().mcp.create({
+          name: "sdk-test-internal",
+          transport: { kind: "http", url: "http://10.1.2.3:9/mcp" },
+        }),
+      (err: unknown) => {
+        if (err instanceof ApexApiError && err.status === 403) {
+          t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+          return true;
+        }
+        return err instanceof ApexApiError && err.status === 502;
+      },
+    );
+  });
+
+  test("full lifecycle over a real stdio connection, and its tool shows up in tools.list()", async (t) => {
+    if (!serverAvailable) return t.skip("no server");
+    const c = adminClient();
+    const name = `sdk-test-stdio-${Date.now()}`;
+    let created: Awaited<ReturnType<typeof c.mcp.create>>;
+    try {
+      created = await c.mcp.create({
+        name,
+        transport: { kind: "stdio", command: "node", args: ["-e", stdioEchoScript] },
+      });
+    } catch (err) {
+      if (err instanceof ApexApiError && err.status === 403) {
+        return t.skip(
+          "server not started with mcp:admin granted + APEX_ENABLE_MCP_STDIO=1",
+        );
+      }
+      throw err;
+    }
+    assert.equal(created.name, name);
+    assert.equal(created.tools[0]?.name, "echo");
+
+    const listed = await c.mcp.list();
+    assert.ok(listed.data.some((conn) => conn.name === name));
+
+    const fetched = await c.mcp.get(name);
+    assert.equal(fetched.name, name);
+    assert.deepEqual(fetched.transport, { kind: "stdio", command: "node", args: ["-e", stdioEchoScript] });
+
+    const refreshed = await c.mcp.refresh(name);
+    assert.equal(refreshed.name, name);
+    assert.equal(refreshed.tools[0]?.name, "echo");
+
+    // MCX-202: the connection's tool now shows up alongside built-ins.
+    const tools = await c.tools.list();
+    assert.ok(tools.data.some((tool) => tool.id === `mcp__${name}__echo`));
+
+    await c.mcp.delete(name);
+    await assert.rejects(
+      () => c.mcp.get(name),
+      (err: unknown) => err instanceof ApexApiError && err.status === 404,
+    );
+  });
+});
+
 describe("HttpClient retry (unit, mocked fetch)", () => {
   function flakyFetch(failCount: number, finalStatus = 200) {
     let calls = 0;

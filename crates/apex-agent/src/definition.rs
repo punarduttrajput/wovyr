@@ -68,6 +68,16 @@ pub struct Spec {
     /// Tool ids this agent is allowed to call (must exist in the registry).
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Configured MCP connection names (PRD-006, RM-MCX-P2-201) this agent may
+    /// draw tools from — an allow-list by *connection name*, not by tool id:
+    /// the connection's served tools are discovered live at run time (they can
+    /// change without a manifest edit), so they can't be listed here the way
+    /// `tools` lists a registry id. Absent/empty means no MCP tools at all,
+    /// even if the tenant has connections configured elsewhere — naming
+    /// nothing grants nothing (fail-closed, the same stance `tools`/
+    /// `permissions` take).
+    #[serde(default, alias = "mcpServers")]
+    pub mcp_servers: Vec<String>,
     /// Permissions granted to this agent, enforced against each tool's declared
     /// permissions ([tool framework §47](../../docs/04-agent-framework/tool-framework.md)).
     /// Absent → unrestricted; `[]` → grant nothing (deny permissioned tools).
@@ -126,6 +136,20 @@ impl AgentDefinition {
     /// The model selector, defaulting to `{capability: chat, class: fast}`.
     pub fn selector(&self) -> ModelSelector {
         self.spec.model_selector.clone().unwrap_or_default()
+    }
+
+    /// Extend `spec.tools` with additional tool ids a run resolves beyond the
+    /// manifest's own declaration (RM-MCX-P2-201: MCP-connection-discovered
+    /// tools, resolved dynamically and unknowable when the manifest was
+    /// authored). Dedups against what's already declared so a repeated id
+    /// isn't advertised twice.
+    pub fn with_additional_tools(mut self, ids: impl IntoIterator<Item = String>) -> Self {
+        for id in ids {
+            if !self.spec.tools.contains(&id) {
+                self.spec.tools.push(id);
+            }
+        }
+        self
     }
 
     /// Resolve a `spec.prompt` template reference (SAF-202) into
@@ -187,6 +211,32 @@ spec:
   instructions: |
     You are a friendly assistant. Greet the user and answer briefly.
 "#;
+
+    #[test]
+    fn mcp_servers_defaults_to_empty_and_parses_either_case() {
+        let def = AgentDefinition::from_yaml(HELLO).unwrap();
+        assert!(def.spec.mcp_servers.is_empty());
+
+        let yaml = "metadata:\n  name: x\nspec:\n  instructions: hi\n  mcpServers: [docs]\n";
+        let def = AgentDefinition::from_yaml(yaml).unwrap();
+        assert_eq!(def.spec.mcp_servers, vec!["docs".to_string()]);
+
+        let yaml = "metadata:\n  name: x\nspec:\n  instructions: hi\n  mcp_servers: [docs]\n";
+        let def = AgentDefinition::from_yaml(yaml).unwrap();
+        assert_eq!(def.spec.mcp_servers, vec!["docs".to_string()]);
+    }
+
+    #[test]
+    fn with_additional_tools_appends_and_dedups() {
+        let yaml = "metadata:\n  name: x\nspec:\n  instructions: hi\n  tools: [echo]\n";
+        let def = AgentDefinition::from_yaml(yaml).unwrap();
+        let def =
+            def.with_additional_tools(vec!["echo".to_string(), "mcp__docs__search".to_string()]);
+        assert_eq!(
+            def.spec.tools,
+            vec!["echo".to_string(), "mcp__docs__search".to_string()]
+        );
+    }
 
     #[test]
     fn parses_hello_manifest() {

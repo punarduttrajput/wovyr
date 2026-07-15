@@ -245,6 +245,63 @@ export interface ToolSummary {
   permissions: string[] | null;
 }
 
+/** How to reach an external MCP server (PRD-006 MCX-101) — `stdio` spawns an
+ * arbitrary local command (materially higher privilege; gated behind
+ * `mcp:admin` + the operator's `APEX_ENABLE_MCP_STDIO=1` opt-in, ADR-0012),
+ * `http` POSTs JSON-RPC to a URL (SSRF-guarded the same way `http_get` is). */
+export type McpTransport =
+  | { kind: "stdio"; command: string; args: string[] }
+  | { kind: "http"; url: string };
+
+/** A tenant's persisted MCP connection (never a resolved credential value —
+ * `secret_ref` is a `SecretRef` string into the secret vault, MCX-105). */
+export interface McpConnection {
+  name: string;
+  transport: McpTransport;
+  secret_ref?: string | null;
+  secret_env_var?: string | null;
+  tool_permissions?: string[] | null;
+  created_ms: number;
+  updated_ms: number;
+}
+
+/** One tool a connection's server currently reports via `tools/list`. */
+export interface McpToolInfo {
+  name: string;
+  description: string;
+}
+
+/** `POST /api/v1/mcp/connections`'s request body. */
+export interface McpConnectionRequest {
+  name: string;
+  transport: McpTransport;
+  secret_ref?: string;
+  secret_env_var?: string;
+  tool_permissions?: string[];
+}
+
+/** `POST /api/v1/mcp/connections`'s response: the persisted connection plus
+ * the tools discovered while verifying it dials successfully. */
+export interface McpConnectionWithTools extends McpConnection {
+  tools: McpToolInfo[];
+}
+
+/** `POST /api/v1/mcp/connections/{name}/refresh`'s response — a fresh
+ * re-discovery, bypassing the connection's client cache (MCX-203). */
+export interface McpRefreshResult {
+  name: string;
+  tools: McpToolInfo[];
+}
+
+/** `GET /api/v1/mcp/connections`'s response: the standard {@link Page}
+ * envelope plus `stdio_enabled` (RM-MCX-P3-302) — whether the operator has
+ * set `APEX_ENABLE_MCP_STDIO=1`, so a caller (the dashboard) knows to hide
+ * the `stdio` transport option before the operator fills out a form, not
+ * after a rejected submit. */
+export interface McpConnectionsPage extends Page<McpConnection> {
+  stdio_enabled: boolean;
+}
+
 /** A minimal shape for a UiFrame document — `root` is left `unknown` (a
  * generic API client shouldn't need to parse the component vocabulary);
  * `@apex/ui-react` owns the typed, full `UiFrame` shape and rendering. Enough

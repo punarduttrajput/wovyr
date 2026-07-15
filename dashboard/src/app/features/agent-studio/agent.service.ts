@@ -19,11 +19,14 @@ export class AgentService {
     return this.http.get<Page<string>>('/api/v1/agents');
   }
 
-  /** The registered tool catalog (built-ins + enabled plugin tools), for the picker. */
+  /** The registered tool catalog for the picker: built-ins, enabled plugin
+   * tools, and (MCX-202) the caller's tenant's configured MCP connections'
+   * currently-discovered tools. `GET /api/v1/tools` returns the standard
+   * cursor-pagination envelope (`{data, has_more, ...}`, RM-GA-P4 API-701) —
+   * not a bare `{tools: [...]}` — mirroring `listAgents()`'s own `Page<T>`
+   * parsing below. */
   tools(): Observable<ToolInfo[]> {
-    return this.http
-      .get<{ tools: ToolInfo[] }>('/api/v1/tools')
-      .pipe(map((r) => r.tools ?? []));
+    return this.http.get<Page<ToolInfo>>('/api/v1/tools').pipe(map((r) => r.data ?? []));
   }
 
   /** Register an agent from its YAML manifest; returns its id. */
@@ -52,6 +55,7 @@ export class AgentService {
       class: 'balanced',
       instructions: '',
       tools: [],
+      mcpServers: [],
       memoryEnabled: false,
       namespace: 'product-kb',
       maxSteps: null,
@@ -83,6 +87,20 @@ export class AgentService {
     if (toolsLine) {
       const inner = toolsLine.slice(toolsLine.indexOf('[') + 1, toolsLine.lastIndexOf(']'));
       d.tools = inner
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+    }
+
+    // `spec.mcp_servers: [...]` (PRD-006 MCX-201) — the allow-list of MCP
+    // connection names this agent may draw tools from.
+    const mcpServersLine = lines.find((l) => /^\s{2}mcp_servers:\s*\[/.test(l));
+    if (mcpServersLine) {
+      const inner = mcpServersLine.slice(
+        mcpServersLine.indexOf('[') + 1,
+        mcpServersLine.lastIndexOf(']'),
+      );
+      d.mcpServers = inner
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean);
@@ -137,6 +155,8 @@ export class AgentService {
     ];
     const tools = d.tools.filter((t) => t.trim());
     if (tools.length) lines.push(`  tools: [${tools.join(', ')}]`);
+    const mcpServers = d.mcpServers.filter((t) => t.trim());
+    if (mcpServers.length) lines.push(`  mcp_servers: [${mcpServers.join(', ')}]`);
     if (d.maxSteps != null && d.maxSteps > 0) lines.push(`  max_steps: ${Math.floor(d.maxSteps)}`);
     if (d.memoryEnabled) {
       lines.push(

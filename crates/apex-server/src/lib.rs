@@ -32,6 +32,7 @@ mod hardening;
 mod kms;
 pub use auth::{ApiKeyStore, AuthMode, FileApiKeyStore, InMemoryApiKeyStore};
 mod marketplace;
+mod mcp;
 mod memory;
 mod openapi;
 mod plugins;
@@ -136,6 +137,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     let sensitive_routes = Router::new()
         .merge(secrets::routes())
         .merge(kms::routes())
+        // MCP connection management (PRD-006): a Stdio connection is arbitrary
+        // local command execution, the same sensitivity class as secrets/KMS.
+        .merge(mcp::routes())
         .layer(idempotency())
         .layer(rate_limit_sensitive())
         .layer(auth())

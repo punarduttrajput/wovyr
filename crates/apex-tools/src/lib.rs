@@ -22,6 +22,8 @@ mod builtin;
 mod egress;
 mod egress_lockdown;
 mod mcp;
+mod mcp_cache;
+mod mcp_store;
 mod pool;
 mod registry;
 mod sandbox;
@@ -35,7 +37,10 @@ pub use builtin::{
 pub use egress::EgressProxy;
 pub use mcp::{
     HttpTransport, MCP_PROTOCOL_VERSION, McpClient, McpToolInfo, McpTransport, StdioTransport,
+    is_valid_mcp_server_name,
 };
+pub use mcp_cache::{DEFAULT_IDLE_TIMEOUT, McpClientCache};
+pub use mcp_store::{McpConnection, McpConnectionStore, McpTransportConfig};
 pub use pool::{AutoscalePolicy, PooledSandbox, SandboxFactory, SandboxPool};
 pub use registry::ToolRegistry;
 #[cfg(feature = "wasi")]

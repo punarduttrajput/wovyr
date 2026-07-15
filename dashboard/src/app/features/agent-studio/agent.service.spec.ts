@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
-import { provideHttpClientTesting } from '@angular/common/http/testing';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { lastValueFrom } from 'rxjs';
 import { toArray } from 'rxjs/operators';
 import { AgentService } from './agent.service';
@@ -33,6 +33,7 @@ describe('AgentService', () => {
         class: 'fast',
         instructions: 'You are a support agent.\nAnswer briefly.',
         tools: ['echo', 'http_get'],
+        mcpServers: ['docs'],
         memoryEnabled: true,
         namespace: 'support-kb',
         maxSteps: 12,
@@ -45,9 +46,20 @@ describe('AgentService', () => {
       expect(back.class).toBe('fast');
       expect(back.instructions).toBe('You are a support agent.\nAnswer briefly.');
       expect(back.tools).toEqual(['echo', 'http_get']);
+      expect(back.mcpServers).toEqual(['docs']);
       expect(back.memoryEnabled).toBeTrue();
       expect(back.namespace).toBe('support-kb');
       expect(back.maxSteps).toBe(12);
+    });
+
+    it('round-trips with no mcp_servers (the common case)', () => {
+      const draft = service.blankDraft();
+      draft.name = 'no-mcp';
+      draft.instructions = 'Hi.';
+
+      const yaml = service.toManifest(draft);
+      expect(yaml).not.toContain('mcp_servers');
+      expect(service.fromManifest(yaml).mcpServers).toEqual([]);
     });
 
     it('round-trips a pinned model instead of a selector', () => {
@@ -96,6 +108,40 @@ describe('AgentService', () => {
       expect(draft.name).toBe('hello');
       expect(draft.class).toBe('fast');
       expect(draft.instructions).toContain('friendly assistant');
+    });
+  });
+
+  // ---- tool catalog -----------------------------------------------------------
+
+  /** Regression test: `tools()` used to read a bare `{tools: [...]}` shape, but
+   * `GET /api/v1/tools` actually returns the standard cursor-pagination
+   * envelope (RM-GA-P4 API-701) — so the live catalog (including MCX-202's
+   * `mcp__<server>__<tool>` entries) silently never replaced the picker's
+   * hardcoded built-in fallback. */
+  describe('tools()', () => {
+    let http: HttpTestingController;
+
+    beforeEach(() => {
+      http = TestBed.inject(HttpTestingController);
+    });
+
+    afterEach(() => http.verify());
+
+    it('parses the Page envelope, not a bare {tools: [...]} shape', async () => {
+      const promise = lastValueFrom(service.tools());
+      const req = http.expectOne('/api/v1/tools');
+      expect(req.request.method).toBe('GET');
+      req.flush({
+        data: [
+          { id: 'echo', description: 'Echo tool.', category: 'builtin', permissions: [] },
+          { id: 'mcp__docs__search_docs', description: 'Search docs.', category: 'mcp', permissions: ['mcp:docs'] },
+        ],
+        has_more: false,
+        next_cursor: null,
+        total_estimate: 2,
+      });
+      const tools = await promise;
+      expect(tools.map((t) => t.id)).toEqual(['echo', 'mcp__docs__search_docs']);
     });
   });
 

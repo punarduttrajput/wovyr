@@ -130,6 +130,22 @@ pub(crate) fn default_webhook_store(kms: Arc<dyn apex_kms::Kms>) -> Arc<dyn Webh
     Arc::new(InMemoryWebhookStore::new())
 }
 
+/// The MCP connection-management runtime (PRD-006): a durable connection
+/// store at `~/.apex/mcp`, falling back to a temp-directory-backed store
+/// (ephemeral across restarts, but keeps the server starting) if that
+/// directory can't be created — `McpConnectionStore` has no separate
+/// in-memory backend the way the other durable stores above do.
+pub(crate) fn default_mcp_runtime() -> crate::mcp::McpRuntime {
+    crate::mcp::McpRuntime::from_env().unwrap_or_else(|e| {
+        tracing::error!(
+            error = %e,
+            "could not open the MCP connection store under ~/.apex/mcp; \
+             falling back to an ephemeral temp-directory-backed store"
+        );
+        crate::mcp::McpRuntime::from_temp_dir_fallback()
+    })
+}
+
 /// An [`Engine`] over the durable workflow store at `~/.apex/workflows` (the same
 /// directory the CLI writes to), falling back to an empty in-memory store if that
 /// directory is unavailable. The executor is the shared
@@ -151,6 +167,8 @@ pub(crate) fn default_workflows_engine(
     timers: Arc<dyn TimerStore>,
     metrics_state: crate::hardening::MetricsState,
     ui: Arc<crate::ui::UiRuntime>,
+    mcp: Arc<crate::mcp::McpRuntime>,
+    secrets: apex_secrets::Vault,
 ) -> Engine {
     let executor = Arc::new(workflow_runner::server_executor(
         gateway,
@@ -161,6 +179,8 @@ pub(crate) fn default_workflows_engine(
         metrics_state.metrics,
         metrics_state.tenant_labels,
         ui,
+        mcp,
+        secrets,
     ));
     if let Some(dir) = workflows_dir()
         && let Ok(store) = FileStore::new(dir)

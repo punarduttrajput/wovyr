@@ -79,15 +79,26 @@ pub struct StoredAgentResolver {
     /// is metered in `agents.rs`.
     metrics: apex_telemetry::Metrics,
     tenant_label_cap: crate::hardening::TenantLabelCap,
+    /// The MCP connection-management runtime (PRD-006, RM-MCX-P2-204): a
+    /// workflow's `agent` activity gets the same `spec.mcp_servers`
+    /// resolution a direct `agents:run` call does — see
+    /// [`AgentResolver::resolve_mcp_tools`].
+    mcp: Arc<crate::mcp::McpRuntime>,
+    /// The tenant-scoped secret vault a connection's `secret_ref` resolves
+    /// against — the same vault `agents.rs`'s `resolve_run_registry` uses.
+    secrets: apex_secrets::Vault,
 }
 
 impl StoredAgentResolver {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agents: Arc<AgentStore>,
         tenancy: Arc<dyn TenancyStore>,
         quota: Arc<tenancy::QuotaTracker>,
         metrics: apex_telemetry::Metrics,
         tenant_label_cap: crate::hardening::TenantLabelCap,
+        mcp: Arc<crate::mcp::McpRuntime>,
+        secrets: apex_secrets::Vault,
     ) -> Self {
         Self {
             agents,
@@ -95,6 +106,8 @@ impl StoredAgentResolver {
             quota,
             metrics,
             tenant_label_cap,
+            mcp,
+            secrets,
         }
     }
 
@@ -155,6 +168,25 @@ impl AgentResolver for StoredAgentResolver {
             u64::from(usage.total_tokens),
         );
     }
+
+    async fn resolve_mcp_tools(
+        &self,
+        ctx: &ActivityContext,
+        connection_names: &[String],
+        registry: &mut ToolRegistry,
+    ) -> Result<Vec<String>, String> {
+        self.mcp
+            .cache()
+            .resolve_agent_mcp_tools(
+                self.mcp.store(),
+                Some(&self.secrets),
+                Self::tenant(ctx),
+                connection_names,
+                registry,
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Build the shared executor for the server: `StoredAgentResolver` for `agent`
@@ -173,6 +205,8 @@ pub(crate) fn server_executor(
     metrics: apex_telemetry::Metrics,
     tenant_label_cap: crate::hardening::TenantLabelCap,
     ui: Arc<crate::ui::UiRuntime>,
+    mcp: Arc<crate::mcp::McpRuntime>,
+    secrets: apex_secrets::Vault,
 ) -> crate::ui::UiActivityExecutor<PlatformActivityExecutor> {
     crate::ui::UiActivityExecutor::new(
         PlatformActivityExecutor::new(
@@ -184,6 +218,8 @@ pub(crate) fn server_executor(
                 quota,
                 metrics,
                 tenant_label_cap,
+                mcp,
+                secrets,
             )),
         ),
         ui,
@@ -615,6 +651,8 @@ mod tests {
             state.metrics.clone(),
             state.tenant_label_cap.clone(),
             ui.clone(),
+            state.mcp.clone(),
+            state.secrets.clone(),
         ));
         let store = InMemoryStore::new();
         let events: Arc<dyn EventLog> = Arc::new(store.clone());
@@ -867,6 +905,8 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
             base.metrics.clone(),
             base.tenant_label_cap.clone(),
             ui,
+            base.mcp.clone(),
+            base.secrets.clone(),
         ));
         let store = InMemoryStore::new();
         let events: Arc<dyn EventLog> = Arc::new(store.clone());

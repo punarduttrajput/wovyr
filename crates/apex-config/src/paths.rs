@@ -82,3 +82,9 @@ pub fn ui_dir() -> Result<PathBuf> {
 pub fn server_state_dir() -> Result<PathBuf> {
     Ok(crate::root::apex_dir()?.join("server"))
 }
+
+/// `~/.apex/mcp` — the persisted MCP connection catalog (PRD-006, RM-MCX-P1-101),
+/// server-only.
+pub fn mcp_dir() -> Result<PathBuf> {
+    Ok(crate::root::apex_dir()?.join("mcp"))
+}

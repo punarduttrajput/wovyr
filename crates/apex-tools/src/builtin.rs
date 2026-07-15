@@ -363,7 +363,7 @@ fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
 /// egress allow-list is configured and `host` isn't on it. Returns the first
 /// resolved address, to be **pinned** for the actual connection (a second DNS
 /// lookup at connect time could return a different address — DNS rebinding).
-async fn resolve_and_guard(
+pub(crate) async fn resolve_and_guard(
     host: &str,
     port: u16,
     egress_allowlist: Option<&[String]>,
@@ -398,11 +398,36 @@ async fn resolve_and_guard(
 /// [`resolve_and_guard`] already vetted), rather than re-resolving DNS at connect
 /// time — SEC-304's defeat of a DNS-rebinding attack — carrying the tool's default
 /// `User-Agent`.
-fn pinned_client(host: &str, pinned: std::net::SocketAddr) -> reqwest::Result<reqwest::Client> {
+pub(crate) fn pinned_client(
+    host: &str,
+    pinned: std::net::SocketAddr,
+) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(DEFAULT_USER_AGENT)
         .resolve(host, pinned)
         .build()
+}
+
+/// Parse an `http(s)://` URL into `(host, port)` — the shared first half of
+/// SEC-304's guard, factored out so [`HttpGetTool`] and the MCP `Http`-transport
+/// connection guard (RM-MCX-P1-104) can never diverge on what counts as a
+/// validatable target.
+pub(crate) fn parse_http_host_port(url: &str) -> Result<(String, u16), ToolError> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(ToolError::Validation(
+            "url must start with http:// or https://".into(),
+        ));
+    }
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| ToolError::Validation(format!("invalid URL `{url}`: {e}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ToolError::Validation(format!("URL `{url}` has no host")))?
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| ToolError::Validation(format!("URL `{url}` has no resolvable port")))?;
+    Ok((host, port))
 }
 
 #[async_trait]
@@ -438,20 +463,7 @@ impl Tool for HttpGetTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::Validation("missing required string field `url`".into()))?;
 
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(ToolError::Validation(
-                "url must start with http:// or https://".into(),
-            ));
-        }
-        let parsed = reqwest::Url::parse(url)
-            .map_err(|e| ToolError::Validation(format!("invalid URL `{url}`: {e}")))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| ToolError::Validation(format!("URL `{url}` has no host")))?
-            .to_string();
-        let port = parsed
-            .port_or_known_default()
-            .ok_or_else(|| ToolError::Validation(format!("URL `{url}` has no resolvable port")))?;
+        let (host, port) = parse_http_host_port(url)?;
 
         let pinned = resolve_and_guard(&host, port, ctx.egress_allowlist.as_deref()).await?;
 

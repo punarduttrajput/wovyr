@@ -26,6 +26,13 @@
   padding:0 2px; border-radius:50%; cursor:pointer;
 }
 .tool-chip .x:hover { color:var(--crit); }
+.tool-chip.mcp { border-color:color-mix(in srgb, var(--accent, #6d5bd0) 40%, var(--line)); }
+.mcp-badge {
+  font-family:var(--sans, inherit); font-size:9px; font-weight:700; letter-spacing:.04em;
+  background:color-mix(in srgb, var(--accent, #6d5bd0) 18%, transparent);
+  color:var(--accent, #6d5bd0); border-radius:4px; padding:1px 4px;
+}
+.mcp-servers-row { margin-top:8px; }
 .tool-add {
   border:1px dashed var(--line); background:transparent; border-radius:20px; padding:4px 11px;
   font-size:12px; color:var(--ink); outline:none; font-family:var(--mono); min-width:120px;

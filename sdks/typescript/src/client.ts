@@ -8,6 +8,11 @@ import type {
   AuditEntry,
   AuditPage,
   MarketplaceSearchParams,
+  McpConnection,
+  McpConnectionRequest,
+  McpConnectionsPage,
+  McpConnectionWithTools,
+  McpRefreshResult,
   MemoryQueryResult,
   Page,
   PageParams,
@@ -70,6 +75,7 @@ export class ApexClient {
   readonly audit: AuditResource;
   readonly tools: ToolsResource;
   readonly ui: UiResource;
+  readonly mcp: McpResource;
 
   constructor(options: ApexClientOptions) {
     this.http = new HttpClient(options);
@@ -85,6 +91,7 @@ export class ApexClient {
     this.audit = new AuditResource(this.http);
     this.tools = new ToolsResource(this.http);
     this.ui = new UiResource(this.http);
+    this.mcp = new McpResource(this.http);
   }
 
   /** `GET /healthz`. */
@@ -645,7 +652,10 @@ class AuditResource {
 class ToolsResource {
   constructor(private readonly http: HttpClient) {}
 
-  /** `GET /api/v1/tools` — built-ins + enabled plugin tools. Unauthenticated. */
+  /** `GET /api/v1/tools` — built-ins + enabled plugin tools (unauthenticated),
+   * plus (MCX-202) the caller's tenant's configured MCP connections'
+   * currently-discovered `mcp__<server>__<tool>` tools, if the client's
+   * `X-Apex-Principal`/tenant can be authorized for `mcp:read`. */
   async list(params?: PageParams): Promise<Page<ToolSummary>> {
     return this.http.request("GET", "/api/v1/tools", undefined, { query: params });
   }
@@ -702,5 +712,57 @@ class UiResource {
    * workflow-backed, or a different tenant). */
   async getDecision(frameId: string): Promise<UiDecisionOutcome> {
     return this.http.request("GET", `/api/v1/ui/decisions/${encodeURIComponent(frameId)}`);
+  }
+}
+
+/** MCP connection management (PRD-006, RM-MCX-P1-102): persisted, tenant-scoped
+ * external MCP server connections. A `stdio`-transport connection is gated
+ * behind `mcp:admin` + the operator's `APEX_ENABLE_MCP_STDIO=1` opt-in
+ * (ADR-0012); `http`-transport only needs `mcp:write`/`mcp:read`. */
+class McpResource {
+  constructor(private readonly http: HttpClient) {}
+
+  /** `GET /api/v1/mcp/connections` — the caller's tenant's configured
+   * connections, plus `stdio_enabled` (whether the operator has set
+   * `APEX_ENABLE_MCP_STDIO=1`, MCX-302). */
+  async list(params?: PageParams): Promise<McpConnectionsPage> {
+    return this.http.request("GET", "/api/v1/mcp/connections", undefined, { query: params });
+  }
+
+  /** `POST /api/v1/mcp/connections` — verifies the connection actually dials
+   * (and resolves any `secret_ref`) before persisting; a connection that
+   * can't be reached is never saved half-configured. Throws
+   * {@link ApexApiError} with `status === 403` if `transport.kind === "stdio"`
+   * and either `mcp:admin` is missing or the operator hasn't set
+   * `APEX_ENABLE_MCP_STDIO=1`. */
+  async create(req: McpConnectionRequest, opts?: IdempotentOpts): Promise<McpConnectionWithTools> {
+    return this.http.request("POST", "/api/v1/mcp/connections", req, { headers: idemHeaders(opts) });
+  }
+
+  /** `GET /api/v1/mcp/connections/{name}` — never includes a resolved secret
+   * value, only the `secret_ref`. */
+  async get(name: string): Promise<McpConnection> {
+    return this.http.request("GET", `/api/v1/mcp/connections/${encodeURIComponent(name)}`);
+  }
+
+  /** `DELETE /api/v1/mcp/connections/{name}` — takes effect immediately (the
+   * cached live client, if any, is evicted), never a stale success on the
+   * connection's next use. */
+  async delete(name: string, opts?: IdempotentOpts): Promise<void> {
+    return this.http.request("DELETE", `/api/v1/mcp/connections/${encodeURIComponent(name)}`, undefined, {
+      headers: idemHeaders(opts),
+    });
+  }
+
+  /** `POST /api/v1/mcp/connections/{name}/refresh` (MCX-203) — force an
+   * immediate re-dial and re-discovery, bypassing the connection's client
+   * cache — the "see what's new" dashboard action. */
+  async refresh(name: string, opts?: IdempotentOpts): Promise<McpRefreshResult> {
+    return this.http.request(
+      "POST",
+      `/api/v1/mcp/connections/${encodeURIComponent(name)}/refresh`,
+      undefined,
+      { headers: idemHeaders(opts) },
+    );
   }
 }

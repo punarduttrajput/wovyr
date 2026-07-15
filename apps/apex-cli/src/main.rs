@@ -18,6 +18,7 @@ mod admin;
 mod auth;
 mod config;
 mod kms;
+mod mcp;
 mod memory;
 mod plugin;
 mod s3;
@@ -1097,7 +1098,7 @@ async fn run_local(
     provider: &str,
     interactive_ui: bool,
 ) -> apex_common::Result<()> {
-    let def = AgentDefinition::from_file(file)?;
+    let mut def = AgentDefinition::from_file(file)?;
     let gateway = std::sync::Arc::new(build_local_gateway(provider).await?);
     // `agents run --local` is a trusted, first-party/local context (SEC-301's
     // documented escape hatch) — shell stays available here, unlike the server's
@@ -1123,9 +1124,33 @@ async fn run_local(
     }
     // Make enabled plugins' tool capabilities callable by the agent.
     plugin::engine()?.register_enabled(&mut registry);
+    let run_tenant = tenant.unwrap_or_default();
+    // MCX-201: resolve the agent's declared `spec.mcp_servers` (PRD-006) into
+    // this run's registry, then extend the advertised `spec.tools` with what
+    // was discovered — an MCP server's tools are found live at run time, so
+    // they can't be listed in the manifest ahead of time the way a plain
+    // registry tool id can.
+    if !def.spec.mcp_servers.is_empty() {
+        let store = mcp::store()?;
+        let vault = mcp::secrets_vault();
+        let cache = apex_tools::McpClientCache::default();
+        let ids = cache
+            .resolve_agent_mcp_tools(
+                &store,
+                Some(&vault),
+                &run_tenant,
+                &def.spec.mcp_servers,
+                &mut registry,
+            )
+            .await
+            .map_err(|e| {
+                apex_common::Error::config(format!("resolving agent spec.mcp_servers: {e}"))
+            })?;
+        def = def.with_additional_tools(ids);
+    }
     let mut opts = RunOptions::new(input);
-    if let Some(t) = tenant {
-        opts = opts.with_tenant(t);
+    if !run_tenant.is_empty() {
+        opts = opts.with_tenant(run_tenant);
     }
     // An explicit --max-steps wins; otherwise fall back to the agent's own default.
     if let Some(n) = max_steps.or(def.spec.max_steps) {

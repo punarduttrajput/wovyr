@@ -41,6 +41,12 @@ export const routes: Routes = [
     loadComponent: () => import('./features/surfaces/surfaces').then((m) => m.Surfaces),
   },
   {
+    path: 'mcp-servers',
+    title: 'MCP Servers · Apex',
+    loadComponent: () =>
+      import('./features/mcp-servers/mcp-servers').then((m) => m.McpServers),
+  },
+  {
     path: 'marketplace',
     title: 'Marketplace · Apex',
     loadComponent: () => import('./features/marketplace/marketplace').then((m) => m.Marketplace),

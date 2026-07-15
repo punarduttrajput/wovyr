@@ -144,6 +144,12 @@ pub struct QuotaLimits {
     /// Max concurrent agent runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrent_agent_runs: Option<u64>,
+    /// Max configured MCP server connections per tenant (RM-MCX-P1-106,
+    /// PRD-006) — bounds a tenant's ability to make the connection cache's
+    /// warm-process pool grow unbounded (each `Stdio` connection can keep a
+    /// real local process alive while cached).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_mcp_connections: Option<u64>,
     /// Where this quota's "day" boundary sits, in minutes east of UTC
     /// (RM-AIM-P2 SRV-203) — e.g. `330` resets daily budgets at 00:00 IST,
     /// `-300` at 00:00 EST. `None` = UTC midnight (the pre-SRV-203 behavior).

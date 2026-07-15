@@ -154,6 +154,7 @@ async fn run_async_inner(
     } else {
         req.input
     };
+    let (registry, def) = resolve_run_registry(state, &tenant, def).await?;
 
     // Quota gate up front, same as the synchronous path: a rejected run never gets a
     // run id at all, rather than reporting `failed` later for a run that never
@@ -174,7 +175,7 @@ async fn run_async_inner(
     let run_id2 = run_id.clone();
     tokio::spawn(async move {
         let _permit = permit; // held for the run's duration, not the HTTP connection
-        match run_agent(&def, &state2.gateway, &state2.registry, opts, &mut NullSink).await {
+        match run_agent(&def, &state2.gateway, &registry, opts, &mut NullSink).await {
             Ok(out) => {
                 tenancy::record_run_usage(
                     &state2.tenancy,
@@ -362,6 +363,10 @@ pub(crate) async fn run_stream_handler(
     // the run task and releases when it ends.
     let project = tenancy::run_project(&headers);
     let tenant = tenancy::run_tenant(&headers);
+    let (registry, def) = match resolve_run_registry(&state, &tenant, def).await {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
     let permit = match tenancy::admit_run(&state.tenancy, &state.quota, project.as_deref()).await {
         Ok(p) => p,
         Err(e) => return e.into_response(),
@@ -379,7 +384,7 @@ pub(crate) async fn run_stream_handler(
     tokio::spawn(async move {
         let _permit = permit;
         let mut sink = ChannelSink { tx: tx.clone() };
-        let frame = match run_agent(&def, &state.gateway, &state.registry, opts, &mut sink).await {
+        let frame = match run_agent(&def, &state.gateway, &registry, opts, &mut sink).await {
             Ok(out) => {
                 tenancy::record_run_usage(
                     &state.tenancy,
@@ -410,6 +415,48 @@ pub(crate) async fn run_stream_handler(
     Sse::new(rx.map(Ok::<Event, Infallible>)).into_response()
 }
 
+/// Clone the shared registry and resolve `def`'s declared `spec.mcp_servers`
+/// (PRD-006, RM-MCX-P2-201) into it, returning the per-run registry and a
+/// definition whose `spec.tools` has been extended with whatever tools were
+/// discovered — an MCP server's tools are found live and can't be listed in
+/// the manifest ahead of time. `state.registry` itself is shared across every
+/// run this server ever serves, so resolution always happens on a clone: one
+/// tenant's run must never see another's (or another run's) MCP tools.
+///
+/// A definition naming no connections is returned untouched (a cheap clone,
+/// no MCP round trip at all). An unknown connection name, or a connection
+/// that fails to dial, is reported as a client-facing `400` — the caller
+/// named a connection expecting it to exist.
+async fn resolve_run_registry(
+    state: &Arc<AppState>,
+    tenant: &str,
+    def: AgentDefinition,
+) -> Result<(apex_tools::ToolRegistry, AgentDefinition), ApiError> {
+    let mut registry = state.registry.clone();
+    if def.spec.mcp_servers.is_empty() {
+        return Ok((registry, def));
+    }
+    let ids = state
+        .mcp
+        .cache()
+        .resolve_agent_mcp_tools(
+            state.mcp.store(),
+            Some(&state.secrets),
+            tenant,
+            &def.spec.mcp_servers,
+            &mut registry,
+        )
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "mcp_resolution_failed",
+                e.to_string(),
+            )
+        })?;
+    Ok((registry, def.with_additional_tools(ids)))
+}
+
 /// Run a (parsed) agent definition with `input`, returning the run-response shape.
 /// Shared by the inline-manifest and stored-agent run endpoints. Enforces the in-scope
 /// `project`'s quota (concurrent runs + daily LLM spend) when one is set.
@@ -423,6 +470,7 @@ async fn run_definition(
     headers: &HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let input = if input.is_null() { json!({}) } else { input };
+    let (registry, def) = resolve_run_registry(state, tenant, def).await?;
 
     // Quota gate: hold a concurrency slot for the duration of the run (released on
     // drop), then record the run's cost against the project's daily budget.
@@ -432,7 +480,7 @@ async fn run_definition(
     if let Some(n) = max_steps.or(def.spec.max_steps) {
         opts = opts.with_max_steps(n);
     }
-    let out = match run_agent(&def, &state.gateway, &state.registry, opts, &mut NullSink).await {
+    let out = match run_agent(&def, &state.gateway, &registry, opts, &mut NullSink).await {
         Ok(out) => out,
         Err(e) => {
             webhooks::emit(

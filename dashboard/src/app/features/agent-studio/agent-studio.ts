@@ -4,6 +4,14 @@ import { Subscription } from 'rxjs';
 import { AgentService } from './agent.service';
 import { AgentDraft, StreamEvent, ToolInfo } from '../../core/api.types';
 
+/** The MCP connection name named by a tool id of the form
+ * `mcp__<server>__<tool>` (the proxy id shape `apex-tools::mcp`'s
+ * `McpClient::connect` produces) — `null` for a built-in/plugin tool id. */
+function mcpServerOf(id: string): string | null {
+  const m = /^mcp__([A-Za-z0-9_-]+)__/.exec(id);
+  return m ? m[1] : null;
+}
+
 @Component({
   selector: 'app-agent-studio',
   imports: [FormsModule],
@@ -23,6 +31,7 @@ export class AgentStudio implements OnInit, OnDestroy {
       'You are a documentation assistant for the Apex platform. Ground every answer in ' +
       'retrieved docs and cite the section. If unsure, say so rather than guessing.',
     tools: ['fs_read', 'http_get'],
+    mcpServers: [],
     memoryEnabled: false,
     namespace: 'product-kb',
     maxSteps: null,
@@ -115,11 +124,29 @@ export class AgentStudio implements OnInit, OnDestroy {
     return this.toolCatalog().filter((t) => !this.draft.tools.includes(t.id));
   }
 
-  /** Add the tool chosen from the dropdown, then reset it to the placeholder. */
+  /** Add the tool chosen from the dropdown, then reset it to the placeholder.
+   * An `mcp__<server>__<tool>` pick (MCX-202/303) also adds `<server>` to
+   * `spec.mcp_servers` — the actual allow-list a run resolves (MCX-201); the
+   * literal tool id alone would be meaningless to the server without it. */
   addPicked(): void {
     const id = this.pickTool;
     if (id && !this.draft.tools.includes(id)) this.draft.tools.push(id);
+    const server = mcpServerOf(id);
+    if (server && !this.draft.mcpServers.includes(server)) this.draft.mcpServers.push(server);
     this.pickTool = '';
+  }
+
+  /** Whether `id` is an MCP-sourced tool (`mcp__<server>__<tool>`) — drives
+   * the picker's "MCP" badge. */
+  isMcpTool(id: string): boolean {
+    return mcpServerOf(id) !== null;
+  }
+
+  removeMcpServer(name: string): void {
+    this.draft.mcpServers = this.draft.mcpServers.filter((s) => s !== name);
+    // Drop that connection's tools from spec.tools too — advertising them
+    // without the connection named would be a dead reference at run time.
+    this.draft.tools = this.draft.tools.filter((t) => mcpServerOf(t) !== name);
   }
 
   /** A tool's description for chip/option tooltips. */

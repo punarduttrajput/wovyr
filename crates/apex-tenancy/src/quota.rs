@@ -42,6 +42,12 @@ impl QuotaLimits {
             adding,
         )
     }
+
+    /// Admit one more configured MCP connection given `current` already
+    /// configured for the tenant (RM-MCX-P1-106, PRD-006).
+    pub fn check_mcp_connections(&self, current: u64) -> Result<()> {
+        check_count("max_mcp_connections", self.max_mcp_connections, current, 1)
+    }
 }
 
 /// Shared count check: `Ok` when unlimited or `current + delta <= limit`.
@@ -101,6 +107,19 @@ mod tests {
                 .check_llm_tokens(u64::MAX / 2, 1)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn enforces_mcp_connection_count_at_the_boundary() {
+        let q = QuotaLimits {
+            max_mcp_connections: Some(3),
+            ..Default::default()
+        };
+        assert!(q.check_mcp_connections(2).is_ok()); // 2 + 1 = 3 <= 3
+        let err = q.check_mcp_connections(3).unwrap_err(); // 3 + 1 = 4 > 3
+        assert!(matches!(err, Error::QuotaExceeded(_)));
+        // Unset = unlimited, same contract as every other dimension.
+        assert!(QuotaLimits::default().check_mcp_connections(1_000).is_ok());
     }
 
     /// SRV-202: a stored quota written before the dead dimensions were removed

@@ -26,10 +26,18 @@ use std::sync::Arc;
 
 /// Resolves `agent`-typed activities from `<agents_dir>/<name>.yaml` — no tenant,
 /// unhosted, no admission gate, matching `agents run --local`'s trust level
-/// (the [`AgentResolver`] trait's default methods already model exactly this, so
-/// this impl only needs `resolve`).
+/// (the [`AgentResolver`] trait's default methods already model exactly this).
+/// `resolve_mcp_tools` (RM-MCX-P2-204) is the one method this impl overrides: a
+/// local workflow's `agent` activity gets the same `spec.mcp_servers`
+/// resolution `agents run --local` does, against the tenant-less "" namespace
+/// of `mcp_store` (the real `~/.apex/mcp` store for [`engine`]'s real
+/// callers; an injectable field — rather than always opening
+/// [`crate::mcp::store`] internally — so tests can point this at a scratch
+/// directory instead of the operator's real connection catalog).
 struct FileAgentResolver {
     agents_dir: String,
+    mcp_store: apex_tools::McpConnectionStore,
+    mcp_cache: apex_tools::McpClientCache,
 }
 
 #[async_trait]
@@ -47,6 +55,25 @@ impl AgentResolver for FileAgentResolver {
                 path.display()
             )
         })
+    }
+
+    async fn resolve_mcp_tools(
+        &self,
+        _ctx: &ActivityContext,
+        connection_names: &[String],
+        registry: &mut ToolRegistry,
+    ) -> Result<Vec<String>, String> {
+        let vault = crate::mcp::secrets_vault();
+        self.mcp_cache
+            .resolve_agent_mcp_tools(
+                &self.mcp_store,
+                Some(&vault),
+                "",
+                connection_names,
+                registry,
+            )
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -73,6 +100,8 @@ fn engine(agents_dir: &str) -> apex_common::Result<Engine> {
         Arc::new(Gateway::from_env()),
         Arc::new(FileAgentResolver {
             agents_dir: agents_dir.to_string(),
+            mcp_store: crate::mcp::store()?,
+            mcp_cache: apex_tools::McpClientCache::default(),
         }),
     ));
     Ok(Engine::new(events, checkpoints, executor).with_timer_store(timers))
@@ -477,12 +506,32 @@ mod tests {
         }
     }
 
+    /// A scratch-directory-backed MCP connection store — never the operator's
+    /// real `~/.apex/mcp` catalog, since these are unit tests.
+    fn scratch_mcp_store(label: &str) -> apex_tools::McpConnectionStore {
+        let dir = std::env::temp_dir().join(format!(
+            "apex_cli_workflow_mcp_test_{label}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        apex_tools::McpConnectionStore::new(dir).unwrap()
+    }
+
     fn executor(agents_dir: &str) -> PlatformActivityExecutor {
+        executor_with_mcp(agents_dir, scratch_mcp_store("default"))
+    }
+
+    fn executor_with_mcp(
+        agents_dir: &str,
+        mcp_store: apex_tools::McpConnectionStore,
+    ) -> PlatformActivityExecutor {
         PlatformActivityExecutor::new(
             ToolRegistry::with_builtins(),
             Arc::new(Gateway::from_env()),
             Arc::new(FileAgentResolver {
                 agents_dir: agents_dir.to_string(),
+                mcp_store,
+                mcp_cache: apex_tools::McpClientCache::default(),
             }),
         )
     }
@@ -514,6 +563,70 @@ mod tests {
             .await
             .expect_err("missing agent file should fail");
         assert!(matches!(err, apex_workflow::ActivityError::Permanent(_)));
+    }
+
+    /// RM-MCX-P2-204: a local workflow's `agent` activity resolves its
+    /// declared `spec.mcp_servers` (against a scratch-directory-backed store,
+    /// never the operator's real `~/.apex/mcp`) and can run with the
+    /// resulting tool — proving `FileAgentResolver::resolve_mcp_tools` is
+    /// actually wired up, not just present.
+    #[tokio::test]
+    async fn agent_activity_resolves_declared_mcp_servers() {
+        let agents_dir = std::env::temp_dir().join(format!(
+            "apex_cli_workflow_mcp_agents_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&agents_dir);
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("docs-agent.yaml"),
+            "metadata:\n  name: docs-agent\nspec:\n  instructions: hi\n  mcp_servers: [docs]\n",
+        )
+        .unwrap();
+
+        let store = scratch_mcp_store("agent_uses_mcp");
+        store
+            .put(
+                "",
+                apex_tools::McpConnection {
+                    name: "docs".to_string(),
+                    transport: apex_tools::McpTransportConfig::Stdio {
+                        command: "node".to_string(),
+                        args: vec![
+                            "-e".to_string(),
+                            r#"
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { serverInfo: { name: 'x', version: '1' } } }) + '\n');
+  } else if (msg.method === 'tools/list') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'search_docs', description: 'search' }] } }) + '\n');
+  }
+});
+"#
+                            .to_string(),
+                        ],
+                    },
+                    secret_ref: None,
+                    secret_env_var: None,
+                    tool_permissions: None,
+                    created_ms: 1,
+                    updated_ms: 1,
+                },
+            )
+            .unwrap();
+
+        let exec = executor_with_mcp(&agents_dir.to_string_lossy(), store);
+        let out = exec
+            .execute(&ctx("agent", Some("docs-agent"), json!({"message": "hi"})))
+            .await
+            .expect("agent naming a configured MCP connection should run");
+        assert!(out.get("message").is_some());
+
+        let _ = std::fs::remove_dir_all(&agents_dir);
     }
 
     /// The full `research-team.yaml` fan-out/join pattern (FUT-001(b)) works through

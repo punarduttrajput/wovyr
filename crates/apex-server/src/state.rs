@@ -405,6 +405,11 @@ pub struct AppState {
     /// resolution, shared between the workflow engine's `ui` activity executor
     /// and the `/api/v1/ui/*` routes — they must see the same frame store.
     pub(crate) ui: Arc<crate::ui::UiRuntime>,
+    /// The MCP connection-management runtime (PRD-006): the durable
+    /// connection catalog + live-client cache backing the
+    /// `/api/v1/mcp/connections*` routes and (RM-MCX-P2-201) an agent
+    /// manifest's `spec.mcp_servers` resolution.
+    pub(crate) mcp: Arc<crate::mcp::McpRuntime>,
     /// API-key store backing `APEX_AUTH_MODE=apikey` ([SEC-101]).
     pub(crate) api_keys: Arc<dyn auth::ApiKeyStore>,
     /// Whether the anonymous default-tenant identity is granted a role set at all
@@ -513,6 +518,14 @@ impl AppState {
         // the `/api/v1/ui/*` routes read (RM-GUI-P1).
         let audit = Arc::new(crate::config::default_audit_log());
         let ui = Arc::new(crate::ui::UiRuntime::from_env(audit.clone()));
+        // Built before the engine (like `ui` above) so both the workflow
+        // executor's `agent`-activity `spec.mcp_servers` resolution
+        // (RM-MCX-P2-204) and the `/api/v1/mcp/connections*` routes share the
+        // same connection store and, crucially, the same live-client cache —
+        // building two `McpRuntime`s here would mean a connection dialed by a
+        // workflow run and one dialed by the API never reuse each other's
+        // cached client.
+        let mcp = Arc::new(crate::config::default_mcp_runtime());
         // Thread gateway + registry + the agent store + tenancy/quota into the workflow
         // engine so the shared executor can actually drive function/ai/agent activities
         // when the submit route runs a workflow (an `agent` activity looks up a stored
@@ -529,6 +542,8 @@ impl AppState {
                 tenant_labels: tenant_label_cap.clone(),
             },
             ui.clone(),
+            mcp.clone(),
+            secrets.clone(),
         );
         let workflow_owners_path = crate::config::workflows_dir().map(|d| d.join("owners.json"));
         let workflow_owners = crate::config::load_owners(workflow_owners_path.as_deref());
@@ -580,6 +595,7 @@ impl AppState {
             kms,
             audit,
             ui,
+            mcp,
             api_keys: auth::default_api_key_store(),
             anonymous_allowed: auth::resolve_anonymous_allowed(),
             auth_mode: auth::AuthMode::from_env(),
@@ -655,6 +671,14 @@ impl AppState {
     /// Override the tenancy store (used by tests to inject a seeded in-memory store).
     pub fn with_tenancy(mut self, store: Arc<dyn TenancyStore>) -> Self {
         self.tenancy = store;
+        self
+    }
+
+    /// Override the MCP connection runtime (tests inject a scratch-directory-backed
+    /// instance instead of touching the real `~/.apex/mcp`).
+    #[cfg(test)]
+    pub(crate) fn with_mcp(mut self, mcp: Arc<crate::mcp::McpRuntime>) -> Self {
+        self.mcp = mcp;
         self
     }
 

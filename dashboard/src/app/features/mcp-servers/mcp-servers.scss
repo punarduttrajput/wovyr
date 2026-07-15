@@ -1,0 +1,45 @@
+.view { padding:24px 26px 60px; }
+
+.mcp-grid { display:grid; grid-template-columns:1fr 1.3fr; gap:16px; align-items:start; }
+@media (max-width:1080px) {
+  .mcp-grid { grid-template-columns:1fr; }
+}
+
+.pad { padding:18px 16px; font-size:13px; }
+.mini { font-size:11px; }
+
+.status-bar {
+  margin-bottom:16px; padding:9px 14px; border-radius:var(--r-sm); font-size:13px; font-weight:500;
+  background:var(--ok-bg); color:var(--ok); border:1px solid color-mix(in srgb, var(--ok) 25%, transparent);
+}
+.status-bar.err {
+  background:var(--crit-bg); color:var(--crit);
+  border-color:color-mix(in srgb, var(--crit) 25%, transparent);
+}
+
+.transport-choice { display:flex; flex-direction:column; gap:6px; }
+.transport-choice .radio { display:flex; align-items:center; gap:8px; font-weight:500; font-size:13px; }
+.transport-choice .radio input { width:auto; }
+.transport-choice .radio.disabled { color:var(--ink-3); font-weight:400; }
+
+table { width:100%; border-collapse:collapse; font-size:13px; }
+thead th {
+  font-family:var(--mono); font-size:10px; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--ink-3); text-align:left; padding:9px 16px; border-bottom:1px solid var(--line-2); font-weight:600;
+}
+thead th.num, td.num { text-align:right; }
+tbody td { padding:10px 16px; border-bottom:1px solid var(--line-2); vertical-align:middle; }
+tbody tr:last-child td { border-bottom:0; }
+tbody tr:hover { background:var(--surface-2); }
+
+.role-tag {
+  font-family:var(--mono); font-size:10.5px; padding:2px 7px; border-radius:5px;
+  background:var(--neutral-bg); color:var(--ink-2); font-weight:600; margin-right:4px; display:inline-block;
+}
+
+.btn.danger { color:var(--crit); border-color:color-mix(in srgb, var(--crit) 25%, var(--line)); }
+.btn.danger:hover { border-color:var(--crit); background:var(--crit-bg); }
+.btn.mini { padding:5px 10px; font-size:12px; margin-left:6px; }
+.sub-btn { padding:4px 10px; font-size:12px; }
+
+code { font-family:var(--mono); font-size:12px; background:var(--neutral-bg); padding:1px 5px; border-radius:4px; }

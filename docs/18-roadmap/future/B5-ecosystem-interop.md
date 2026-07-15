@@ -7,10 +7,11 @@ Document ID: FUT-005
 
 **Document ID:** FUT-005
 **File Path:** `docs/18-roadmap/future/B5-ecosystem-interop.md`
-**Version:** 1.1.0
-**Status:** Exploratory — research bet, not committed
+**Version:** 1.2.0
+**Status:** Exploratory — research bet, not committed (narrowed 2026-07-15: the
+inbound MCP-connection slice graduated out to PRD-006, see scope note below)
 **Owner:** Ecosystem Team
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-15
 
 ---
 
@@ -29,6 +30,16 @@ Exploratory — graduates only via an [ADR](../../17-adr/index.md).
 > (near-term GA completion, [PRD-002 §5.4](../../01-product/prd-future.md#54-ecosystem-marketplace-economics--safety)),
 > not part of this exploratory doc. This doc covers the *interop and federation*
 > frontier only.
+>
+> **Scope note (2026-07-15).** The *inbound* half of "MCP gateway" below — Apex
+> consuming external MCP servers, made usable without writing code — is no
+> longer exploratory: it graduated to a committed, scoped milestone,
+> [PRD-006](../../01-product/prd-mcp-connections.md) /
+> [v1.3 roadmap](../v1.3-mcp-connections.md). What remains exploratory here is
+> narrower than before: the *outbound* direction (Apex's own tools/agents
+> reachable **over** MCP by external clients) and cross-org federation. Read
+> "MCP gateway" below as that narrower remainder, not the inbound
+> connection-management PRD-006 already covers.
 
 ---
 
@@ -144,5 +155,6 @@ Per-slice; federation specifically becomes an ADR + roadmap slot only with:
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-15 | Narrowed scope: the inbound MCP-connection-management slice (consuming external MCP servers, made usable without code) graduated to a committed milestone — [PRD-006](../../01-product/prd-mcp-connections.md) / [v1.3 roadmap](../v1.3-mcp-connections.md). This doc now covers only the outbound gateway + federation remainder |
 | 1.1.0 | 2026-07-07 | Added gRPC explicitly under the MCP/protocol-interop direction — named in the Day-1 architecture docs but never built; this is now where that gap is tracked. Found during a project-wide doc review |
 | 1.0.0 | 2026-07-05 | Initial exploration doc for the ecosystem/interop research bet |

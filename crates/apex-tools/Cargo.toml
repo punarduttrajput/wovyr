@@ -15,6 +15,7 @@ wasi = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasi-common"]
 [dependencies]
 apex-common.workspace = true
 apex-provider.workspace = true
+apex-secrets.workspace = true
 apex-ui.workspace = true
 apex-ui-guard.workspace = true
 # `#[derive(Tool)]` (SBX-303) + the `schemars::JsonSchema` derive its generated
