@@ -23,8 +23,10 @@ import type {
   SecretMetadata,
   SubmitWorkflowRequest,
   ToolSummary,
+  UiDecisionOutcome,
   UiDecisionRequest,
   UiDecisionResult,
+  UiFrame,
   WorkflowListParams,
   WorkflowValidation,
 } from "./types.js";
@@ -649,11 +651,21 @@ class ToolsResource {
   }
 }
 
-/** Generative UI (PRD-005 RM-GUI-P1): pending validated frames and typed human
- * decisions. `@apex/ui-react` builds on these same three routes — reach for it
- * instead of hand-rolling a renderer against this resource directly. */
+/** Generative UI (PRD-005 RM-GUI-P1/P3): pending validated frames and typed
+ * human decisions. `@apex/ui-react` builds on these same routes — reach for
+ * it instead of hand-rolling a renderer against this resource directly. */
 class UiResource {
   constructor(private readonly http: HttpClient) {}
+
+  /** `POST /api/v1/ui/present` (RM-GUI-P3 EMB-701) — present a frame with
+   * **no workflow or agent adoption required at all**: the standalone
+   * middleware entry point. Runs the identical trust layer the workflow `ui`
+   * activity uses; a policy block throws {@link ApexApiError} with
+   * `status === 403`. Decide it and retrieve the outcome the same way as any
+   * other frame — `decide`/`getDecision` below don't care how it was presented. */
+  async present(frame: UiFrame, opts?: IdempotentOpts): Promise<PendingUiFrame> {
+    return this.http.request("POST", "/api/v1/ui/present", { frame }, { headers: idemHeaders(opts) });
+  }
 
   /** `GET /api/v1/ui/frames` — the caller's tenant's pending validated frames. */
   async list(): Promise<{ data: PendingUiFrame[] }> {
@@ -680,5 +692,15 @@ class UiResource {
       req,
       { headers: idemHeaders(opts) },
     );
+  }
+
+  /** `GET /api/v1/ui/decisions/{frame_id}` (RM-GUI-P3 EMB-701) — retrieve a
+   * **standalone** frame's recorded decision after the pending record is
+   * gone; a workflow-backed frame's outcome lives in the workflow's own
+   * state/output instead (`workflows.get`). Throws {@link ApexApiError} with
+   * `status === 404` if nothing was ever recorded (unknown, still pending,
+   * workflow-backed, or a different tenant). */
+  async getDecision(frameId: string): Promise<UiDecisionOutcome> {
+    return this.http.request("GET", `/api/v1/ui/decisions/${encodeURIComponent(frameId)}`);
   }
 }

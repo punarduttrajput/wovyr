@@ -83,3 +83,10 @@ frame in a real browser.
   [`examples/workflows/ui-checkout-approve.yaml`](../../workflows/ui-checkout-approve.yaml)
   and [`ui-checkout-block.yaml`](../../workflows/ui-checkout-block.yaml)
   verbatim (a static demo can't read server-side files at runtime).
+- `web-component.html` / `src/webComponentDemo.js` — a second, deliberately
+  React-free entry point proving `<apex-ui-frame>` (RDR-402,
+  `@apex/ui-react/web-component`) renders and dispatches a `decide`
+  `CustomEvent` from a page that never imports React itself — the shape a
+  non-React host (the dashboard's Angular shell, a design partner's own app)
+  would actually use. Open `/web-component.html` with the same `npm run dev`
+  above; it renders a static sample frame, no server required.

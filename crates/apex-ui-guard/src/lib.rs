@@ -25,6 +25,8 @@ use apex_common::{Error, Result};
 use apex_ui::{ActionClass, UiFrame, UiNode};
 use serde::{Deserialize, Serialize};
 
+pub mod conformance;
+
 /// Rule identifiers, stable for audit records (GRD-205) and tests.
 pub mod rules {
     /// Frame exceeds the policy's node budget.

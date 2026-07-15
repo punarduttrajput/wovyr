@@ -455,6 +455,54 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
       },
     );
   });
+
+  // RM-GUI-P3 EMB-701: the standalone-middleware claim, proven from the SDK
+  // side too — present a frame with zero workflow/agent involvement, decide
+  // it, and retrieve the recorded outcome afterward.
+  test("EMB-701: present/decide/getDecision works with no workflow at all", async (t) => {
+    if (!serverAvailable) return t.skip("no server");
+    const c = adminClient();
+    const frame = {
+      schema_version: "1.0.0",
+      title: "Approve refund",
+      root: {
+        type: "column",
+        children: [
+          { type: "text", text: "Refund $42.00?" },
+          { type: "button", action: "approve", label: "Approve", class: "approve" },
+        ],
+      },
+    };
+    let pending: Awaited<ReturnType<typeof c.ui.present>>;
+    try {
+      pending = await c.ui.present(frame);
+    } catch (err) {
+      if (err instanceof ApexApiError && err.status === 403 && err.code === "forbidden") {
+        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      }
+      if (err instanceof ApexApiError && err.code === "blocked") {
+        return t.skip(
+          "no ui policy configured — see examples/policies/default-ui-policy.yaml",
+        );
+      }
+      throw err;
+    }
+    assert.equal(pending.execution_id, null);
+    assert.equal(pending.activity_id, null);
+
+    await assert.rejects(
+      () => c.ui.getDecision(pending.frame_id),
+      (err: unknown) => err instanceof ApexApiError && err.status === 404,
+    );
+
+    const decided = await c.ui.decide(pending.frame_id, { action: "approve" });
+    assert.equal(decided.status, "decided");
+    assert.equal(decided.execution_id, null);
+
+    const outcome = await c.ui.getDecision(pending.frame_id);
+    assert.equal(outcome.action, "approve");
+    assert.equal(outcome.frame_hash, pending.frame_hash);
+  });
 });
 
 describe("HttpClient retry (unit, mocked fetch)", () => {

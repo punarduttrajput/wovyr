@@ -245,16 +245,28 @@ export interface ToolSummary {
   permissions: string[] | null;
 }
 
+/** A minimal shape for a UiFrame document — `root` is left `unknown` (a
+ * generic API client shouldn't need to parse the component vocabulary);
+ * `@apex/ui-react` owns the typed, full `UiFrame` shape and rendering. Enough
+ * to *submit* a frame (`ui.present`); reach for `@apex/ui-react` to *build*
+ * or *render* one. */
+export interface UiFrame {
+  schema_version: string;
+  title?: string;
+  root: unknown;
+}
+
 /** A pending, already-validated generative-UI frame awaiting a human decision
- * (PRD-005 RM-GUI-P1). `frame` is left `unknown` — a generic API client
- * shouldn't need to parse the component vocabulary; `@apex/ui-react` owns the
- * typed `UiFrame` shape and rendering, and can consume this envelope
- * directly (its `frame`/`frame_hash` fields are exactly what
- * `verifyFrame`/`UiFrameView` expect). */
+ * (PRD-005 RM-GUI-P1/P3). `frame` is left `unknown` for the same reason as
+ * {@link UiFrame} — `@apex/ui-react` owns rendering, and can consume this
+ * envelope directly (its `frame`/`frame_hash` fields are exactly what
+ * `verifyFrame`/`UiFrameView` expect). `execution_id`/`activity_id` are
+ * `null` for a **standalone** frame (RM-GUI-P3 EMB-701, `ui.present`) — one
+ * presented with no workflow/agent involvement at all. */
 export interface PendingUiFrame {
   frame_id: string;
-  execution_id: string;
-  activity_id: string;
+  execution_id: string | null;
+  activity_id: string | null;
   frame: unknown;
   frame_hash: string;
   /** Which policy judged the frame: `name@vN`, `hosted-floor`, or
@@ -270,6 +282,18 @@ export interface PendingUiFrame {
 export interface UiDecisionRequest {
   action: string;
   values?: Record<string, unknown>;
+}
+
+/** `GET /api/v1/ui/decisions/{frame_id}` response (RM-GUI-P3 EMB-701) — a
+ * standalone frame's recorded decision, retrievable after the pending record
+ * is gone. */
+export interface UiDecisionOutcome {
+  frame_id: string;
+  action: string;
+  values: Record<string, unknown>;
+  decided_by: string;
+  decided_at_ms: number;
+  frame_hash: string;
 }
 
 export interface UiDecisionResult {

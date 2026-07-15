@@ -1,0 +1,77 @@
+<section class="view">
+  <div class="page-head">
+    <div>
+      <div class="eyebrow">Build / Surfaces</div>
+      <h1>Surfaces</h1>
+      <p>Compose a real generative-UI frame, present it through the trust runtime's
+        standalone middleware route (no workflow involved), and decide it yourself —
+        the same <code>ui:read</code>/<code>ui:write</code>-scoped path a design
+        partner's own integration uses.</p>
+    </div>
+  </div>
+
+  @if (status()) {
+    <div class="status-bar" [class.err]="status().startsWith('Error') || status().startsWith('Blocked')">
+      {{ status() }}
+    </div>
+  }
+
+  <div class="surfaces-grid">
+    <!-- compose -->
+    <div class="card pad">
+      <div class="card-h"><h3>Compose a frame</h3></div>
+      <div class="field">
+        <label>Title</label>
+        <input type="text" [(ngModel)]="title" placeholder="Confirm refund" />
+      </div>
+      <div class="field">
+        <label>Message</label>
+        <textarea [(ngModel)]="message" rows="3"
+          placeholder="Refund $42.00 to order #A1017?"></textarea>
+      </div>
+      <div class="field checkbox-field">
+        <label>
+          <input type="checkbox" [(ngModel)]="includeDestructive" />
+          Include a destructive action (GRD-201 blocks this by default — try it)
+        </label>
+      </div>
+      <button class="btn pri" [disabled]="busy()" (click)="present()">
+        {{ busy() ? 'Presenting…' : 'Present frame' }}
+      </button>
+    </div>
+
+    <!-- result -->
+    <div class="card pad">
+      <div class="card-h"><h3>Result</h3>
+        @if (pending() || blockedReason()) {
+          <button class="btn sub-btn right" (click)="reset()">Clear</button>
+        }
+      </div>
+
+      @if (blockedReason()) {
+        <div class="apex-ui-integrity-warning" role="alert">
+          <strong>Blocked by the trust layer.</strong>
+          <p>{{ blockedReason() }}</p>
+        </div>
+      }
+
+      @if (pending(); as pf) {
+        <div class="frame-meta mini muted">
+          <span>frame_id <code>{{ pf.frame_id }}</code></span>
+          <span>policy <code>{{ pf.policy_ref }}</code></span>
+        </div>
+        <apex-ui-frame #frameEl (decide)="onDecide($event)"></apex-ui-frame>
+      }
+
+      @if (outcome(); as o) {
+        <div class="card-h"><h3>Recorded decision</h3></div>
+        <pre class="outcome-json">{{ o | json }}</pre>
+      }
+
+      @if (!pending() && !blockedReason() && !outcome()) {
+        <p class="muted mini pad-sm">Nothing presented yet — compose a frame and click
+          "Present frame".</p>
+      }
+    </div>
+  </div>
+</section>
