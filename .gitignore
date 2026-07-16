@@ -15,3 +15,4 @@ Thumbs.db
 
 # Local-only AI-assistant context (kept out of the public repo)
 /CLAUDE.md
+/CLAUDE.full.md
