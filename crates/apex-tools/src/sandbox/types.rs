@@ -289,7 +289,9 @@ pub struct SandboxCommand {
     /// Working directory (bind-mounted to `/workspace` for container backends).
     pub workdir: String,
     /// Environment variables injected into the sandbox (e.g. resolved secrets, in
-    /// memory). Honored by the WASI backend; zeroed with the command on teardown.
+    /// memory). Honored by the WASI and container backends (the latter passes names
+    /// on the argv and values via the CLI process env, keeping secret values out of
+    /// host process listings); zeroed with the command on teardown.
     pub env: Vec<(String, String)>,
     /// Resource limits.
     pub limits: ResourceLimits,

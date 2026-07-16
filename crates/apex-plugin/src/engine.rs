@@ -258,8 +258,8 @@ pub struct CapabilityCall<'a> {
 /// Loads and executes a plugin capability's artifact in isolation — the bridge to the
 /// [Tool Runtime](../../docs/07-tool-runtime/index.md) sandbox loader. The engine
 /// constructs the [`PluginTool`] wrapper; the runtime performs the actual sandboxed
-/// invocation. Pluggable so a future wasm/container loader drops in without touching
-/// the control plane.
+/// invocation. Pluggable so a loader (the WASM and container loaders in
+/// [`runtime`](crate::runtime)) drops in without touching the control plane.
 #[async_trait]
 pub trait CapabilityRuntime: Send + Sync {
     /// Invoke a capability with `request`, returning its tool response.
@@ -270,9 +270,9 @@ pub trait CapabilityRuntime: Send + Sync {
     ) -> std::result::Result<ToolResponse, ToolError>;
 }
 
-/// The default runtime: capabilities register and advertise correctly but cannot yet
-/// execute, since the sandbox loader is deferred. Calls fail closed with a clear
-/// message rather than silently no-op'ing.
+/// The default runtime: capabilities register and advertise correctly but cannot
+/// execute until a loader from [`runtime`](crate::runtime) is configured. Calls fail
+/// closed with a clear message rather than silently no-op'ing.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NotLoadedRuntime;
 
@@ -834,9 +834,6 @@ fn tool_metadata(manifest: &PluginManifest, cap: &CapabilityDescriptor) -> ToolM
 /// An empty `tenant` (no tenant context — e.g. the operator `plugin run` path) injects
 /// nothing; a wildcard grant (`secret:read:*`) is skipped, since no concrete secret name
 /// can be enumerated from it.
-///
-/// Compiled only where used — the WASM runtime (`wasi` feature) and tests.
-#[cfg(any(test, feature = "wasi"))]
 pub(crate) fn resolve_secret_env(
     declared_permissions: &[String],
     tenant: &str,
@@ -866,7 +863,6 @@ pub(crate) fn resolve_secret_env(
 
 /// Map a secret name to the env var it is injected as: `APEX_SECRET_<UPPER_SNAKE>`
 /// (non-alphanumeric characters become `_`).
-#[cfg(any(test, feature = "wasi"))]
 fn secret_env_var(name: &str) -> String {
     let upper: String = name
         .chars()

@@ -3,7 +3,7 @@
 use super::types::{
     CommandOutcome, NetworkPolicy, ResourceLimits, SandboxBackend, SandboxCommand, SandboxError,
 };
-use super::{NativeSandbox, Sandbox};
+use super::{Sandbox, cap};
 use async_trait::async_trait;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -75,6 +75,7 @@ impl ContainerSandbox {
             cmd,
             &self.network,
             proxy_port,
+            false,
         )
     }
 
@@ -91,6 +92,28 @@ impl Sandbox for ContainerSandbox {
     }
 
     async fn execute(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
+        self.execute_inner(cmd, None).await
+    }
+}
+
+impl ContainerSandbox {
+    /// Like [`Sandbox::execute`], but launches the container interactive (`-i`),
+    /// feeds `stdin` to the wrapped command, and closes the pipe (EOF) once written —
+    /// the stdin/stdout half of the plugin capability ABI
+    /// ([sandbox §loading model](../../../docs/08-plugin-sdk/sandbox.md)).
+    pub async fn execute_with_stdin(
+        &self,
+        cmd: &SandboxCommand,
+        stdin: Vec<u8>,
+    ) -> Result<CommandOutcome, SandboxError> {
+        self.execute_inner(cmd, Some(stdin)).await
+    }
+
+    async fn execute_inner(
+        &self,
+        cmd: &SandboxCommand,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<CommandOutcome, SandboxError> {
         if self.network.needs_proxy() {
             // Fail closed (SBX-304) *before* ever starting a container: a non-empty
             // egress allow-list is only meaningfully enforced by the host-side
@@ -119,26 +142,23 @@ impl Sandbox for ContainerSandbox {
                     self.runtime
                 )));
             }
-            return self.execute_with_egress_lockdown(cmd).await;
+            return self.execute_with_egress_lockdown(cmd, stdin).await;
         }
 
         // Deny-all (`--network none`, already airtight) or a fully open bridge
-        // (the policy explicitly permits all egress): no proxy, no lockdown, the
-        // existing single foreground `run` is sufficient.
-        let argv = self.argv(cmd);
-        let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
-        let outer = ResourceLimits {
-            timeout: cmd.limits.timeout,
-            max_output_bytes: cmd.limits.max_output_bytes,
-            ..ResourceLimits::default()
-        };
-        NativeSandbox::with_limits(outer)
-            .run(&argv[0], &args, ".")
-            .await
+        // (the policy explicitly permits all egress): no proxy, no lockdown, a
+        // single foreground `run` is sufficient.
+        let argv = container_argv(
+            &self.runtime,
+            self.runtime_class.as_deref(),
+            &self.image,
+            cmd,
+            &self.network,
+            None,
+            stdin.is_some(),
+        );
+        run_cli(&argv, &cmd.env, stdin, &cmd.limits).await
     }
-}
-
-impl ContainerSandbox {
     /// Run `cmd` under a host-enforced egress lockdown (closes the "L3 egress
     /// bypass" gap — see `egress_lockdown` module docs): start the container
     /// detached running an inert placeholder (never the untrusted command),
@@ -150,6 +170,7 @@ impl ContainerSandbox {
     async fn execute_with_egress_lockdown(
         &self,
         cmd: &SandboxCommand,
+        stdin: Option<Vec<u8>>,
     ) -> Result<CommandOutcome, SandboxError> {
         const NETWORK: &str = "bridge";
         let gateway = crate::egress_lockdown::docker_network_gateway(&self.runtime, NETWORK)
@@ -189,7 +210,7 @@ impl ContainerSandbox {
 
         // From here on, every path must remove the container before returning.
         let result = self
-            .run_locked_down(cmd, &container_id, &gateway, proxy.port())
+            .run_locked_down(cmd, stdin, &container_id, &gateway, proxy.port())
             .await;
         let _ = Command::new(&self.runtime)
             .args(["rm", "-f", &container_id])
@@ -209,6 +230,7 @@ impl ContainerSandbox {
     async fn run_locked_down(
         &self,
         cmd: &SandboxCommand,
+        stdin: Option<Vec<u8>>,
         container_id: &str,
         gateway: &str,
         proxy_port: u16,
@@ -216,26 +238,94 @@ impl ContainerSandbox {
         let pid = crate::egress_lockdown::container_pid(&self.runtime, container_id).await?;
         crate::egress_lockdown::lock_down_egress(pid, gateway, proxy_port).await?;
 
-        let mut exec_argv = vec![
-            self.runtime.clone(),
-            "exec".to_string(),
-            container_id.to_string(),
-        ];
+        let mut exec_argv = vec![self.runtime.clone(), "exec".to_string()];
+        if stdin.is_some() {
+            exec_argv.push("-i".to_string());
+        }
+        // Env variable *names* only — the values travel via the CLI's own process
+        // environment (see `run_cli`), never the argv.
+        for (name, _) in &cmd.env {
+            exec_argv.push("-e".to_string());
+            exec_argv.push(name.clone());
+        }
+        exec_argv.push(container_id.to_string());
         exec_argv.push(cmd.program.clone());
         exec_argv.extend(cmd.args.iter().cloned());
-        let exec_args: Vec<&str> = exec_argv[1..].iter().map(String::as_str).collect();
 
         // The container's own cgroup limits (already applied at creation) enforce
         // memory/CPU/pids; this outer run only arms the wall-clock timeout and
         // output cap, exactly like the non-lockdown path.
-        let outer = ResourceLimits {
-            timeout: cmd.limits.timeout,
-            max_output_bytes: cmd.limits.max_output_bytes,
-            ..ResourceLimits::default()
-        };
-        NativeSandbox::with_limits(outer)
-            .run(&exec_argv[0], &exec_args, ".")
-            .await
+        run_cli(&exec_argv, &cmd.env, stdin, &cmd.limits).await
+    }
+}
+
+/// Run a container-CLI invocation (`docker run`/`docker exec`), arming only the
+/// wall-clock timeout and output cap — resource enforcement is the container's
+/// cgroups, applied via the argv's own flags. `client_env` is set on the CLI
+/// *process* so `-e NAME` argv entries resolve to their values daemon-side without
+/// the values ever appearing in a host process listing; `stdin` (when present) is
+/// written to the CLI's piped stdin and closed (EOF) once delivered.
+async fn run_cli(
+    argv: &[String],
+    client_env: &[(String, String)],
+    stdin: Option<Vec<u8>>,
+    limits: &ResourceLimits,
+) -> Result<CommandOutcome, SandboxError> {
+    let mut command = Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for (name, value) in client_env {
+        command.env(name, value);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| SandboxError::Spawn(format!("`{}`: {e}", argv[0])))?;
+    if let Some(bytes) = stdin {
+        use tokio::io::AsyncWriteExt;
+        let mut pipe = child
+            .stdin
+            .take()
+            .ok_or_else(|| SandboxError::Internal("container stdin pipe unavailable".into()))?;
+        // Write concurrently with the output drain: a guest that emits output
+        // before consuming its input must not deadlock against a full pipe.
+        tokio::spawn(async move {
+            let _ = pipe.write_all(&bytes).await;
+            let _ = pipe.shutdown().await;
+        });
+    }
+    match tokio::time::timeout(limits.timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            let (stdout, t1) = cap(&output.stdout, limits.max_output_bytes);
+            let (stderr, t2) = cap(&output.stderr, limits.max_output_bytes);
+            let (signal, resource_exceeded) = super::native::terminating_signal(&output.status);
+            Ok(CommandOutcome {
+                exit_code: output.status.code(),
+                stdout,
+                stderr,
+                timed_out: false,
+                truncated: t1 || t2,
+                signal,
+                resource_exceeded,
+            })
+        }
+        Ok(Err(e)) => Err(SandboxError::Internal(format!("process error: {e}"))),
+        Err(_elapsed) => Ok(CommandOutcome {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!("execution exceeded timeout of {:?}", limits.timeout),
+            timed_out: true,
+            truncated: false,
+            signal: None,
+            resource_exceeded: false,
+        }),
     }
 }
 
@@ -294,7 +384,11 @@ fn container_lockdown_create_argv(
     a
 }
 
-/// Build the container launch argv. See [`ContainerSandbox::argv`].
+/// Build the container launch argv. See [`ContainerSandbox::argv`]. With `stdin`,
+/// the run is interactive (`-i`) so piped input reaches the wrapped command.
+/// [`SandboxCommand::env`] contributes variable *names* only (`-e NAME`) — the
+/// values are supplied through the container CLI's process environment (`run_cli`),
+/// keeping secrets out of host process listings.
 fn container_argv(
     runtime: &str,
     runtime_class: Option<&str>,
@@ -302,8 +396,16 @@ fn container_argv(
     cmd: &SandboxCommand,
     network: &NetworkPolicy,
     proxy_port: Option<u16>,
+    stdin: bool,
 ) -> Vec<String> {
     let mut a: Vec<String> = vec![runtime.to_string(), "run".into(), "--rm".into()];
+    if stdin {
+        a.push("-i".into());
+    }
+    for (name, _) in &cmd.env {
+        a.push("-e".into());
+        a.push(name.clone());
+    }
     if let Some(rc) = runtime_class {
         a.push("--runtime".into());
         a.push(rc.to_string());
@@ -445,6 +547,34 @@ mod tests {
         assert_eq!(&argv[img + 1..], &["echo".to_string(), "hi".to_string()]);
         // No runtime override for the plain container backend.
         assert!(!argv.iter().any(|s| s == "--runtime"));
+    }
+
+    #[test]
+    fn stdin_run_is_interactive_and_env_argv_carries_names_only() {
+        let mut c = sample_cmd();
+        c.env = vec![("APEX_SECRET_TOKEN".into(), "t0p-secret".into())];
+        let argv = container_argv(
+            "docker",
+            None,
+            "alpine:3.20",
+            &c,
+            &NetworkPolicy::default(),
+            None,
+            true,
+        );
+        // Interactive, so piped stdin reaches the wrapped command.
+        assert!(argv.iter().any(|s| s == "-i"), "{argv:?}");
+        // The env var travels by *name*; its value must never hit the argv
+        // (it would be visible in a host `ps` otherwise).
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "APEX_SECRET_TOKEN"),
+            "{argv:?}"
+        );
+        assert!(!argv.join(" ").contains("t0p-secret"), "{argv:?}");
+        // A stdin-less, env-free run keeps its exact pre-stdin argv shape.
+        let plain = ContainerSandbox::docker("alpine:3.20").argv(&sample_cmd());
+        assert!(!plain.iter().any(|s| s == "-i" || s == "-e"), "{plain:?}");
     }
 
     #[test]

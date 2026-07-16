@@ -7,10 +7,10 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.8.0
-**Status:** In progress — ECO-301, ECO-302, ECO-304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), DEP-301 done; everything else planned
+**Version:** 1.9.0
+**Status:** In progress — ECO-301..304 (all but ECO-305 of WS-F's ECO row), WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), SEC-301, DEP-301 done; everything else planned
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
-**Last Updated:** 2026-07-14
+**Last Updated:** 2026-07-16
 
 ---
 
@@ -161,7 +161,7 @@ publish` one-shotting sign+digest+trust output (ECO-304, which depends on
 this), SBOM/provenance auto-fill in `build`, and publishing the SDK crate
 to crates.io.
 
-## ECO-303 `[P2]` — Container capability loader
+## ECO-303 `[P2]` — Container capability loader — **DONE (2026-07-16)**
 
 **Problem.** Only `WasiCapabilityRuntime` exists; without the `wasi` feature the
 default `NotLoadedRuntime` errors on call (`crates/apex-plugin/src/{lib.rs:31-34,
@@ -172,6 +172,29 @@ runtime.rs:20-33}`). (PRD-004 R-F.3; audit Med.)
 **Acceptance criteria.** A gated test runs a container-backed capability end to end.
 
 **Files.** `crates/apex-plugin/src/runtime.rs`. **Size.** M. **Depends on:** SBX-101.
+
+**Resolution.** `ContainerCapabilityRuntime` (`runtime.rs`, now compiled
+unconditionally — the WASM loader stays behind `wasi`): Docker/Podman/gVisor
+constructors over `ContainerSandbox`, speaking the exact WASM-loader ABI (request
+JSON → stdin, response JSON ← stdout, `with_secrets` → `APEX_SECRET_*` env,
+`with_limits`/`with_network` pass-through; shared `staged_entry` +
+`capability_response` helpers so the two loaders can't drift). The staged artifact
+dir is bind-mounted at `/workspace` and the entry runs inside the image (exec bit
+stamped at invoke — staging preserves no mode bits). Routing is fail-closed both
+ways: the container loader only accepts manifest `sandbox: container|gvisor`, the
+WASM loader only `wasm|wasi|` — and a `gvisor` capability on a plain-Docker runtime
+is refused, never silently demoted. Enabler in apex-tools:
+`ContainerSandbox::execute_with_stdin` (a `-i` interactive run feeding piped stdin,
+unified with `execute` incl. the egress-lockdown `docker exec` path), which also
+makes the backend honor `SandboxCommand.env` — variable *names* on the argv
+(`-e NAME`), values via the CLI's process environment, so secrets never appear in a
+host `ps`. Proven by docker-gated end-to-end tests (install → enable → registry
+execute of a `/bin/sh` capability round-tripping stdin + injected secret; a gVisor
+variant runs the same flow under `runsc`) plus ungated fail-closed unit tests
+(wrong-sandbox / gvisor-demotion / missing staging/entry) and an argv unit test
+that asserts the secret value is absent from the argv. Not done here (later
+slices): a microVM loader, and wiring a container runtime choice into the CLI's
+`plugin run` (WASI-only today via `--features plugin-wasi`).
 
 ## ECO-304 `[P2]` — One-shot `apex plugin publish` — **DONE (2026-07-14)**
 
@@ -1325,4 +1348,5 @@ lint and load.
 | 1.5.0 | 2026-07-14 | WFL-303..308 (all remaining WS-H tickets) implemented and marked DONE with implementation notes, closing out WS-H entirely: WFL-303 fail-closed activity-output size cap (permanent failure via the saga path, not a hard abort); WFL-304 event-log paging (`history_page`, real bounded `FileStore`/`PostgresStore` implementations) + explicit opt-in retention (`compact_history`), plus a proof that `resume` already never reads the log at all; WFL-305 indexed `workflow_name`/`status` Postgres columns + SQL-side filtering/pagination (migration V3), proven via a deliberately-corrupt non-matching row that would fail to decode if `list()` ever fell back to scanning; WFL-306 a `fire_at`-sorted `BTreeSet` index for `InMemoryTimerStore` + `TimerDispatcher`/`ScheduleDispatcher::run_adaptive` (sleep until the next deadline, capped at a max interval), proven with a real wall-clock near-deadline-timer test; WFL-307 an `ActivityContext.progress` channel + `ActivityProgress` event, live on the sequential activity path via `tokio::select!`; WFL-308 a versioned event wire envelope (`encode_event`/`decode_event`, fail-closed on an unknown future version) now used by every store. 30 new tests total; full `apex-workflow` suite + whole-workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
 | 1.6.0 | 2026-07-14 | SBX-301..304 (all of WS-E) implemented and marked DONE with implementation notes, closing out WS-E entirely: SBX-301 a confined `fs_write` builtin (opt-in like `shell`) with a write-specific symlink-escape guard beyond `fs_read`'s existing confinement; SBX-302 a sandboxed `code_execute` tool (Python/Node) routed through the identical SBX-101/SEC-305 backend selection `ShellTool` uses, resource-limited and egress-controlled, including a real Windows "app execution alias" false-positive found and fixed in the test gating itself; SBX-303 a new `apex-tool-macros` proc-macro crate (`#[derive(Tool)]`) generating `ToolMetadata`/JSON-Schema (via `schemars`)/typed-parse boilerplate so a tool author never hand-writes a schema literal or a `.get().and_then()` chain; SBX-304 an explicit, documented platform-matrix fail-closed check (Linux+Docker only) in `ContainerSandbox::execute`, replacing what used to be only an *accidental* fail-closed side effect of a missing `nsenter` binary, and additionally closing a real, previously-unguarded Podman gap. 27 new tests total (8 fs_write + 9 code_execute + 4 derive(Tool) + 2 registry opt-in + 4 egress-lockdown-gate); full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
 | 1.7.0 | 2026-07-14 | SRV-302..307 (all of WS-G) implemented and marked DONE with implementation notes, closing out WS-G entirely: SRV-302 an mtime-stamped in-memory cache for `FileApiKeyStore` (one `stat()` replaces a full read+parse per request in the common case); SRV-303 a real generated OpenAPI spec (`#[utoipa::path]` on all ~65 routes + `ToSchema` request/error types, served at `GET /openapi.json`, verified live end-to-end via a real `apex dev` server + `redocly lint` at 0 errors, with the CI contract gate repointed at the live document instead of the hand-written `openapi.yaml`); SRV-304 `lib.rs`'s inline test suite moved to a file-backed `tests.rs` submodule (2,842 → 444 lines, same crate-internal visibility, no `pub` widening); SRV-305 the idempotency store rewritten from a per-`put` full-file rewrite to an append-only JSON-lines log with periodic compaction (O(1) amortized instead of O(entries) per call); SRV-306 an 11-file audit finding zero attacker-triggerable unwraps in production handler code, plus a real `cfg_attr(not(test), warn(...))`-gated clippy lint (verified to actually fire) guarding regressions; SRV-307 Redis-shared concurrency slots mirroring SRV-201's `RateLimiter` design (atomic Lua increment-if-under-limit, `Drop`-triggered fire-and-forget async release, a documented 24h crash-recovery safety-net TTL), `admit_run` converted to `async fn` across all call sites. 8 new tests total (2 SRV-302 + 2 SRV-305 + 3 SRV-307 capability-gated); a pre-existing, unrelated flaky test in `rate_limit.rs` was found (and, in a same-day follow-up, fixed) on this Windows dev machine while validating SRV-307; full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout, incl. the `redis` feature build |
+| 1.9.0 | 2026-07-16 | ECO-303 (container capability loader) implemented and marked DONE with implementation notes: `ContainerCapabilityRuntime` in `apex-plugin` (compiled unconditionally — plugins are finally executable without the heavy `wasi` feature), Docker/Podman/gVisor over `ContainerSandbox`, same stdin/stdout JSON ABI + `APEX_SECRET_*` injection as the WASM loader via shared helpers, fail-closed loader routing (a `gvisor`-declared capability is refused by a plain-Docker runtime, never demoted); enabler in `apex-tools`: `ContainerSandbox::execute_with_stdin` + `SandboxCommand.env` support with env *names* on the argv and values via the CLI process environment (secrets never visible in host `ps`). 8 new tests (2 docker/runsc-gated e2e — both actually executed against the real runtimes on this dev box — + 4 fail-closed unit + 1 argv-shape + 1 WASI-parity via the shared-helper refactor); the pre-existing status line was also corrected to count SEC-301 (done since 2026-07-14 but never listed) |
 | 1.8.0 | 2026-07-14 | DEP-301 (systemd unit + install script for the appliance) implemented and marked DONE with implementation notes: `deployment/systemd/apex.service` (real sandboxing — `ProtectSystem=strict` etc. — not decorative) + `apex.env.example`, idempotent `deployment/install.sh` (dedicated system user, `/var/lib/apex/.apex` at `0700`, never overwrites an existing env file), new `docs/12-deployment/systemd.md`, a `.gitattributes` forcing LF on `*.sh`/`*.service` (a real corruption risk caught before it shipped, not hypothetical), and a `systemd-install` CI job that runs the actual install on a genuine systemd VM, polls `/healthz`, and re-runs `install.sh` to mechanically check the idempotency claim rather than trust a comment |

@@ -138,9 +138,10 @@ impl Sandbox for NativeSandbox {
 }
 
 /// Map a process exit status to its terminating Unix signal and whether that signal
-/// indicates a resource-limit breach (`SIGXCPU`/`SIGXFSZ`).
+/// indicates a resource-limit breach (`SIGXCPU`/`SIGXFSZ`). Shared with the container
+/// backend, whose CLI runner maps outcomes identically.
 #[cfg(unix)]
-fn terminating_signal(status: &std::process::ExitStatus) -> (Option<i32>, bool) {
+pub(super) fn terminating_signal(status: &std::process::ExitStatus) -> (Option<i32>, bool) {
     use std::os::unix::process::ExitStatusExt;
     let signal = status.signal();
     let exceeded = matches!(signal, Some(libc::SIGXCPU) | Some(libc::SIGXFSZ));
@@ -148,7 +149,7 @@ fn terminating_signal(status: &std::process::ExitStatus) -> (Option<i32>, bool) 
 }
 
 #[cfg(not(unix))]
-fn terminating_signal(_status: &std::process::ExitStatus) -> (Option<i32>, bool) {
+pub(super) fn terminating_signal(_status: &std::process::ExitStatus) -> (Option<i32>, bool) {
     (None, false)
 }
 

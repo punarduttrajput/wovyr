@@ -17,11 +17,13 @@
 //! - [`engine`] — the [`PluginEngine`]: the installed-plugin catalog and the
 //!   install → enable → disable → uninstall lifecycle, routing tool capabilities into
 //!   the [`ToolRegistry`](apex_tools::ToolRegistry) and emitting `plugin.*` events.
-//! - [`runtime`] (behind the `wasi` feature) — [`WasiCapabilityRuntime`], the WASM
-//!   capability loader: it runs a `tool` capability's staged `wasm32-wasi` module in
-//!   the WASI sandbox (request JSON on stdin → response JSON on stdout). Without the
-//!   feature, the engine's default [`NotLoadedRuntime`] registers capabilities but
-//!   errors on call.
+//! - [`runtime`] — the capability loaders (request JSON on stdin → response JSON on
+//!   stdout): [`ContainerCapabilityRuntime`] (always compiled) runs a `tool`
+//!   capability's staged entry in an OCI container (Docker/Podman/gVisor via
+//!   apex-tools' `ContainerSandbox`), and [`WasiCapabilityRuntime`] (behind the
+//!   `wasi` feature) runs `wasm32-wasi` modules in the in-process WASI sandbox.
+//!   With no loader configured, the engine's default [`NotLoadedRuntime`] registers
+//!   capabilities but errors on call.
 //! - [`keyless`] — identity-based (Sigstore-shaped) signing ([ADR-0009]): short-lived
 //!   [`IdentityCert`]s from a [`CertificateAuthority`], transparency-log-witnessed
 //!   [`KeylessBundle`]s, and fully-offline verification against a pinned
@@ -29,7 +31,7 @@
 //!   [`TransparencyLog`] backed by a real Rekor server (`deployment/rekor/`).
 //!
 //! Deferred to later slices (see [overview §15](../../docs/08-plugin-sdk/overview.md#15-future-enhancements)):
-//! container/microVM capability loaders (only the WASM loader exists today),
+//! a microVM capability loader (WASM and container loaders exist today),
 //! upgrade/rollback, and marketplace distribution (incl. fetching missing dependencies
 //! — dependency *resolution* against the installed catalog is implemented).
 
@@ -40,7 +42,6 @@ pub mod permissions;
 #[cfg(feature = "rekor")]
 pub mod rekor;
 mod resolve;
-#[cfg(feature = "wasi")]
 pub mod runtime;
 pub mod verify;
 
@@ -58,6 +59,7 @@ pub use manifest::{
     PLUGIN_API_VERSION, PluginManifest, Provenance, ProvenancePolicy, Sbom, SbomComponent,
 };
 pub use permissions::{grant_covers, is_broad, missing_grants};
+pub use runtime::ContainerCapabilityRuntime;
 #[cfg(feature = "wasi")]
 pub use runtime::WasiCapabilityRuntime;
 pub use verify::{TrustStore, verify_digest};

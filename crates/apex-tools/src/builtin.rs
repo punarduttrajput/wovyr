@@ -1512,8 +1512,9 @@ mod tests {
         let (root, outside_dir) = {
             let root = tempfile_dir::TempDir::new();
             let outside = tempfile_dir::TempDir::new();
-            std::mem::forget(&outside); // keep alive; workspace_fixture-style leak
-            (root, outside.path().to_path_buf())
+            let outside_path = outside.path().to_path_buf();
+            std::mem::forget(outside); // keep alive; workspace_fixture-style leak
+            (root, outside_path)
         };
         let link = root.path().join("escape-dir");
         std::os::unix::fs::symlink(&outside_dir, &link).unwrap();

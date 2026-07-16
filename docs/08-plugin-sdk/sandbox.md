@@ -7,10 +7,10 @@ Document ID: PLG-004
 
 **Document ID:** PLG-004  
 **File Path:** `docs/08-plugin-sdk/sandbox.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Draft  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-07-16
 
 ---
 
@@ -68,6 +68,16 @@ verbatim; this document focuses on how the *other* kinds are contained.
 **WASM is the default** loading model: capability-based, deterministic, memory-safe,
 language-portable, and cheap to instantiate. Native in-process loading is reserved
 for first-party plugins.
+
+**Implemented today** (`apex-plugin`'s `runtime` module): the WASM loader
+(`WasiCapabilityRuntime`, behind the `wasi` cargo feature) and the container loader
+(`ContainerCapabilityRuntime` — Docker/Podman, gVisor via `runsc`; always compiled,
+ECO-303). Both speak the same capability ABI (request JSON on stdin → response JSON
+on stdout, `APEX_SECRET_*` env injection); a capability picks its loader via the
+manifest's `sandbox` field (`wasm` vs `container`/`gvisor`), and each loader refuses
+the other's capabilities fail-closed — a `gvisor` capability is refused by a
+plain-Docker runtime rather than demoted. The out-of-process (IPC/gRPC) and microVM
+models remain future work.
 
 ---
 
@@ -171,4 +181,5 @@ Tenant policy may require a stronger model than the default, never weaker.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-16 | §4: noted the implemented loading models — the WASM loader (`wasi` feature) and the new container/gVisor loader (`ContainerCapabilityRuntime`, ECO-303) with their shared stdin/stdout ABI and fail-closed loader routing |
 | 1.0.0 | 2026-06-27 | Initial Plugin Sandbox & Loading specification |
