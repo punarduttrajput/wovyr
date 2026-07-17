@@ -27,3 +27,14 @@ export class ApexApiError extends Error {
     this.body = body;
   }
 }
+
+/** Thrown when a client-side wait (e.g.
+ * `workflows.waitForCompletion`) exhausts its timeout before the awaited
+ * condition holds. Not an API error — the server never rejected anything; the
+ * caller's deadline simply passed. */
+export class ApexTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ApexTimeoutError";
+  }
+}

@@ -27,9 +27,10 @@ DEFAULT_BASE_DELAY_S = 0.25
 @dataclass
 class RetryOptions:
     """Retry policy for transient failures (network errors, 429/502/503/504).
-    Only applied to `GET` requests — mutating requests are never
-    auto-retried, since retrying one without an `Idempotency-Key` could
-    double-execute it."""
+    Applied to every `GET`, and — DX-301 — to mutating requests **only when
+    they carry an `Idempotency-Key`** (pass `idempotency_key=` on the call):
+    the server's replay middleware then makes the retry safe, whereas a
+    keyless retry could double-execute."""
 
     max_retries: int = DEFAULT_MAX_RETRIES
     base_delay_s: float = DEFAULT_BASE_DELAY_S
@@ -121,14 +122,19 @@ class HttpClient:
     ) -> RawResponse:
         """Perform a request and return the raw response (used by the SSE
         helper, which needs to iterate the body rather than decode it whole).
-        Retries transient failures per `self.retry`, but only for `GET`."""
+        Retries transient failures per `self.retry`: always for `GET`, and for
+        mutating requests **only when an `Idempotency-Key` header rides
+        along** (DX-301) — the server's replay middleware then guarantees a
+        retried mutation can't double-execute, which is exactly the property
+        a keyless retry would violate."""
         hdrs = self._default_headers(headers)
         data: Optional[bytes] = None
         if body is not None:
             hdrs["Content-Type"] = "application/json"
             data = json.dumps(body).encode("utf-8")
         url = self._url(path, query)
-        retries_allowed = self.retry.max_retries if method == "GET" else 0
+        idempotent = method == "GET" or "Idempotency-Key" in hdrs
+        retries_allowed = self.retry.max_retries if idempotent else 0
 
         attempt = 0
         while True:

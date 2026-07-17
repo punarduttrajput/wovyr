@@ -10,9 +10,11 @@ export interface ApexClientOptions {
   fetchImpl?: typeof fetch;
   /** Retry policy for transient failures (network errors, `429`, `502`/`503`/
    * `504`). Defaults to 2 retries with a 250ms base delay, doubling each
-   * attempt. Set `maxRetries: 0` to disable. Only applied to `GET` requests —
-   * mutating requests are never auto-retried, since retrying one without an
-   * `Idempotency-Key` could double-execute it. */
+   * attempt. Set `maxRetries: 0` to disable. Applied to every `GET`, and —
+   * DX-301 — to mutating requests **only when they carry an
+   * `Idempotency-Key`** (pass `idempotencyKey` on the call): the server's
+   * replay middleware then makes the retry safe, whereas a keyless retry
+   * could double-execute. */
   retry?: RetryOptions;
 }
 

@@ -7,8 +7,8 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.10.0
-**Status:** In progress — ECO-301..304 (all but ECO-305 of WS-F's ECO row), WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), SEC-301, UI-301..306 (all of WS-K), DEP-301 done; remaining: ECO-305, SEC-302, RAG-301, DX-301..306, DEP-302, OBS-301/302
+**Version:** 1.11.0
+**Status:** In progress — ECO-301..304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), SEC-301, UI-301..306 (all of WS-K), DX-301..306 (all of WS-J), DEP-301 done; remaining: ECO-305, SEC-302, RAG-301, DEP-302, OBS-301/302
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
 **Last Updated:** 2026-07-17
 
@@ -1236,7 +1236,7 @@ deleted.
 
 # WS-J — SDK & Docs Parity
 
-## DX-301 `[P2]` — SDK parity: async Python, mutation retry, poll helper, TS paginateAll
+## DX-301 `[P2]` — SDK parity: async Python, mutation retry, poll helper, TS paginateAll — **DONE (2026-07-17)**
 
 **Problem.** Python is sync-only urllib (`sdks/python/apex_sdk/http.py`); TS has no
 retry at all and Python retries GET-only; neither has a `wait_for_completion` poll
@@ -1252,7 +1252,29 @@ TS `paginateAll`.
 
 **Files.** `sdks/python/*`, `sdks/typescript/*`. **Size.** L. **Depends on:** none.
 
-## DX-302 `[P2]` — Coverage + benchmark tracking in CI
+**Resolution.** Two of the ticket's four claims were already stale (TS gained
+GET retry and `paginateAll` in the v1.0 DX work); the real deliverables:
+**(1) opt-in mutation retry, both SDKs** — a mutating request that carries an
+`Idempotency-Key` now retries transient failures exactly like a `GET` (the
+server's replay middleware makes it safe); keyless mutations still never
+retry, and unit tests pin that the same key rides every attempt.
+**(2) `waitForCompletion`/`wait_for_completion`, both SDKs** — polls
+`GET /workflows/{id}` to a terminal status (case-insensitive
+`completed|failed|cancelled`) with interval/timeout knobs and a new
+`ApexTimeoutError`; both integration suites' submit-then-poll tests now run
+through it (the acceptance path). **(3) asyncio Python client** —
+`apex_sdk.aio.AsyncApexClient`: the full resource surface awaitable via
+worker-thread delegation (zero-dependency stays true; a hand-rolled asyncio
+HTTP client would re-implement chunked/TLS plumbing for no API gain — the
+trade-off is documented in the module), with `agents.stream` bridging SSE
+frames through an `asyncio.Queue` as they arrive and an async
+`paginate_all`. 15 new SDK tests (TS 8: keyed-retry ×2, wait ×3, plus DX-303's
+3; Python 10: keyed-retry ×2, wait ×3, async unit ×4 incl. the SSE bridge,
+async live integration ×3 gated). Drive-by: the dashboard's shared
+`statusClass`/`isWaiting` still matched pre-API-702 PascalCase — every real
+status fell through to the neutral pill; now case-insensitive with a spec.
+
+## DX-302 `[P2]` — Coverage + benchmark tracking in CI — **DONE (2026-07-17)**
 
 **Problem.** CI runs `cargo test` but no coverage upload and no benchmark tracking
 (`.github/workflows/ci.yml:68`). (PRD-004 R-J.4; audit Med.)
@@ -1263,7 +1285,24 @@ TS `paginateAll`.
 
 **Files.** `.github/workflows/ci.yml`. **Size.** S. **Depends on:** none.
 
-## DX-303 `[P2]` — SDK versioning + server-skew warning
+**Resolution.** Two new CI jobs: **coverage** (cargo-llvm-cov over the
+workspace, lcov + human summary uploaded as an artifact and totals surfaced in
+the run summary; separate job so the instrumented rebuild doesn't slow the
+main leg) and **benchmarks** (the workspace's first criterion benches —
+`apex-provider/benches/tokenizer.rs`, the budgeting hot path that runs over
+the whole history before every model call: 1 KiB/64 KiB prose + a 40-message
+history; `--output-format bencher` into `github-action-benchmark` against a
+cache-persisted baseline, `fail-on-alert` at a 150% threshold that tolerates
+runner noise but flags a real regression). Verified locally (bench runs:
+~3.9µs/162µs/394µs). **Found while validating the workflow file: CI had been
+entirely dead since 2026-07-14** — DEP-301's commit stranded one line of the
+Trivy config (`ignore-unfixed: true`) after the systemd job's last step,
+making ci.yml unparseable, so every push since (ECO-303, the whole UI batch)
+ran zero CI. Fixed by restoring the line to the Trivy `with:` block, plus a
+second latent YAML-spec violation (unquoted `(idempotency: …)` step name)
+from the same commit; both workflows now parse clean.
+
+## DX-303 `[P2]` — SDK versioning + server-skew warning — **DONE (2026-07-17)**
 
 **Problem.** Both SDKs pinned `0.1.0`, no CHANGELOG, no server-version compatibility
 check; the Python README's PyPI-publish claim isn't corroborated by packaging
@@ -1278,7 +1317,21 @@ claim matches reality.
 
 **Files.** `sdks/*/`. **Size.** S. **Depends on:** DX-102.
 
-## DX-304 `[P2]` — Regenerate `docs/11-cli/commands.md` from the clap tree
+**Resolution.** The "pinned 0.1.0" claim was stale (both SDKs were release-
+reconciled to 0.3.0), and the PyPI claim was already true (DX-102 published) —
+what was missing: **per-SDK CHANGELOG.md** (both, with the versioning policy
+stated: the SDK tracks the platform release it targets; same major.minor =
+same API surface), and the **skew warning**: `health()` is now the version
+handshake — a major.minor mismatch emits `console.warn` (TS) /
+`ApexVersionSkewWarning` (Python, filterable category) once per client, never
+thrown, and stays silent for unparseable dev versions. The compat constants
+can't drift: a TS unit test asserts `SDK_VERSION === package.json.version`
+and a Python one asserts the source-tree fallback equals `pyproject.toml`
+(the runtime value comes from installed package metadata). Both READMEs'
+stale "Known gaps (v0.1)" sections (TS claimed no retry/paginateAll; Python
+claimed no asyncio) replaced with accurate retry/polling/versioning docs.
+
+## DX-304 `[P2]` — Regenerate `docs/11-cli/commands.md` from the clap tree — **DONE (2026-07-17)**
 
 **Problem.** `docs/11-cli/commands.md` documents many non-existent commands
 (`init/context/config/doctor/...`, a `tools` group, `projects/users/apikeys`) and omits
@@ -1293,7 +1346,17 @@ documented; ideally a CI check diffs the doc against `--help` output.
 
 **Files.** `docs/11-cli/commands.md`. **Size.** S. **Depends on:** none.
 
-## DX-305 `[P3]` — Docs status front-matter + quickstart
+**Resolution.** `scripts/gen-cli-docs.py` walks the real binary's `--help`
+tree recursively and rewrites `docs/11-cli/commands.md` as one verbatim help
+section per command — 59 commands, every ghost (`init`/`doctor`/`apikeys`/…)
+gone, every real command (`admin backup`, `kms rotate|destroy`, `auth`,
+`dev`, `workflows schedule`, the full `plugin` lifecycle) present. The doc
+header declares itself generated; `--check` mode regenerates and diffs, and a
+new CI step in the main rust job runs it — the "ideally a CI check" clause is
+the actual gate, so the reference can never again describe a command that
+doesn't exist nor omit one that does.
+
+## DX-305 `[P3]` — Docs status front-matter + quickstart — **DONE (2026-07-17)**
 
 **Problem.** The `docs/` tree mixes shipped and aspirational content (README flags it
 at lines 148-150); README front-loads vision, not getting-started. (PRD-004 R-J.6;
@@ -1307,7 +1370,19 @@ runnable quickstart.
 
 **Files.** `docs/**`, `README.md`. **Size.** M. **Depends on:** DX-304.
 
-## DX-306 `[P3]` — Go/Java client decision
+**Resolution.** The truth half was substantially delivered by the 2026-07-15
+project-wide status-truth pass (every stale header reconciled; known-
+aspirational docs like Terraform's explicitly say "spec-only, zero
+artifacts") — what remained was the *convention*: `docs/SUMMARY.md` now
+defines the `Status:` vocabulary (Shipped / In delivery / Active / Draft /
+Exploratory) and what a reader may assume from each — in particular that
+**Draft never implies the feature exists in code**. The README now opens with
+a real 5-minute quickstart (clone → `APEX_ALLOW_ANONYMOUS=1 apex dev` →
+`/healthz` → first agent run on the offline mock provider, then pointers to
+real keys/dashboard/SDKs) — every command verified against this working
+tree.
+
+## DX-306 `[P3]` — Go/Java client decision — **DONE (2026-07-17)**
 
 **Problem.** Only TS + Python clients exist; no decision recorded on further languages.
 (PRD-004 R-J.7; audit Low.)
@@ -1319,6 +1394,17 @@ runnable quickstart.
 contract gate.
 
 **Files.** `docs/`, optionally `sdks/`. **Size.** S. **Depends on:** none.
+
+**Resolution.** [ADR-0013](../../17-adr/ADR-0013-client-sdk-languages.md)
+(Accepted): first-party SDKs stay TypeScript + Python; Go/Java are a
+documented non-goal. The supported path for other languages is the generated
+`GET /openapi.json` (SRV-303's drift-proof, CI-gated ground truth) through
+standard OpenAPI generators — the API's conventions were kept generator-
+friendly on purpose. A concrete revisit trigger is recorded (an external
+integration that a generated client demonstrably can't serve, or JVM/Go-
+standard paying consumers at GA), along with the shape of the answer if it
+fires (a generated client + hand-written SSE layer, not a third hand-written
+SDK).
 
 ---
 
@@ -1452,6 +1538,7 @@ lint and load.
 | 1.5.0 | 2026-07-14 | WFL-303..308 (all remaining WS-H tickets) implemented and marked DONE with implementation notes, closing out WS-H entirely: WFL-303 fail-closed activity-output size cap (permanent failure via the saga path, not a hard abort); WFL-304 event-log paging (`history_page`, real bounded `FileStore`/`PostgresStore` implementations) + explicit opt-in retention (`compact_history`), plus a proof that `resume` already never reads the log at all; WFL-305 indexed `workflow_name`/`status` Postgres columns + SQL-side filtering/pagination (migration V3), proven via a deliberately-corrupt non-matching row that would fail to decode if `list()` ever fell back to scanning; WFL-306 a `fire_at`-sorted `BTreeSet` index for `InMemoryTimerStore` + `TimerDispatcher`/`ScheduleDispatcher::run_adaptive` (sleep until the next deadline, capped at a max interval), proven with a real wall-clock near-deadline-timer test; WFL-307 an `ActivityContext.progress` channel + `ActivityProgress` event, live on the sequential activity path via `tokio::select!`; WFL-308 a versioned event wire envelope (`encode_event`/`decode_event`, fail-closed on an unknown future version) now used by every store. 30 new tests total; full `apex-workflow` suite + whole-workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
 | 1.6.0 | 2026-07-14 | SBX-301..304 (all of WS-E) implemented and marked DONE with implementation notes, closing out WS-E entirely: SBX-301 a confined `fs_write` builtin (opt-in like `shell`) with a write-specific symlink-escape guard beyond `fs_read`'s existing confinement; SBX-302 a sandboxed `code_execute` tool (Python/Node) routed through the identical SBX-101/SEC-305 backend selection `ShellTool` uses, resource-limited and egress-controlled, including a real Windows "app execution alias" false-positive found and fixed in the test gating itself; SBX-303 a new `apex-tool-macros` proc-macro crate (`#[derive(Tool)]`) generating `ToolMetadata`/JSON-Schema (via `schemars`)/typed-parse boilerplate so a tool author never hand-writes a schema literal or a `.get().and_then()` chain; SBX-304 an explicit, documented platform-matrix fail-closed check (Linux+Docker only) in `ContainerSandbox::execute`, replacing what used to be only an *accidental* fail-closed side effect of a missing `nsenter` binary, and additionally closing a real, previously-unguarded Podman gap. 27 new tests total (8 fs_write + 9 code_execute + 4 derive(Tool) + 2 registry opt-in + 4 egress-lockdown-gate); full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
 | 1.7.0 | 2026-07-14 | SRV-302..307 (all of WS-G) implemented and marked DONE with implementation notes, closing out WS-G entirely: SRV-302 an mtime-stamped in-memory cache for `FileApiKeyStore` (one `stat()` replaces a full read+parse per request in the common case); SRV-303 a real generated OpenAPI spec (`#[utoipa::path]` on all ~65 routes + `ToSchema` request/error types, served at `GET /openapi.json`, verified live end-to-end via a real `apex dev` server + `redocly lint` at 0 errors, with the CI contract gate repointed at the live document instead of the hand-written `openapi.yaml`); SRV-304 `lib.rs`'s inline test suite moved to a file-backed `tests.rs` submodule (2,842 → 444 lines, same crate-internal visibility, no `pub` widening); SRV-305 the idempotency store rewritten from a per-`put` full-file rewrite to an append-only JSON-lines log with periodic compaction (O(1) amortized instead of O(entries) per call); SRV-306 an 11-file audit finding zero attacker-triggerable unwraps in production handler code, plus a real `cfg_attr(not(test), warn(...))`-gated clippy lint (verified to actually fire) guarding regressions; SRV-307 Redis-shared concurrency slots mirroring SRV-201's `RateLimiter` design (atomic Lua increment-if-under-limit, `Drop`-triggered fire-and-forget async release, a documented 24h crash-recovery safety-net TTL), `admit_run` converted to `async fn` across all call sites. 8 new tests total (2 SRV-302 + 2 SRV-305 + 3 SRV-307 capability-gated); a pre-existing, unrelated flaky test in `rate_limit.rs` was found (and, in a same-day follow-up, fixed) on this Windows dev machine while validating SRV-307; full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout, incl. the `redis` feature build |
+| 1.11.0 | 2026-07-17 | DX-301..306 (all of WS-J) implemented and marked DONE with implementation notes, closing out the DX workstream entirely: DX-301 (idempotency-keyed mutation retry + waitForCompletion/wait_for_completion in both SDKs, asyncio Python client with a thread-bridged SSE stream — 15 new SDK tests; drive-by fix for the dashboard's pre-API-702 status-casing bug); DX-302 (cargo-llvm-cov coverage job + the workspace's first criterion benches with a github-action-benchmark regression gate — and the discovery that **ci.yml had been unparseable since DEP-301's 2026-07-14 commit** (a stranded Trivy line), meaning no CI ran for three days of pushes; fixed, both workflows now parse); DX-303 (per-SDK CHANGELOGs, health()-handshake skew warning with test-pinned version-lockstep constants, stale README gap sections corrected); DX-304 (`scripts/gen-cli-docs.py` regenerates the 59-command CLI reference from the clap tree, CI-diffed); DX-305 (Status-vocabulary convention in SUMMARY.md + a verified 5-minute README quickstart); DX-306 (ADR-0013: TS+Python only, OpenAPI generation for other languages, revisit trigger recorded) |
 | 1.10.0 | 2026-07-17 | UI-301..306 (all of WS-K) implemented and marked DONE with implementation notes, closing out the dashboard workstream entirely: UI-302 first (SDK-source types via a type-only tsconfig path alias, the `yaml` library replacing both hand-rolled DSL codecs — with the workflow specs repinned to parsed semantics — plus `core/http-error.ts`'s shared `errText` + global toast interceptor with 30s dedupe and a `silentErrors()` opt-out, and a found-and-fixed live envelope bug in `WorkflowService.tools()`); UI-301 (shared `StatusPill`/`Tabs`/`Modal`/`ConfirmService`+`ConfirmDialog`/`EmptyState`, tri-duplicated table CSS globalized, native `confirm()` gone); UI-303 (RBAC-gated `/audit` viewer over SEC-301's paged query — live verification against a real `apex dev` caught and fixed the SDK's flat, wrong `AuditEntry` type); UI-304 (off-canvas nav drawer ≤900px, in-card table overflow, phone-width topbar/toast handling); UI-305 (label association, aria-labels, modal focus trap/restore, roving-tabindex tabs, and an `axe-core` gate inside the Karma suite that already caught a real heading-order violation); UI-306 (Playground surface, fake nav badges removed, i18n target dropped — decision recorded, nav icons moved to a `public/icons.svg` sprite and `SafeSvgPipe` deleted). 23 new specs (51 total, all green); `ng build` clean; smoke-verified in a real browser against a live server (desktop + 390px mobile), incl. an engine-side parse check of both YAML emitters' output |
 | 1.9.0 | 2026-07-16 | ECO-303 (container capability loader) implemented and marked DONE with implementation notes: `ContainerCapabilityRuntime` in `apex-plugin` (compiled unconditionally — plugins are finally executable without the heavy `wasi` feature), Docker/Podman/gVisor over `ContainerSandbox`, same stdin/stdout JSON ABI + `APEX_SECRET_*` injection as the WASM loader via shared helpers, fail-closed loader routing (a `gvisor`-declared capability is refused by a plain-Docker runtime, never demoted); enabler in `apex-tools`: `ContainerSandbox::execute_with_stdin` + `SandboxCommand.env` support with env *names* on the argv and values via the CLI process environment (secrets never visible in host `ps`). 8 new tests (2 docker/runsc-gated e2e — both actually executed against the real runtimes on this dev box — + 4 fail-closed unit + 1 argv-shape + 1 WASI-parity via the shared-helper refactor); the pre-existing status line was also corrected to count SEC-301 (done since 2026-07-14 but never listed) |
 | 1.8.0 | 2026-07-14 | DEP-301 (systemd unit + install script for the appliance) implemented and marked DONE with implementation notes: `deployment/systemd/apex.service` (real sandboxing — `ProtectSystem=strict` etc. — not decorative) + `apex.env.example`, idempotent `deployment/install.sh` (dedicated system user, `/var/lib/apex/.apex` at `0700`, never overwrites an existing env file), new `docs/12-deployment/systemd.md`, a `.gitattributes` forcing LF on `*.sh`/`*.service` (a real corruption risk caught before it shipped, not hypothetical), and a `systemd-install` CI job that runs the actual install on a genuine systemd VM, polls `/healthz`, and re-runs `install.sh` to mechanically check the idempotency claim rather than trust a comment |

@@ -37,8 +37,9 @@
  * rule would.
  */
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { before, describe, test } from "node:test";
-import { ApexClient, ApexApiError, paginateAll, type PendingUiFrame } from "../src/index.js";
+import { ApexClient, ApexApiError, ApexTimeoutError, SDK_VERSION, paginateAll, type PendingUiFrame } from "../src/index.js";
 
 const baseUrl = process.env.APEX_TEST_BASE_URL ?? "http://127.0.0.1:8080";
 
@@ -185,19 +186,15 @@ describe("ApexClient (integration)", () => {
     }
     assert.equal(status, "submitted");
 
-    let completed = false;
-    for (let i = 0; i < 20; i++) {
-      const { execution } = await c.workflows.get(execution_id);
-      // RM-GA-P4 API-702: WorkflowState now serializes snake_case ("completed",
-      // "failed"), matching the `?status=` filter's casing (previously
-      // PascalCase — a wart API-702 fixed by construction).
-      if ((execution as { status?: string }).status === "completed") {
-        completed = true;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    assert.ok(completed, "workflow should reach completed status within the poll window");
+    // DX-301: the poll loop every caller used to hand-roll is now the SDK's
+    // `waitForCompletion` — this exercises it against the real server.
+    const { execution } = await c.workflows.waitForCompletion(execution_id, {
+      intervalMs: 100,
+      timeoutMs: 10_000,
+    });
+    // RM-GA-P4 API-702: WorkflowState serializes snake_case ("completed",
+    // "failed"), matching the `?status=` filter's casing.
+    assert.equal((execution as { status?: string }).status, "completed");
   });
 
   test("memory: put then query round-trips a record", async (t) => {
@@ -634,5 +631,132 @@ describe("HttpClient retry (unit, mocked fetch)", () => {
     });
     await assert.rejects(() => c.agents.run({ manifest: "x" }), ApexApiError);
     assert.equal(callCount(), 1);
+  });
+});
+
+describe("DX-301: idempotency-keyed mutation retry (unit, mocked fetch)", () => {
+  function flakySubmit(failCount: number) {
+    let calls = 0;
+    const keys: Array<string | null> = [];
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      calls++;
+      keys.push(new Headers(init?.headers).get("Idempotency-Key"));
+      if (calls <= failCount) {
+        return new Response("bad gateway", { status: 502 });
+      }
+      return new Response(JSON.stringify({ execution_id: "wf-1", status: "submitted" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, callCount: () => calls, keys };
+  }
+
+  test("a keyed submit retries a 502 and succeeds", async () => {
+    const { fetchImpl, callCount, keys } = flakySubmit(2);
+    const c = new ApexClient({
+      baseUrl: "http://unit-test.invalid",
+      fetchImpl,
+      retry: { maxRetries: 2, baseDelayMs: 1 },
+    });
+    const res = await c.workflows.submit(
+      { manifest: "m", input: {} },
+      { idempotencyKey: "sdk-key-1" },
+    );
+    assert.equal(res.status, "submitted");
+    assert.equal(callCount(), 3);
+    // Every attempt carried the same key — that's what makes the retry safe
+    // (the server's replay middleware collapses duplicates).
+    assert.deepEqual(keys, ["sdk-key-1", "sdk-key-1", "sdk-key-1"]);
+  });
+
+  test("the same submit without a key still never retries", async () => {
+    const { fetchImpl, callCount } = flakySubmit(1);
+    const c = new ApexClient({
+      baseUrl: "http://unit-test.invalid",
+      fetchImpl,
+      retry: { maxRetries: 2, baseDelayMs: 1 },
+    });
+    await assert.rejects(() => c.workflows.submit({ manifest: "m" }), ApexApiError);
+    assert.equal(callCount(), 1);
+  });
+});
+
+describe("DX-301: workflows.waitForCompletion (unit, mocked fetch)", () => {
+  function statusSequence(statuses: string[]) {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      const status = statuses[Math.min(calls, statuses.length - 1)];
+      calls++;
+      return new Response(JSON.stringify({ execution: { execution_id: "wf-1", status }, events: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, callCount: () => calls };
+  }
+
+  test("polls until terminal and returns the final snapshot", async () => {
+    const { fetchImpl, callCount } = statusSequence(["running", "running", "completed"]);
+    const c = new ApexClient({ baseUrl: "http://unit-test.invalid", fetchImpl });
+    const { execution } = await c.workflows.waitForCompletion("wf-1", { intervalMs: 1 });
+    assert.equal(execution["status"], "completed");
+    assert.equal(callCount(), 3);
+  });
+
+  test("failed is terminal too — the helper returns it rather than spinning", async () => {
+    const { fetchImpl } = statusSequence(["failed"]);
+    const c = new ApexClient({ baseUrl: "http://unit-test.invalid", fetchImpl });
+    const { execution } = await c.workflows.waitForCompletion("wf-1", { intervalMs: 1 });
+    assert.equal(execution["status"], "failed");
+  });
+
+  test("throws ApexTimeoutError once the deadline passes", async () => {
+    const { fetchImpl } = statusSequence(["running"]);
+    const c = new ApexClient({ baseUrl: "http://unit-test.invalid", fetchImpl });
+    await assert.rejects(
+      () => c.workflows.waitForCompletion("wf-1", { intervalMs: 5, timeoutMs: 20 }),
+      ApexTimeoutError,
+    );
+  });
+});
+
+describe("DX-303: version handshake (unit, mocked fetch)", () => {
+  function healthFetch(serverVersion: string) {
+    return (async () =>
+      new Response(JSON.stringify({ status: "ok", version: serverVersion }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+  }
+
+  test("SDK_VERSION stays in lockstep with package.json", async () => {
+    const pkg = JSON.parse(
+      await readFile(new URL("../../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    assert.equal(SDK_VERSION, pkg.version);
+  });
+
+  test("matching major.minor is silent; a skew warns once per client", async (t) => {
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (msg: string) => warnings.push(msg));
+
+    const same = new ApexClient({ baseUrl: "http://u.invalid", fetchImpl: healthFetch(SDK_VERSION) });
+    await same.health();
+    assert.equal(warnings.length, 0);
+
+    const skewed = new ApexClient({ baseUrl: "http://u.invalid", fetchImpl: healthFetch("0.99.0") });
+    await skewed.health();
+    await skewed.health(); // once per client, not per call
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /0\.99\.0/);
+  });
+
+  test("an unparseable dev version stays silent", async (t) => {
+    const warnings: string[] = [];
+    t.mock.method(console, "warn", (msg: string) => warnings.push(msg));
+    const c = new ApexClient({ baseUrl: "http://u.invalid", fetchImpl: healthFetch("dry-run") });
+    await c.health();
+    assert.equal(warnings.length, 0);
   });
 });

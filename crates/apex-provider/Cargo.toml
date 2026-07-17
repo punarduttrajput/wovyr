@@ -59,3 +59,11 @@ tokio = { workspace = true, features = ["rt", "test-util"] }
 # for downstream consumers).
 apex-agent.workspace = true
 apex-tools.workspace = true
+# DX-302: criterion benchmarks over the budgeting hot path (benches/tokenizer.rs).
+# Default features off — no plotters/HTML reports; CI consumes `--output-format
+# bencher` text and tracks it with github-action-benchmark.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "tokenizer"
+harness = false

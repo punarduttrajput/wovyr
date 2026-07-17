@@ -10,6 +10,35 @@
 
 ---
 
+## Quickstart (5 minutes)
+
+Everything below runs offline with a deterministic mock provider — no API key
+needed. You need Rust 1.85+ (edition 2024).
+
+```bash
+git clone https://github.com/punarduttrajput/apex && cd apex
+
+# 1. Start the all-in-one local server (builds on first run).
+APEX_ALLOW_ANONYMOUS=1 cargo run -p apex-cli -- dev
+#    → listening on http://127.0.0.1:8080
+
+# 2. In a second terminal: is it up?
+curl http://127.0.0.1:8080/healthz
+#    → {"status":"ok","version":"0.3.0"}
+
+# 3. Run your first agent (mock provider answers deterministically).
+cargo run -p apex-cli -- agents run --local \
+  -f examples/agents/hello.yaml --input '{"message":"Hi"}' --stream
+```
+
+From there: set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for a real model,
+`cd dashboard && npm ci && npx ng serve` for the UI (proxies to the server),
+or `pip install apex-ai-sdk` / `sdks/typescript` to call the API from code.
+The full picture lives in [docs/](docs/SUMMARY.md); the runnable examples in
+[examples/](examples/).
+
+---
+
 ## Overview
 
 **The product** ([PRD-005](docs/01-product/prd-generative-ui-runtime.md),

@@ -6,8 +6,8 @@ OAuth2; resources are addressed by their natural key and auth is the
 `X-Apex-Tenant`/`X-Apex-Principal` headers).
 
 Synchronous by design: built on `urllib` (see `http.py`), so every method
-blocks. An `asyncio` variant is a documented gap (see the package README),
-not an oversight.
+blocks. For asyncio programs use `apex_sdk.aio.AsyncApexClient` (DX-301),
+which exposes the same resource surface with every method awaitable.
 
 Every mutating method below takes an `idempotency_key` keyword (RM-GA-P4
 API-703): the server honors `Idempotency-Key` on every mutating route, not
@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from typing import Any, Iterator, List, Optional
 from urllib.parse import quote
 
+from .errors import ApexTimeoutError
 from .http import HttpClient, Opener, RetryOptions
+from .version import ApexVersionSkewWarning, sdk_version, version_skew
 from .sse import parse_sse
 from .types import (
     Attestation,
@@ -58,6 +61,11 @@ def _idem_headers(idempotency_key: Optional[str]) -> dict[str, str]:
     return {"Idempotency-Key": idempotency_key} if idempotency_key else {}
 
 
+#: Statuses after which an execution can never change again (apex-workflow
+#: `WorkflowState::is_terminal`).
+_TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
+
+
 class ApexClient:
     def __init__(
         self,
@@ -80,10 +88,21 @@ class ApexClient:
         self.webhooks = WebhooksResource(self._http)
         self.audit = AuditResource(self._http)
         self.tools = ToolsResource(self._http)
+        self._warned_skew = False
 
     def health(self) -> dict[str, Any]:
-        """`GET /healthz`."""
-        return self._http.request("GET", "/healthz")
+        """`GET /healthz`. Also the SDK's version handshake (DX-303): when the
+        server's major.minor differs from the release this SDK tracks, an
+        `ApexVersionSkewWarning` is emitted — once per client, never raised."""
+        health = self._http.request("GET", "/healthz")
+        if not self._warned_skew:
+            warning = version_skew(sdk_version(), str(health.get("version", "")))
+            if warning:
+                self._warned_skew = True
+                import warnings
+
+                warnings.warn(warning, ApexVersionSkewWarning, stacklevel=2)
+        return health
 
 
 class AgentsResource:
@@ -187,6 +206,31 @@ class WorkflowsResource:
     def get(self, execution_id: str) -> dict[str, Any]:
         """`GET /api/v1/workflows/{id}` — live status + event history."""
         return self._http.request("GET", f"/api/v1/workflows/{_quote(execution_id)}")
+
+    def wait_for_completion(
+        self,
+        execution_id: str,
+        *,
+        interval_s: float = 0.5,
+        timeout_s: float = 60.0,
+    ) -> dict[str, Any]:
+        """Poll `get` until the execution reaches a terminal status
+        (`completed`/`failed`/`cancelled` — compared case-insensitively) and
+        return the final snapshot (DX-301). The submit routes return
+        immediately by design; this is the "just wait for it" helper every
+        caller was hand-rolling. Raises `ApexTimeoutError` once `timeout_s`
+        (default 60s) elapses; polls every `interval_s` (default 0.5s)."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            snapshot = self.get(execution_id)
+            status = str((snapshot.get("execution") or {}).get("status", "")).lower()
+            if status in _TERMINAL_WORKFLOW_STATUSES:
+                return snapshot
+            if time.monotonic() + interval_s > deadline:
+                raise ApexTimeoutError(
+                    f"workflow execution {execution_id} still `{status}` after {timeout_s}s"
+                )
+            time.sleep(interval_s)
 
     def cancel(self, execution_id: str, *, idempotency_key: Optional[str] = None) -> None:
         """`DELETE /api/v1/workflows/{id}` — advisory cancel."""

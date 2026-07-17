@@ -19,3 +19,10 @@ class ApexApiError(Exception):
         self.request_id: Optional[str] = (body or {}).get("request_id")
         message = (body or {}).get("message") if body else None
         super().__init__(message or f"Apex API request failed with status {status}: {raw_text}")
+
+
+class ApexTimeoutError(Exception):
+    """Raised when a client-side wait (e.g. `workflows.wait_for_completion`)
+    exhausts its timeout before the awaited condition holds. Not an API error
+    — the server never rejected anything; the caller's deadline simply
+    passed."""

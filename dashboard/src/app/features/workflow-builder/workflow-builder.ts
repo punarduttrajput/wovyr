@@ -519,7 +519,9 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
 
   // ── helpers ────────────────────────────────────────────────────────────────────
   isWaiting(ex: WorkflowSummary): boolean {
-    return ex.status === 'Waiting' || ex.status === 'Running';
+    // Case-insensitive: the engine serializes snake_case (`waiting`, API-702).
+    const s = ex.status.toLowerCase();
+    return s === 'waiting' || s === 'running';
   }
 
   activities(): { id: string; state: string }[] {

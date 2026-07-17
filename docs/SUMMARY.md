@@ -19,6 +19,27 @@ Trust Runtime) and v1.3 (MCP Connection Management) shipped
 * Section numbers match the folder layout under `docs/` — all sections `00-`
   through `19-` exist.
 
+## The `Status:` field (DX-305)
+
+Every spec doc carries a `**Status:**` header line. The vocabulary, and what a
+reader may assume from it:
+
+* **Shipped** — describes behavior the code implements today; where reality
+  and the doc disagree, that's a bug in one of them.
+* **In delivery** — an active milestone: partly implemented, with the tracking
+  ticket doc naming exactly which parts (e.g. PRD-004's phase docs).
+* **Active** — an operating document (index, ADR log, roadmap) that is kept
+  current rather than "finished".
+* **Draft** — a design that *precedes* implementation (this repo is
+  spec-driven). **Never assume a Draft doc's feature exists in code** — check;
+  known-aspirational Drafts say so explicitly in their status line (e.g.
+  Terraform: "spec-only, zero artifacts").
+* **Exploratory** — a research bet, not committed (see
+  [future.md](18-roadmap/future.md)).
+
+The 2026-07-15 status-truth pass reconciled every stale header against shipped
+reality; new docs must pick from this vocabulary.
+
 New contributors should follow the [Reading Order](#reading-order) at the bottom.
 
 ---

@@ -56,8 +56,11 @@ export class HttpClient {
 
   /** Perform a request and return the raw `Response` (used by the SSE helper,
    * which needs the body stream rather than a parsed value). Retries transient
-   * failures per the client's {@link RetryOptions}, but only for `GET` — see
-   * {@link ApexClientOptions.retry}. */
+   * failures per the client's {@link RetryOptions}: always for `GET`, and for
+   * mutating requests **only when an `Idempotency-Key` header rides along**
+   * (DX-301) — the server's replay middleware then guarantees a retried
+   * mutation can't double-execute, which is exactly the property a keyless
+   * retry would violate. See {@link ApexClientOptions.retry}. */
   async raw(method: string, path: string, body?: unknown, options?: RequestOptions): Promise<Response> {
     const headers = this.defaultHeaders(options?.headers);
     const init: RequestInit = { method, headers };
@@ -66,7 +69,8 @@ export class HttpClient {
       init.body = JSON.stringify(body);
     }
     const url = this.url(path, options?.query);
-    const retriesAllowed = method === "GET" ? this.maxRetries : 0;
+    const idempotent = method === "GET" || headers["Idempotency-Key"] !== undefined;
+    const retriesAllowed = idempotent ? this.maxRetries : 0;
 
     let attempt = 0;
     for (;;) {

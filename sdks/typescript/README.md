@@ -63,9 +63,24 @@ anonymous-default-tenant back-compat bypass; it needs a real `org.admin` role.
 Start the server with `APEX_PLATFORM_ADMINS=sdk-test-admin` for that test to
 run instead of skip.
 
-## Known gaps (v0.1 of this SDK)
+## Retries, polling, versions
 
-- No retry/backoff policy — a failed request throws once.
-- No pagination auto-iteration helper (`for await` over all pages) — callers
-  loop on `next_cursor` themselves.
-- Not published to npm yet.
+- **GET requests** retry transient failures (429/502/503/504, network errors)
+  with exponential backoff — configurable via the constructor's `retry`
+  option.
+- **Mutations retry only when keyed**: pass `idempotencyKey` in a call's
+  `opts` and the same retry policy applies — the server's replay middleware
+  makes it safe. A keyless mutation never auto-retries (it could
+  double-execute).
+- **`client.workflows.waitForCompletion(id)`** polls to a terminal status and
+  returns the final snapshot (`ApexTimeoutError` on deadline) — no more
+  hand-rolled poll loops. `paginateAll` auto-iterates any cursor-paginated
+  list.
+- **Versioning**: the SDK version tracks the platform release it targets
+  (same major.minor = same API surface; see `CHANGELOG.md`). `health()`
+  logs a `console.warn` once per client if the server's major.minor differs.
+
+## Known gaps
+
+- Not published to npm yet (the packed tarball is attached to each GitHub
+  Release; publishing needs an operator-supplied 2FA OTP).

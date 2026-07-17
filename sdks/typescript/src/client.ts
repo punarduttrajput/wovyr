@@ -1,5 +1,7 @@
+import { ApexTimeoutError } from "./errors.js";
 import { HttpClient } from "./http.js";
 import { parseSse } from "./sse.js";
+import { SDK_VERSION, versionSkew } from "./version.js";
 import type {
   AgentStreamEvent,
   AgentSummary,
@@ -35,6 +37,10 @@ import type {
   WorkflowListParams,
   WorkflowValidation,
 } from "./types.js";
+
+/** Statuses after which an execution can never change again (apex-workflow
+ * `WorkflowState::is_terminal`). */
+const TERMINAL_WORKFLOW_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 function base64Encode(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64");
@@ -94,10 +100,25 @@ export class ApexClient {
     this.mcp = new McpResource(this.http);
   }
 
-  /** `GET /healthz`. */
+  /** `GET /healthz`. Also the SDK's version handshake (DX-303): when the
+   * server's major.minor differs from the release this SDK tracks, a warning
+   * is logged via `console.warn` — once per client, never thrown. */
   async health(): Promise<{ status: string; version: string }> {
-    return this.http.request("GET", "/healthz");
+    const health = await this.http.request<{ status: string; version: string }>(
+      "GET",
+      "/healthz",
+    );
+    if (!this.warnedSkew) {
+      const warning = versionSkew(SDK_VERSION, health.version);
+      if (warning) {
+        this.warnedSkew = true;
+        console.warn(warning);
+      }
+    }
+    return health;
   }
+
+  private warnedSkew = false;
 }
 
 /** Build the `Idempotency-Key` header entry (or `{}`) from an {@link IdempotentOpts}. */
@@ -198,6 +219,32 @@ class WorkflowsResource {
   /** `GET /api/v1/workflows/{id}` — live status + event history. */
   async get(id: string): Promise<{ execution: Record<string, unknown>; events: Record<string, unknown>[] }> {
     return this.http.request("GET", `/api/v1/workflows/${encodeURIComponent(id)}`);
+  }
+
+  /** Poll {@link get} until the execution reaches a terminal status
+   * (`completed`/`failed`/`cancelled` — compared case-insensitively) and
+   * return the final snapshot (DX-301). The submit routes return immediately
+   * by design; this is the "just wait for it" helper every caller was
+   * hand-rolling. Throws {@link ApexTimeoutError} once `timeoutMs` (default
+   * 60s) elapses; polls every `intervalMs` (default 500ms). */
+  async waitForCompletion(
+    id: string,
+    opts?: { intervalMs?: number; timeoutMs?: number },
+  ): Promise<{ execution: Record<string, unknown>; events: Record<string, unknown>[] }> {
+    const intervalMs = opts?.intervalMs ?? 500;
+    const timeoutMs = opts?.timeoutMs ?? 60_000;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const snapshot = await this.get(id);
+      const status = String(snapshot.execution["status"] ?? "").toLowerCase();
+      if (TERMINAL_WORKFLOW_STATUSES.has(status)) return snapshot;
+      if (Date.now() + intervalMs > deadline) {
+        throw new ApexTimeoutError(
+          `workflow execution ${id} still \`${status}\` after ${timeoutMs}ms`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
   }
 
   /** `DELETE /api/v1/workflows/{id}` — advisory cancel. */

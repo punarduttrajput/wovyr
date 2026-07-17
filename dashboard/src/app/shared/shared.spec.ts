@@ -6,14 +6,17 @@ import { Tabs, TabSpec } from './tabs';
 
 /** UI-301: the shared component library's contracts. */
 describe('statusClass', () => {
-  it('maps every engine status family to its pill class', () => {
+  it('maps every engine status family to its pill class, wire-casing included', () => {
+    // The engine serializes snake_case (`completed`, API-702); the old
+    // PascalCase is still accepted for anything that stored it.
+    expect(statusClass('completed')).toBe('ok');
     expect(statusClass('Completed')).toBe('ok');
-    expect(statusClass('Failed')).toBe('crit');
-    expect(statusClass('Compensating')).toBe('warn');
-    for (const s of ['Running', 'Waiting', 'Resumed', 'Scheduled']) {
+    expect(statusClass('failed')).toBe('crit');
+    expect(statusClass('compensating')).toBe('warn');
+    for (const s of ['running', 'waiting', 'resumed', 'scheduled', 'Running']) {
       expect(statusClass(s)).toBe('info');
     }
-    expect(statusClass('SomethingNew')).toBe('mut');
+    expect(statusClass('something_new')).toBe('mut');
   });
 });
 

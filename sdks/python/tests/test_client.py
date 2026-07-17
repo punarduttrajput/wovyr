@@ -8,11 +8,13 @@ Skips cleanly (not failing) if no server answers at `APEX_TEST_BASE_URL`
 (default `http://127.0.0.1:8080`), so this suite doesn't fail an offline run
 that never started one.
 
-The org/project test additionally needs the server started with
-`APEX_PLATFORM_ADMINS=sdk-test-admin` (unlike agents/workflows/memory,
-tenancy management routes have no anonymous-default-tenant back-compat
-bypass — see `_admin_client()` below); it skips gracefully, rather than
-failing, if that wasn't configured.
+Like the TypeScript suite, almost every mutating/tenant-scoped flow below
+(workflows submit/poll, memory, secrets, both pagination tests, org/project)
+uses `_admin_client()` and needs the server started with
+`APEX_PLATFORM_ADMINS=sdk-test-admin` (SEC-105: nothing tenant-scoped is
+reachable via anonymity alone); those tests error with a 403 otherwise.
+Run-only agent routes and reads (`health`, `tools`, `validate`) stay
+anonymous.
 """
 
 from __future__ import annotations
@@ -26,7 +28,15 @@ import urllib.request
 from email.message import Message
 from typing import Any, Optional
 
-from apex_sdk import ApexApiError, ApexClient, RetryOptions, paginate_all
+from apex_sdk import (
+    ApexApiError,
+    ApexClient,
+    ApexTimeoutError,
+    ApexVersionSkewWarning,
+    RetryOptions,
+    paginate_all,
+    sdk_version,
+)
 from apex_sdk.http import Opener
 
 BASE_URL = os.environ.get("APEX_TEST_BASE_URL", "http://127.0.0.1:8080")
@@ -124,26 +134,21 @@ class ApexClientIntegrationTests(unittest.TestCase):
             "metadata:\n  name: sdk-submit-test\n  version: 1.0.0\n"
             "spec:\n  activities:\n    - {id: a, type: function, name: echo, inputs: {message: hi}}\n"
         )
-        submitted = _client().workflows.submit({"manifest": manifest, "input": {}})
+        submitted = _admin_client().workflows.submit({"manifest": manifest, "input": {}})
         self.assertEqual(submitted["status"], "submitted")
         execution_id = submitted["execution_id"]
 
-        completed = False
-        for _ in range(20):
-            got = _client().workflows.get(execution_id)
-            # RM-GA-P4 API-702: WorkflowState now serializes snake_case
-            # ("completed", "failed"), matching the `?status=` filter's
-            # casing (previously PascalCase — a wart API-702 fixed by
-            # construction).
-            if got["execution"].get("status") == "completed":
-                completed = True
-                break
-            time.sleep(0.1)
-        self.assertTrue(completed, "workflow should reach completed status within the poll window")
+        # DX-301: the poll loop every caller used to hand-roll is now the
+        # SDK's `wait_for_completion` — this exercises it against the real
+        # server. (RM-GA-P4 API-702: status serializes snake_case.)
+        got = _admin_client().workflows.wait_for_completion(
+            execution_id, interval_s=0.1, timeout_s=10.0
+        )
+        self.assertEqual(got["execution"].get("status"), "completed")
 
     def test_memory_put_then_query_round_trips_a_record(self) -> None:
         namespace = f"sdk-test-{int(time.time() * 1000)}"
-        client = _client()
+        client = _admin_client()
         client.memory.put(
             {
                 "namespace": namespace,
@@ -159,7 +164,7 @@ class ApexClientIntegrationTests(unittest.TestCase):
 
     def test_secrets_create_get_rotate_delete_round_trip(self) -> None:
         name = f"sdk-test-secret-{int(time.time() * 1000)}"
-        client = _client()
+        client = _admin_client()
         created = client.secrets.create(name, "s3cr3t-v1")
         self.assertEqual(created["version"], 1)
         self.assertNotIn("value", created)
@@ -198,12 +203,12 @@ class ApexClientIntegrationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 409)
 
     def test_pagination_agents_list_honors_limit(self) -> None:
-        page = _client().agents.list(limit=1)
+        page = _admin_client().agents.list(limit=1)
         self.assertLessEqual(len(page["data"]), 1)
         self.assertIsInstance(page["has_more"], bool)
 
     def test_pagination_paginate_all_drains_every_stored_agent_across_pages(self) -> None:
-        client = _client()
+        client = _admin_client()
         created = []
         for i in range(3):
             manifest = (
@@ -290,5 +295,144 @@ class HttpClientRetryTests(unittest.TestCase):
         self.assertEqual(opener.calls, 1)
 
 
+class _RecordingFlakyOpener(_FlakyOpener):
+    """A `_FlakyOpener` that also records each request's Idempotency-Key."""
+
+    def __init__(self, fail_count: int) -> None:
+        super().__init__(fail_count)
+        self.keys: list[Optional[str]] = []
+
+    def open(self, request: urllib.request.Request) -> Any:
+        self.keys.append(request.get_header("Idempotency-key"))
+        return super().open(request)
+
+
+class IdempotentMutationRetryTests(unittest.TestCase):
+    """DX-301: a mutating request retries transient failures only when it
+    carries an `Idempotency-Key` — the server's replay middleware then makes
+    the retry safe."""
+
+    def test_a_keyed_mutation_retries_a_503_and_succeeds(self) -> None:
+        opener = _RecordingFlakyOpener(fail_count=2)
+        client = ApexClient(
+            "http://unit-test.invalid", opener=opener, retry=RetryOptions(max_retries=2, base_delay_s=0.001)
+        )
+        client.secrets.create("token", "v1", idempotency_key="sdk-key-1")
+        self.assertEqual(opener.calls, 3)
+        # Every attempt carried the same key — that's what makes it safe.
+        self.assertEqual(opener.keys, ["sdk-key-1"] * 3)
+
+    def test_the_same_mutation_without_a_key_still_never_retries(self) -> None:
+        opener = _RecordingFlakyOpener(fail_count=1)
+        client = ApexClient(
+            "http://unit-test.invalid", opener=opener, retry=RetryOptions(max_retries=2, base_delay_s=0.001)
+        )
+        with self.assertRaises(ApexApiError):
+            client.secrets.create("token", "v1")
+        self.assertEqual(opener.calls, 1)
+
+
+class _StatusSequenceOpener(Opener):
+    """Serves `GET /workflows/{id}` snapshots from a scripted status list
+    (the last status repeats once the script is exhausted)."""
+
+    def __init__(self, statuses: list[str]) -> None:
+        self.statuses = statuses
+        self.calls = 0
+
+    def open(self, request: urllib.request.Request) -> Any:
+        status = self.statuses[min(self.calls, len(self.statuses) - 1)]
+        self.calls += 1
+        headers = Message()
+        headers["content-type"] = "application/json"
+        body = ('{"execution": {"execution_id": "wf-1", "status": "%s"}, "events": []}' % status).encode()
+        return _FakeHttpResponse(200, body, headers)
+
+
+class WaitForCompletionTests(unittest.TestCase):
+    """DX-301: `workflows.wait_for_completion` — polls to a terminal status,
+    treats `failed` as terminal, and raises `ApexTimeoutError` on deadline."""
+
+    def _client(self, opener: Opener) -> ApexClient:
+        return ApexClient("http://unit-test.invalid", opener=opener)
+
+    def test_polls_until_terminal_and_returns_the_final_snapshot(self) -> None:
+        opener = _StatusSequenceOpener(["running", "running", "completed"])
+        got = self._client(opener).workflows.wait_for_completion("wf-1", interval_s=0.001)
+        self.assertEqual(got["execution"]["status"], "completed")
+        self.assertEqual(opener.calls, 3)
+
+    def test_failed_is_terminal_too(self) -> None:
+        opener = _StatusSequenceOpener(["failed"])
+        got = self._client(opener).workflows.wait_for_completion("wf-1", interval_s=0.001)
+        self.assertEqual(got["execution"]["status"], "failed")
+
+    def test_raises_apex_timeout_error_once_the_deadline_passes(self) -> None:
+        opener = _StatusSequenceOpener(["running"])
+        with self.assertRaises(ApexTimeoutError):
+            self._client(opener).workflows.wait_for_completion(
+                "wf-1", interval_s=0.005, timeout_s=0.02
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class VersionSkewTests(unittest.TestCase):
+    """DX-303: `health()` is the version handshake — a major.minor mismatch
+    warns (once), agreement and unparseable dev versions stay silent."""
+
+    def _health_opener(self, server_version: str) -> "_FlakyOpener":
+        opener = _FlakyOpener(fail_count=0)
+
+        def open_(request: urllib.request.Request) -> Any:  # noqa: ANN401
+            headers = Message()
+            headers["content-type"] = "application/json"
+            body = ('{"status": "ok", "version": "%s"}' % server_version).encode()
+            return _FakeHttpResponse(200, body, headers)
+
+        opener.open = open_  # type: ignore[method-assign]
+        return opener
+
+    def test_matching_major_minor_is_silent(self) -> None:
+        import warnings as w
+
+        client = ApexClient("http://unit-test.invalid", opener=self._health_opener(sdk_version()))
+        with w.catch_warnings():
+            w.simplefilter("error", ApexVersionSkewWarning)
+            client.health()  # would raise if it warned
+
+    def test_minor_skew_warns_once_per_client(self) -> None:
+        client = ApexClient("http://unit-test.invalid", opener=self._health_opener("0.99.0"))
+        with self.assertWarns(ApexVersionSkewWarning):
+            client.health()
+        import warnings as w
+
+        with w.catch_warnings():
+            w.simplefilter("error", ApexVersionSkewWarning)
+            client.health()  # second call: already warned, stays silent
+
+    def test_unparseable_dev_version_is_silent(self) -> None:
+        import warnings as w
+
+        client = ApexClient("http://unit-test.invalid", opener=self._health_opener("dry-run"))
+        with w.catch_warnings():
+            w.simplefilter("error", ApexVersionSkewWarning)
+            client.health()
+
+
+class VersionLockstepTests(unittest.TestCase):
+    """The source-tree fallback version must match `pyproject.toml` — the
+    mechanical guard DX-303 relies on instead of a manual convention."""
+
+    def test_fallback_version_matches_pyproject(self) -> None:
+        import pathlib
+        import re
+
+        from apex_sdk.version import _FALLBACK_VERSION
+
+        pyproject = (pathlib.Path(__file__).parent.parent / "pyproject.toml").read_text()
+        m = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+        assert m is not None
+        self.assertEqual(_FALLBACK_VERSION, m.group(1))

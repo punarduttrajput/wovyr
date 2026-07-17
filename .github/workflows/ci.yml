@@ -75,6 +75,12 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # DX-304: the CLI reference is generated from the real clap tree —
+      # regenerate and fail on any diff, so `docs/11-cli/commands.md` can
+      # never describe a command that doesn't exist nor omit one that does.
+      - name: CLI docs drift check (DX-304)
+        run: python3 scripts/gen-cli-docs.py --check
+
       # RM-GA-P1 SEC-105 negative-authorization gate: fails if any protected route
       # accepts a missing/unknown credential (401 expected) or an authenticated-but-
       # under-scoped principal (403 expected), or if the route table's hand-maintained
@@ -170,6 +176,87 @@ jobs:
 
       - name: Test (headless)
         run: npx ng test --watch=false --browsers=ChromeHeadless
+
+  # DX-302 (coverage half): line/branch coverage over the whole workspace via
+  # cargo-llvm-cov, published as a CI artifact (lcov + human summary) on every
+  # run. A separate job because the instrumented rebuild roughly doubles
+  # compile time — the main `rust` job's feedback loop stays fast.
+  coverage:
+    name: coverage (cargo-llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+          targets: wasm32-wasip1
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Coverage (workspace, default features)
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          # Surface the totals in the run summary page too.
+          { echo '### Coverage'; echo '```'; tail -3 coverage-summary.txt; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            lcov.info
+            coverage-summary.txt
+
+  # DX-302 (benchmark half): criterion benchmarks over the budgeting hot path
+  # (apex-provider/benches/tokenizer.rs), tracked across runs with
+  # github-action-benchmark against a cache-persisted baseline — a run whose
+  # benchmarks land >150% of the baseline fails the job (the threshold
+  # tolerates shared-runner noise; a real algorithmic regression is far
+  # louder). The cache key embeds the run id so every run saves a fresh
+  # baseline while restore-keys picks up the most recent prior one.
+  benchmarks:
+    name: benchmarks (criterion regression gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run criterion benches (bencher output)
+        run: |
+          cargo bench -p apex-provider --bench tokenizer -- --output-format bencher \
+            | tee bench-output.txt
+
+      - name: Restore benchmark baseline
+        uses: actions/cache@v4
+        with:
+          path: bench-baseline
+          key: bench-v1-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            bench-v1-${{ runner.os }}-
+
+      - name: Compare against baseline (fail on regression)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: cargo
+          output-file-path: bench-output.txt
+          external-data-json-path: bench-baseline/benchmark-data.json
+          fail-on-alert: true
+          alert-threshold: 150%
+          summary-always: true
 
   # RM-GA-P2 CI-901 (first half): compile + lint every feature-gated code path.
   # `cargo hack clippy --each-feature` runs clippy once per crate per feature (plus
@@ -466,6 +553,7 @@ jobs:
           image-ref: apex:ci
           severity: HIGH,CRITICAL
           exit-code: "1"
+          ignore-unfixed: true
 
   systemd-install:
     name: systemd install smoke test (DEP-301)
@@ -504,7 +592,7 @@ jobs:
           sudo journalctl -u apex --no-pager || true
           exit 1
 
-      - name: Re-run install.sh (idempotency: must not clobber the env file)
+      - name: "Re-run install.sh (idempotency: must not clobber the env file)"
         run: |
           sudo md5sum /etc/apex/apex.env > /tmp/env-before.md5
           sudo ./deployment/install.sh
@@ -517,4 +605,3 @@ jobs:
       - name: Stop the service
         if: always()
         run: sudo systemctl disable --now apex || true
-          ignore-unfixed: true

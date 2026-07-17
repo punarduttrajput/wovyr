@@ -79,9 +79,40 @@ anonymous-default-tenant back-compat bypass; it needs a real `org.admin` role.
 Start the server with `APEX_PLATFORM_ADMINS=sdk-test-admin` for that test to
 run instead of skip.
 
-## Known gaps (v0.1 of this SDK)
+## Asyncio
 
-- Synchronous only — no `asyncio` client.
+For asyncio programs, `apex_sdk.aio.AsyncApexClient` exposes the same
+resource surface with every method awaitable (the sync transport runs in a
+worker thread, so the event loop never blocks; streaming yields frames as
+they arrive):
+
+```python
+from apex_sdk.aio import AsyncApexClient
+
+client = AsyncApexClient("http://127.0.0.1:8080")
+result = await client.agents.run({"manifest": my_agent_yaml, "input": {"message": "Hi"}})
+final = await client.workflows.wait_for_completion(execution_id)
+async for frame in client.agents.stream({"manifest": my_agent_yaml}):
+    ...
+```
+
+## Retries, polling, versions
+
+- **GET requests** retry transient failures (429/502/503/504, network errors)
+  with exponential backoff — configurable via `retry=RetryOptions(...)`.
+- **Mutations retry only when keyed**: pass `idempotency_key=` and the same
+  retry policy applies — the server's replay middleware makes it safe. A
+  keyless mutation never auto-retries (it could double-execute).
+- **`client.workflows.wait_for_completion(execution_id)`** polls to a
+  terminal status and returns the final snapshot (`ApexTimeoutError` on
+  deadline) — no more hand-rolled poll loops.
+- **Versioning**: the SDK version tracks the platform release it targets
+  (same major.minor = same API surface; see `CHANGELOG.md`). `health()`
+  emits an `ApexVersionSkewWarning` once per client if the server's
+  major.minor differs.
+
+## Known gaps
+
 - No `redocly`-style contract test wired against `openapi.yaml` (the
   TypeScript SDK's `npm test` runs one; this package has no npm-equivalent
   tool available in this environment to wire the same check to).
