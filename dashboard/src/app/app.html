@@ -1,5 +1,8 @@
 <div class="app">
-  <aside class="rail">
+  @if (navOpen()) {
+    <div class="rail-scrim" (click)="navOpen.set(false)" aria-hidden="true"></div>
+  }
+  <aside class="rail" [class.open]="navOpen()">
     <div class="brand">
       <span class="mark">
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 3L21 19H3L12 3Z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>
@@ -15,11 +18,11 @@
       </span>
     </button>
 
-    <nav>
+    <nav aria-label="Primary">
       <div class="nav-sec">Operate</div>
       @for (item of operate; track item.path) {
         <a class="navi" [routerLink]="item.path" routerLinkActive="on">
-          <svg viewBox="0 0 24 24" fill="none" [innerHTML]="item.icon | safeSvg"></svg>
+          <svg aria-hidden="true"><use [attr.href]="'icons.svg#' + item.icon" /></svg>
           {{ item.label }}
           @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
         </a>
@@ -27,7 +30,7 @@
       <div class="nav-sec">Build</div>
       @for (item of build; track item.path) {
         <a class="navi" [routerLink]="item.path" routerLinkActive="on">
-          <svg viewBox="0 0 24 24" fill="none" [innerHTML]="item.icon | safeSvg"></svg>
+          <svg aria-hidden="true"><use [attr.href]="'icons.svg#' + item.icon" /></svg>
           {{ item.label }}
           @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
         </a>
@@ -35,7 +38,7 @@
       <div class="nav-sec">Extend</div>
       @for (item of extend; track item.path) {
         <a class="navi" [routerLink]="item.path" routerLinkActive="on">
-          <svg viewBox="0 0 24 24" fill="none" [innerHTML]="item.icon | safeSvg"></svg>
+          <svg aria-hidden="true"><use [attr.href]="'icons.svg#' + item.icon" /></svg>
           {{ item.label }}
           @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
         </a>
@@ -58,6 +61,15 @@
 
   <main>
     <header class="topbar">
+      <button
+        class="icon-btn nav-toggle"
+        type="button"
+        aria-label="Toggle navigation"
+        [attr.aria-expanded]="navOpen()"
+        (click)="navOpen.set(!navOpen())"
+      >
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
       <div class="crumb">
         <span>{{ crumb().root }}</span>
         <svg viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -81,8 +93,9 @@
 </div>
 
 <app-command-palette #cmdk />
+<app-confirm-dialog />
 
-<div class="toasts">
+<div class="toasts" aria-live="polite">
   @for (t of toasts.toasts(); track t.id) {
     <div class="toast" [class.err]="t.kind === 'err'">
       <svg viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>

@@ -13,7 +13,13 @@
     "experimentalDecorators": true,
     "importHelpers": true,
     "target": "ES2022",
-    "module": "preserve"
+    "module": "preserve",
+    /* UI-302: wire types come from the TypeScript SDK's source, so the dashboard
+     * and SDK can never drift. Type-only imports are erased at compile time —
+     * nothing from the SDK is bundled and no dist build is needed. */
+    "paths": {
+      "@apex-ai/sdk-types": ["../sdks/typescript/src/types"]
+    }
   },
   "angularCompilerOptions": {
     "enableI18nLegacyMessageIdFormat": false,

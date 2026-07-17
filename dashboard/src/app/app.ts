@@ -1,21 +1,24 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, HostListener, inject, signal } from '@angular/core';
 import { Router, NavigationEnd, RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { filter } from 'rxjs/operators';
 import { ThemeService } from './core/theme.service';
-import { SafeSvgPipe } from './core/safe-svg.pipe';
 import { ToastService } from './core/toast.service';
 import { CommandPalette } from './shared/command-palette';
+import { ConfirmDialog } from './shared/confirm';
 
 interface NavItem {
   path: string;
   label: string;
-  icon: string; // svg inner markup
+  /** Symbol id in the shared `icons.svg` sprite (UI-306). */
+  icon: string;
+  /** Live count rendered as a badge; absent = no badge. Fake hardcoded badge
+   * strings were removed in UI-306 — a badge must mean something real. */
   badge?: string;
 }
 
 @Component({
   selector: 'app-root',
-  imports: [RouterOutlet, RouterLink, RouterLinkActive, SafeSvgPipe, CommandPalette],
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, CommandPalette, ConfirmDialog],
   templateUrl: './app.html',
   styleUrl: './app.scss',
 })
@@ -25,8 +28,11 @@ export class App {
   private router = inject(Router);
 
   readonly crumb = signal<{ root: string; leaf: string }>({ root: 'Build', leaf: 'Agent Studio' });
+  /** Mobile-only nav drawer state (UI-304); the rail is always visible on desktop. */
+  readonly navOpen = signal(false);
   private readonly labels: Record<string, { root: string; leaf: string }> = {
     agents: { root: 'Build', leaf: 'Agent Studio' },
+    playground: { root: 'Build', leaf: 'Playground' },
     monitoring: { root: 'Operate', leaf: 'Monitoring' },
     workflows: { root: 'Build', leaf: 'Workflow Builder' },
     memory: { root: 'Build', leaf: 'Memory Explorer' },
@@ -35,6 +41,7 @@ export class App {
     marketplace: { root: 'Extend', leaf: 'Marketplace' },
     settings: { root: 'Administer', leaf: 'Settings' },
     executions: { root: 'Operate', leaf: 'Execution' },
+    audit: { root: 'Operate', leaf: 'Audit log' },
     login: { root: 'Account', leaf: 'Sign in' },
   };
 
@@ -44,62 +51,32 @@ export class App {
       .subscribe((e) => {
         const seg = e.urlAfterRedirects.split('?')[0].split('/')[1] || 'agents';
         this.crumb.set(this.labels[seg] ?? { root: '', leaf: seg });
+        this.navOpen.set(false); // navigating closes the mobile drawer
       });
   }
 
+  @HostListener('document:keydown.escape')
+  closeNav(): void {
+    this.navOpen.set(false);
+  }
+
   readonly operate: NavItem[] = [
-    {
-      path: '/monitoring',
-      label: 'Monitoring',
-      badge: '12',
-      icon: '<path d="M3 12h4l3 8 4-16 3 8h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
-    },
+    { path: '/monitoring', label: 'Monitoring', icon: 'i-monitoring' },
+    { path: '/audit', label: 'Audit log', icon: 'i-audit' },
   ];
 
   readonly build: NavItem[] = [
-    {
-      path: '/workflows',
-      label: 'Workflow Builder',
-      icon: '<rect x="3" y="4" width="6" height="5" rx="1.4" stroke="currentColor" stroke-width="2"/><rect x="15" y="15" width="6" height="5" rx="1.4" stroke="currentColor" stroke-width="2"/><path d="M9 6h4a2 2 0 012 2v9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
-    },
-    {
-      path: '/agents',
-      label: 'Agent Studio',
-      icon: '<rect x="4" y="7" width="16" height="12" rx="3" stroke="currentColor" stroke-width="2"/><path d="M12 7V4M9 13h.01M15 13h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
-    },
-    {
-      path: '/memory',
-      label: 'Memory Explorer',
-      icon: '<ellipse cx="12" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="2"/><path d="M5 6v6c0 1.66 3.13 3 7 3s7-1.34 7-3V6M5 12v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6" stroke="currentColor" stroke-width="2"/>',
-    },
-    {
-      path: '/surfaces',
-      label: 'Surfaces',
-      icon: '<rect x="4" y="5" width="16" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M4 9.5h16" stroke="currentColor" stroke-width="2"/><path d="M8 14h3M8 16.5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
-    },
-    {
-      path: '/mcp-servers',
-      label: 'MCP Servers',
-      icon: '<circle cx="6" cy="6" r="2.5" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="6" r="2.5" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="18" r="2.5" stroke="currentColor" stroke-width="2"/><path d="M8.2 7.3L11 16M15.8 7.3L13 16M8.5 6h7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
-    },
+    { path: '/workflows', label: 'Workflow Builder', icon: 'i-workflows' },
+    { path: '/agents', label: 'Agent Studio', icon: 'i-agents' },
+    { path: '/playground', label: 'Playground', icon: 'i-playground' },
+    { path: '/memory', label: 'Memory Explorer', icon: 'i-memory' },
+    { path: '/surfaces', label: 'Surfaces', icon: 'i-surfaces' },
+    { path: '/mcp-servers', label: 'MCP Servers', icon: 'i-mcp' },
   ];
 
   readonly extend: NavItem[] = [
-    {
-      path: '/marketplace',
-      label: 'Marketplace',
-      badge: '3',
-      icon: '<path d="M4 8h16l-1 11H5L4 8Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 8V6a4 4 0 018 0v2" stroke="currentColor" stroke-width="2"/>',
-    },
-    {
-      path: '/settings',
-      label: 'Settings',
-      icon: '<circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M12 2v3m0 14v3M4.2 4.2l2.1 2.1m11.4 11.4l2.1 2.1M2 12h3m14 0h3M4.2 19.8l2.1-2.1m11.4-11.4l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
-    },
-    {
-      path: '/login',
-      label: 'Sign in',
-      icon: '<circle cx="12" cy="8" r="3.5" stroke="currentColor" stroke-width="2"/><path d="M5 20c0-3.3 3.1-6 7-6s7 2.7 7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
-    },
+    { path: '/marketplace', label: 'Marketplace', icon: 'i-marketplace' },
+    { path: '/settings', label: 'Settings', icon: 'i-settings' },
+    { path: '/login', label: 'Sign in', icon: 'i-login' },
   ];
 }

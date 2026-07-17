@@ -1,3 +1,4 @@
+import { Tabs, TabSpec } from '../../shared/tabs';
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { SettingsService } from './settings.service';
@@ -8,7 +9,7 @@ type Tab = 'projects' | 'members' | 'quotas' | 'integrations';
 
 @Component({
   selector: 'app-settings',
-  imports: [FormsModule],
+  imports: [FormsModule, Tabs],
   templateUrl: './settings.html',
   styleUrl: './settings.scss',
 })
@@ -21,6 +22,12 @@ export class Settings implements OnInit {
   readonly roles: Role[] = ['viewer', 'editor', 'project_admin', 'org_admin', 'platform_admin'];
 
   readonly tab = signal<Tab>('projects');
+  readonly tabSpecs: TabSpec[] = [
+    { id: 'projects', label: 'Organizations & Projects' },
+    { id: 'members', label: 'Members & Roles' },
+    { id: 'quotas', label: 'Quotas' },
+    { id: 'integrations', label: 'Integrations' },
+  ];
   readonly orgs = signal<Organization[]>([]);
   readonly projects = signal<Project[]>([]);
   readonly members = signal<Membership[]>([]);
@@ -41,8 +48,8 @@ export class Settings implements OnInit {
     this.loadWebhooks();
   }
 
-  setTab(t: Tab): void {
-    this.tab.set(t);
+  setTab(t: string): void {
+    this.tab.set(t as Tab);
   }
 
   // --- loads ---

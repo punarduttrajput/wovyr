@@ -1,8 +1,11 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MarketplaceService } from './marketplace.service';
+import { errText } from '../../core/http-error';
 import { MarketplaceListing, PluginAttestation, PluginInfo } from '../../core/api.types';
 import { ToastService } from '../../core/toast.service';
+import { ConfirmService } from '../../shared/confirm';
+import { Tabs, TabSpec } from '../../shared/tabs';
 
 /** Capability-kind filter options for browse (mirrors `apex_plugin::CapabilityKind`). */
 const CAPABILITY_KINDS = [
@@ -15,13 +18,14 @@ const CAPABILITY_KINDS = [
 
 @Component({
   selector: 'app-marketplace',
-  imports: [FormsModule],
+  imports: [FormsModule, Tabs],
   templateUrl: './marketplace.html',
   styleUrl: './marketplace.scss',
 })
 export class Marketplace implements OnInit {
   private svc = inject(MarketplaceService);
   private toast = inject(ToastService);
+  private confirm = inject(ConfirmService);
 
   readonly capabilityKinds = CAPABILITY_KINDS;
 
@@ -31,6 +35,10 @@ export class Marketplace implements OnInit {
 
   // ── tabs ─────────────────────────────────────────────────────────────────────
   readonly tab = signal<'browse' | 'installed'>('browse');
+  readonly tabSpecs = computed<TabSpec[]>(() => [
+    { id: 'browse', label: 'Browse' },
+    { id: 'installed', label: 'Installed', count: this.plugins().length },
+  ]);
 
   // ── browse / discovery ─────────────────────────────────────────────────────────
   readonly listings = signal<MarketplaceListing[]>([]);
@@ -67,8 +75,8 @@ export class Marketplace implements OnInit {
     this.search();
   }
 
-  setTab(t: 'browse' | 'installed'): void {
-    this.tab.set(t);
+  setTab(t: string): void {
+    this.tab.set(t as 'browse' | 'installed');
     if (t === 'browse' && !this.searched()) this.search();
     if (t === 'installed') this.refresh();
   }
@@ -180,8 +188,14 @@ export class Marketplace implements OnInit {
     });
   }
 
-  uninstall(p: PluginInfo): void {
-    if (!confirm(`Uninstall ${p.name}?`)) return;
+  async uninstall(p: PluginInfo): Promise<void> {
+    const ok = await this.confirm.ask({
+      title: 'Uninstall plugin',
+      message: `Uninstall ${p.name}? Its capabilities are withdrawn immediately.`,
+      confirmLabel: 'Uninstall',
+      danger: true,
+    });
+    if (!ok) return;
     this.busy.set(p.id);
     this.svc.uninstall(p.id).subscribe({
       next: () => {
@@ -272,7 +286,6 @@ export class Marketplace implements OnInit {
   }
 
   private fail(e: unknown): void {
-    const err = e as { error?: { error?: { message?: string } }; message?: string };
-    this.status.set('Error: ' + (err?.error?.error?.message ?? err?.message ?? 'request failed'));
+    this.status.set('Error: ' + errText(e));
   }
 }

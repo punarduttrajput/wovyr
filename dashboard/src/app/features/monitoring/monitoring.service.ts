@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
+import { silentErrors } from '../../core/http-error';
 import { Health, MetricSample, Page, WorkflowSummary } from '../../core/api.types';
 
 /** Aggregated view of the platform metrics the Monitoring surface renders. */
@@ -22,12 +23,15 @@ export interface MetricsSnapshot {
 export class MonitoringService {
   private http = inject(HttpClient);
 
+  // The three polled reads are marked `silentErrors()`: Monitoring renders its
+  // own "unreachable" banner from their failure, so the global error-toast
+  // interceptor (UI-302) staying quiet here is deliberate, not a swallow.
   health(): Observable<Health> {
-    return this.http.get<Health>('/healthz');
+    return this.http.get<Health>('/healthz', { context: silentErrors() });
   }
 
   workflows(): Observable<Page<WorkflowSummary>> {
-    return this.http.get<Page<WorkflowSummary>>('/api/v1/workflows');
+    return this.http.get<Page<WorkflowSummary>>('/api/v1/workflows', { context: silentErrors() });
   }
 
   execution(id: string): Observable<{ execution: WorkflowSummary; events: unknown[] }> {
@@ -38,7 +42,7 @@ export class MonitoringService {
 
   metrics(): Observable<MetricsSnapshot> {
     return this.http
-      .get('/metrics', { responseType: 'text' })
+      .get('/metrics', { responseType: 'text', context: silentErrors() })
       .pipe(map((text) => this.aggregate(this.parse(text))));
   }
 

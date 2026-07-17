@@ -13,6 +13,7 @@ import { firstValueFrom } from 'rxjs';
 import type { ApexUiFrameDecideDetail } from '@apex/ui-react/web-component';
 // Side-effecting: registers the `<apex-ui-frame>` custom element (RDR-402).
 import '@apex/ui-react/web-component';
+import { errText } from '../../core/http-error';
 import { PendingUiFrame, SurfacesService, UiDecisionOutcome } from './surfaces.service';
 
 /** The runtime shape of an `<apex-ui-frame>` DOM node (its `frame`/
@@ -114,7 +115,7 @@ export class Surfaces {
       })
       .then((decided) => this.outcome.set(decided))
       .catch((e) => {
-        this.status.set('Error: ' + this.errText(e));
+        this.status.set('Error: ' + errText(e));
         throw e;
       });
   }
@@ -149,15 +150,11 @@ export class Surfaces {
     this.pending.set(null);
     const err = e as { status?: number };
     if (err?.status === 403) {
-      this.blockedReason.set(this.errText(e));
+      this.blockedReason.set(errText(e));
       this.status.set('Blocked by the trust layer.');
     } else {
-      this.status.set('Error: ' + this.errText(e));
+      this.status.set('Error: ' + errText(e));
     }
   }
 
-  private errText(e: unknown): string {
-    const err = e as { error?: { error?: { message?: string } }; message?: string };
-    return err?.error?.error?.message ?? err?.message ?? 'request failed';
-  }
 }

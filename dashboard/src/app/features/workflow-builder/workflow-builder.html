@@ -46,7 +46,7 @@
               @for (n of savedNames(); track n) {
                 <span class="saved-wf">
                   <button class="chip-btn" (click)="loadWorkflow(n)" title="Load into canvas">{{ n }}</button>
-                  <button class="x" (click)="deleteWorkflow(n)" title="Delete saved workflow">×</button>
+                  <button class="x" type="button" (click)="deleteWorkflow(n)" title="Delete saved workflow" [attr.aria-label]="'Delete saved workflow ' + n">×</button>
                 </span>
               }
             </div>
@@ -75,7 +75,7 @@
                   (pointerdown)="startNodeDrag($index, $event); $event.stopPropagation()">
                   <div class="node-h">
                     <span class="node-id mono">{{ a.id }}</span>
-                    <button class="x" (pointerdown)="$event.stopPropagation()"
+                    <button class="x" type="button" aria-label="Remove step" (pointerdown)="$event.stopPropagation()"
                       (click)="removeNode($index)" title="Delete step">×</button>
                   </div>
                   <div class="node-type">{{ typeLabel(a.type) }}</div>
@@ -208,14 +208,14 @@
         <div class="card-h">
           <h3>Executions</h3>
           <span class="sub">{{ executions().length }} recent</span>
-          <div class="right"><button class="icon-btn" (click)="refresh()" title="Refresh">↺</button></div>
+          <div class="right"><button class="icon-btn" type="button" (click)="refresh()" title="Refresh" aria-label="Refresh executions">↺</button></div>
         </div>
         @for (ex of executions(); track ex.execution_id) {
           <div class="exec-row" [class.sel]="selectedExec()?.execution_id === ex.execution_id"
             (click)="select(ex)">
             <div class="exec-id mono">{{ ex.execution_id }}</div>
             <div class="exec-meta">
-              <span class="pill {{ statusClass(ex.status) }}">{{ ex.status }}</span>
+              <app-status-pill [status]="ex.status" />
               <span class="muted mini">{{ ex.workflow_name }}</span>
             </div>
           </div>
@@ -228,7 +228,7 @@
         <div class="card detail-card">
           <div class="card-h">
             <h3 class="mono">{{ selectedExec()!.execution_id }}</h3>
-            <span class="pill {{ statusClass(selectedExec()!.status) }}">{{ selectedExec()!.status }}</span>
+            <app-status-pill [status]="selectedExec()!.status" />
             <div class="right">
               <a class="btn" [routerLink]="['/executions', selectedExec()!.execution_id]">Full detail →</a>
             </div>
@@ -238,7 +238,7 @@
             @for (a of activities(); track a.id) {
               <div class="act-row">
                 <span class="mono act-id">{{ a.id }}</span>
-                <span class="pill {{ statusClass(a.state) }}">{{ a.state }}</span>
+                <app-status-pill [status]="a.state" />
               </div>
             }
           </div>

@@ -24,13 +24,13 @@
     <div class="card pad">
       <div class="card-h"><h3>Add a connection</h3></div>
       <div class="field">
-        <label>Name</label>
-        <input type="text" [(ngModel)]="name" placeholder="docs" />
+        <label for="mcp-servers-name">Name</label>
+        <input id="mcp-servers-name" type="text" [(ngModel)]="name" placeholder="docs" />
       </div>
 
       <div class="field">
         <label>Transport</label>
-        <div class="transport-choice">
+        <div class="transport-choice" role="radiogroup" aria-label="Transport">
           <label class="radio">
             <input type="radio" name="kind" value="http" [(ngModel)]="kind" />
             HTTP (remote server, no local execution)
@@ -47,28 +47,28 @@
 
       @if (kind === 'http') {
         <div class="field">
-          <label>URL</label>
-          <input type="text" [(ngModel)]="url" placeholder="https://mcp.example.com/mcp" />
+          <label for="mcp-servers-url">URL</label>
+          <input id="mcp-servers-url" type="text" [(ngModel)]="url" placeholder="https://mcp.example.com/mcp" />
         </div>
       } @else {
         <div class="field">
-          <label>Command</label>
-          <input type="text" [(ngModel)]="command" placeholder="npx" />
+          <label for="mcp-servers-command">Command</label>
+          <input id="mcp-servers-command" type="text" [(ngModel)]="command" placeholder="npx" />
         </div>
         <div class="field">
-          <label>Args <span class="muted">— space-separated</span></label>
-          <input type="text" [(ngModel)]="args" placeholder="-y @modelcontextprotocol/server-filesystem /data/docs" />
+          <label for="mcp-servers-args-space-separated">Args <span class="muted">— space-separated</span></label>
+          <input id="mcp-servers-args-space-separated" type="text" [(ngModel)]="args" placeholder="-y @modelcontextprotocol/server-filesystem /data/docs" />
         </div>
       }
 
       <div class="field">
-        <label>Secret reference <span class="muted">— optional, e.g. secret://acme/mcp-token</span></label>
-        <input type="text" [(ngModel)]="secretRef" placeholder="secret://<tenant>/<name>" />
+        <label for="mcp-servers-secret-reference-optional">Secret reference <span class="muted">— optional, e.g. secret://acme/mcp-token</span></label>
+        <input id="mcp-servers-secret-reference-optional" type="text" [(ngModel)]="secretRef" placeholder="secret://<tenant>/<name>" />
       </div>
       @if (kind === 'stdio' && secretRef.trim()) {
         <div class="field">
-          <label>Secret env var <span class="muted">— name the spawned server reads it as</span></label>
-          <input type="text" [(ngModel)]="secretEnvVar" placeholder="GITHUB_TOKEN" />
+          <label for="mcp-servers-secret-env-var">Secret env var <span class="muted">— name the spawned server reads it as</span></label>
+          <input id="mcp-servers-secret-env-var" type="text" [(ngModel)]="secretEnvVar" placeholder="GITHUB_TOKEN" />
         </div>
       }
 
@@ -80,7 +80,7 @@
     <!-- list -->
     <div class="card">
       <div class="card-h"><h3>Configured connections</h3><span class="sub">{{ connections().length }}</span></div>
-      <table>
+      <div class="table-wrap"><table>
         <thead><tr><th>Name</th><th>Transport</th><th>Tools</th><th></th></tr></thead>
         <tbody>
           @for (c of connections(); track c.name) {
@@ -100,7 +100,7 @@
             <tr><td colspan="4" class="muted">No MCP connections configured yet.</td></tr>
           }
         </tbody>
-      </table>
+      </table></div>
     </div>
   </div>
 </section>

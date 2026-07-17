@@ -93,6 +93,24 @@ export interface AgentSummary {
   manifest: string;
 }
 
+/** `GET /healthz`. */
+export interface Health {
+  status: string;
+  version: string;
+}
+
+/** A workflow execution summary (apex-workflow `ExecutionSummary`) — the row
+ * shape `GET /api/v1/workflows` pages and `GET /api/v1/workflows/{id}` returns
+ * under `execution`. */
+export interface WorkflowSummary {
+  execution_id: string;
+  workflow_name: string;
+  workflow_version: string;
+  status: string;
+  activities: Record<string, string>;
+  waiting_on: string[];
+}
+
 export interface WorkflowValidation {
   valid: boolean;
   name: string;
@@ -195,6 +213,33 @@ export interface MarketplaceSearchParams {
   capability?: CapabilityDescriptor["kind"];
 }
 
+/** Permission-risk classification of a listing's latest version. */
+export type PermissionRisk = "low" | "medium" | "high";
+
+/** A marketplace listing projection (apex-marketplace `Listing`) — the row
+ * shape `GET /api/v1/marketplace/listings` pages. `capabilities` are the
+ * latest version's capability kinds (snake_case strings, e.g. `tool`). */
+export interface MarketplaceListing {
+  id: string;
+  publisher: string;
+  name: string;
+  description: string;
+  categories: string[];
+  capabilities: string[];
+  permissions: string[];
+  risk: PermissionRisk;
+  /** Most severe scan finding on the latest version (absent/null ⇒ clean scan). */
+  scan_severity?: ScanFinding["severity"] | null;
+  /** Number of scan findings on the latest version. */
+  scan_findings?: number;
+  versions: string[];
+  channels: Record<string, string>;
+  rating: number | null;
+  reviews: number;
+  installs: number;
+  verified: boolean;
+}
+
 export interface PublishResult {
   listing: string;
   reference: string;
@@ -203,17 +248,31 @@ export interface PublishResult {
   scan: ScanReport;
 }
 
+/** One SBOM component a package bundles (apex-plugin `SbomComponent`). */
+export interface SbomComponent {
+  name: string;
+  version: string;
+  license?: string;
+}
+
+/** Build provenance for a package (apex-plugin `Provenance`). */
+export interface Provenance {
+  builder: string;
+  source: string;
+  built_at: string;
+}
+
 export interface Attestation {
   id: string;
   version: string;
   publisher: string;
   verified: boolean;
   signature_verified: boolean;
-  risk: "low" | "medium" | "high";
+  risk: PermissionRisk;
   permissions: string[];
   package_digest: string;
-  sbom: unknown[] | null;
-  provenance: unknown | null;
+  sbom: { components: SbomComponent[] } | null;
+  provenance: Provenance | null;
   scan: ScanReport;
 }
 
@@ -226,16 +285,75 @@ export interface SecretMetadata {
 
 export type Role = "viewer" | "editor" | "project_admin" | "org_admin" | "platform_admin";
 
-export interface AuditEntry {
-  actor: { principal: string; type?: string; tenant?: string };
+// ---- tenancy (apex-tenancy; organizations/projects routes) ----
+
+export interface Organization {
+  id: string;
+  name: string;
+  tenant: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  organization: string;
+  tenant: string;
+  settings?: Record<string, unknown>;
+  status?: string;
+  version?: number;
+}
+
+export interface Membership {
+  user: string;
+  role: Role;
+  scope: unknown;
+}
+
+export interface QuotaLimits {
+  llm_cost_per_day_usd?: number | null;
+  /** LLM tokens (prompt + completion) per rolling day (SRV-202). */
+  llm_tokens_per_day?: number | null;
+  concurrent_agent_runs?: number | null;
+  max_mcp_connections?: number | null;
+  /** Daily-reset boundary in minutes east of UTC (SRV-203); empty = UTC midnight. */
+  day_reset_offset_minutes?: number | null;
+}
+
+/** A webhook subscription row (`GET /api/v1/webhooks` — secrets redacted). */
+export interface Webhook {
+  id: string;
+  url: string;
+  events: string[];
+  active?: boolean;
+}
+
+/** A single audited action (apex-audit `AuditEvent`) — who did what, when,
+ * with what outcome. `reason` is set for denials/errors (e.g. the missing
+ * scope). */
+export interface AuditEvent {
+  timestamp_ms: number;
+  actor: { principal: string; type: "user" | "service" | "api_key" | "system"; tenant: string };
+  /** Dotted action, e.g. `secret.create`, `workflow.execution.cancel`. */
   action: string;
-  resource: { type?: string; id: string };
-  outcome?: string;
+  /** The resource acted on, by type + id — never by value. */
+  resource: { type: string; id: string };
+  outcome: "allowed" | "denied" | "error";
   reason?: string;
   request_id?: string;
-  timestamp_ms: number;
-  prev_hash?: string;
-  hash?: string;
+}
+
+/** A persisted audit record (apex-audit `AuditEntry`): the event plus its
+ * position and hash-chain links — the row shape `GET /api/v1/audit` pages.
+ * (This type used to mirror the event fields flat, which is not what the
+ * server sends — the event nests under `event`.) */
+export interface AuditEntry {
+  /** Derived id, `aud-<seq>`. */
+  id: string;
+  seq: number;
+  event: AuditEvent;
+  /** Hex sha256 of the previous entry (empty string for the genesis entry). */
+  prev_hash: string;
+  hash: string;
 }
 
 export interface ToolSummary {

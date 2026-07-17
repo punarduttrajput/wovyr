@@ -104,7 +104,7 @@
     <div class="card">
       <div class="card-h"><h3>Requests by route</h3><span class="sub">RED · cumulative</span></div>
       @if (metrics()?.routes?.length) {
-        <table>
+        <div class="table-wrap"><table>
           <thead><tr><th>Route</th><th class="num">Requests</th><th class="num">Errors</th></tr></thead>
           <tbody>
             @for (r of metrics()!.routes; track r.route) {
@@ -115,7 +115,7 @@
               </tr>
             }
           </tbody>
-        </table>
+        </table></div>
       } @else {
         <div class="muted pad">No route metrics yet — they appear as the API serves requests.</div>
       }
@@ -130,7 +130,7 @@
       </div>
     </div>
     @if (workflows().length) {
-      <table>
+      <div class="table-wrap"><table>
         <thead><tr><th>Execution</th><th>Workflow</th><th>Version</th><th>Status</th><th class="num">Activities</th><th>Waiting on</th></tr></thead>
         <tbody>
           @for (w of workflows(); track w.execution_id) {
@@ -138,13 +138,13 @@
               <td class="rid">{{ w.execution_id }}</td>
               <td><b>{{ w.workflow_name }}</b></td>
               <td class="mono muted">{{ w.workflow_version }}</td>
-              <td><span class="pill {{ statusClass(w.status) }}"><span class="pd"></span>{{ w.status }}</span></td>
+              <td><app-status-pill [status]="w.status" /></td>
               <td class="num tnum">{{ activityCount(w) }}</td>
               <td class="mono muted">{{ w.waiting_on.length ? w.waiting_on.join(', ') : '—' }}</td>
             </tr>
           }
         </tbody>
-      </table>
+      </table></div>
     } @else {
       <div class="muted pad">No workflow executions yet. Start one with
         <code>apex workflows run</code> and it will appear here live.</div>

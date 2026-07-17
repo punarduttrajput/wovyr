@@ -1,0 +1,80 @@
+<div class="view">
+  <div class="page-head">
+    <div>
+      <span class="eyebrow">Build</span>
+      <h1>Playground</h1>
+      <p>
+        Iterate on a prompt against the live gateway — no agent, tools, or memory involved.
+        Promote a prompt you like into Agent Studio when it's ready.
+      </p>
+    </div>
+    <div class="head-actions">
+      @if (running()) {
+        <button class="btn" type="button" (click)="stop()">Stop</button>
+      }
+      <button class="btn pri" type="button" (click)="run()" [disabled]="running()">
+        {{ running() ? 'Running…' : 'Run' }}
+      </button>
+    </div>
+  </div>
+
+  <div class="pg">
+    <div class="card">
+      <div class="card-h"><h2>Prompt</h2></div>
+      <div class="body">
+        <div class="field">
+          <label for="pg-system">System instructions</label>
+          <textarea id="pg-system" rows="5" [(ngModel)]="system"></textarea>
+        </div>
+        <div class="field">
+          <label for="pg-message">Message</label>
+          <textarea id="pg-message" rows="3" [(ngModel)]="message" (keydown.control.enter)="run()"></textarea>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="pg-class">Model class</label>
+            <select id="pg-class" [(ngModel)]="modelClass" [disabled]="!!pinnedModel.trim()">
+              <option value="fast">fast</option>
+              <option value="balanced">balanced</option>
+              <option value="frontier">frontier</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="pg-pinned">Pinned model <span class="muted">— overrides the class</span></label>
+            <input id="pg-pinned" type="text" [(ngModel)]="pinnedModel" placeholder="(optional)" />
+          </div>
+        </div>
+        <p class="hint muted">Ctrl+Enter runs. The manifest sent is a minimal inline agent — no tools, no memory.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h2>Answer</h2>
+        @if (usage(); as u) {
+          <span class="sub tnum">{{ u.total_tokens ?? '—' }} tok · ${{ (u.cost_usd ?? 0).toFixed(4) }}</span>
+        }
+        @if (reasoning()) {
+          <div class="right">
+            <button class="btn mini" type="button" (click)="showReasoning.set(!showReasoning())">
+              {{ showReasoning() ? 'Hide' : 'Show' }} reasoning
+            </button>
+          </div>
+        }
+      </div>
+      <div class="body">
+        @if (status()) { <p class="err">{{ status() }}</p> }
+        @if (showReasoning() && reasoning()) {
+          <pre class="reasoning mono">{{ reasoning() }}</pre>
+        }
+        @if (answer()) {
+          <pre class="answer">{{ answer() }}</pre>
+        } @else if (!running() && !status()) {
+          <p class="muted">Run the prompt to see the streamed answer here.</p>
+        } @else if (running() && !answer()) {
+          <p class="muted">Streaming…</p>
+        }
+      </div>
+    </div>
+  </div>
+</div>

@@ -20,6 +20,8 @@ import {
   WorkflowService,
   WorkflowValidation,
 } from './workflow.service';
+import { errText } from '../../core/http-error';
+import { StatusPill } from '../../shared/status-pill';
 import { ToolInfo, WorkflowSummary } from '../../core/api.types';
 
 const EXAMPLE_YAML = `metadata:
@@ -48,7 +50,7 @@ const PORT_Y = 30;
 
 @Component({
   selector: 'app-workflow-builder',
-  imports: [JsonPipe, FormsModule, RouterLink],
+  imports: [JsonPipe, FormsModule, RouterLink, StatusPill],
   templateUrl: './workflow-builder.html',
   styleUrl: './workflow-builder.scss',
 })
@@ -82,10 +84,10 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
   };
 
   readonly toolCatalog = signal<ToolInfo[]>([
-    { id: 'echo', description: 'Echo the input back unchanged.' },
-    { id: 'fs_read', description: 'Read the contents of a text file at a given path.' },
-    { id: 'http_get', description: 'Fetch a URL and return its status and body.' },
-    { id: 'shell', description: 'Run a shell command.' },
+    { id: 'echo', description: 'Echo the input back unchanged.', category: 'builtin', permissions: [] },
+    { id: 'fs_read', description: 'Read the contents of a text file at a given path.', category: 'builtin', permissions: [] },
+    { id: 'http_get', description: 'Fetch a URL and return its status and body.', category: 'builtin', permissions: [] },
+    { id: 'shell', description: 'Run a shell command.', category: 'builtin', permissions: [] },
   ]);
 
   /** Stored agent ids (`GET /api/v1/agents`), for the `agent` node's picker. */
@@ -150,6 +152,9 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.loadList();
     this.loadSavedNames();
+    // Catalog loads and the executions poll surface failures via the global
+    // error-toast interceptor (UI-302) — the empty error handlers below only
+    // stop the observable error from propagating, they don't swallow it.
     this.svc.tools().subscribe({
       next: (t) => {
         if (t.length) this.toolCatalog.set(t);
@@ -409,7 +414,7 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
     this.validation.set(null);
     this.svc.validate(this.currentManifest()).subscribe({
       next: (v) => this.validation.set(v),
-      error: (e) => this.validErr.set(this.errText(e)),
+      error: (e) => this.validErr.set(errText(e)),
     });
   }
 
@@ -431,7 +436,7 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
         this.customExecId = '';
       },
       error: (e) => {
-        this.status.set('Error: ' + this.errText(e));
+        this.status.set('Error: ' + errText(e));
         this.busy.set(false);
       },
     });
@@ -480,7 +485,7 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
         setTimeout(() => this.refresh(), 800);
       },
       error: (e) => {
-        this.status.set('Error: ' + this.errText(e));
+        this.status.set('Error: ' + errText(e));
         this.busy.set(false);
       },
     });
@@ -506,23 +511,13 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
           setTimeout(() => this.refresh(), 800);
         },
         error: (e) => {
-          this.status.set('Error: ' + this.errText(e));
+          this.status.set('Error: ' + errText(e));
           this.busy.set(false);
         },
       });
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────────
-  statusClass(s: string): string {
-    switch (s) {
-      case 'Completed': return 'ok';
-      case 'Failed': return 'crit';
-      case 'Compensating': return 'warn';
-      case 'Running': case 'Waiting': case 'Resumed': case 'Scheduled': return 'info';
-      default: return 'mut';
-    }
-  }
-
   isWaiting(ex: WorkflowSummary): boolean {
     return ex.status === 'Waiting' || ex.status === 'Running';
   }
@@ -532,8 +527,4 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
     return Object.entries(a).map(([id, state]) => ({ id, state: String(state) }));
   }
 
-  private errText(e: unknown): string {
-    const err = e as { error?: { error?: { message?: string } }; message?: string };
-    return err?.error?.error?.message ?? err?.message ?? 'request failed';
-  }
 }

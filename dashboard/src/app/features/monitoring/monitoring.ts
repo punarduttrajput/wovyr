@@ -5,6 +5,7 @@ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { forkJoin, of, timer } from 'rxjs';
 import { catchError, switchMap } from 'rxjs/operators';
 import { MonitoringService, MetricsSnapshot } from './monitoring.service';
+import { StatusPill } from '../../shared/status-pill';
 import { Health, WorkflowSummary } from '../../core/api.types';
 
 const POLL_MS = 5000;
@@ -12,7 +13,7 @@ const HISTORY = 30;
 
 @Component({
   selector: 'app-monitoring',
-  imports: [DecimalPipe, RouterLink],
+  imports: [DecimalPipe, RouterLink, StatusPill],
   templateUrl: './monitoring.html',
   styleUrl: './monitoring.scss',
 })
@@ -60,23 +61,6 @@ export class Monitoring {
       });
   }
 
-  statusClass(status: string): string {
-    switch (status) {
-      case 'Completed':
-        return 'ok';
-      case 'Failed':
-        return 'crit';
-      case 'Compensating':
-        return 'warn';
-      case 'Running':
-      case 'Waiting':
-      case 'Resumed':
-      case 'Scheduled':
-        return 'info';
-      default:
-        return 'mut';
-    }
-  }
 
   activityCount(s: WorkflowSummary): number {
     return Object.keys(s.activities ?? {}).length;

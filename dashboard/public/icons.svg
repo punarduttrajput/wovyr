@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <!-- UI-306: the shared icon sprite. Nav/topbar icons used to live as inline
+       SVG strings in component code (nudging the per-component style budget and
+       re-parsing per render); referenced via <use href="icons.svg#<id>">. All
+       symbols draw with stroke="currentColor" so CSS color applies. -->
+  <symbol id="i-monitoring" viewBox="0 0 24 24" fill="none">
+    <path d="M3 12h4l3 8 4-16 3 8h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-audit" viewBox="0 0 24 24" fill="none">
+    <path d="M12 3l7 3v5c0 4.6-3 8.6-7 10-4-1.4-7-5.4-7-10V6l7-3Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-workflows" viewBox="0 0 24 24" fill="none">
+    <rect x="3" y="4" width="6" height="5" rx="1.4" stroke="currentColor" stroke-width="2"/>
+    <rect x="15" y="15" width="6" height="5" rx="1.4" stroke="currentColor" stroke-width="2"/>
+    <path d="M9 6h4a2 2 0 012 2v9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-agents" viewBox="0 0 24 24" fill="none">
+    <rect x="4" y="7" width="16" height="12" rx="3" stroke="currentColor" stroke-width="2"/>
+    <path d="M12 7V4M9 13h.01M15 13h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-playground" viewBox="0 0 24 24" fill="none">
+    <path d="M8 5.5v13l11-6.5-11-6.5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-memory" viewBox="0 0 24 24" fill="none">
+    <ellipse cx="12" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="2"/>
+    <path d="M5 6v6c0 1.66 3.13 3 7 3s7-1.34 7-3V6M5 12v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6" stroke="currentColor" stroke-width="2"/>
+  </symbol>
+  <symbol id="i-surfaces" viewBox="0 0 24 24" fill="none">
+    <rect x="4" y="5" width="16" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/>
+    <path d="M4 9.5h16" stroke="currentColor" stroke-width="2"/>
+    <path d="M8 14h3M8 16.5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-mcp" viewBox="0 0 24 24" fill="none">
+    <circle cx="6" cy="6" r="2.5" stroke="currentColor" stroke-width="2"/>
+    <circle cx="18" cy="6" r="2.5" stroke="currentColor" stroke-width="2"/>
+    <circle cx="12" cy="18" r="2.5" stroke="currentColor" stroke-width="2"/>
+    <path d="M8.2 7.3L11 16M15.8 7.3L13 16M8.5 6h7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-marketplace" viewBox="0 0 24 24" fill="none">
+    <path d="M4 8h16l-1 11H5L4 8Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M8 8V6a4 4 0 018 0v2" stroke="currentColor" stroke-width="2"/>
+  </symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24" fill="none">
+    <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+    <path d="M12 2v3m0 14v3M4.2 4.2l2.1 2.1m11.4 11.4l2.1 2.1M2 12h3m14 0h3M4.2 19.8l2.1-2.1m11.4-11.4l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-login" viewBox="0 0 24 24" fill="none">
+    <circle cx="12" cy="8" r="3.5" stroke="currentColor" stroke-width="2"/>
+    <path d="M5 20c0-3.3 3.1-6 7-6s7 2.7 7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  </symbol>
+</svg>

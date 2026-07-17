@@ -2,6 +2,7 @@ import { Component, OnDestroy, OnInit, computed, inject, signal } from '@angular
 import { FormsModule } from '@angular/forms';
 import { Subscription } from 'rxjs';
 import { AgentService } from './agent.service';
+import { errText } from '../../core/http-error';
 import { AgentDraft, StreamEvent, ToolInfo } from '../../core/api.types';
 
 /** The MCP connection name named by a tool id of the form
@@ -43,10 +44,10 @@ export class AgentStudio implements OnInit, OnDestroy {
    *  tools). Seeded with the built-ins so the picker works before the fetch resolves or
    *  if the server doesn't expose the endpoint. */
   readonly toolCatalog = signal<ToolInfo[]>([
-    { id: 'fs_read', description: 'Read the contents of a text file at a given path.' },
-    { id: 'http_get', description: 'Fetch a URL and return its status and body.' },
-    { id: 'shell', description: 'Run a shell command; returns stdout, stderr, exit code.' },
-    { id: 'echo', description: 'Echo the input back unchanged — handy for testing.' },
+    { id: 'fs_read', description: 'Read the contents of a text file at a given path.', category: 'builtin', permissions: [] },
+    { id: 'http_get', description: 'Fetch a URL and return its status and body.', category: 'builtin', permissions: [] },
+    { id: 'shell', description: 'Run a shell command; returns stdout, stderr, exit code.', category: 'builtin', permissions: [] },
+    { id: 'echo', description: 'Echo the input back unchanged — handy for testing.', category: 'builtin', permissions: [] },
   ]);
 
   readonly agents = signal<string[]>([]);
@@ -68,7 +69,8 @@ export class AgentStudio implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.refresh();
-    // Load the live tool catalog; keep the built-in fallback if the endpoint is absent.
+    // Load the live tool catalog; keep the built-in fallback if the endpoint is
+    // absent. A failure surfaces via the global error-toast interceptor (UI-302).
     this.svc.tools().subscribe({
       next: (t) => {
         if (t.length) this.toolCatalog.set(t);
@@ -115,7 +117,7 @@ export class AgentStudio implements OnInit, OnDestroy {
         this.usage.set(undefined);
         this.status.set('Loaded · ' + id);
       },
-      error: (e) => this.status.set('Error: ' + this.errText(e)),
+      error: (e) => this.status.set('Error: ' + errText(e)),
     });
   }
 
@@ -204,7 +206,7 @@ export class AgentStudio implements OnInit, OnDestroy {
         this.loadedId.set(r.id);
         this.refresh();
       },
-      error: (e) => this.status.set('Error: ' + this.errText(e)),
+      error: (e) => this.status.set('Error: ' + errText(e)),
     });
   }
 
@@ -213,8 +215,4 @@ export class AgentStudio implements OnInit, OnDestroy {
     this.svc.deleteAgent(id).subscribe({ next: () => this.refresh(), error: () => this.refresh() });
   }
 
-  private errText(e: unknown): string {
-    const err = e as { error?: { error?: { message?: string } }; message?: string };
-    return err?.error?.error?.message ?? err?.message ?? 'request failed';
-  }
 }

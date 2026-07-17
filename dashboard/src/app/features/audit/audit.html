@@ -1,0 +1,97 @@
+<div class="view">
+  <div class="page-head">
+    <div>
+      <span class="eyebrow">Operate</span>
+      <h1>Audit log</h1>
+      <p>
+        The tenant's tamper-evident audit trail — every state-changing API call, hash-chained so
+        after-the-fact edits are detectable. Read-only; requires the <code class="mono">audit:read</code> scope.
+      </p>
+    </div>
+  </div>
+
+  <form class="filters card" (ngSubmit)="apply()">
+    <div class="field">
+      <label for="audit-principal">Principal</label>
+      <input id="audit-principal" name="principal" [(ngModel)]="principal" placeholder="user or service id" />
+    </div>
+    <div class="field">
+      <label for="audit-action">Action</label>
+      <input id="audit-action" name="action" [(ngModel)]="action" placeholder="e.g. secrets.create" />
+    </div>
+    <div class="field">
+      <label for="audit-from">From</label>
+      <input id="audit-from" name="from" type="datetime-local" [(ngModel)]="from" />
+    </div>
+    <div class="field">
+      <label for="audit-to">To</label>
+      <input id="audit-to" name="to" type="datetime-local" [(ngModel)]="to" />
+    </div>
+    <div class="filter-actions">
+      <button class="btn pri" type="submit" [disabled]="loading()">Apply</button>
+      <button class="btn" type="button" (click)="clearFilters()" [disabled]="loading()">Clear</button>
+    </div>
+  </form>
+
+  @if (forbidden()) {
+    <app-empty-state>
+      <b>Not authorized.</b>
+      <span>
+        Your role doesn't include <code class="mono">audit:read</code> — ask an org admin for the
+        viewer-plus grant if you need the trail.
+      </span>
+    </app-empty-state>
+  } @else if (error()) {
+    <app-empty-state kind="error"><b>Couldn't load the audit log.</b> <span>{{ error() }}</span></app-empty-state>
+  } @else {
+    <div class="card">
+      <div class="card-h">
+        <h2>Entries</h2>
+        <span class="sub">most recent first</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Actor</th>
+              <th>Action</th>
+              <th>Resource</th>
+              <th>Outcome</th>
+              <th>Request</th>
+              <th>Chain</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (e of entries(); track e.id) {
+              <tr>
+                <td class="tnum nowrap">{{ e.event.timestamp_ms | date: 'MMM d, HH:mm:ss' }}</td>
+                <td class="mono actor">{{ e.event.actor.principal }}</td>
+                <td class="mono">{{ e.event.action }}</td>
+                <td class="mono rid">{{ e.event.resource.type ? e.event.resource.type + ' · ' : '' }}{{ e.event.resource.id }}</td>
+                <td>
+                  <span class="pill {{ outcomeClass(e.event.outcome) }}" [title]="e.event.reason || ''"><span class="pd"></span>{{ e.event.outcome }}</span>
+                </td>
+                <td class="mono rid">{{ e.event.request_id || '—' }}</td>
+                <td class="mono rid" [title]="e.hash">{{ short(e.hash) }}</td>
+              </tr>
+            } @empty {
+              @if (!loading()) {
+                <tr><td colspan="7" class="muted pad">No audit entries match these filters.</td></tr>
+              }
+            }
+          </tbody>
+        </table>
+      </div>
+      <div class="foot">
+        @if (loading()) {
+          <span class="muted">Loading…</span>
+        } @else if (hasMore()) {
+          <button class="btn" type="button" (click)="load()">Load older entries</button>
+        } @else if (entries().length) {
+          <span class="muted">End of the visible trail.</span>
+        }
+      </div>
+    </div>
+  }
+</div>

@@ -2,6 +2,8 @@ import { Component, OnInit, inject, input, signal } from '@angular/core';
 import { JsonPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { MonitoringService } from '../monitoring/monitoring.service';
+import { EmptyState } from '../../shared/empty-state';
+import { StatusPill } from '../../shared/status-pill';
 import { WorkflowSummary } from '../../core/api.types';
 
 /**
@@ -11,7 +13,7 @@ import { WorkflowSummary } from '../../core/api.types';
  */
 @Component({
   selector: 'app-execution-detail',
-  imports: [JsonPipe, RouterLink],
+  imports: [JsonPipe, RouterLink, EmptyState, StatusPill],
   templateUrl: './execution-detail.html',
   styleUrl: './execution-detail.scss',
 })
@@ -43,21 +45,4 @@ export class ExecutionDetail implements OnInit {
     return Object.entries(a).map(([id, state]) => ({ id, state: String(state) }));
   }
 
-  statusClass(s: string): string {
-    switch (s) {
-      case 'Completed':
-        return 'ok';
-      case 'Failed':
-        return 'crit';
-      case 'Compensating':
-        return 'warn';
-      case 'Running':
-      case 'Waiting':
-      case 'Resumed':
-      case 'Scheduled':
-        return 'info';
-      default:
-        return 'mut';
-    }
-  }
 }

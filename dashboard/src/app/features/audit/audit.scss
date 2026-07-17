@@ -1,0 +1,18 @@
+.view { padding:24px 26px 60px; }
+
+.filters {
+  display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;
+  padding:14px 16px; margin-bottom:16px;
+}
+.filters .field { margin:0; flex:1 1 160px; min-width:150px; }
+.filter-actions { display:flex; gap:8px; }
+
+.nowrap { white-space:nowrap; }
+.actor { color:var(--ink-2); }
+.rid { font-size:11px; color:var(--ink-3); }
+.pad { padding:16px; }
+
+.foot {
+  display:flex; justify-content:center; padding:12px;
+  border-top:1px solid var(--line-2); font-size:12.5px;
+}

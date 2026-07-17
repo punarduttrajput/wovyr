@@ -4,12 +4,13 @@ import { provideHttpClient, withFetch, withInterceptors } from '@angular/common/
 
 import { routes } from './app.routes';
 import { tenantInterceptor } from './core/tenant.interceptor';
+import { httpErrorInterceptor } from './core/http-error';
 
 export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
     provideZoneChangeDetection({ eventCoalescing: true }),
     provideRouter(routes, withComponentInputBinding()),
-    provideHttpClient(withFetch(), withInterceptors([tenantInterceptor])),
+    provideHttpClient(withFetch(), withInterceptors([tenantInterceptor, httpErrorInterceptor])),
   ]
 };

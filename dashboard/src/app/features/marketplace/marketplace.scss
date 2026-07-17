@@ -14,19 +14,7 @@
 .note svg { width:15px; height:15px; flex:none; margin-top:1px; color:var(--accent); }
 .note b { color:var(--ink-2); }
 
-/* ── Tabs ──────────────────────────────────────────────────────────────────── */
-.tabs { display:flex; gap:4px; margin-bottom:18px; border-bottom:1px solid var(--line); }
-.tab {
-  appearance:none; background:none; border:none; cursor:pointer;
-  padding:8px 14px; font-size:13px; font-weight:500; color:var(--ink-3);
-  border-bottom:2px solid transparent; margin-bottom:-1px;
-}
-.tab:hover { color:var(--ink-2); }
-.tab.on { color:var(--accent); border-bottom-color:var(--accent); }
-.tab .count {
-  font-family:var(--mono); font-size:10.5px; padding:1px 6px; border-radius:10px;
-  background:var(--surface-2); border:1px solid var(--line); color:var(--ink-3); margin-left:2px;
-}
+/* tab strip is the shared <app-tabs> component (UI-301) */
 
 /* ── Search bar ────────────────────────────────────────────────────────────── */
 .searchbar { display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }

@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
+import * as YAML from 'yaml';
 import { AgentDraft, Page, StreamEvent, ToolInfo } from '../../core/api.types';
 
 /**
@@ -63,110 +64,86 @@ export class AgentService {
   }
 
   /**
-   * Parse a manifest back into an [`AgentDraft`] — the inverse of [`toManifest`]. It reads
-   * the fixed shape this studio emits (and the same shape the example agents use): name,
-   * `model` or `model_selector`, the `instructions: |` block, `tools: [...]`, `max_steps`,
-   * and a `memory` block. Unknown/extra fields are ignored.
+   * Parse a manifest back into an [`AgentDraft`] — the inverse of [`toManifest`].
+   * UI-302: a real YAML parse (the `yaml` library) replaced the old line-regex
+   * walker, so any valid manifest loads — not just the byte shape this studio
+   * happens to emit. Unknown/extra fields are ignored.
    */
   fromManifest(yaml: string): AgentDraft {
     const d = this.blankDraft();
-    const lines = yaml.split('\n');
-    const firstMatch = (re: RegExp): string | undefined =>
-      lines.find((l) => re.test(l))?.match(re)?.[1]?.trim();
-
-    d.name = firstMatch(/^\s{2}name:\s*(.+)$/) ?? '';
-    const pinned = firstMatch(/^\s{2}model:\s*(.+)$/);
-    if (pinned) d.pinnedModel = pinned;
-    const selector = lines.find((l) => /^\s{2}model_selector:/.test(l));
-    if (selector) {
-      d.capability = selector.match(/capability:\s*([\w-]+)/)?.[1] ?? d.capability;
-      d.class = selector.match(/class:\s*([\w-]+)/)?.[1] ?? d.class;
+    let doc: unknown;
+    try {
+      doc = YAML.parse(yaml);
+    } catch {
+      return d; // unparseable → blank draft (the editor shows the raw text anyway)
     }
+    const m = doc as {
+      metadata?: { name?: unknown };
+      spec?: {
+        model?: unknown;
+        model_selector?: { capability?: unknown; class?: unknown };
+        instructions?: unknown;
+        tools?: unknown;
+        mcp_servers?: unknown;
+        max_steps?: unknown;
+        memory?: { namespace?: unknown };
+      };
+    } | null;
+    const strings = (v: unknown): string[] =>
+      Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : [];
 
-    const toolsLine = lines.find((l) => /^\s{2}tools:\s*\[/.test(l));
-    if (toolsLine) {
-      const inner = toolsLine.slice(toolsLine.indexOf('[') + 1, toolsLine.lastIndexOf(']'));
-      d.tools = inner
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean);
+    d.name = typeof m?.metadata?.name === 'string' ? m.metadata.name : '';
+    const spec = m?.spec;
+    if (typeof spec?.model === 'string') d.pinnedModel = spec.model;
+    if (spec?.model_selector && typeof spec.model_selector === 'object') {
+      const sel = spec.model_selector;
+      if (typeof sel.capability === 'string') d.capability = sel.capability;
+      if (typeof sel.class === 'string') d.class = sel.class;
     }
-
-    // `spec.mcp_servers: [...]` (PRD-006 MCX-201) — the allow-list of MCP
-    // connection names this agent may draw tools from.
-    const mcpServersLine = lines.find((l) => /^\s{2}mcp_servers:\s*\[/.test(l));
-    if (mcpServersLine) {
-      const inner = mcpServersLine.slice(
-        mcpServersLine.indexOf('[') + 1,
-        mcpServersLine.lastIndexOf(']'),
-      );
-      d.mcpServers = inner
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean);
-    }
-
-    if (lines.some((l) => /^\s{2}memory:/.test(l))) {
+    if (typeof spec?.instructions === 'string') d.instructions = spec.instructions.trimEnd();
+    d.tools = strings(spec?.tools);
+    // `spec.mcp_servers` (PRD-006 MCX-201) — the allow-list of MCP connection
+    // names this agent may draw tools from.
+    d.mcpServers = strings(spec?.mcp_servers);
+    if (spec?.memory && typeof spec.memory === 'object') {
       d.memoryEnabled = true;
-      d.namespace = firstMatch(/^\s{4}namespace:\s*(.+)$/) ?? d.namespace;
+      if (typeof spec.memory.namespace === 'string') d.namespace = spec.memory.namespace;
     }
-
-    const maxSteps = firstMatch(/^\s{2}max_steps:\s*(\d+)$/);
-    d.maxSteps = maxSteps ? Number(maxSteps) : null;
-
-    // The `instructions: |` block scalar — collect the 4-space-indented body lines.
-    const instrIdx = lines.findIndex((l) => /^\s{2}instructions:\s*\|/.test(l));
-    if (instrIdx >= 0) {
-      const body: string[] = [];
-      for (let i = instrIdx + 1; i < lines.length; i++) {
-        const l = lines[i];
-        if (l.trim() === '') {
-          body.push('');
-        } else if (/^\s{4}/.test(l)) {
-          body.push(l.slice(4));
-        } else {
-          break; // dedent → block ended
-        }
-      }
-      d.instructions = body.join('\n').trimEnd();
-    }
+    d.maxSteps = typeof spec?.max_steps === 'number' ? spec.max_steps : null;
     return d;
   }
 
   /** Serialize a draft to the k8s-style agent manifest the engine expects. */
   toManifest(d: AgentDraft): string {
-    const indent = (s: string, n: number) =>
-      s
-        .split('\n')
-        .map((l) => ' '.repeat(n) + l)
-        .join('\n');
-    const model = d.pinnedModel.trim()
-      ? `  model: ${d.pinnedModel.trim()}`
-      : `  model_selector: { capability: ${d.capability}, class: ${d.class} }`;
-    const lines = [
-      'apiVersion: agent.apex.io/v1',
-      'kind: Agent',
-      'metadata:',
-      `  name: ${d.name.trim() || 'untitled'}`,
-      'spec:',
-      model,
-      '  instructions: |',
-      indent(d.instructions.trimEnd() || 'You are a helpful assistant.', 4),
-    ];
-    const tools = d.tools.filter((t) => t.trim());
-    if (tools.length) lines.push(`  tools: [${tools.join(', ')}]`);
-    const mcpServers = d.mcpServers.filter((t) => t.trim());
-    if (mcpServers.length) lines.push(`  mcp_servers: [${mcpServers.join(', ')}]`);
-    if (d.maxSteps != null && d.maxSteps > 0) lines.push(`  max_steps: ${Math.floor(d.maxSteps)}`);
-    if (d.memoryEnabled) {
-      lines.push(
-        '  memory:',
-        '    enabled: true',
-        `    namespace: ${d.namespace.trim() || 'default'}`,
-        '    retrieval: { strategy: hybrid, limit: 4 }',
-      );
+    const spec: Record<string, unknown> = {};
+    if (d.pinnedModel.trim()) {
+      spec['model'] = d.pinnedModel.trim();
+    } else {
+      spec['model_selector'] = { capability: d.capability, class: d.class };
     }
-    return lines.join('\n') + '\n';
+    spec['instructions'] = (d.instructions.trimEnd() || 'You are a helpful assistant.') + '\n';
+    const tools = d.tools.filter((t) => t.trim());
+    if (tools.length) spec['tools'] = tools;
+    const mcpServers = d.mcpServers.filter((t) => t.trim());
+    if (mcpServers.length) spec['mcp_servers'] = mcpServers;
+    if (d.maxSteps != null && d.maxSteps > 0) spec['max_steps'] = Math.floor(d.maxSteps);
+    if (d.memoryEnabled) {
+      spec['memory'] = {
+        enabled: true,
+        namespace: d.namespace.trim() || 'default',
+        retrieval: { strategy: 'hybrid', limit: 4 },
+      };
+    }
+    return YAML.stringify(
+      {
+        apiVersion: 'agent.apex.io/v1',
+        kind: 'Agent',
+        metadata: { name: d.name.trim() || 'untitled' },
+        spec,
+      },
+      // Multi-line instructions render as a `|` block scalar, like the examples.
+      { blockQuote: 'literal', lineWidth: 0 },
+    );
   }
 
   /**

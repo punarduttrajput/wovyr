@@ -70,8 +70,10 @@ export class CommandPalette {
 
   private cmds: Cmd[] = [
     { section: 'Operate', label: 'Monitoring', hint: 'G M', go: '/monitoring' },
+    { section: 'Operate', label: 'Audit log', go: '/audit' },
     { section: 'Build', label: 'Workflow Builder', hint: 'G W', go: '/workflows' },
     { section: 'Build', label: 'Agent Studio', hint: 'G A', go: '/agents' },
+    { section: 'Build', label: 'Playground', go: '/playground' },
     { section: 'Build', label: 'Memory Explorer', hint: 'G E', go: '/memory' },
     { section: 'Build', label: 'Surfaces', hint: 'G U', go: '/surfaces' },
     { section: 'Extend', label: 'Marketplace', hint: 'G K', go: '/marketplace' },

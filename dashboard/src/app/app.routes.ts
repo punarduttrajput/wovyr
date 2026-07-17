@@ -18,6 +18,11 @@ export const routes: Routes = [
     loadComponent: () => import('./features/monitoring/monitoring').then((m) => m.Monitoring),
   },
   {
+    path: 'audit',
+    title: 'Audit log · Apex',
+    loadComponent: () => import('./features/audit/audit').then((m) => m.Audit),
+  },
+  {
     path: 'workflows',
     title: 'Workflow Builder · Apex',
     loadComponent: () =>
@@ -28,6 +33,11 @@ export const routes: Routes = [
     title: 'Execution · Apex',
     loadComponent: () =>
       import('./features/execution-detail/execution-detail').then((m) => m.ExecutionDetail),
+  },
+  {
+    path: 'playground',
+    title: 'Playground · Apex',
+    loadComponent: () => import('./features/playground/playground').then((m) => m.Playground),
   },
   {
     path: 'memory',

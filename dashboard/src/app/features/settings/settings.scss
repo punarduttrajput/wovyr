@@ -7,13 +7,7 @@
 .status-bar.err { background:var(--crit-bg); color:var(--crit); border-color:color-mix(in srgb, var(--crit) 25%, transparent); }
 .status-bar code { font-family:var(--mono); font-size:12px; }
 
-.tabs { display:flex; gap:2px; border-bottom:1px solid var(--line); margin-bottom:18px; }
-.tabs button {
-  border:0; background:transparent; padding:10px 14px; font-size:13px; font-weight:600;
-  color:var(--ink-3); border-bottom:2px solid transparent; margin-bottom:-1px; transition:color .15s;
-}
-.tabs button:hover { color:var(--ink); }
-.tabs button.on { color:var(--ink); border-bottom-color:var(--accent); }
+/* tab strip is the shared <app-tabs> component (UI-301) */
 
 .two { display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:start; }
 @media (max-width:1000px) { .two { grid-template-columns:1fr; } }
@@ -47,15 +41,7 @@
 .inline-form input:focus, .inline-form select:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-weak); }
 .inline-form .btn { flex:none; }
 
-table { width:100%; border-collapse:collapse; font-size:13px; }
-thead th {
-  font-family:var(--mono); font-size:10px; letter-spacing:.06em; text-transform:uppercase;
-  color:var(--ink-3); text-align:left; padding:9px 16px; border-bottom:1px solid var(--line-2); font-weight:600;
-}
-thead th.num, td.num { text-align:right; }
-tbody td { padding:10px 16px; border-bottom:1px solid var(--line-2); vertical-align:middle; }
-tbody tr:last-child td { border-bottom:0; }
-tbody tr:hover { background:var(--surface-2); }
+/* data-table styles are global (styles.scss, UI-301) */
 td .rid { font-family:var(--mono); font-size:11px; color:var(--ink-3); }
 
 .role-tag {

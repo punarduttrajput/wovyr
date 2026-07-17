@@ -13,12 +13,7 @@
     </div>
   </div>
 
-  <div class="tabs">
-    <button class="tab" [class.on]="tab() === 'browse'" (click)="setTab('browse')">Browse</button>
-    <button class="tab" [class.on]="tab() === 'installed'" (click)="setTab('installed')">
-      Installed @if (plugins().length) { <span class="count">{{ plugins().length }}</span> }
-    </button>
-  </div>
+  <app-tabs [tabs]="tabSpecs()" [active]="tab()" (activeChange)="setTab($event)" />
 
   <!-- Install-from-file panel (applies to both tabs) -->
   @if (showInstall()) {

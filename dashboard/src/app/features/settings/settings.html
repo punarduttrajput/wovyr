@@ -20,12 +20,7 @@
     <div class="status-bar" [class.err]="status().startsWith('Error')">{{ status() }}</div>
   }
 
-  <div class="tabs">
-    <button [class.on]="tab() === 'projects'" (click)="setTab('projects')">Organizations &amp; Projects</button>
-    <button [class.on]="tab() === 'members'" (click)="setTab('members')">Members &amp; Roles</button>
-    <button [class.on]="tab() === 'quotas'" (click)="setTab('quotas')">Quotas</button>
-    <button [class.on]="tab() === 'integrations'" (click)="setTab('integrations')">Integrations</button>
-  </div>
+  <app-tabs [tabs]="tabSpecs" [active]="tab()" (activeChange)="setTab($event)" />
 
   <!-- ===== Projects & Orgs ===== -->
   @if (tab() === 'projects') {
@@ -57,7 +52,7 @@
             </div>
             <span class="pill mut">v{{ p.version }}</span>
             @if (p.status) { <span class="pill" [class.ok]="p.status === 'active'" [class.mut]="p.status !== 'active'">{{ p.status }}</span> }
-            <button class="del" title="Delete project" (click)="removeProject(p); $event.stopPropagation()">×</button>
+            <button class="del" type="button" title="Delete project" [attr.aria-label]="'Delete project ' + p.name" (click)="removeProject(p); $event.stopPropagation()">×</button>
           </div>
         } @empty {
           <div class="pad muted">No projects yet — create an org, then a project.</div>
@@ -80,7 +75,7 @@
     @if (selected(); as p) {
       <div class="card">
         <div class="card-h"><h3>Members of {{ p.name }}</h3><span class="sub">{{ p.id }}</span></div>
-        <table>
+        <div class="table-wrap"><table>
           <thead><tr><th>User</th><th>Role</th><th></th></tr></thead>
           <tbody>
             @for (m of members(); track m.user) {
@@ -91,7 +86,7 @@
               </tr>
             } @empty { <tr><td colspan="3" class="muted">No members yet.</td></tr> }
           </tbody>
-        </table>
+        </table></div>
         <div class="inline-form">
           <input type="text" [(ngModel)]="newMember.user" placeholder="user id / email" (keydown.enter)="addMember()" />
           <select [(ngModel)]="newMember.role">
@@ -111,10 +106,10 @@
       <div class="card">
         <div class="card-h"><h3>Quotas — {{ p.name }}</h3><span class="sub">limits enforced at the run boundary</span></div>
         <div class="quota-grid">
-          <div class="field"><label>LLM cost / day (USD)</label><input type="number" step="0.01" [(ngModel)]="quota.llm_cost_per_day_usd" placeholder="unlimited" /></div>
-          <div class="field"><label>LLM tokens / day</label><input type="number" [(ngModel)]="quota.llm_tokens_per_day" placeholder="unlimited" /></div>
-          <div class="field"><label>Concurrent agent runs</label><input type="number" [(ngModel)]="quota.concurrent_agent_runs" placeholder="unlimited" /></div>
-          <div class="field"><label>Day reset offset (min east of UTC)</label><input type="number" [(ngModel)]="quota.day_reset_offset_minutes" placeholder="UTC midnight" /></div>
+          <div class="field"><label for="settings-llm-cost-day-usd">LLM cost / day (USD)</label><input id="settings-llm-cost-day-usd" type="number" step="0.01" [(ngModel)]="quota.llm_cost_per_day_usd" placeholder="unlimited" /></div>
+          <div class="field"><label for="settings-llm-tokens-day">LLM tokens / day</label><input id="settings-llm-tokens-day" type="number" [(ngModel)]="quota.llm_tokens_per_day" placeholder="unlimited" /></div>
+          <div class="field"><label for="settings-concurrent-agent-runs">Concurrent agent runs</label><input id="settings-concurrent-agent-runs" type="number" [(ngModel)]="quota.concurrent_agent_runs" placeholder="unlimited" /></div>
+          <div class="field"><label for="settings-day-reset-offset-min-east-of-utc">Day reset offset (min east of UTC)</label><input id="settings-day-reset-offset-min-east-of-utc" type="number" [(ngModel)]="quota.day_reset_offset_minutes" placeholder="UTC midnight" /></div>
         </div>
         <div class="card-foot"><span class="muted mono mini">empty = unlimited</span><button class="btn pri" (click)="saveQuota()">Save quota</button></div>
       </div>
@@ -127,7 +122,7 @@
   @if (tab() === 'integrations') {
     <div class="card">
       <div class="card-h"><h3>Webhooks</h3><span class="sub">HMAC-signed event delivery · secrets never shown</span></div>
-      <table>
+      <div class="table-wrap"><table>
         <thead><tr><th>Endpoint</th><th>Events</th><th>State</th><th></th></tr></thead>
         <tbody>
           @for (w of webhooks(); track w.id) {
@@ -139,7 +134,7 @@
             </tr>
           } @empty { <tr><td colspan="4" class="muted">No webhooks registered.</td></tr> }
         </tbody>
-      </table>
+      </table></div>
       <div class="inline-form col">
         <input type="text" [(ngModel)]="newWebhook.url" placeholder="https://example.com/hooks/apex" />
         <div class="inline-form">

@@ -7,10 +7,10 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.9.0
-**Status:** In progress — ECO-301..304 (all but ECO-305 of WS-F's ECO row), WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), SEC-301, DEP-301 done; everything else planned
+**Version:** 1.10.0
+**Status:** In progress — ECO-301..304 (all but ECO-305 of WS-F's ECO row), WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), SEC-301, UI-301..306 (all of WS-K), DEP-301 done; remaining: ECO-305, SEC-302, RAG-301, DX-301..306, DEP-302, OBS-301/302
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
-**Last Updated:** 2026-07-16
+**Last Updated:** 2026-07-17
 
 ---
 
@@ -1036,7 +1036,7 @@ verifies uniform dimensionality after.
 
 # WS-K — Dashboard Maturity
 
-## UI-301 `[P2]` — Shared component library
+## UI-301 `[P2]` — Shared component library — **DONE (2026-07-17)**
 
 **Problem.** Primitives are CSS classes only; every feature re-implements tabs, modals,
 tables, and status-pill mapping (`statusClass()` duplicated verbatim in
@@ -1053,7 +1053,23 @@ are replaced by shared components; no native `confirm()`.
 **Files.** `dashboard/src/app/shared/*`, feature components. **Size.** M.
 **Depends on:** UI-102.
 
-## UI-302 `[P2]` — Share SDK types, real YAML, central error handling
+**Resolution.** `dashboard/src/app/shared/`: `StatusPill` (+ exported
+`statusClass()` — the one copy of the status→pill mapping; the three verbatim
+duplicates are deleted and their templates use `<app-status-pill>`), `Tabs`
+(accessible `role="tablist"` with roving tabindex + arrow-key selection; adopted
+by Marketplace and Settings, whose two divergent hand-rolled tab styles are
+gone), `Modal` (scrim + Escape/scrim-close, focus moved in on open, Tab trapped,
+focus restored to the opener — the UI-305 groundwork), `ConfirmService` +
+`ConfirmDialog` hosted once in the app shell (`await confirm.ask({...})`;
+Marketplace uninstall no longer calls native `confirm()`), and `EmptyState`
+(empty/loading/error card, adopted where features hand-rolled it). The
+table CSS block that was copied verbatim into three feature sheets is now one
+global rule set (+ a `.table-wrap` overflow container). `errText` was already
+centralized by UI-302. 7 new specs (`shared.spec.ts`) pin the mapping, the
+confirm resolve semantics (incl. a superseded request auto-cancelling), dialog
+button flow, and tab keyboard nav.
+
+## UI-302 `[P2]` — Share SDK types, real YAML, central error handling — **DONE (2026-07-17)**
 
 **Problem.** `api.types.ts` hand-duplicates server shapes (unused `sdks/typescript`
 exists); manifest/workflow (de)serialize YAML via regex + `join`
@@ -1071,7 +1087,34 @@ failed poll surfaces (not silently swallowed).
 **Files.** `dashboard/src/app/core/*`, feature services. **Size.** M.
 **Depends on:** none.
 
-## UI-303 `[P2]` — Audit-log viewer
+**Resolution.** **Types:** the dashboard's wire shapes now re-export from
+`sdks/typescript/src/types.ts` via a type-only tsconfig path alias
+(`@apex-ai/sdk-types`) — erased at compile time, so no SDK dist build, no
+`file:`-install ordering, and no CI change; the SDK's `types.ts` gained the
+precise shapes the dashboard had hand-written (`Health`, `WorkflowSummary`,
+`MarketplaceListing`/`PermissionRisk`, `SbomComponent`/`Provenance` — also
+tightening `Attestation.sbom` from `unknown[]` to the real
+`{components: [...]}` shape — plus the tenancy set and `Webhook`), making the
+SDK the single source; `api.types.ts` keeps only UI-local shapes (drafts,
+normalized stream events, metric samples). **YAML:** the `yaml` library
+replaces both hand-rolled DSL codecs — the agent manifest's line-regex
+parser/emitter (any valid YAML now loads, not just the studio's byte shape)
+and the workflow serializer's hand-quoted emission; the workflow specs now
+pin the *parsed* manifest semantics instead of byte shapes. Found and fixed
+along the way: `WorkflowService.tools()` still read the pre-API-701 bare
+`{tools: [...]}` shape (the same envelope bug already fixed in
+`AgentService.tools()`), so the canvas tool picker never saw the live catalog
+— regression test added. **Errors:** `core/http-error.ts` — one exported
+`errText` (the ≥4 verbatim component copies are deleted) and a global
+`httpErrorInterceptor` that toasts every failed platform call (deduped 30s so
+a 5s poll complains once, not forever), with a `silentErrors()` HttpContext
+opt-out used only where failure has dedicated UI (Monitoring's unreachable
+banner, the audit viewer's 403 explanation). A failed background poll now
+always surfaces. 8 new specs (interceptor guarantee/dedupe/opt-out/rethrow,
+errText envelope handling incl. never showing an HTML error page, the
+workflow-tools regression, parse-based workflow serializer).
+
+## UI-303 `[P2]` — Audit-log viewer — **DONE (2026-07-17)**
 
 **Problem.** No surface consumes an audit/events endpoint despite the RBAC/tenancy
 backend (no `audit` route in `dashboard/src/app/app.routes.ts`). (PRD-004 R-K.5; audit
@@ -1084,7 +1127,27 @@ High.)
 **Files.** `dashboard/src/app/features/audit/*`, routes. **Size.** M.
 **Depends on:** SEC-301.
 
-## UI-304 `[P2]` — Responsive / mobile layout
+**Resolution.** `features/audit/` — a lazy-loaded `/audit` route (nav rail
+"Operate" section + command palette) over `GET /api/v1/audit`: most-recent-first
+table (time, actor, action, resource, outcome pill, request id, chain-hash
+prefix with the full hash on hover), principal/action/time-range filters
+(`datetime-local` → `after_ms`/`before_ms`), and cursor pagination via a
+"Load older entries" footer that *appends* (the SEC-301 envelope's
+`total_estimate` is always null, so no page count is pretended). RBAC-gated
+server-side: a 403 renders as a "your role lacks `audit:read`" explanation —
+deliberately not an error toast (the audit query opts out of UI-302's global
+interceptor since all its failures have dedicated in-page UI). Types
+(`AuditEntry`/`AuditPage`) come from the SDK per UI-302 — and live verification
+against a real `apex dev` server caught the SDK's hand-written `AuditEntry`
+type being **flat and wrong**: the server nests the event under `event` with
+`id`/`seq`/`hash`/`prev_hash` at the row level (apex-audit `AuditEntry`), and
+`outcome` is the `allowed|denied|error` enum, not free text. The SDK type was
+corrected to the real envelope (a client-annotation fix, not a wire change;
+the Python SDK is untyped) and the viewer verified rendering genuine seeded
+entries end to end, including the mobile/drawer layout. 3 specs pin the
+query-param encoding, append-pagination, and the 403 rendering.
+
+## UI-304 `[P2]` — Responsive / mobile layout — **DONE (2026-07-17)**
 
 **Problem.** The only media queries repo-wide are `prefers-reduced-motion`
 (`dashboard/src/styles.scss:125`); the nav rail + multi-column canvases assume desktop.
@@ -1099,7 +1162,18 @@ body scroll; nav collapses).
 **Files.** `dashboard/src/styles.scss`, layout components. **Size.** M.
 **Depends on:** none.
 
-## UI-305 `[P2]` — Accessibility pass
+**Resolution.** (By landing time the feature canvases had grown their own stack
+breakpoints; the real gaps were the shell and overflow containment.) ≤900px the
+nav rail becomes an off-canvas drawer: a topbar hamburger (`aria-expanded`)
+toggles it, a scrim or Escape or any navigation closes it, and the old
+wrap-into-a-row hack at 760px is gone. Wide tables now scroll inside their card
+(`.table-wrap` overflow container wrapped around every bare `<table>`;
+global rule) instead of forcing body-level horizontal scroll; toasts clamp to
+the viewport; the topbar search collapses to icon-only and the crumb truncates
+at phone widths; Monitoring's stat row goes 4→2→1 columns. Drawer transition is
+disabled under `prefers-reduced-motion`.
+
+## UI-305 `[P2]` — Accessibility pass — **DONE (2026-07-17)**
 
 **Problem.** Only ~8 `aria/role/for` occurrences across feature templates; `.field
 label`s aren't associated with inputs; nav/icon buttons are SVG-only
@@ -1113,7 +1187,23 @@ navigation works for nav + modals.
 
 **Files.** `dashboard/src/app/**`. **Size.** M. **Depends on:** UI-301.
 
-## UI-306 `[P3]` — Playground, live nav badges, i18n decision, icon sprite
+**Resolution.** Every `.field` label is now `for`/`id`-associated with its
+control (18 associations added; labels that wrap their control — weight
+spinners, radio rows, checkboxes — were already implicitly associated); the
+MCP transport radios sit in a labelled `role="radiogroup"`; every symbol-only
+button (`×` chips/deletes, `↺` refresh) carries a specific `aria-label`; the
+nav landmark is labelled and the toast stack is an `aria-live="polite"`
+region. Keyboard/focus: the shared `Modal` moves focus in on open, traps Tab,
+closes on Escape, and restores the opener's focus (UI-301); `Tabs` does
+roving-tabindex arrow-key selection; the mobile drawer closes on Escape.
+**The axe check is a CI gate, not a one-off audit**: `axe-core` runs inside
+the Karma suite (`a11y.spec.ts`) against the app shell, the audit viewer, and
+the open confirm dialog — any statically detectable WCAG violation fails the
+build (it already caught a real heading-order violation, fixed by allowing
+`h2` card titles). Color-contrast is excluded (needs a painted page, not a
+detached fixture) and was reviewed manually.
+
+## UI-306 `[P3]` — Playground, live nav badges, i18n decision, icon sprite — **DONE (2026-07-17)**
 
 **Problem.** No dedicated prompt playground (bolted onto Agent Studio only,
 `agent-studio.ts:130`); hardcoded fake nav badges (`app.ts:52,79`); `extract-i18n`
@@ -1127,6 +1217,20 @@ remove); decide i18n (adopt or drop the target); move icons to a sprite.
 icons served from a sprite.
 
 **Files.** `dashboard/src/app/**`, `angular.json`. **Size.** M. **Depends on:** UI-301.
+
+**Resolution.** **Playground** (`features/playground/`, `/playground` under
+Build + palette entry): system prompt + message + model class (or pinned
+model) against the live gateway — it reuses `AgentService`'s manifest
+serializer and SSE stream (a minimal inline agent: no tools, no memory) and
+streams answer/reasoning/usage; Ctrl+Enter runs. **Badges:** the hardcoded
+fake `12`/`3` are removed — decision: a nav badge must mean something real;
+the rendering plumbing stays for a future live count. **i18n:** decided to
+**drop** the unused `extract-i18n` target (single-language product; Angular's
+built-in i18n can be reintroduced if a locale need appears) — recorded here.
+**Icons:** nav/topbar icons moved to a real SVG sprite
+(`public/icons.svg`, `<use href="icons.svg#i-...">`), replacing the inline
+SVG-string + `innerHTML` pipe approach; the now-unused `SafeSvgPipe` is
+deleted.
 
 ---
 
@@ -1348,5 +1452,6 @@ lint and load.
 | 1.5.0 | 2026-07-14 | WFL-303..308 (all remaining WS-H tickets) implemented and marked DONE with implementation notes, closing out WS-H entirely: WFL-303 fail-closed activity-output size cap (permanent failure via the saga path, not a hard abort); WFL-304 event-log paging (`history_page`, real bounded `FileStore`/`PostgresStore` implementations) + explicit opt-in retention (`compact_history`), plus a proof that `resume` already never reads the log at all; WFL-305 indexed `workflow_name`/`status` Postgres columns + SQL-side filtering/pagination (migration V3), proven via a deliberately-corrupt non-matching row that would fail to decode if `list()` ever fell back to scanning; WFL-306 a `fire_at`-sorted `BTreeSet` index for `InMemoryTimerStore` + `TimerDispatcher`/`ScheduleDispatcher::run_adaptive` (sleep until the next deadline, capped at a max interval), proven with a real wall-clock near-deadline-timer test; WFL-307 an `ActivityContext.progress` channel + `ActivityProgress` event, live on the sequential activity path via `tokio::select!`; WFL-308 a versioned event wire envelope (`encode_event`/`decode_event`, fail-closed on an unknown future version) now used by every store. 30 new tests total; full `apex-workflow` suite + whole-workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
 | 1.6.0 | 2026-07-14 | SBX-301..304 (all of WS-E) implemented and marked DONE with implementation notes, closing out WS-E entirely: SBX-301 a confined `fs_write` builtin (opt-in like `shell`) with a write-specific symlink-escape guard beyond `fs_read`'s existing confinement; SBX-302 a sandboxed `code_execute` tool (Python/Node) routed through the identical SBX-101/SEC-305 backend selection `ShellTool` uses, resource-limited and egress-controlled, including a real Windows "app execution alias" false-positive found and fixed in the test gating itself; SBX-303 a new `apex-tool-macros` proc-macro crate (`#[derive(Tool)]`) generating `ToolMetadata`/JSON-Schema (via `schemars`)/typed-parse boilerplate so a tool author never hand-writes a schema literal or a `.get().and_then()` chain; SBX-304 an explicit, documented platform-matrix fail-closed check (Linux+Docker only) in `ContainerSandbox::execute`, replacing what used to be only an *accidental* fail-closed side effect of a missing `nsenter` binary, and additionally closing a real, previously-unguarded Podman gap. 27 new tests total (8 fs_write + 9 code_execute + 4 derive(Tool) + 2 registry opt-in + 4 egress-lockdown-gate); full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
 | 1.7.0 | 2026-07-14 | SRV-302..307 (all of WS-G) implemented and marked DONE with implementation notes, closing out WS-G entirely: SRV-302 an mtime-stamped in-memory cache for `FileApiKeyStore` (one `stat()` replaces a full read+parse per request in the common case); SRV-303 a real generated OpenAPI spec (`#[utoipa::path]` on all ~65 routes + `ToSchema` request/error types, served at `GET /openapi.json`, verified live end-to-end via a real `apex dev` server + `redocly lint` at 0 errors, with the CI contract gate repointed at the live document instead of the hand-written `openapi.yaml`); SRV-304 `lib.rs`'s inline test suite moved to a file-backed `tests.rs` submodule (2,842 → 444 lines, same crate-internal visibility, no `pub` widening); SRV-305 the idempotency store rewritten from a per-`put` full-file rewrite to an append-only JSON-lines log with periodic compaction (O(1) amortized instead of O(entries) per call); SRV-306 an 11-file audit finding zero attacker-triggerable unwraps in production handler code, plus a real `cfg_attr(not(test), warn(...))`-gated clippy lint (verified to actually fire) guarding regressions; SRV-307 Redis-shared concurrency slots mirroring SRV-201's `RateLimiter` design (atomic Lua increment-if-under-limit, `Drop`-triggered fire-and-forget async release, a documented 24h crash-recovery safety-net TTL), `admit_run` converted to `async fn` across all call sites. 8 new tests total (2 SRV-302 + 2 SRV-305 + 3 SRV-307 capability-gated); a pre-existing, unrelated flaky test in `rate_limit.rs` was found (and, in a same-day follow-up, fixed) on this Windows dev machine while validating SRV-307; full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout, incl. the `redis` feature build |
+| 1.10.0 | 2026-07-17 | UI-301..306 (all of WS-K) implemented and marked DONE with implementation notes, closing out the dashboard workstream entirely: UI-302 first (SDK-source types via a type-only tsconfig path alias, the `yaml` library replacing both hand-rolled DSL codecs — with the workflow specs repinned to parsed semantics — plus `core/http-error.ts`'s shared `errText` + global toast interceptor with 30s dedupe and a `silentErrors()` opt-out, and a found-and-fixed live envelope bug in `WorkflowService.tools()`); UI-301 (shared `StatusPill`/`Tabs`/`Modal`/`ConfirmService`+`ConfirmDialog`/`EmptyState`, tri-duplicated table CSS globalized, native `confirm()` gone); UI-303 (RBAC-gated `/audit` viewer over SEC-301's paged query — live verification against a real `apex dev` caught and fixed the SDK's flat, wrong `AuditEntry` type); UI-304 (off-canvas nav drawer ≤900px, in-card table overflow, phone-width topbar/toast handling); UI-305 (label association, aria-labels, modal focus trap/restore, roving-tabindex tabs, and an `axe-core` gate inside the Karma suite that already caught a real heading-order violation); UI-306 (Playground surface, fake nav badges removed, i18n target dropped — decision recorded, nav icons moved to a `public/icons.svg` sprite and `SafeSvgPipe` deleted). 23 new specs (51 total, all green); `ng build` clean; smoke-verified in a real browser against a live server (desktop + 390px mobile), incl. an engine-side parse check of both YAML emitters' output |
 | 1.9.0 | 2026-07-16 | ECO-303 (container capability loader) implemented and marked DONE with implementation notes: `ContainerCapabilityRuntime` in `apex-plugin` (compiled unconditionally — plugins are finally executable without the heavy `wasi` feature), Docker/Podman/gVisor over `ContainerSandbox`, same stdin/stdout JSON ABI + `APEX_SECRET_*` injection as the WASM loader via shared helpers, fail-closed loader routing (a `gvisor`-declared capability is refused by a plain-Docker runtime, never demoted); enabler in `apex-tools`: `ContainerSandbox::execute_with_stdin` + `SandboxCommand.env` support with env *names* on the argv and values via the CLI process environment (secrets never visible in host `ps`). 8 new tests (2 docker/runsc-gated e2e — both actually executed against the real runtimes on this dev box — + 4 fail-closed unit + 1 argv-shape + 1 WASI-parity via the shared-helper refactor); the pre-existing status line was also corrected to count SEC-301 (done since 2026-07-14 but never listed) |
 | 1.8.0 | 2026-07-14 | DEP-301 (systemd unit + install script for the appliance) implemented and marked DONE with implementation notes: `deployment/systemd/apex.service` (real sandboxing — `ProtectSystem=strict` etc. — not decorative) + `apex.env.example`, idempotent `deployment/install.sh` (dedicated system user, `/var/lib/apex/.apex` at `0700`, never overwrites an existing env file), new `docs/12-deployment/systemd.md`, a `.gitattributes` forcing LF on `*.sh`/`*.service` (a real corruption risk caught before it shipped, not hypothetical), and a `systemd-install` CI job that runs the actual install on a genuine systemd VM, polls `/healthz`, and re-runs `install.sh` to mechanically check the idempotency claim rather than trust a comment |

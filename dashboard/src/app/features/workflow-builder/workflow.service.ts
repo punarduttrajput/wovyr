@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
+import * as YAML from 'yaml';
 import { Page, ToolInfo, WorkflowSummary } from '../../core/api.types';
 
 /** Activity type the visual builder supports. */
@@ -111,11 +112,13 @@ export class WorkflowService {
     return this.list(limit).pipe(map((p) => p.data ?? []));
   }
 
-  /** The registered tool catalog (for `function` activities' tool picker). */
+  /** The registered tool catalog (for `function` activities' tool picker).
+   * `GET /api/v1/tools` returns the standard cursor-pagination envelope
+   * (`{data, has_more, ...}`, RM-GA-P4 API-701) — this used to read a bare
+   * `{tools: [...]}` shape (the same bug already fixed in `AgentService.tools()`),
+   * so the live catalog silently never replaced the canvas's hardcoded seeds. */
   tools(): Observable<ToolInfo[]> {
-    return this.http
-      .get<{ tools: ToolInfo[] }>('/api/v1/tools')
-      .pipe(map((r) => r.tools ?? []));
+    return this.http.get<Page<ToolInfo>>('/api/v1/tools').pipe(map((r) => r.data ?? []));
   }
 
   /** The caller's stored agent ids (for `agent` activities' agent picker). */
@@ -134,45 +137,51 @@ export class WorkflowService {
    * - `human`    → suspends for approval (no fields).
    */
   toWorkflowManifest(d: WorkflowDraft): string {
-    const q = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-    // Compact a JSON-object string to a single-line YAML flow map (JSON ⊂ YAML).
-    const compact = (json: string): string | null => {
+    // UI-302: emit through the `yaml` library from a plain object — quoting and
+    // escaping are the library's problem, not a hand-rolled `q()` helper's.
+    const parseInputs = (json: string): Record<string, unknown> | null => {
       const t = (json || '').trim();
       if (!t || t === '{}') return null;
       try {
-        return JSON.stringify(JSON.parse(t));
+        const v = JSON.parse(t);
+        return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
       } catch {
         return null;
       }
     };
 
-    const lines = [
-      'metadata:',
-      `  name: ${d.name.trim() || 'untitled-workflow'}`,
-      `  version: ${q(d.version.trim() || '1.0.0')}`,
-      'spec:',
-      '  activities:',
-    ];
-    for (const a of d.activities) {
+    const activities = d.activities.map((a) => {
       const id = a.id.trim() || 'step';
-      lines.push(`    - id: ${id}`, `      type: ${a.type}`);
+      const out: Record<string, unknown> = { id, type: a.type };
       if (a.type === 'wait') {
-        lines.push(`      inputs: { event: ${q(a.name.trim() || id)} }`);
+        out['inputs'] = { event: a.name.trim() || id };
       } else {
-        if (a.name.trim()) lines.push(`      name: ${q(a.name.trim())}`);
-        const inputs = compact(a.inputs);
-        if (inputs) lines.push(`      inputs: ${inputs}`);
+        if (a.name.trim()) out['name'] = a.name.trim();
+        const inputs = parseInputs(a.inputs);
+        if (inputs) out['inputs'] = inputs;
       }
-    }
+      return out;
+    });
 
-    const edges = d.transitions.filter((t) => t.from.trim() && t.to.trim());
-    if (edges.length) {
-      lines.push('  transitions:');
-      for (const t of edges) {
-        lines.push(`    - from: ${t.from.trim()}`, `      to: ${t.to.trim()}`);
-        if (t.when.trim()) lines.push(`      when: ${q(t.when.trim())}`);
-      }
-    }
-    return lines.join('\n') + '\n';
+    const spec: Record<string, unknown> = { activities };
+    const edges = d.transitions
+      .filter((t) => t.from.trim() && t.to.trim())
+      .map((t) => ({
+        from: t.from.trim(),
+        to: t.to.trim(),
+        ...(t.when.trim() ? { when: t.when.trim() } : {}),
+      }));
+    if (edges.length) spec['transitions'] = edges;
+
+    return YAML.stringify(
+      {
+        metadata: {
+          name: d.name.trim() || 'untitled-workflow',
+          version: d.version.trim() || '1.0.0',
+        },
+        spec,
+      },
+      { lineWidth: 0 },
+    );
   }
 }

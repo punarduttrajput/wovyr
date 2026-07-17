@@ -6,6 +6,9 @@
   .four { grid-template-columns:repeat(2, 1fr); }
   .cols { grid-template-columns:1fr; }
 }
+@media (max-width:560px) {
+  .four { grid-template-columns:1fr; }
+}
 
 .tiles { margin-bottom:4px; }
 
@@ -36,15 +39,7 @@
 .svc .pill { padding:1px 7px; }
 
 /* tables */
-table { width:100%; border-collapse:collapse; font-size:13px; }
-thead th {
-  font-family:var(--mono); font-size:10px; letter-spacing:.06em; text-transform:uppercase;
-  color:var(--ink-3); text-align:left; padding:9px 16px; border-bottom:1px solid var(--line-2); font-weight:600;
-}
-thead th.num, td.num { text-align:right; }
-tbody td { padding:10px 16px; border-bottom:1px solid var(--line-2); vertical-align:middle; }
-tbody tr:last-child td { border-bottom:0; }
-tbody tr:hover { background:var(--surface-2); }
+/* data-table styles are global (styles.scss, UI-301) */
 .route { color:var(--ink-2); }
 .has-err { color:var(--crit); font-weight:600; }
 .rid { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); }

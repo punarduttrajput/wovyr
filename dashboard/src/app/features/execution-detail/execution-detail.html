@@ -13,12 +13,12 @@
   </div>
 
   @if (error()) {
-    <div class="card empty"><b>{{ error() }}</b></div>
+    <app-empty-state kind="error"><b>{{ error() }}</b></app-empty-state>
   } @else if (execution(); as e) {
     <div class="two">
       <div class="card">
         <div class="card-h"><h3>Status</h3>
-          <div class="right"><span class="pill {{ statusClass(e.status) }}"><span class="pd"></span>{{ e.status }}</span></div>
+          <div class="right"><app-status-pill [status]="e.status" /></div>
         </div>
         <div class="kv"><span>Execution</span><b class="mono">{{ e.execution_id }}</b></div>
         <div class="kv"><span>Workflow</span><b>{{ e.workflow_name }}</b></div>
@@ -31,7 +31,7 @@
         @for (a of activities(); track a.id) {
           <div class="act">
             <span class="mono">{{ a.id }}</span>
-            <span class="pill {{ statusClass(a.state) }}"><span class="pd"></span>{{ a.state }}</span>
+            <app-status-pill [status]="a.state" />
           </div>
         } @empty { <div class="pad muted">No activities recorded.</div> }
       </div>
@@ -47,6 +47,6 @@
       } @empty { <div class="pad muted">No events.</div> }
     </div>
   } @else {
-    <div class="card empty"><b>Loading…</b></div>
+    <app-empty-state kind="loading"><b>Loading…</b></app-empty-state>
   }
 </section>

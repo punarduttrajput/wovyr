@@ -103,9 +103,29 @@ main { display:flex; flex-direction:column; min-width:0; }
 @keyframes toastIn { from { opacity:0; transform:translateY(12px) scale(.96); } to { opacity:1; transform:none; } }
 @media (prefers-reduced-motion:reduce) { .toast { animation:none; } }
 
-@media (max-width:760px) {
+/* ── UI-304: responsive shell ─────────────────────────────────────────────
+ * ≤900px the rail becomes an off-canvas drawer toggled from the topbar; the
+ * content column always owns the full width, and nothing forces body-level
+ * horizontal scroll. */
+.nav-toggle { display:none; }
+.rail-scrim { position:fixed; inset:0; background:rgba(13,20,36,.4); z-index:70; }
+
+@media (max-width:900px) {
   .app { grid-template-columns:1fr; }
-  .rail { position:static; height:auto; flex-direction:row; flex-wrap:wrap; align-items:center; }
-  nav { flex-direction:row; flex-wrap:wrap; }
-  .nav-sec { display:none; }
+  .nav-toggle { display:grid; flex:none; }
+  .rail {
+    position:fixed; inset:0 auto 0 0; width:min(280px, 84vw); z-index:80;
+    transform:translateX(-100%); transition:transform .2s ease;
+  }
+  .rail.open { transform:none; box-shadow:var(--shadow-lg); }
+  .topbar { padding:0 14px; }
+  .toasts { left:14px; right:14px; bottom:14px; }
+  .toast { max-width:100%; }
 }
+@media (max-width:620px) {
+  .search .ph, .search kbd { display:none; }
+  .search { flex:none; max-width:none; }
+  .crumb { min-width:0; }
+  .crumb b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+}
+@media (prefers-reduced-motion:reduce) { .rail { transition:none; } }
