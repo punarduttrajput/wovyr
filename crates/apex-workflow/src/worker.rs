@@ -69,6 +69,7 @@ impl Worker {
 
     /// Lease and drive one ready execution. Returns `Some((execution_id, outcome))`
     /// if it processed one, or `None` if the queue was empty.
+    #[tracing::instrument(name = "workflow.worker.step", skip_all, fields(worker = %self.id, execution_id = tracing::field::Empty))]
     pub async fn step(&self) -> Result<Option<(String, RunOutcome)>> {
         let leased = match &self.partitions {
             Some(assignment) => {
@@ -81,6 +82,7 @@ impl Worker {
         let Some(execution_id) = leased else {
             return Ok(None);
         };
+        tracing::Span::current().record("execution_id", tracing::field::display(&execution_id));
 
         // Resolve the definition for the leased execution from its checkpoint.
         let state = self

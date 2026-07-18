@@ -7,7 +7,7 @@
 //! default and unconfigured runs do nothing.
 
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter, MeterProvider as _};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig;
@@ -131,6 +131,7 @@ where
 pub struct OtelMetrics {
     meter: Meter,
     counters: BTreeMap<String, Counter<f64>>,
+    gauges: BTreeMap<String, Gauge<f64>>,
     histograms: BTreeMap<String, Histogram<f64>>,
     provider: SdkMeterProvider,
 }
@@ -169,6 +170,7 @@ impl OtelMetrics {
         Some(Self {
             meter,
             counters: BTreeMap::new(),
+            gauges: BTreeMap::new(),
             histograms: BTreeMap::new(),
             provider,
         })
@@ -182,6 +184,16 @@ impl OtelMetrics {
             .entry(name.to_string())
             .or_insert_with(|| meter.f64_counter(name.to_string()).build());
         counter.add(value, &to_attrs(labels));
+    }
+
+    /// Record a gauge sample into the matching OTLP instrument (OBS-301).
+    pub fn set_gauge(&mut self, name: &str, value: f64, labels: &[(&str, &str)]) {
+        let meter = &self.meter;
+        let gauge = self
+            .gauges
+            .entry(name.to_string())
+            .or_insert_with(|| meter.f64_gauge(name.to_string()).build());
+        gauge.record(value, &to_attrs(labels));
     }
 
     /// Record a histogram observation into the matching OTLP instrument.

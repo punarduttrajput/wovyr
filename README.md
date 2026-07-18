@@ -400,7 +400,13 @@ multimodal parts, RAG chunking/reranking/BM25, LLM-as-judge eval gates,
 Redis-shared rate limiting, token quotas, content-safety guardrails, a
 versioned prompt registry, per-tenant metrics) are **done**;
 [Phase 3](docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md)
-(ecosystem & scale) has not started and is **re-scoped through
+(ecosystem & scale) is **nearly complete** — the ecosystem (MCP client,
+plugin SDK + container loader, one-shot publish), workflow-scale (WS-H),
+sandbox (WS-E), server-hardening (WS-G), dashboard (WS-K), DX/SDK (WS-J),
+and operability (WS-L: systemd appliance, scrape-time operability gauges,
+end-to-end workflow traces + SLO burn-rate rules, upgrade runbook + Helm
+TLS) workstreams are done; ECO-305, SEC-302, and RAG-301 remain. Phase 3 was
+**re-scoped through
 [PRD-005](docs/01-product/prd-generative-ui-runtime.md)** —
 **[v1.2 "Generative UI Trust Runtime"](docs/18-roadmap/v1.2-generative-ui.md)**
 ([ADR-0011](docs/17-adr/ADR-0011-generative-ui-repositioning.md)) is **done,

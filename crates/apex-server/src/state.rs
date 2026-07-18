@@ -317,6 +317,17 @@ impl RunStore {
             .get(run_id)
             .map(|r| (r.tenant.clone(), r.status.clone()))
     }
+
+    /// How many tracked runs are still `Running` — the async-run backlog gauge
+    /// (OBS-301), recomputed from this source of truth at every scrape.
+    pub(crate) fn running_count(&self) -> usize {
+        let inner = self.inner.lock().expect("run store poisoned");
+        inner
+            .entries
+            .values()
+            .filter(|r| matches!(r.status, AsyncRunStatus::Running))
+            .count()
+    }
 }
 
 /// Wall-clock milliseconds since the Unix epoch — read only at this persistence

@@ -515,6 +515,135 @@ async fn metrics_endpoint_serves_openmetrics_when_accepted() {
     );
 }
 
+/// OBS-301: the operability depth gauges are recomputed from their stores at every
+/// scrape, so they *move with load* — up when work is queued/in flight, back down
+/// when it drains — rather than drifting like inc/dec bookkeeping would.
+#[tokio::test]
+async fn operability_gauges_move_with_load() {
+    let state = Arc::new(AppState::from_env().await);
+
+    async fn scrape(state: &Arc<AppState>) -> String {
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn gauge(text: &str, name: &str) -> f64 {
+        text.lines()
+            .find(|l| l.starts_with(name) && !l.starts_with('#'))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("gauge {name} missing:\n{text}"))
+    }
+
+    // Baseline: every gauge is present and typed. Values are read as a baseline
+    // rather than asserted to be zero — the durable stores are shared with local
+    // dev state by design, so this test asserts *movement*, not absolutes.
+    let text = scrape(&state).await;
+    for name in [
+        "apex_async_runs_in_flight",
+        "apex_webhook_outbox_pending",
+        "apex_webhook_dlq_size",
+        "apex_quota_runs_in_flight",
+        "apex_workflow_timers_pending",
+        "apex_workflow_executions_active",
+    ] {
+        assert!(text.contains(&format!("# TYPE {name} gauge")), "{text}");
+    }
+    let base_runs = gauge(&text, "apex_async_runs_in_flight");
+    let base_outbox = gauge(&text, "apex_webhook_outbox_pending");
+    let base_dlq = gauge(&text, "apex_webhook_dlq_size");
+    let base_timers = gauge(&text, "apex_workflow_timers_pending");
+
+    // Load up: a running async run, a pending webhook delivery, and a durable timer.
+    state
+        .runs
+        .insert_running("run_gauge_test".to_string(), "acme".to_string());
+    state
+        .webhook_outbox
+        .enqueue(crate::webhook_outbox::OutboxEntry {
+            delivery_id: "evt_g::wh_g".to_string(),
+            tenant: "acme".to_string(),
+            sub_id: "wh_g".to_string(),
+            event: apex_events::Event::new("evt_g", "project.created", "acme", 1, json!({})),
+            enqueued_at_ms: 0,
+        });
+    state
+        .timers
+        .schedule(apex_workflow::PendingTimer {
+            execution_id: "wf-gauge".to_string(),
+            timer_id: "t1".to_string(),
+            fire_at_ms: u64::MAX - 1,
+        })
+        .await
+        .unwrap();
+
+    let text = scrape(&state).await;
+    assert_eq!(
+        gauge(&text, "apex_async_runs_in_flight"),
+        base_runs + 1.0,
+        "{text}"
+    );
+    assert_eq!(
+        gauge(&text, "apex_webhook_outbox_pending"),
+        base_outbox + 1.0,
+        "{text}"
+    );
+    assert_eq!(
+        gauge(&text, "apex_workflow_timers_pending"),
+        base_timers + 1.0,
+        "{text}"
+    );
+
+    // Drain: the run finishes, the delivery exhausts into the DLQ, the timer fires.
+    state.runs.finish(
+        "run_gauge_test",
+        crate::state::AsyncRunStatus::Failed {
+            error: "test drain".to_string(),
+        },
+    );
+    state.webhook_outbox.dead_letter(
+        "evt_g::wh_g",
+        "http://example.invalid",
+        "project.created",
+        3,
+        1,
+    );
+    state.timers.cancel("wf-gauge", "t1").await.unwrap();
+
+    let text = scrape(&state).await;
+    assert_eq!(
+        gauge(&text, "apex_async_runs_in_flight"),
+        base_runs,
+        "{text}"
+    );
+    assert_eq!(
+        gauge(&text, "apex_webhook_outbox_pending"),
+        base_outbox,
+        "{text}"
+    );
+    assert_eq!(
+        gauge(&text, "apex_workflow_timers_pending"),
+        base_timers,
+        "{text}"
+    );
+    // The exhausted delivery moved to the DLQ — that gauge went *up*.
+    assert_eq!(
+        gauge(&text, "apex_webhook_dlq_size"),
+        base_dlq + 1.0,
+        "{text}"
+    );
+}
+
 #[tokio::test]
 async fn invalid_manifest_is_400() {
     let app = test_app().await;

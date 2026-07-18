@@ -7,10 +7,10 @@ Document ID: DEP-INDEX-001
 
 **Document ID:** DEP-INDEX-001  
 **File Path:** `docs/12-deployment/index.md`  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Status:** Active  
 **Owner:** Platform Operations Team  
-**Last Updated:** 2026-07-14
+**Last Updated:** 2026-07-18
 
 ---
 
@@ -74,6 +74,7 @@ exposes `/healthz` and `/metrics` directly.
 | [helm.md](helm.md) | Helm chart, values, upgrades |
 | [terraform.md](terraform.md) | Cloud infrastructure provisioning |
 | [backup-and-restore.md](backup-and-restore.md) | `apex admin backup`/`restore`, KMS root-key escrow, RPO/RTO targets |
+| [upgrade-and-migration.md](upgrade-and-migration.md) | Operator upgrade runbook: backup → binary swap → `apex admin migrate` → verify → rollback, per deployment shape |
 
 ---
 

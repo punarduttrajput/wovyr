@@ -255,6 +255,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     responses((status = 200, description = "Prometheus (or OpenMetrics, via Accept negotiation) text.")),
 )]
 async fn metrics_handler(headers: HeaderMap, State(state): State<Arc<AppState>>) -> Response {
+    refresh_operability_gauges(&state).await;
     let accept = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -277,6 +278,47 @@ async fn metrics_handler(headers: HeaderMap, State(state): State<Arc<AppState>>)
             state.metrics.render_prometheus(),
         )
             .into_response()
+    }
+}
+
+/// OBS-301: recompute the operability depth gauges from their sources of truth on
+/// every scrape — a gauge that is *set* at read time can never drift from reality
+/// across restarts or missed updates, unlike inc/dec bookkeeping. All six reads are
+/// cheap at scrape cadence on the single-node appliance (the priciest two — pending
+/// timers and the execution list — are bounded by the durable stores' own sizes);
+/// a store error skips that gauge (stale beats invented) and logs.
+async fn refresh_operability_gauges(state: &AppState) {
+    use apex_workflow::ExecutionFilter;
+
+    let m = &state.metrics;
+    // Async agent runs still executing (`Prefer: respond-async` backlog, SRV-102).
+    m.gauge_set(
+        "apex_async_runs_in_flight",
+        &[],
+        state.runs.running_count() as f64,
+    );
+    // Webhook delivery outbox + dead-letter queue (SRV-103).
+    let (outbox_pending, dlq_size) = state.webhook_outbox.depths();
+    m.gauge_set("apex_webhook_outbox_pending", &[], outbox_pending as f64);
+    m.gauge_set("apex_webhook_dlq_size", &[], dlq_size as f64);
+    // Quota-admitted runs holding a permit right now (node-local ledger, SRV-201).
+    m.gauge_set(
+        "apex_quota_runs_in_flight",
+        &[],
+        state.quota.concurrent_total() as f64,
+    );
+    // Durable wall-clock timers not yet fired (EXE-601).
+    match state.timers.due(u64::MAX).await {
+        Ok(due) => m.gauge_set("apex_workflow_timers_pending", &[], due.len() as f64),
+        Err(e) => tracing::warn!(error = %e, "timer store unavailable for gauge refresh"),
+    }
+    // Workflow executions in a non-terminal state (running/waiting/compensating…).
+    match state.workflows.list(&ExecutionFilter::default()).await {
+        Ok(summaries) => {
+            let active = summaries.iter().filter(|s| !s.status.is_terminal()).count();
+            m.gauge_set("apex_workflow_executions_active", &[], active as f64);
+        }
+        Err(e) => tracing::warn!(error = %e, "workflow store unavailable for gauge refresh"),
     }
 }
 

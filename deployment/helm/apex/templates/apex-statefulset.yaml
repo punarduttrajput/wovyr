@@ -66,16 +66,26 @@ spec:
           # actually gates the pod on Postgres being ready before apex ever
           # starts. Documented explicitly in this chart's README.md rather
           # than implying readinessProbe means more than it does.
+          # With in-process TLS (apex.tls.enabled, RM-AIM-P3 DEP-302) the
+          # probes must speak HTTPS — the kubelet skips certificate
+          # verification on HTTPS probes, so a self-signed/cert-manager cert
+          # both work.
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
+              {{- if .Values.apex.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /healthz
               port: http
+              {{- if .Values.apex.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 5
           resources:
@@ -83,6 +93,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /home/apex/.apex
+            {{- if .Values.apex.tls.enabled }}
+            - name: tls
+              mountPath: /etc/apex/tls
+              readOnly: true
+            {{- end }}
+      {{- if .Values.apex.tls.enabled }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.apex.tls.secretName | quote }}
+      {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data

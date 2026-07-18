@@ -530,6 +530,7 @@ impl Engine {
     /// activities. Returns the initial state. Used by distributed workers: the
     /// submitter calls `start` then enqueues the execution for a worker to drive via
     /// [`resume`](Self::resume).
+    #[tracing::instrument(name = "workflow.start", skip_all, fields(execution_id = %execution_id, workflow = %def.metadata.name))]
     pub async fn start(
         &self,
         def: &Definition,
@@ -607,6 +608,7 @@ impl Engine {
     /// that can drive this execution (see the `execution_locks` field doc
     /// comment) — a concurrent `resume`/`signal_event`/`fire_timer` call for
     /// the same id blocks until this one finishes, rather than racing it.
+    #[tracing::instrument(name = "workflow.resume", skip_all, fields(execution_id = %execution_id, workflow = %def.metadata.name))]
     pub async fn resume(
         &self,
         def: &Definition,
@@ -652,6 +654,7 @@ impl Engine {
 
     /// Deliver a named **event** to a waiting execution and resume it. A `wait`
     /// activity declared `{event: <name>}` observes it and completes with `payload`.
+    #[tracing::instrument(name = "workflow.signal", skip_all, fields(execution_id = %execution_id, event = %name))]
     pub async fn signal_event(
         &self,
         def: &Definition,
@@ -665,6 +668,7 @@ impl Engine {
 
     /// Fire a **timer** for a waiting execution and resume it. A `wait` activity
     /// declared `{timer: <id>}` observes it and completes.
+    #[tracing::instrument(name = "workflow.fire_timer", skip_all, fields(execution_id = %execution_id, timer = %timer))]
     pub async fn fire_timer(
         &self,
         def: &Definition,
@@ -692,6 +696,7 @@ impl Engine {
     /// worker already has to tolerate. Fails closed (`Error::NotFound` /
     /// `Error::Conflict`) rather than silently succeeding on an unknown or already-
     /// terminal execution.
+    #[tracing::instrument(name = "workflow.cancel", skip_all, fields(execution_id = %execution_id))]
     pub async fn cancel(&self, execution_id: &str) -> Result<ExecutionState> {
         let mut state = self
             .checkpoints

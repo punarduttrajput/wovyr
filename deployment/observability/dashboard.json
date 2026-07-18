@@ -154,6 +154,57 @@
           "legendFormat": "{{status}}"
         }
       ]
+    },
+    {
+      "id": 10,
+      "title": "SLO error-budget burn (multi-window 5xx ratio vs 0.5% budget)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "description": "The recorded series from burn-rates.yml (RM-AIM-P3 OBS-302). Fast-burn pages at 7.2% (1h+5m), slow-burn at 3% (6h+30m), trickle tickets at 0.5% (3d+6h).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": {
+            "thresholdsStyle": { "mode": "dashed+area" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.005 },
+              { "color": "orange", "value": 0.03 },
+              { "color": "red", "value": 0.072 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "apex:api_error_ratio:rate5m", "legendFormat": "5m" },
+        { "expr": "apex:api_error_ratio:rate30m", "legendFormat": "30m" },
+        { "expr": "apex:api_error_ratio:rate1h", "legendFormat": "1h" },
+        { "expr": "apex:api_error_ratio:rate6h", "legendFormat": "6h" },
+        { "expr": "apex:api_error_ratio:rate3d", "legendFormat": "3d" }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Operability gauges (in-flight / backlogs, OBS-301)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "description": "Recomputed at every /metrics scrape from the durable stores (never inc/dec bookkeeping), so values survive restarts and cannot drift.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "expr": "apex_async_runs_in_flight", "legendFormat": "async runs in flight" },
+        { "expr": "apex_quota_runs_in_flight", "legendFormat": "quota-admitted runs" },
+        { "expr": "apex_workflow_executions_active", "legendFormat": "active workflow executions" },
+        { "expr": "apex_workflow_timers_pending", "legendFormat": "pending workflow timers" },
+        { "expr": "apex_webhook_outbox_pending", "legendFormat": "webhook outbox pending" },
+        { "expr": "apex_webhook_dlq_size", "legendFormat": "webhook DLQ size" }
+      ]
     }
   ]
 }

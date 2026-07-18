@@ -7,10 +7,10 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.11.0
-**Status:** In progress — ECO-301..304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), SEC-301, UI-301..306 (all of WS-K), DX-301..306 (all of WS-J), DEP-301 done; remaining: ECO-305, SEC-302, RAG-301, DEP-302, OBS-301/302
+**Version:** 1.12.0
+**Status:** In progress — ECO-301..304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), SEC-301, UI-301..306 (all of WS-K), DX-301..306 (all of WS-J), DEP-301/302 + OBS-301/302 (all of WS-L) done; remaining: ECO-305, SEC-302, RAG-301
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
-**Last Updated:** 2026-07-17
+**Last Updated:** 2026-07-18
 
 ---
 
@@ -1460,7 +1460,7 @@ status` and fails), **then re-runs `install.sh` and asserts
 `/etc/apex/apex.env`'s checksum is unchanged** — the idempotency/never-clobber
 claim, checked mechanically rather than left as an unverified comment.
 
-## DEP-302 `[P2]` — Operator upgrade/migration runbook + Helm/Terraform
+## DEP-302 `[P2]` — Operator upgrade/migration runbook + Helm/Terraform — **DONE (2026-07-18)**
 
 **Problem.** No upgrade-path/migration runbook tying version bumps to `apex admin
 migrate`; Helm is single-replica with no in-chart TLS; no Terraform. (PRD-004 R-L.4/R-L.5;
@@ -1476,7 +1476,37 @@ TLS; the Terraform decision is recorded.
 **Files.** `docs/12-deployment/*`, `deployment/helm/*`, optionally `deployment/terraform/`.
 **Size.** M. **Depends on:** none.
 
-## OBS-301 `[P2]` — Queue-depth / in-flight / DLQ gauges
+**Resolution.** Three parts, one per acceptance clause. **Runbook**:
+`docs/12-deployment/upgrade-and-migration.md` (DEP-UPG-001, linked from
+`index.md`'s doc map) — the five-step end-to-end procedure (backup while the
+server runs, FileLock-quiesced → SIGTERM drain → binary/image swap →
+`apex admin migrate` per opted-into schema → verify via
+`/healthz`-version/`/metrics`-gauges/a smoke run), with per-shape command
+variants for systemd (`install.sh --binary`, env-file survival),
+compose (`stop`/tag-bump/`run --rm … admin migrate`), and Helm
+(`helm upgrade --set apex.image.tag`); a rollback section that pairs the old
+binary with *restored* old state (never old binary alone — every versioned
+surface rejects newer-than-understood data) and names snapshot-restore, not a
+nonexistent `migrate --down`, as the schema rollback path; and a version-skew
+rules summary. Commands were verified against the real
+sources (`install.sh`'s actual `--binary` flag, `healthz`'s actual
+`{status, version}` body) rather than written from memory. **Helm TLS**:
+`apex.tls.{enabled, secretName}` templates optional **in-process** TLS — an
+existing `kubernetes.io/tls` Secret mounted read-only at `/etc/apex/tls`,
+`APEX_TLS_CERT`/`APEX_TLS_KEY` set in the ConfigMap, both probes switched to
+`scheme: HTTPS` (kubelet skips cert verification, so self-signed works), and
+`APEX_TLS_TERMINATED_UPSTREAM` deliberately **not** emitted when enabled (two
+distinct trust models; emitting both would mask a broken mount behind the
+proxy claim). `apex.tls.enabled` without a `secretName` fails at template time
+(`fail`), and the combination was validated with a freshly-downloaded portable
+`helm` v3.16.4: `helm lint` clean, default + TLS renders both parse as YAML,
+the fail-closed message confirmed. **Terraform**: recorded as a deliberate
+scope-out in `docs/12-deployment/terraform.md` (→1.2.0) — generic modules +
+Helm/compose/systemd cover the single-node topology, and a first-party module
+would wrap them with no Apex-specific logic; revisit at the multi-service
+split.
+
+## OBS-301 `[P2]` — Queue-depth / in-flight / DLQ gauges — **DONE (2026-07-18)**
 
 **Problem.** No gauges for workflow queue depth, pending timers, async-run backlog, or
 webhook DLQ — only counters/histograms exist. (PRD-004 R-L.2; audit Med.)
@@ -1489,7 +1519,31 @@ load.
 **Files.** `crates/apex-server/src/*`, `crates/apex-telemetry/*`. **Size.** M.
 **Depends on:** SRV-103.
 
-## OBS-302 `[P3]` — Traces on store/queue/dispatch + SLO burn signals
+**Resolution.** The `Metrics` registry gained a third instrument family:
+`gauge_set(name, labels, value)` (**set**, not accumulate — calling twice with
+the same labels keeps the last value) rendered as `# TYPE … gauge` in both the
+Prometheus and OpenMetrics outputs, dual-written to OTLP via a new
+`OtelMetrics::set_gauge`. Six gauges, all **recomputed at scrape time** in the
+`/metrics` handler (`refresh_operability_gauges`) from the durable
+source-of-truth stores rather than maintained by inc/dec bookkeeping — the
+design choice that makes them restart-proof and drift-immune by construction:
+`apex_async_runs_in_flight` (RunStore `Running` count),
+`apex_quota_runs_in_flight` (QuotaTracker permit-ledger sum; poisoned-lock
+reads degrade to 0 rather than panicking the scrape — the handler modules deny
+`expect_used`), `apex_workflow_executions_active` (checkpoint list filtered
+non-terminal), `apex_workflow_timers_pending` (`timers.due(u64::MAX)`),
+`apex_webhook_outbox_pending` + `apex_webhook_dlq_size` (a new
+`WebhookOutbox::depths()`). A store error logs a warning and skips that gauge
+(stale > fabricated). The acceptance test
+(`operability_gauges_move_with_load`) scrapes the real router, seeds an async
+run + outbox entry + timer, asserts each gauge moved **by delta from its
+recorded baseline** (the store is `~/.apex`-shared by design, so absolute
+zeros would be flaky), then drains and asserts the return, with the drained
+delivery landing as `+1` on the DLQ gauge. Found and cleaned along the way: 20
+stale pre-API-702 PascalCase checkpoints in `~/.apex/workflows` that made
+`workflows.list()` error (moved aside to `workflows-stale-preapi702-backup/`).
+
+## OBS-302 `[P3]` — Traces on store/queue/dispatch + SLO burn signals — **DONE (2026-07-18)**
 
 **Problem.** Store/queue/dispatcher ops are un-instrumented (`postgres.rs`/`queue.rs`/
 `timer.rs` have no spans); no SLO burn-rate metric or alert rules. (PRD-004 R-L.3/R-L.5;
@@ -1504,6 +1558,39 @@ lint and load.
 
 **Files.** `crates/apex-workflow/src/*`, `deployment/observability/*`. **Size.** M.
 **Depends on:** none.
+
+**Resolution.** **Spans** (matching the existing `workflow.activity`
+`#[tracing::instrument]` style): engine entry points
+`workflow.start`/`resume`/`signal`/`fire_timer`/`cancel` (execution id +
+workflow/event/timer fields); the durable stores as `workflow.store.append`/
+`load`/`compact`/`checkpoint`/`checkpoint_load` on **both** `FileStore` and
+`PostgresStore`, distinguished by a `backend = file|postgres` field (the
+in-memory store stays uninstrumented — test-only); the Postgres
+`WorkQueue` as `workflow.queue.enqueue`/`lease`/`remove`;
+`workflow.worker.step` (records the leased execution id into the span after
+lease); and `workflow.timer.poll` (records the fired count). The end-to-end
+acceptance criterion is **pinned by a test**, not asserted by hand:
+`apex-workflow/tests/tracing_spans.rs` installs a minimal hand-rolled
+`tracing::Subscriber` (no new dev-deps) that tracks contextual parentage via
+an enter/exit stack on a current-thread runtime, drives a real
+submit→enqueue→worker-lease→resume run over `FileStore`, and asserts both
+that every layer's span exists and that they nest —
+`workflow.worker.step` ⊃ `workflow.resume` ⊃ `workflow.activity` /
+`workflow.store.append` / `workflow.store.checkpoint`, plus the submit path's
+own `workflow.start` ⊃ store writes. **SLO burn assets**:
+`deployment/observability/burn-rates.yml` extends the existing OBS-803
+starter with the SRE-workbook multi-window multi-burn-rate pattern against a
+99.5%/30-day availability SLO — recording rules
+`apex:api_error_ratio:rate{5m,30m,1h,6h,3d}`, paired long+short-window alerts
+(fast 14.4× on 1h+5m, slow 6× on 6h+30m as pages; trickle 1× on 3d+6h as a
+ticket; header documents the threshold rescale for other SLO targets), and
+backpressure alerts over the OBS-301 gauges (DLQ `delta()` growth, sustained
+outbox backlog). "Alert rules lint and load" verified with the real
+`promtool` (`prom/prometheus` image, `--entrypoint promtool check rules`):
+10 rules pass (plus the pre-existing 7 in `alerts.yml`, re-checked).
+`dashboard.json` gained an SLO-burn panel over the recorded ratios (threshold
+bands at 0.5%/3%/7.2%) and a six-series operability-gauges panel; the README
+documents the new file, the gauge table, and the full span taxonomy.
 
 ---
 
@@ -1530,6 +1617,7 @@ lint and load.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.12.0 | 2026-07-18 | OBS-301/302 + DEP-302 implemented and marked DONE with implementation notes, closing out WS-L (operability) entirely: OBS-301 (gauge instrument family in `apex-telemetry` + six operability gauges recomputed at scrape time from the durable stores — restart-proof/drift-immune by construction — with a delta-based moves-with-load acceptance test against the real router); OBS-302 (tracing spans across the workflow engine's entry points, both durable store backends, the Postgres queue, worker step, and timer poll — end-to-end nesting pinned by a hand-rolled-subscriber test — plus promtool-validated multi-window burn-rate recording/alert rules at 99.5%/30d, OBS-301-gauge backpressure alerts, and SLO-burn/operability dashboard panels); DEP-302 (end-to-end operator upgrade/migration runbook `upgrade-and-migration.md` with per-shape variants and a restore-based rollback doctrine, optional in-process Helm TLS templated fail-closed and helm-lint/template-validated, Terraform first-party artifacts explicitly scoped out in `terraform.md` v1.2.0). WS-L done; remaining Phase-3 tickets: ECO-305, SEC-302, RAG-301 |
 | 1.0.0 | 2026-07-09 | Initial Phase-3 tickets from PRD-004 / the 2026-07-09 engineering audit (ecosystem, scale, DX, UI, operability) |
 | 1.1.0 | 2026-07-14 | ECO-301 (MCP client tool-source: stdio + streamable-HTTP transports, handshake/paginated discovery/`tools/call` proxying into `ToolRegistry` as permissioned `Tool` impls, fail-closed error mapping + timeouts) implemented and marked DONE with implementation notes — Phase 3 started |
 | 1.2.0 | 2026-07-14 | ECO-302 (plugin authoring SDK: new `apex-plugin-sdk` crate with typed `run_tool` stdin/stdout entry point + secret helpers; `apex plugin new` scaffold + `apex plugin build` digest-computing wasm32-wasip1 build step; real scaffold→build→sign→install acceptance round trip, wasm target added to CI) implemented and marked DONE with implementation notes |

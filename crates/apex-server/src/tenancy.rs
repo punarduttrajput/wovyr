@@ -714,6 +714,19 @@ impl QuotaTracker {
         self.used_on_day(project, current_day())
     }
 
+    /// Total quota-admitted runs currently in flight across every project — the
+    /// in-flight gauge (OBS-301), recomputed from the permit ledger at every
+    /// scrape. Node-local by design, like the ledger itself (SRV-307's optional
+    /// Redis sharing changes admission, not this local view).
+    pub(crate) fn concurrent_total(&self) -> u64 {
+        // A poisoned ledger reads as 0 rather than panicking the scrape — the
+        // gauge is advisory, and the next healthy scrape self-corrects.
+        self.usage
+            .lock()
+            .map(|u| u.concurrent.values().sum())
+            .unwrap_or(0)
+    }
+
     /// Like [`Self::used_today`] but for an explicit day bucket — lets a test
     /// assert usage landed under a non-UTC reset boundary (SRV-203).
     #[cfg(test)]

@@ -23,6 +23,17 @@ data:
   {{- if .Values.apex.env.authMode }}
   APEX_AUTH_MODE: {{ .Values.apex.env.authMode | quote }}
   {{- end }}
-  {{- if .Values.apex.env.tlsTerminatedUpstream }}
+  {{- if .Values.apex.tls.enabled }}
+  {{- if not .Values.apex.tls.secretName }}
+  {{- fail "apex.tls.enabled requires apex.tls.secretName (an existing kubernetes.io/tls Secret)" }}
+  {{- end }}
+  # RM-AIM-P3 DEP-302: in-process TLS — the cert/key mount from
+  # apex.tls.secretName (see apex-statefulset.yaml). Mutually exclusive with
+  # APEX_TLS_TERMINATED_UPSTREAM: with a real certificate served by the
+  # process itself, the fronting-proxy declaration must not also be emitted
+  # (it would mask a broken mount behind the proxy claim).
+  APEX_TLS_CERT: /etc/apex/tls/tls.crt
+  APEX_TLS_KEY: /etc/apex/tls/tls.key
+  {{- else if .Values.apex.env.tlsTerminatedUpstream }}
   APEX_TLS_TERMINATED_UPSTREAM: {{ .Values.apex.env.tlsTerminatedUpstream | quote }}
   {{- end }}

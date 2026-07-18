@@ -1,8 +1,9 @@
 //! An in-process metrics registry that renders Prometheus text exposition.
 //!
 //! Follows the [metric taxonomy](../../docs/14-observability/metrics.md): counters
-//! for traffic/errors, histograms for latency (the RED golden signals), and bounded
-//! labels (no high-cardinality ids). Cloning a [`Metrics`] shares the same registry.
+//! for traffic/errors, histograms for latency (the RED golden signals), gauges for
+//! point-in-time depths (queue/backlog/DLQ sizes — OBS-301), and bounded labels
+//! (no high-cardinality ids). Cloning a [`Metrics`] shares the same registry.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -22,6 +23,8 @@ pub struct Metrics {
 struct Inner {
     /// metric name → (label-set string → value)
     counters: BTreeMap<String, BTreeMap<String, f64>>,
+    /// metric name → (label-set string → point-in-time value), set not added
+    gauges: BTreeMap<String, BTreeMap<String, f64>>,
     /// metric name → (label-set string → histogram)
     histograms: BTreeMap<String, BTreeMap<String, Hist>>,
     /// Optional OTLP metrics sink: when present, record calls are mirrored to it
@@ -122,6 +125,25 @@ impl Metrics {
         self.counter_add(name, labels, 1.0);
     }
 
+    /// Set a gauge to a point-in-time value (OBS-301). Unlike counters, gauges are
+    /// **set**, not accumulated — the natural fit for depths (queue length, DLQ
+    /// size, in-flight runs) that the scrape handler recomputes from the source of
+    /// truth on every render, so the exposed value can never drift from reality
+    /// across restarts or missed updates.
+    pub fn gauge_set(&self, name: &str, labels: &[(&str, &str)], value: f64) {
+        let key = render_labels(labels);
+        let mut inner = self.inner.lock().expect("metrics mutex poisoned");
+        inner
+            .gauges
+            .entry(name.to_string())
+            .or_default()
+            .insert(key, value);
+        #[cfg(feature = "otlp")]
+        if let Some(otel) = inner.otel.as_mut() {
+            otel.set_gauge(name, value, labels);
+        }
+    }
+
     /// Observe a value into a histogram (using the default seconds buckets),
     /// attaching a trace exemplar from the current span when one is active.
     pub fn histogram_observe(&self, name: &str, labels: &[(&str, &str)], value: f64) {
@@ -169,6 +191,13 @@ impl Metrics {
             }
         }
 
+        for (name, series) in &inner.gauges {
+            out.push_str(&format!("# TYPE {name} gauge\n"));
+            for (labels, value) in series {
+                out.push_str(&format!("{name}{labels} {}\n", trim_float(*value)));
+            }
+        }
+
         for (name, series) in &inner.histograms {
             out.push_str(&format!("# TYPE {name} histogram\n"));
             for (labels, hist) in series {
@@ -203,6 +232,13 @@ impl Metrics {
 
         for (name, series) in &inner.counters {
             out.push_str(&format!("# TYPE {name} counter\n"));
+            for (labels, value) in series {
+                out.push_str(&format!("{name}{labels} {}\n", trim_float(*value)));
+            }
+        }
+
+        for (name, series) in &inner.gauges {
+            out.push_str(&format!("# TYPE {name} gauge\n"));
             for (labels, value) in series {
                 out.push_str(&format!("{name}{labels} {}\n", trim_float(*value)));
             }
@@ -356,6 +392,30 @@ mod tests {
         // 0.03 falls in the 0.05 bucket but not 0.025.
         assert!(out.contains(r#"le="0.05"} 1"#), "got:\n{out}");
         assert!(out.contains(r#"le="0.025"} 0"#), "got:\n{out}");
+    }
+
+    #[test]
+    fn gauges_set_not_accumulate_and_render_in_both_formats() {
+        let m = Metrics::new();
+        m.gauge_set("apex_webhook_dlq_size", &[], 3.0);
+        // A later set replaces the value — gauges are point-in-time, not summed.
+        m.gauge_set("apex_webhook_dlq_size", &[], 1.0);
+        m.gauge_set("apex_workflow_timers_pending", &[("shard", "0")], 7.0);
+
+        let prom = m.render_prometheus();
+        assert!(
+            prom.contains("# TYPE apex_webhook_dlq_size gauge"),
+            "{prom}"
+        );
+        assert!(prom.contains("apex_webhook_dlq_size 1\n"), "{prom}");
+        assert!(
+            prom.contains(r#"apex_workflow_timers_pending{shard="0"} 7"#),
+            "{prom}"
+        );
+
+        let om = m.render_openmetrics();
+        assert!(om.contains("# TYPE apex_webhook_dlq_size gauge"), "{om}");
+        assert!(om.trim_end().ends_with("# EOF"), "{om}");
     }
 
     #[test]

@@ -410,6 +410,7 @@ impl PostgresStore {
 
 #[async_trait]
 impl EventLog for PostgresStore {
+    #[tracing::instrument(name = "workflow.store.append", skip_all, fields(backend = "postgres", execution_id = %execution_id))]
     async fn append(&self, execution_id: &str, event: WorkflowEvent) -> Result<u64> {
         let payload = crate::event::encode_event(&event)?;
         let conn = self.pool.get().await?;
@@ -441,6 +442,7 @@ impl EventLog for PostgresStore {
         Ok(seq as u64)
     }
 
+    #[tracing::instrument(name = "workflow.store.load", skip_all, fields(backend = "postgres", execution_id = %execution_id))]
     async fn load(&self, execution_id: &str) -> Result<Vec<WorkflowEvent>> {
         let conn = self.pool.get().await?;
         let rows = conn
@@ -479,6 +481,7 @@ impl EventLog for PostgresStore {
             .collect()
     }
 
+    #[tracing::instrument(name = "workflow.store.compact", skip_all, fields(backend = "postgres", execution_id = %execution_id))]
     async fn compact(&self, execution_id: &str, keep_after_seq: u64) -> Result<()> {
         let conn = self.pool.get().await?;
         conn.client()
@@ -494,6 +497,7 @@ impl EventLog for PostgresStore {
 
 #[async_trait]
 impl CheckpointStore for PostgresStore {
+    #[tracing::instrument(name = "workflow.store.checkpoint", skip_all, fields(backend = "postgres", execution_id = %snapshot.execution_id))]
     async fn save(&self, snapshot: &ExecutionState) -> Result<()> {
         let payload = serde_json::to_string(snapshot)?;
         // WFL-305: `workflow_name`/`status` ride along as their own indexed
@@ -521,6 +525,7 @@ impl CheckpointStore for PostgresStore {
         Ok(())
     }
 
+    #[tracing::instrument(name = "workflow.store.checkpoint_load", skip_all, fields(backend = "postgres", execution_id = %execution_id))]
     async fn latest(&self, execution_id: &str) -> Result<Option<ExecutionState>> {
         let conn = self.pool.get().await?;
         let row = conn
@@ -586,6 +591,7 @@ fn status_str(status: crate::state::WorkflowState) -> String {
 
 #[async_trait]
 impl WorkQueue for PostgresStore {
+    #[tracing::instrument(name = "workflow.queue.enqueue", skip_all, fields(backend = "postgres", execution_id = %execution_id))]
     async fn enqueue(&self, execution_id: &str) -> Result<()> {
         let conn = self.pool.get().await?;
         conn.client()
@@ -602,6 +608,7 @@ impl WorkQueue for PostgresStore {
         Ok(())
     }
 
+    #[tracing::instrument(name = "workflow.queue.lease", skip_all, fields(backend = "postgres", worker = %worker))]
     async fn lease(&self, worker: &str, ttl: Duration) -> Result<Option<String>> {
         // Atomically claim one ready row; `SKIP LOCKED` lets concurrent workers take
         // disjoint executions without blocking each other.
@@ -628,6 +635,7 @@ impl WorkQueue for PostgresStore {
         Ok(row.map(|r| r.get::<_, String>("execution_id")))
     }
 
+    #[tracing::instrument(name = "workflow.queue.lease", skip_all, fields(backend = "postgres", worker = %worker))]
     async fn lease_sharded(
         &self,
         worker: &str,
@@ -674,6 +682,7 @@ impl WorkQueue for PostgresStore {
         Ok(())
     }
 
+    #[tracing::instrument(name = "workflow.queue.remove", skip_all, fields(backend = "postgres", execution_id = %execution_id))]
     async fn remove(&self, execution_id: &str) -> Result<()> {
         let conn = self.pool.get().await?;
         conn.client()

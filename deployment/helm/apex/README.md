@@ -48,12 +48,18 @@ exactly that, honestly.
   [`deployment/docker/Dockerfile`](../docker/Dockerfile)'s image (built with
   `--build-arg FEATURES=tiered-memory,postgres` to match this chart's
   Postgres/Qdrant wiring) to a real registry and set these before deploying.
-- **No TLS termination or ingress of its own (RM-GA-P1 SEC-202).** The pod
-  binds `0.0.0.0`, so `apex_server::serve()` refuses to start without either
-  real TLS (not templated by this chart) or `apex.env.tlsTerminatedUpstream`
+- **TLS: fronting proxy by default, optional in-process (RM-AIM-P3
+  DEP-302).** The pod binds `0.0.0.0`, so `apex_server::serve()` refuses to
+  start without either real TLS or `apex.env.tlsTerminatedUpstream`
   acknowledging a proxy/mesh sidecar handles it — defaulted to `"1"` here,
-  since this chart has no Ingress/Gateway resource. Put a real TLS-terminating
-  proxy in front before exposing this outside the cluster. Real auth
+  since this chart has no Ingress/Gateway resource. Alternatively set
+  `apex.tls.enabled=true` with `apex.tls.secretName` naming an existing
+  `kubernetes.io/tls` Secret (cert-manager or `kubectl create secret tls`):
+  the chart mounts it read-only at `/etc/apex/tls`, points
+  `APEX_TLS_CERT`/`APEX_TLS_KEY` at it, switches both probes to HTTPS, and
+  stops emitting `APEX_TLS_TERMINATED_UPSTREAM` (the two are distinct trust
+  models; emitting both would mask a broken mount behind the proxy claim).
+  Enabling TLS without a secret name fails at template time. Real auth
   (RM-GA-P1 SEC-101) is also required now — `apex.env.authMode` defaults to
   `apikey`; mint a key post-deploy with `kubectl exec -it <pod> -- apex auth
   create-key <principal>` (persisted to the same PVC the server reads).

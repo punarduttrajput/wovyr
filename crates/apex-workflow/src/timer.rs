@@ -300,6 +300,7 @@ impl TimerDispatcher {
     /// Fire every timer due at the current time, resuming each execution. Returns
     /// the ids of the timers fired. Stale timers (execution gone, or its definition
     /// unresolvable) are dropped rather than retried forever.
+    #[tracing::instrument(name = "workflow.timer.poll", skip_all, fields(fired = tracing::field::Empty))]
     pub async fn poll(&self) -> Result<Vec<String>> {
         let now = self.clock.now_millis();
         let due = self.timers.due(now).await?;
@@ -325,6 +326,7 @@ impl TimerDispatcher {
                 .await?;
             fired.push(timer.timer_id);
         }
+        tracing::Span::current().record("fired", fired.len());
         Ok(fired)
     }
 

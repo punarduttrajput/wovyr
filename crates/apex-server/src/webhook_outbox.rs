@@ -136,6 +136,14 @@ impl WebhookOutbox {
         inner.pending.values().cloned().collect()
     }
 
+    /// `(pending deliveries, dead letters across every tenant)` — the outbox depth
+    /// and DLQ size gauges (OBS-301), recomputed at every scrape. Counts only; the
+    /// tenant-scoped [`Self::dead_letters`] stays the inspection surface.
+    pub(crate) fn depths(&self) -> (usize, usize) {
+        let inner = self.inner.lock().expect("outbox poisoned");
+        (inner.pending.len(), inner.dlq.len())
+    }
+
     /// Dead-letters for a tenant, most-recent first.
     pub(crate) fn dead_letters(&self, tenant: &str) -> Vec<DeadLetter> {
         let inner = self.inner.lock().expect("outbox poisoned");

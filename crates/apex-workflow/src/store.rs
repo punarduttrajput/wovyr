@@ -236,6 +236,7 @@ impl FileStore {
 
 #[async_trait]
 impl EventLog for FileStore {
+    #[tracing::instrument(name = "workflow.store.append", skip_all, fields(backend = "file", execution_id = %execution_id))]
     async fn append(&self, execution_id: &str, event: WorkflowEvent) -> Result<u64> {
         use tokio::io::AsyncWriteExt;
 
@@ -272,6 +273,7 @@ impl EventLog for FileStore {
         Ok(seq)
     }
 
+    #[tracing::instrument(name = "workflow.store.load", skip_all, fields(backend = "file", execution_id = %execution_id))]
     async fn load(&self, execution_id: &str) -> Result<Vec<WorkflowEvent>> {
         let path = self.events_path(execution_id);
         let lines = load_lines(&path).await?;
@@ -319,6 +321,7 @@ impl EventLog for FileStore {
         Ok(out)
     }
 
+    #[tracing::instrument(name = "workflow.store.compact", skip_all, fields(backend = "file", execution_id = %execution_id))]
     async fn compact(&self, execution_id: &str, keep_after_seq: u64) -> Result<()> {
         // Line position *is* the seq (1-based, per `append`'s seq-from-line-count
         // seeding) — so "keep events after seq N" is exactly "drop the first N
@@ -340,6 +343,7 @@ impl EventLog for FileStore {
 
 #[async_trait]
 impl CheckpointStore for FileStore {
+    #[tracing::instrument(name = "workflow.store.checkpoint", skip_all, fields(backend = "file", execution_id = %snapshot.execution_id))]
     async fn save(&self, snapshot: &ExecutionState) -> Result<()> {
         let path = self.checkpoint_path(&snapshot.execution_id);
         let json = serde_json::to_string_pretty(snapshot)?;
@@ -352,6 +356,7 @@ impl CheckpointStore for FileStore {
         Ok(())
     }
 
+    #[tracing::instrument(name = "workflow.store.checkpoint_load", skip_all, fields(backend = "file", execution_id = %execution_id))]
     async fn latest(&self, execution_id: &str) -> Result<Option<ExecutionState>> {
         let path = self.checkpoint_path(execution_id);
         match tokio::fs::read_to_string(&path).await {

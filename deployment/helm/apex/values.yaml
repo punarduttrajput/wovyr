@@ -27,13 +27,25 @@ apex:
     # `~/.apex/auth` (the same PVC the running server reads):
     #   kubectl exec -it <pod> -- apex auth create-key <principal>
     authMode: "apikey"
-    # RM-GA-P1 SEC-202: this chart has no ingress/TLS termination of its own —
-    # `serve()` refuses to bind non-loopback without either real TLS or this
-    # explicit acknowledgment that TLS is terminated in front of it (an
-    # Ingress/Gateway/service mesh sidecar). Set to "" only if you've wired
-    # in-process TLS via APEX_TLS_CERT/APEX_TLS_KEY (not templated by this
-    # chart yet) instead.
+    # RM-GA-P1 SEC-202: `serve()` refuses to bind non-loopback without either
+    # real TLS or this explicit acknowledgment that TLS is terminated in front
+    # of it (an Ingress/Gateway/service mesh sidecar). Ignored (not emitted)
+    # when `apex.tls.enabled` below wires in-process TLS instead.
     tlsTerminatedUpstream: "1"
+  # RM-AIM-P3 DEP-302: optional **in-process** TLS — the alternative to
+  # `tlsTerminatedUpstream` for clusters with no TLS-terminating
+  # Ingress/mesh in front of the pod. Points APEX_TLS_CERT/APEX_TLS_KEY at a
+  # standard `kubernetes.io/tls` Secret (keys `tls.crt`/`tls.key`) you
+  # provision out-of-band (e.g. cert-manager, `kubectl create secret tls`).
+  # When enabled, APEX_TLS_TERMINATED_UPSTREAM is deliberately not emitted —
+  # in-process TLS and a fronting-proxy declaration are distinct trust
+  # models, and emitting both would mask a broken TLS mount behind the
+  # proxy claim. Both probes switch to HTTPS.
+  tls:
+    enabled: false
+    # Name of an existing kubernetes.io/tls Secret in the release namespace.
+    # Required when enabled; the chart fails at template time if empty.
+    secretName: ""
   secrets:
     # APEX_KMS_ROOT_KEY (hex). Empty -> apex-server falls back to a fully
     # ephemeral in-process root key (logged loudly) — fine for a smoke test,
