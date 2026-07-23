@@ -49,6 +49,7 @@ pub mod postgres;
 pub mod registry;
 pub mod scan;
 pub mod store;
+pub mod vuln;
 
 pub use listing::{
     AbuseReport, AbuseReportStatus, Listing, ListingRecord, PermissionRisk, PublishedVersion,
@@ -60,3 +61,4 @@ pub use postgres::PostgresRegistryStore;
 pub use registry::{DEFAULT_CHANNEL, PublishOutcome, Registry, SearchQuery};
 pub use scan::{Finding, ScanReport, Severity, scan};
 pub use store::{FileRegistryStore, InMemoryRegistryStore, RegistryState, RegistryStore};
+pub use vuln::{Advisory, VulnFeed};

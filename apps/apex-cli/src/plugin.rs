@@ -673,11 +673,26 @@ fn open_store() -> Result<Box<dyn RegistryStore>> {
     )))
 }
 
+/// OSV/CVE vulnerability feed from `~/.apex/marketplace/osv.json` (ECO-305), or an
+/// empty feed when absent — the same file the server's registry reads, so a local
+/// `apex plugin publish` scans against the same advisories. Corrupt content fails
+/// closed rather than scanning against a half-loaded feed.
+fn load_vuln_feed() -> Result<apex_marketplace::VulnFeed> {
+    let path = apex_config::paths::marketplace_dir()?.join("osv.json");
+    match std::fs::read_to_string(&path) {
+        Ok(json) => apex_marketplace::VulnFeed::from_osv_json(&json),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(apex_marketplace::VulnFeed::default())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// A registry over the durable store, sharing the plugin trust store (and the
 /// keyless trust config, when present).
 fn marketplace_registry() -> Result<Registry<Box<dyn RegistryStore>>> {
     let store = open_store()?;
-    let mut reg = Registry::new(store, load_trust()?);
+    let mut reg = Registry::new(store, load_trust()?).with_vuln_feed(load_vuln_feed()?);
     if let Some(k) = load_keyless()? {
         reg = reg.with_keyless(k.root, k.policy);
     }

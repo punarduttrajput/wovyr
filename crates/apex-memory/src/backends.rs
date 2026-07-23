@@ -148,6 +148,7 @@ impl PostgresStore {
             namespace: row.get("namespace"),
             content: row.get("content"),
             embedding: row.get("embedding"),
+            embedding_model: row.get("embedding_model"),
             memory_type: mt_from_str(&row.get::<_, String>("memory_type")),
             importance: row.get("importance"),
             tags: row.get("tags"),
@@ -174,13 +175,14 @@ impl MemoryStore for PostgresStore {
         self.client
             .execute(
                 "INSERT INTO memory_records
-                   (id, namespace, content, embedding, memory_type, importance, tags, required_scopes, sensitive, parent_id, is_parent, created_ms, seq)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                   (id, namespace, content, embedding, embedding_model, memory_type, importance, tags, required_scopes, sensitive, parent_id, is_parent, created_ms, seq)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                 &[
                     &id,
                     &record.namespace,
                     &record.content,
                     &record.embedding,
+                    &record.embedding_model,
                     &mt_to_str(record.memory_type),
                     &record.importance,
                     &record.tags,
@@ -215,6 +217,43 @@ impl MemoryStore for PostgresStore {
         }
         .map_err(|e| pg_err("select all", e))?;
         Ok(rows.iter().map(Self::row_to_record).collect())
+    }
+
+    async fn update(&self, record: MemoryRecord) -> Result<()> {
+        // In-place by id (RAG-301): namespace/seq are identity here and stay
+        // untouched; everything else follows the record.
+        let updated = self
+            .client
+            .execute(
+                "UPDATE memory_records SET
+                   content = $2, embedding = $3, embedding_model = $4, memory_type = $5,
+                   importance = $6, tags = $7, required_scopes = $8, sensitive = $9,
+                   parent_id = $10, is_parent = $11, created_ms = $12
+                 WHERE id = $1",
+                &[
+                    &record.id,
+                    &record.content,
+                    &record.embedding,
+                    &record.embedding_model,
+                    &mt_to_str(record.memory_type),
+                    &record.importance,
+                    &record.tags,
+                    &record.required_scopes,
+                    &record.sensitive,
+                    &record.parent_id,
+                    &record.is_parent,
+                    &(record.created_ms as i64),
+                ],
+            )
+            .await
+            .map_err(|e| pg_err("update", e))?;
+        if updated == 0 {
+            return Err(Error::NotFound(format!(
+                "memory record `{}` not found for update",
+                record.id
+            )));
+        }
+        Ok(())
     }
 
     async fn get(&self, ids: &[String]) -> Result<Vec<MemoryRecord>> {
@@ -531,6 +570,20 @@ impl MemoryStore for TieredStore {
         // Remove from both tiers: the system of record and the vector index.
         self.postgres.delete(ids).await?;
         self.qdrant.delete(ids).await?;
+        Ok(())
+    }
+
+    async fn update(&self, record: MemoryRecord) -> Result<()> {
+        // System of record first; the vector upsert replaces the existing point
+        // (same stable point id), so the ANN index follows the new embedding.
+        let id = record.id.clone();
+        let namespace = record.namespace.clone();
+        let embedding = record.embedding.clone();
+        let index_vector = !record.is_parent && !embedding.is_empty();
+        self.postgres.update(record).await?;
+        if index_vector {
+            self.qdrant.upsert(&id, &namespace, &embedding).await?;
+        }
         Ok(())
     }
 

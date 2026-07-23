@@ -20,8 +20,18 @@
 //! invocation the loader writes the request parameters as JSON to the guest's
 //! **stdin** and reads the response as JSON from its **stdout**. A clean exit (`0`)
 //! with parseable JSON is a success; a non-zero exit, a resource-budget breach, a
-//! timeout, or non-JSON output is a [`ToolError`]. Declared `secret:read:<name>`
-//! permissions resolve through an attached vault into `APEX_SECRET_*` env vars.
+//! timeout, or non-JSON output is a [`ToolError`].
+//!
+//! **Secrets** (SEC-302). Declared `secret:read:<name>` permissions resolve through
+//! an attached vault and travel to the guest over a [`SecretChannel`]:
+//! [`SecretChannel::Stdin`] (the default) wraps the request in a versioned envelope
+//! — `{"__apex_abi": 1, "params": <params>, "secrets": {"APEX_SECRET_<NAME>": …}}` —
+//! written to the guest's stdin, so the secret values **never enter the guest's
+//! environment** (a verbose/compromised guest echoing `env` leaks nothing); the
+//! `apex-plugin-sdk` reads both shapes transparently. [`SecretChannel::Env`] is the
+//! legacy path (`APEX_SECRET_*` env vars, bare-params stdin) for native entries
+//! that can't parse the envelope. With no resolved secrets, stdin always carries
+//! bare params regardless of channel.
 //!
 //! A capability selects its loader through the manifest's `sandbox` field: `wasm`
 //! (or empty) routes to the WASM loader, `container`/`gvisor` to the container
@@ -39,6 +49,55 @@ use apex_tools::{
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::PathBuf;
+
+/// How resolved secrets travel from the loader to the guest (SEC-302).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SecretChannel {
+    /// Request-scoped: secrets ride inside the stdin JSON envelope
+    /// (`{"__apex_abi": 1, "params": …, "secrets": …}`) and never enter the
+    /// guest's environment. The default.
+    #[default]
+    Stdin,
+    /// Legacy: secrets are injected as `APEX_SECRET_*` environment variables and
+    /// stdin carries the bare request parameters. For native container entries
+    /// (shell scripts, off-the-shelf binaries) that can't parse the envelope —
+    /// accepts that anything able to read the guest's environment sees them.
+    Env,
+}
+
+/// Resolved `(name, value)` secret pairs, as `resolve_secret_env` yields them.
+type SecretPairs = Vec<(String, String)>;
+
+/// Build the guest's stdin bytes and env vars for one invocation, per the
+/// channel: `Stdin` with resolved secrets ⇒ the versioned envelope + empty env;
+/// otherwise bare params, with secrets (if any) in env only on the `Env` channel.
+fn secret_delivery(
+    params: &Value,
+    secrets: SecretPairs,
+    channel: SecretChannel,
+) -> Result<(Vec<u8>, SecretPairs), ToolError> {
+    let encode = |v: &Value| {
+        serde_json::to_vec(v).map_err(|e| ToolError::Internal(format!("encode request: {e}")))
+    };
+    if secrets.is_empty() {
+        return Ok((encode(params)?, Vec::new()));
+    }
+    match channel {
+        SecretChannel::Env => Ok((encode(params)?, secrets)),
+        SecretChannel::Stdin => {
+            let secret_map: serde_json::Map<String, Value> = secrets
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect();
+            let envelope = serde_json::json!({
+                "__apex_abi": 1,
+                "params": params,
+                "secrets": secret_map,
+            });
+            Ok((encode(&envelope)?, Vec::new()))
+        }
+    }
+}
 
 /// Resolve a capability's staged entry to `(artifact_dir, module_path)`, failing
 /// closed on the mispackaging cases every loader shares: no staging dir configured,
@@ -116,6 +175,7 @@ pub struct ContainerCapabilityRuntime {
     sandbox: ContainerSandbox,
     limits: ResourceLimits,
     secrets: Option<apex_secrets::Vault>,
+    secret_channel: SecretChannel,
 }
 
 impl ContainerCapabilityRuntime {
@@ -140,6 +200,7 @@ impl ContainerCapabilityRuntime {
             sandbox,
             limits: ResourceLimits::default(),
             secrets: None,
+            secret_channel: SecretChannel::default(),
         }
     }
 
@@ -156,11 +217,19 @@ impl ContainerCapabilityRuntime {
     }
 
     /// Resolve a capability's declared `secret:read:<name>` permissions from `vault`
-    /// and inject the values as `APEX_SECRET_<NAME>` env vars at invocation
-    /// ([secret-management §5](../../docs/13-security/secret-management.md#5-injection-into-tools--plugins)).
-    /// Values travel via the container CLI's process environment, never its argv.
+    /// at invocation
+    /// ([secret-management §5](../../docs/13-security/secret-management.md#5-injection-into-tools--plugins)),
+    /// delivered per the configured [`SecretChannel`] (default: the stdin
+    /// envelope — SEC-302). On the legacy `Env` channel, values travel via the
+    /// container CLI's process environment, never its argv.
     pub fn with_secrets(mut self, vault: apex_secrets::Vault) -> Self {
         self.secrets = Some(vault);
+        self
+    }
+
+    /// Choose how secrets reach the guest (SEC-302); see [`SecretChannel`].
+    pub fn with_secret_channel(mut self, channel: SecretChannel) -> Self {
+        self.secret_channel = channel;
         self
     }
 }
@@ -228,13 +297,10 @@ impl CapabilityRuntime for ContainerCapabilityRuntime {
         #[cfg(not(unix))]
         let _ = &module;
 
-        // Request parameters → guest stdin (JSON).
-        let stdin = serde_json::to_vec(&request.parameters)
-            .map_err(|e| ToolError::Internal(format!("encode request: {e}")))?;
-
         // Resolve the secrets this capability is entitled to (within the caller's
-        // tenant); injected per-invocation, dropped with the command on teardown.
-        let env = match &self.secrets {
+        // tenant); delivered per-invocation over the configured channel, dropped
+        // with the command on teardown.
+        let secrets = match &self.secrets {
             Some(vault) => crate::engine::resolve_secret_env(
                 call.declared_permissions,
                 &call.ctx.tenant,
@@ -242,6 +308,7 @@ impl CapabilityRuntime for ContainerCapabilityRuntime {
             )?,
             None => Vec::new(),
         };
+        let (stdin, env) = secret_delivery(&request.parameters, secrets, self.secret_channel)?;
 
         let cmd = SandboxCommand {
             program: format!("/workspace/{}", call.entry),
@@ -267,6 +334,7 @@ pub struct WasiCapabilityRuntime {
     sandbox: WasiSandbox,
     limits: ResourceLimits,
     secrets: Option<apex_secrets::Vault>,
+    secret_channel: SecretChannel,
 }
 
 #[cfg(feature = "wasi")]
@@ -279,6 +347,7 @@ impl WasiCapabilityRuntime {
             sandbox,
             limits: ResourceLimits::default(),
             secrets: None,
+            secret_channel: SecretChannel::default(),
         })
     }
 
@@ -288,11 +357,19 @@ impl WasiCapabilityRuntime {
         self
     }
 
-    /// Resolve a capability's declared `secret:read:<name>` permissions from `vault` and
-    /// inject the values into the sandbox as `APEX_SECRET_<NAME>` env vars at invocation
-    /// ([secret-management §5](../../docs/13-security/secret-management.md#5-injection-into-tools--plugins)).
+    /// Resolve a capability's declared `secret:read:<name>` permissions from `vault`
+    /// at invocation
+    /// ([secret-management §5](../../docs/13-security/secret-management.md#5-injection-into-tools--plugins)),
+    /// delivered per the configured [`SecretChannel`] (default: the stdin
+    /// envelope — SEC-302, so the guest's WASI environ stays empty of secrets).
     pub fn with_secrets(mut self, vault: apex_secrets::Vault) -> Self {
         self.secrets = Some(vault);
+        self
+    }
+
+    /// Choose how secrets reach the guest (SEC-302); see [`SecretChannel`].
+    pub fn with_secret_channel(mut self, channel: SecretChannel) -> Self {
+        self.secret_channel = channel;
         self
     }
 }
@@ -314,13 +391,10 @@ impl CapabilityRuntime for WasiCapabilityRuntime {
         }
         let (dir, module) = staged_entry(call)?;
 
-        // Request parameters → guest stdin (JSON).
-        let stdin = serde_json::to_vec(&request.parameters)
-            .map_err(|e| ToolError::Internal(format!("encode request: {e}")))?;
-
-        // Resolve the secrets this capability is entitled to (within the caller's tenant)
-        // and inject them as env vars — in memory, dropped with the command on teardown.
-        let env = match &self.secrets {
+        // Resolve the secrets this capability is entitled to (within the caller's
+        // tenant), delivered per the configured channel — in memory, dropped with
+        // the command on teardown.
+        let secrets = match &self.secrets {
             Some(vault) => crate::engine::resolve_secret_env(
                 call.declared_permissions,
                 &call.ctx.tenant,
@@ -328,6 +402,7 @@ impl CapabilityRuntime for WasiCapabilityRuntime {
             )?,
             None => Vec::new(),
         };
+        let (stdin, env) = secret_delivery(&request.parameters, secrets, self.secret_channel)?;
 
         let cmd = SandboxCommand {
             program: module.to_string_lossy().into_owned(),
@@ -343,6 +418,51 @@ impl CapabilityRuntime for WasiCapabilityRuntime {
             .await
             .map_err(|e| ToolError::Internal(format!("wasm execution failed: {e}")))?;
         capability_response(call.capability_id, outcome)
+    }
+}
+
+/// SEC-302's channel logic is pure — tested here without any sandbox.
+#[cfg(test)]
+mod secret_channel_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn secrets() -> Vec<(String, String)> {
+        vec![("APEX_SECRET_API_TOKEN".to_string(), "s3cr3t".to_string())]
+    }
+
+    #[test]
+    fn stdin_channel_envelopes_secrets_and_keeps_env_empty() {
+        let params = json!({"n": 1});
+        let (stdin, env) = secret_delivery(&params, secrets(), SecretChannel::Stdin).unwrap();
+        assert!(env.is_empty(), "stdin channel must not populate guest env");
+        let doc: Value = serde_json::from_slice(&stdin).unwrap();
+        assert_eq!(doc["__apex_abi"], 1);
+        assert_eq!(doc["params"], params);
+        assert_eq!(doc["secrets"]["APEX_SECRET_API_TOKEN"], "s3cr3t");
+    }
+
+    #[test]
+    fn env_channel_keeps_bare_params_and_populates_env() {
+        let params = json!({"n": 1});
+        let (stdin, env) = secret_delivery(&params, secrets(), SecretChannel::Env).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&stdin).unwrap(), params);
+        assert_eq!(env, secrets());
+    }
+
+    #[test]
+    fn no_secrets_means_bare_params_on_either_channel() {
+        let params = json!({"n": 1});
+        for channel in [SecretChannel::Stdin, SecretChannel::Env] {
+            let (stdin, env) = secret_delivery(&params, Vec::new(), channel).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&stdin).unwrap(), params);
+            assert!(env.is_empty());
+        }
+    }
+
+    #[test]
+    fn stdin_is_the_default_channel() {
+        assert_eq!(SecretChannel::default(), SecretChannel::Stdin);
     }
 }
 
@@ -417,6 +537,135 @@ artifacts:
             .with_runtime(std::sync::Arc::new(WasiCapabilityRuntime::new().unwrap()))
             .with_staging_dir(staging);
         (package, engine)
+    }
+
+    /// A `wasm32-wasi` module that writes its environ **count** as a single ASCII
+    /// digit to stdout (valid JSON: a number). Lets a test observe, from inside
+    /// the guest, exactly how many environment variables the platform injected.
+    const ENV_COUNT_WAT: &str = r#"
+        (module
+          (import "wasi_snapshot_preview1" "environ_sizes_get"
+            (func $environ_sizes_get (param i32 i32) (result i32)))
+          (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (func (export "_start")
+            ;; environ_sizes_get(count@0, buf_size@4)
+            (drop (call $environ_sizes_get (i32.const 0) (i32.const 4)))
+            ;; ASCII digit of the count (tests keep it < 10) at 100
+            (i32.store8 (i32.const 100) (i32.add (i32.const 48) (i32.load (i32.const 0))))
+            ;; write iovec @16 → {buf=100, len=1}
+            (i32.store (i32.const 16) (i32.const 100))
+            (i32.store (i32.const 20) (i32.const 1))
+            (drop (call $fd_write (i32.const 1) (i32.const 16) (i32.const 1) (i32.const 24)))))
+    "#;
+
+    /// Build a signed single-capability package around `wasm` with a declared
+    /// `secret:read:api-token` permission, and an engine driving `runtime`.
+    fn secret_wasm_plugin(
+        staging: &std::path::Path,
+        wasm: Vec<u8>,
+        runtime: WasiCapabilityRuntime,
+    ) -> (Package, PluginEngine) {
+        let manifest = format!(
+            r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata:
+  name: wsec
+  version: 0.1.0
+  publisher: acme
+permissions:
+  - secret:read:api-token
+capabilities:
+  - kind: tool
+    id: wsec.run
+    entry: wsec.wasm
+    sandbox: wasm
+artifacts:
+  - path: wsec.wasm
+    digest: "sha256:{}"
+"#,
+            sha256_hex(&wasm)
+        );
+        let (kp, public) = generate_keypair();
+        let mut trust = TrustStore::new();
+        trust.trust("acme", public);
+        let sig = sign(&kp, manifest.as_bytes());
+        let package = Package::new(manifest, sig).with_artifact("wsec.wasm", wasm);
+        let engine = PluginEngine::new(semver::Version::new(1, 0, 0), trust)
+            .with_runtime(std::sync::Arc::new(runtime))
+            .with_staging_dir(staging);
+        (package, engine)
+    }
+
+    fn vault_with_token() -> apex_secrets::Vault {
+        let store = std::sync::Arc::new(apex_secrets::InMemorySecretStore::new());
+        let vault = apex_secrets::Vault::new(store);
+        vault.create("acme", "api-token", "s3cr3t-t0ken").unwrap();
+        vault
+    }
+
+    async fn run_wsec(
+        staging: &std::path::Path,
+        wasm: Vec<u8>,
+        runtime: WasiCapabilityRuntime,
+    ) -> serde_json::Value {
+        let (package, mut engine) = secret_wasm_plugin(staging, wasm, runtime);
+        let mut registry = ToolRegistry::new();
+        engine
+            .install(&package, &["secret:read:api-token".to_string()])
+            .unwrap();
+        engine.enable("acme/wsec", &mut registry).unwrap();
+        let ctx = ToolContext {
+            tenant: "acme".to_string(),
+            ..ToolContext::default()
+        };
+        let resp = registry
+            .execute("wsec.run", &ctx, ToolRequest::new(json!({"q": "x"})))
+            .await
+            .unwrap();
+        assert!(resp.success);
+        resp.payload
+    }
+
+    /// SEC-302 acceptance (wasi path): on the default request-scoped channel the
+    /// guest's WASI environ is **empty** (observed from inside the guest) while
+    /// the secret arrives inside the stdin envelope; the legacy env channel, by
+    /// contrast, populates environ.
+    #[tokio::test]
+    async fn stdin_channel_keeps_wasi_environ_empty_and_delivers_via_envelope() {
+        let staging =
+            std::env::temp_dir().join(format!("apex_plugin_wasi_sec_{}", std::process::id()));
+
+        // 1. Default (stdin) channel, env-count module: zero environ entries.
+        let counter = wat::parse_str(ENV_COUNT_WAT).expect("assemble env-count wat");
+        let runtime = WasiCapabilityRuntime::new()
+            .unwrap()
+            .with_secrets(vault_with_token());
+        let payload = run_wsec(&staging.join("stdin"), counter.clone(), runtime).await;
+        assert_eq!(payload, json!(0), "no secret env vars on the stdin channel");
+
+        // 2. Legacy env channel, same module: the secret shows up in environ.
+        let runtime = WasiCapabilityRuntime::new()
+            .unwrap()
+            .with_secrets(vault_with_token())
+            .with_secret_channel(SecretChannel::Env);
+        let payload = run_wsec(&staging.join("env"), counter, runtime).await;
+        assert_eq!(payload, json!(1), "the env channel injects APEX_SECRET_*");
+
+        // 3. Stdin channel, echo module: the envelope (params + secrets) is what
+        // the guest actually received on stdin.
+        let echo = wat::parse_str(ECHO_WAT).expect("assemble echo wat");
+        let runtime = WasiCapabilityRuntime::new()
+            .unwrap()
+            .with_secrets(vault_with_token());
+        let payload = run_wsec(&staging.join("echo"), echo, runtime).await;
+        assert_eq!(payload["__apex_abi"], json!(1));
+        assert_eq!(payload["params"], json!({"q": "x"}));
+        assert_eq!(payload["secrets"]["APEX_SECRET_API_TOKEN"], "s3cr3t-t0ken");
+
+        let _ = std::fs::remove_dir_all(&staging);
     }
 
     #[tokio::test]
@@ -579,7 +828,8 @@ artifacts:
 
     /// ECO-303 acceptance: a container-backed capability runs end to end — install →
     /// enable → execute through the registry, with the request round-tripping over
-    /// stdin/stdout and the declared secret injected as an env var.
+    /// stdin/stdout and the declared secret injected as an env var (the legacy
+    /// `SecretChannel::Env` — the script reads `$APEX_SECRET_API_TOKEN`).
     #[tokio::test]
     async fn container_capability_runs_end_to_end() {
         if !has(SandboxBackend::Container).await {
@@ -587,8 +837,9 @@ artifacts:
         }
         let staging =
             std::env::temp_dir().join(format!("apex_plugin_container_{}", std::process::id()));
-        let runtime =
-            ContainerCapabilityRuntime::docker("alpine:3.20").with_secrets(vault_with_token());
+        let runtime = ContainerCapabilityRuntime::docker("alpine:3.20")
+            .with_secrets(vault_with_token())
+            .with_secret_channel(SecretChannel::Env);
         let (package, mut engine) = container_plugin(&staging, "container", runtime);
         let mut registry = ToolRegistry::new();
         engine
@@ -617,6 +868,82 @@ artifacts:
         let _ = std::fs::remove_dir_all(&staging);
     }
 
+    /// A capability entry proving the SEC-302 stdin channel from inside the guest:
+    /// extracts the token from the stdin envelope with `sed` and reports its own
+    /// `$APEX_SECRET_API_TOKEN` env var alongside — the latter must be empty.
+    const STDIN_SECRET_SH: &str = "#!/bin/sh\n\
+        IN=$(cat)\n\
+        TOK=$(printf '%s' \"$IN\" | sed -n 's/.*\"APEX_SECRET_API_TOKEN\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+        printf '{\"token_from_stdin\":\"%s\",\"token_from_env\":\"%s\"}' \"$TOK\" \"$APEX_SECRET_API_TOKEN\"\n";
+
+    /// SEC-302 acceptance (container path): on the default request-scoped channel
+    /// the secret reaches the guest via the stdin envelope and does **not** appear
+    /// in the guest's environment.
+    #[tokio::test]
+    async fn stdin_channel_delivers_secret_without_touching_guest_env() {
+        if !has(SandboxBackend::Container).await {
+            return;
+        }
+        let staging =
+            std::env::temp_dir().join(format!("apex_plugin_stdin_sec_{}", std::process::id()));
+        // Default channel — no `.with_secret_channel` call, proving Stdin is the default.
+        let runtime =
+            ContainerCapabilityRuntime::docker("alpine:3.20").with_secrets(vault_with_token());
+
+        let manifest = format!(
+            r#"
+apiVersion: plugin.apex.io/v1
+kind: Plugin
+metadata:
+  name: stdinsec
+  version: 0.1.0
+  publisher: acme
+permissions:
+  - secret:read:api-token
+capabilities:
+  - kind: tool
+    id: stdinsec.run
+    entry: stdinsec.sh
+    sandbox: container
+artifacts:
+  - path: stdinsec.sh
+    digest: "sha256:{}"
+"#,
+            sha256_hex(STDIN_SECRET_SH.as_bytes())
+        );
+        let (kp, public) = generate_keypair();
+        let mut trust = TrustStore::new();
+        trust.trust("acme", public);
+        let sig = sign(&kp, manifest.as_bytes());
+        let package = Package::new(manifest, sig)
+            .with_artifact("stdinsec.sh", STDIN_SECRET_SH.as_bytes().to_vec());
+        let mut engine = PluginEngine::new(semver::Version::new(1, 0, 0), trust)
+            .with_runtime(std::sync::Arc::new(runtime))
+            .with_staging_dir(&staging);
+        let mut registry = ToolRegistry::new();
+        engine
+            .install(&package, &["secret:read:api-token".to_string()])
+            .unwrap();
+        engine.enable("acme/stdinsec", &mut registry).unwrap();
+
+        let ctx = ToolContext {
+            tenant: "acme".to_string(),
+            ..ToolContext::default()
+        };
+        let resp = registry
+            .execute("stdinsec.run", &ctx, ToolRequest::new(json!({})))
+            .await
+            .unwrap();
+        assert!(resp.success);
+        assert_eq!(
+            resp.payload,
+            json!({"token_from_stdin": "s3cr3t-t0ken", "token_from_env": ""}),
+            "secret must arrive via stdin and be absent from the guest environment"
+        );
+
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
     /// The same capability declared `sandbox: gvisor` runs under the gVisor-backed
     /// runtime (which the docker-backed loader would have refused — see the
     /// fail-closed test above).
@@ -627,8 +954,9 @@ artifacts:
         }
         let staging =
             std::env::temp_dir().join(format!("apex_plugin_gvisor_{}", std::process::id()));
-        let runtime =
-            ContainerCapabilityRuntime::gvisor("alpine:3.20").with_secrets(vault_with_token());
+        let runtime = ContainerCapabilityRuntime::gvisor("alpine:3.20")
+            .with_secrets(vault_with_token())
+            .with_secret_channel(SecretChannel::Env);
         let (package, mut engine) = container_plugin(&staging, "gvisor", runtime);
         let mut registry = ToolRegistry::new();
         engine

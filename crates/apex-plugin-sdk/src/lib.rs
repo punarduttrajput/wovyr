@@ -36,13 +36,20 @@
 //! [`serde_json::Value`] through the same entry point.
 //!
 //! Secrets a capability's manifest declares (`secret:read:<name>` permissions)
-//! are injected by the platform as environment variables; read them with
-//! [`secret`] rather than hand-mangling names.
+//! arrive either inside the stdin request envelope (`{"__apex_abi": 1,
+//! "params": …, "secrets": …}` — the platform's default request-scoped channel,
+//! SEC-302, which keeps them out of this process's environment) or as
+//! `APEX_SECRET_*` environment variables (the legacy channel). Read them with
+//! [`secret`], which handles both transparently; [`run_tool`] likewise accepts
+//! both the envelope and the bare-parameters stdin shape, so a tool never needs
+//! to know which channel the platform used.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 use std::io::Read;
 use std::process::ExitCode;
+use std::sync::OnceLock;
 
 /// Run a tool capability: read the request JSON from stdin, invoke `handler`,
 /// and write the response JSON to stdout. Returns the process exit code —
@@ -62,6 +69,20 @@ where
         eprintln!("could not read the request from stdin: {e}");
         return ExitCode::FAILURE;
     }
+    // Unwrap the request-scoped secret envelope (SEC-302), if present, before the
+    // handler sees the parameters; the secrets become readable via `secret`.
+    let input = match unwrap_envelope(&input) {
+        Ok((params, secrets)) => {
+            if let Some(secrets) = secrets {
+                let _ = stdin_secrets().set(secrets);
+            }
+            params
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
     match respond(&input, handler) {
         Ok(output) => {
             println!("{output}");
@@ -94,12 +115,59 @@ where
     serde_json::to_string(&response).map_err(|e| format!("could not encode the response: {e}"))
 }
 
-/// Read a secret the platform injected for this capability. The capability's
+/// The secrets delivered over the stdin envelope for this invocation (SEC-302),
+/// keyed by their `APEX_SECRET_*` name. Set once by [`run_tool`]; a tool
+/// process handles exactly one request, so there is nothing to reset.
+fn stdin_secrets() -> &'static OnceLock<HashMap<String, String>> {
+    static SECRETS: OnceLock<HashMap<String, String>> = OnceLock::new();
+    &SECRETS
+}
+
+/// Split a raw stdin document into `(parameter JSON, envelope secrets)`.
+///
+/// The platform's request-scoped secret channel (SEC-302) wraps the parameters
+/// as `{"__apex_abi": 1, "params": …, "secrets": {…}}`; anything without the
+/// `__apex_abi` marker is the bare-parameters shape and passes through
+/// untouched. Pure, so it is unit-testable without a stdin pipe; an envelope
+/// from an ABI newer than this SDK understands fails closed.
+pub fn unwrap_envelope(input: &str) -> Result<(String, Option<HashMap<String, String>>), String> {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(input) else {
+        // Not JSON at all — let `respond` produce its normal parse error.
+        return Ok((input.to_string(), None));
+    };
+    let Some(abi) = doc.get("__apex_abi") else {
+        return Ok((input.to_string(), None));
+    };
+    if abi.as_u64() != Some(1) {
+        return Err(format!(
+            "request envelope ABI {abi} is newer than this SDK understands (max 1)"
+        ));
+    }
+    let params = doc.get("params").cloned().unwrap_or(serde_json::json!({}));
+    let params = serde_json::to_string(&params)
+        .map_err(|e| format!("could not re-encode envelope params: {e}"))?;
+    let secrets = doc.get("secrets").and_then(|s| s.as_object()).map(|map| {
+        map.iter()
+            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+            .collect()
+    });
+    Ok((params, secrets))
+}
+
+/// Read a secret the platform delivered for this capability — from the stdin
+/// request envelope (the default channel) or the legacy `APEX_SECRET_*`
+/// environment variable, whichever the platform used. The capability's
 /// manifest must declare the matching `secret:read:<name>` permission, and the
-/// run must be tenant-scoped — otherwise nothing is injected and this returns
+/// run must be tenant-scoped — otherwise nothing is delivered and this returns
 /// `None`.
 pub fn secret(name: &str) -> Option<String> {
-    std::env::var(secret_env_var(name)).ok()
+    let key = secret_env_var(name);
+    if let Some(map) = stdin_secrets().get()
+        && let Some(value) = map.get(&key)
+    {
+        return Some(value.clone());
+    }
+    std::env::var(key).ok()
 }
 
 /// The environment variable a named secret is injected as:
@@ -181,6 +249,61 @@ mod tests {
         assert_eq!(secret_env_var("github-token"), "APEX_SECRET_GITHUB_TOKEN");
         assert_eq!(secret_env_var("db.url"), "APEX_SECRET_DB_URL");
         assert_eq!(secret_env_var("plain"), "APEX_SECRET_PLAIN");
+    }
+
+    /// SEC-302: the request-scoped envelope splits into params + secrets; the
+    /// bare-parameters shape passes through untouched.
+    #[test]
+    fn envelope_unwraps_params_and_secrets() {
+        let (params, secrets) = unwrap_envelope(
+            r#"{"__apex_abi": 1, "params": {"name": "Apex"},
+                "secrets": {"APEX_SECRET_API_TOKEN": "s3cr3t"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&params).unwrap(),
+            json!({"name": "Apex"})
+        );
+        assert_eq!(
+            secrets.unwrap().get("APEX_SECRET_API_TOKEN").unwrap(),
+            "s3cr3t"
+        );
+
+        // Bare params (legacy env channel, or no secrets): untouched, no secrets.
+        let (params, secrets) = unwrap_envelope(r#"{"name": "Apex"}"#).unwrap();
+        assert_eq!(params, r#"{"name": "Apex"}"#);
+        assert!(secrets.is_none());
+
+        // Non-JSON passes through for `respond` to reject with its normal error.
+        let (params, secrets) = unwrap_envelope("not json").unwrap();
+        assert_eq!(params, "not json");
+        assert!(secrets.is_none());
+    }
+
+    /// A future envelope ABI this SDK doesn't understand fails closed instead of
+    /// being misread as parameters.
+    #[test]
+    fn newer_envelope_abi_fails_closed() {
+        let err = unwrap_envelope(r#"{"__apex_abi": 2, "params": {}}"#).unwrap_err();
+        assert!(err.contains("newer than this SDK"), "{err}");
+    }
+
+    /// End to end through `respond`: envelope params reach the handler, and the
+    /// stashed secrets are readable via `secret` without any env var existing.
+    #[test]
+    fn envelope_secrets_are_readable_via_secret_without_env() {
+        let (params, secrets) = unwrap_envelope(
+            r#"{"__apex_abi": 1, "params": {"name": "Sec"},
+                "secrets": {"APEX_SECRET_ENVELOPE_ONLY_TEST": "from-stdin"}}"#,
+        )
+        .unwrap();
+        let _ = stdin_secrets().set(secrets.unwrap());
+
+        assert!(std::env::var("APEX_SECRET_ENVELOPE_ONLY_TEST").is_err());
+        assert_eq!(secret("envelope-only-test").as_deref(), Some("from-stdin"));
+
+        let out = respond(&params, greet).unwrap();
+        assert_eq!(out, r#"{"greeting":"Hello, Sec!"}"#);
     }
 
     #[test]

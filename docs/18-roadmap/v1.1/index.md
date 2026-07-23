@@ -7,14 +7,14 @@ Document ID: RM-AIM-INDEX
 
 **Document ID:** RM-AIM-INDEX
 **File Path:** `docs/18-roadmap/v1.1/index.md`
-**Version:** 1.2.0
-**Status:** In progress — Phase 1 done (WFL-104 lease fencing deferred), Phase 2
-done, Phase 3 well underway: ECO-301/302/304, all of WS-H (WFL-301..308), all of
-WS-E (SBX-301..304), SRV-302..307, and DEP-301 are done; the UI (UI-301..306),
-DX (DX-301..306), and observability (OBS-301/302) tracks plus ECO-303/305 and
-DEP-302 remain
+**Version:** 1.3.0
+**Status:** **Complete (2026-07-19)** — all three phases done: Phase 1
+(WFL-104 lease fencing deferred within its ticket), Phase 2, and Phase 3
+(every ticket across WS-C/E/F/G/H/J/K/L; exit criteria met — see the
+[Phase 3 doc](phase3-ecosystem-scale-tickets.md)'s closing notes for the
+deliberate leftovers)
 **Owner:** Product / AI Engineering
-**Last Updated:** 2026-07-15
+**Last Updated:** 2026-07-19
 
 ---
 
@@ -84,6 +84,7 @@ not committed, pending that decision. See
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.3.0 | 2026-07-19 | **v1.1 milestone complete**: Phase 3 finished (ECO-305, SEC-302, RAG-301 were the last three tickets; all seven Phase-3 exit criteria met) — status header → Complete |
 | 1.0.0 | 2026-07-09 | Initial v1.1 milestone index: three phase ticket docs derived from PRD-004 / the 2026-07-09 engineering audit |
 | 1.2.0 | 2026-07-15 | Status refresh to match the Phase 3 ticket doc: 22 of 39 P3 tickets done (ecosystem, workflow-scale, sandbox, server tracks + DEP-301); UI/DX/OBS tracks, ECO-303/305, DEP-302 remain |
 | 1.1.0 | 2026-07-14 | Status refresh: Phase 1 complete (WFL-104 lease fencing deferred within its ticket), Phase 2 complete (SAF-202 was the last ticket); Phase 3 remains planned |

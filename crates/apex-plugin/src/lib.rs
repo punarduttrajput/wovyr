@@ -59,7 +59,7 @@ pub use manifest::{
     PLUGIN_API_VERSION, PluginManifest, Provenance, ProvenancePolicy, Sbom, SbomComponent,
 };
 pub use permissions::{grant_covers, is_broad, missing_grants};
-pub use runtime::ContainerCapabilityRuntime;
 #[cfg(feature = "wasi")]
 pub use runtime::WasiCapabilityRuntime;
+pub use runtime::{ContainerCapabilityRuntime, SecretChannel};
 pub use verify::{TrustStore, verify_digest};

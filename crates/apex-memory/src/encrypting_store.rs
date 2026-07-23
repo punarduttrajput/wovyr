@@ -92,6 +92,14 @@ impl MemoryStore for EncryptingMemoryStore {
         self.inner.delete(ids).await
     }
 
+    async fn update(&self, record: MemoryRecord) -> Result<()> {
+        // Same sealing discipline as `put`: a sensitive record's content is
+        // re-sealed before the rewrite reaches disk (RAG-301 migration passes
+        // plaintext content, since it read through `all`'s unsealing).
+        let sealed = self.seal_if_sensitive(record)?;
+        self.inner.update(sealed).await
+    }
+
     fn supports_pushdown(&self) -> bool {
         false
     }
@@ -126,6 +134,7 @@ mod tests {
             namespace: namespace.to_string(),
             content: content.to_string(),
             embedding: vec![0.1, 0.2, 0.3],
+            embedding_model: String::new(),
             memory_type: MemoryType::Semantic,
             importance: 0.5,
             tags: Vec::new(),

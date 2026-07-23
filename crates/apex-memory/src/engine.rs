@@ -3,8 +3,8 @@
 use crate::chunk::ChunkPolicy;
 use crate::clock::{Clock, SystemClock};
 use crate::record::{
-    CompactionOutcome, CompactionPolicy, DocumentIngest, MemoryQuery, MemoryRecord, MemoryType,
-    RetrievalStrategy, ScoreBreakdown, ScoredMemory,
+    CompactionOutcome, CompactionPolicy, DocumentIngest, EmbeddingMigrationReport, MemoryQuery,
+    MemoryRecord, MemoryType, RetrievalStrategy, ScoreBreakdown, ScoredMemory,
 };
 use crate::rerank::Reranker;
 use crate::store::MemoryStore;
@@ -155,6 +155,7 @@ impl MemoryEngine {
             namespace: namespace.into(),
             content,
             embedding,
+            embedding_model: self.gateway.resolve_embedding_model(None),
             memory_type,
             importance: importance.clamp(0.0, 1.0),
             tags,
@@ -231,6 +232,8 @@ impl MemoryEngine {
                 namespace: namespace.clone(),
                 content,
                 embedding: Vec::new(),
+                // Non-embedded by construction — no model to attribute.
+                embedding_model: String::new(),
                 memory_type,
                 importance,
                 tags: tags.clone(),
@@ -244,6 +247,7 @@ impl MemoryEngine {
             .await?;
 
         let embeddings = self.embed_batch(&chunks).await?;
+        let embedding_model = self.gateway.resolve_embedding_model(None);
         let mut chunk_ids = Vec::with_capacity(chunks.len());
         for (chunk, embedding) in chunks.into_iter().zip(embeddings) {
             let id = self
@@ -253,6 +257,7 @@ impl MemoryEngine {
                     namespace: namespace.clone(),
                     content: chunk,
                     embedding,
+                    embedding_model: embedding_model.clone(),
                     memory_type,
                     importance,
                     tags: tags.clone(),
@@ -270,6 +275,71 @@ impl MemoryEngine {
             parent_id,
             chunk_ids,
         })
+    }
+
+    /// Migrate `namespace`'s embeddings to the gateway's **current** embedding
+    /// model (RM-AIM-P3 RAG-301).
+    ///
+    /// Incremental by design: only *stale* records are touched — a record whose
+    /// [`embedding_model`](MemoryRecord::embedding_model) already matches the
+    /// current model is skipped, so re-running after a partial failure (or on a
+    /// cron cadence after a model change) only pays for what's left. A record
+    /// with an **empty** model id (written before model ids were recorded) is
+    /// treated as stale rather than assumed current — an unknown provenance
+    /// can't be trusted to share the new model's vector space. Parent documents
+    /// (non-embedded by construction) are skipped.
+    ///
+    /// Each migrated record is re-embedded from its stored `content` (batched
+    /// gateway calls) and rewritten **in place** via [`MemoryStore::update`] —
+    /// same `id`/`seq`/timestamps, so chunk→parent links and recency ordering
+    /// survive. Requires a store with an in-place write path (the in-memory and
+    /// file stores; a store without one fails closed on the first write).
+    /// After a run that reports no failures, every embedded record in the
+    /// namespace carries the same model id — and therefore one uniform
+    /// dimensionality.
+    pub async fn migrate_embeddings(&self, namespace: &str) -> Result<EmbeddingMigrationReport> {
+        /// Records re-embedded per gateway call — bounds request size while
+        /// still amortizing the per-call overhead.
+        const BATCH: usize = 32;
+
+        let target_model = self.gateway.resolve_embedding_model(None);
+        let records = self.store.all(Some(namespace)).await?;
+
+        let mut report = EmbeddingMigrationReport {
+            namespace: namespace.to_string(),
+            target_model: target_model.clone(),
+            scanned: records.len(),
+            migrated: 0,
+            already_current: 0,
+            parents_skipped: 0,
+        };
+        let stale: Vec<MemoryRecord> = records
+            .into_iter()
+            .filter(|r| {
+                if r.is_parent {
+                    report.parents_skipped += 1;
+                    false
+                } else if r.embedding_model == target_model {
+                    report.already_current += 1;
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        for batch in stale.chunks(BATCH) {
+            let texts: Vec<String> = batch.iter().map(|r| r.content.clone()).collect();
+            let embeddings = self.embed_batch(&texts).await?;
+            for (record, embedding) in batch.iter().zip(embeddings) {
+                let mut updated = record.clone();
+                updated.embedding = embedding;
+                updated.embedding_model = target_model.clone();
+                self.store.update(updated).await?;
+                report.migrated += 1;
+            }
+        }
+        Ok(report)
     }
 
     /// Consolidate stale, low-importance memories in `namespace` into a single
@@ -999,6 +1069,7 @@ mod tests {
             namespace: "kb".to_string(),
             content: id.to_string(),
             embedding,
+            embedding_model: String::new(),
             memory_type: MemoryType::Semantic, // recency == 1.0 (no decay)
             importance: 0.0,
             tags: Vec::new(),
@@ -1958,6 +2029,165 @@ mod tests {
         assert!(
             summary.required_scopes.contains(&"pii".to_string()),
             "summary must inherit the pii scope so it stays protected"
+        );
+    }
+
+    // --- RAG-301: incremental re-embedding migration -------------------------
+
+    /// An embedding provider with a different identity (→ model id
+    /// `mockv2-embeddings`) and a different dimensionality (4, vs the mock's
+    /// 16) — the "we switched embedding models" scenario.
+    struct AltEmbedProvider;
+
+    #[async_trait::async_trait]
+    impl apex_provider::AIProvider for AltEmbedProvider {
+        fn name(&self) -> &str {
+            "mockv2"
+        }
+        async fn chat(
+            &self,
+            _request: apex_provider::ChatRequest,
+        ) -> apex_common::Result<apex_provider::ChatResponse> {
+            Err(apex_common::Error::provider(
+                "chat is not used in this test",
+            ))
+        }
+        async fn embed(
+            &self,
+            request: apex_provider::EmbeddingRequest,
+        ) -> apex_common::Result<apex_provider::EmbeddingResponse> {
+            Ok(apex_provider::EmbeddingResponse {
+                model: request.model,
+                vectors: request
+                    .input
+                    .iter()
+                    .map(|t| vec![t.len() as f32, 1.0, 2.0, 3.0])
+                    .collect(),
+                usage: apex_common::Usage::default(),
+            })
+        }
+    }
+
+    /// RAG-301 acceptance: a namespace ingested under one embedding model is
+    /// migrated to a new model — afterwards every embedded record carries the
+    /// new model id and one uniform dimensionality, ids/seqs/parent links
+    /// survive, parents stay non-embedded, and a re-run is an incremental
+    /// no-op.
+    #[tokio::test]
+    async fn migrate_embeddings_moves_a_namespace_to_the_new_model() {
+        let store = Arc::new(InMemoryStore::new());
+
+        // Ingest under the mock model (16-dim, id `mock-embeddings`): two plain
+        // memories + one chunked document (parent + chunks).
+        let old = MemoryEngine::new(
+            Gateway::new(Box::new(MockProvider::new())),
+            store.clone() as Arc<dyn MemoryStore>,
+        );
+        for text in ["refunds take 30 days", "the office is in Berlin"] {
+            old.remember("kb", text, MemoryType::Semantic, 0.5, vec![])
+                .await
+                .unwrap();
+        }
+        let doc = old
+            .remember_document(
+                "kb",
+                "alpha beta gamma delta epsilon zeta eta theta",
+                MemoryType::Semantic,
+                0.5,
+                vec![],
+                vec![],
+                false,
+                &ChunkPolicy {
+                    max_chars: 20,
+                    overlap_chars: 4,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(doc.chunk_ids.len() >= 2, "document must actually chunk");
+
+        let before = store.all(Some("kb")).await.unwrap();
+        let embedded_before = before.iter().filter(|r| !r.is_parent).count();
+        assert!(
+            before
+                .iter()
+                .filter(|r| !r.is_parent)
+                .all(|r| r.embedding.len() == 16 && r.embedding_model == "mock-embeddings"),
+            "precondition: everything embedded on the old model"
+        );
+
+        // Switch models: same store, new gateway → migrate.
+        let new = MemoryEngine::new(
+            Gateway::new(Box::new(AltEmbedProvider)),
+            store.clone() as Arc<dyn MemoryStore>,
+        );
+        let report = new.migrate_embeddings("kb").await.unwrap();
+        assert_eq!(report.target_model, "mockv2-embeddings");
+        assert_eq!(report.scanned, before.len());
+        assert_eq!(report.migrated, embedded_before);
+        assert_eq!(report.already_current, 0);
+        assert_eq!(report.parents_skipped, 1);
+
+        // Uniform dimensionality + model id after; identity and links intact.
+        let after = store.all(Some("kb")).await.unwrap();
+        assert_eq!(after.len(), before.len());
+        for (b, a) in before.iter().zip(&after) {
+            assert_eq!(b.id, a.id, "ids survive migration");
+            assert_eq!(b.seq, a.seq, "seqs survive migration");
+            assert_eq!(b.created_ms, a.created_ms, "timestamps survive migration");
+            assert_eq!(b.parent_id, a.parent_id, "chunk links survive migration");
+            assert_eq!(b.content, a.content, "content is never touched");
+            if a.is_parent {
+                assert!(a.embedding.is_empty(), "parents stay non-embedded");
+            } else {
+                assert_eq!(a.embedding.len(), 4, "uniform new dimensionality");
+                assert_eq!(a.embedding_model, "mockv2-embeddings");
+            }
+        }
+
+        // Incremental: a second run finds nothing stale.
+        let rerun = new.migrate_embeddings("kb").await.unwrap();
+        assert_eq!(rerun.migrated, 0);
+        assert_eq!(rerun.already_current, embedded_before);
+
+        // And retrieval still works over the migrated namespace end to end.
+        let mut q = MemoryQuery::new("refunds");
+        q.namespace = Some("kb".into());
+        q.strategy = RetrievalStrategy::Keyword;
+        let hits = new.query(&q).await.unwrap();
+        assert!(!hits.is_empty(), "migrated namespace still retrieves");
+    }
+
+    /// A store without an in-place write path fails the migration closed on the
+    /// first stale record — never silently re-inserting under new ids.
+    #[tokio::test]
+    async fn migration_fails_closed_on_a_store_without_update() {
+        /// Wraps the in-memory store but hides `update` (the trait default).
+        struct NoUpdateStore(InMemoryStore);
+        #[async_trait::async_trait]
+        impl MemoryStore for NoUpdateStore {
+            async fn put(&self, record: MemoryRecord) -> apex_common::Result<String> {
+                self.0.put(record).await
+            }
+            async fn all(&self, namespace: Option<&str>) -> apex_common::Result<Vec<MemoryRecord>> {
+                self.0.all(namespace).await
+            }
+        }
+
+        let store = Arc::new(NoUpdateStore(InMemoryStore::new()));
+        let old = MemoryEngine::new(
+            Gateway::new(Box::new(MockProvider::new())),
+            store.clone() as Arc<dyn MemoryStore>,
+        );
+        old.remember("kb", "hello", MemoryType::Semantic, 0.5, vec![])
+            .await
+            .unwrap();
+
+        let new = MemoryEngine::new(Gateway::new(Box::new(AltEmbedProvider)), store);
+        let err = new.migrate_embeddings("kb").await.unwrap_err();
+        assert!(
+            err.to_string().contains("in-place updates"),
+            "clear fail-closed error, got: {err}"
         );
     }
 }

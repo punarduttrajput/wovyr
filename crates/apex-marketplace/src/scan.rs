@@ -10,9 +10,15 @@
 //! gates publish fail-closed. No clock, no network, no randomness — the same package
 //! always yields the same report, findings in manifest declaration order.
 //!
-//! Deferred (needs static analysis of artifact code, [§6]): undeclared-usage detection
-//! (a module calling APIs its manifest doesn't request) and CVE feeds.
+//! Known vulnerabilities come from two complementary sources: the operator's
+//! manual `deny_components` list (emergency blocks) and an OSV/CVE feed
+//! ([`crate::vuln::VulnFeed`], RM-AIM-P3 ECO-305) matched against every SBOM
+//! component's `name@version` — both purely data-driven, keeping the scan
+//! deterministic. Deferred (needs static analysis of artifact code, [§6]):
+//! undeclared-usage detection (a module calling APIs its manifest doesn't
+//! request).
 
+use crate::vuln::VulnFeed;
 use apex_plugin::{Package, PluginManifest, is_broad, verify_digest};
 use serde::{Deserialize, Serialize};
 
@@ -64,13 +70,16 @@ impl ScanReport {
 
 /// Statically scan a verified `package`/`manifest` pair. `deny_components` is the
 /// operator's SBOM deny-list (entries match a component `name` or `name@version` —
-/// e.g. known-vulnerable releases).
+/// e.g. known-vulnerable releases); `vuln_feed` is the OSV/CVE feed (ECO-305 —
+/// pass `&VulnFeed::default()` for a feedless scan).
 ///
 /// Checks, by code:
 /// - `artifact.missing` (**Critical**) — a manifest artifact has no blob in the package.
 /// - `artifact.digest_mismatch` (**Critical**) — a bundled blob does not content-address
 ///   to its declared digest (install would also reject it; publish refuses to serve it).
 /// - `component.denied` (**Critical**) — an SBOM component is on the operator deny-list.
+/// - `component.vulnerable` (**Critical**) — an SBOM component matches an OSV/CVE
+///   advisory in the operator's feed.
 /// - `permission.broad` (**Warning**) — a requested permission carries a wildcard.
 /// - `capability.unsandboxed` (**Warning**) — a capability asks for the `native`
 ///   (weakest-isolation) sandbox.
@@ -80,6 +89,7 @@ pub fn scan(
     package: &Package,
     manifest: &PluginManifest,
     deny_components: &[String],
+    vuln_feed: &VulnFeed,
 ) -> ScanReport {
     let mut report = ScanReport::default();
 
@@ -149,6 +159,21 @@ pub fn scan(
                         format!("SBOM component `{pinned}` is on the operator deny-list"),
                     );
                 }
+                for adv in vuln_feed.advisories_for(&c.name, &c.version) {
+                    let aliases = if adv.aliases.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (aka {})", adv.aliases.join(", "))
+                    };
+                    report.push(
+                        "component.vulnerable",
+                        Severity::Critical,
+                        format!(
+                            "SBOM component `{pinned}` matches advisory {}{aliases}: {}",
+                            adv.id, adv.summary
+                        ),
+                    );
+                }
                 if c.license.is_empty() {
                     report.push(
                         "component.unlicensed",
@@ -197,7 +222,7 @@ sbom:
     fn clean_attested_package_has_no_findings() {
         let m = manifest(ATTESTED_CLEAN);
         let pkg = Package::new(ATTESTED_CLEAN, Vec::new());
-        let report = scan(&pkg, &m, &[]);
+        let report = scan(&pkg, &m, &[], &VulnFeed::default());
         assert!(report.findings.is_empty(), "{report:?}");
         assert_eq!(report.max_severity(), None);
     }
@@ -216,7 +241,12 @@ provenance: { builder: ci, source: s, built_at: t }
 sbom: { components: [] }
 "#;
         let m = manifest(yaml);
-        let report = scan(&Package::new(yaml, Vec::new()), &m, &[]);
+        let report = scan(
+            &Package::new(yaml, Vec::new()),
+            &m,
+            &[],
+            &VulnFeed::default(),
+        );
         let codes: Vec<&str> = report.findings.iter().map(|f| f.code.as_str()).collect();
         assert_eq!(codes, ["permission.broad", "capability.unsandboxed"]);
         assert_eq!(report.max_severity(), Some(Severity::Warning));
@@ -228,13 +258,13 @@ sbom: { components: [] }
         let pkg = Package::new(ATTESTED_CLEAN, Vec::new());
 
         for deny in ["serde", "serde@1.0.0"] {
-            let report = scan(&pkg, &m, &[deny.to_string()]);
+            let report = scan(&pkg, &m, &[deny.to_string()], &VulnFeed::default());
             assert_eq!(report.findings.len(), 1, "deny `{deny}`: {report:?}");
             assert_eq!(report.findings[0].code, "component.denied");
             assert_eq!(report.max_severity(), Some(Severity::Critical));
         }
         // A different pinned version does not match.
-        let report = scan(&pkg, &m, &["serde@2.0.0".to_string()]);
+        let report = scan(&pkg, &m, &["serde@2.0.0".to_string()], &VulnFeed::default());
         assert!(report.findings.is_empty());
     }
 
@@ -258,7 +288,7 @@ sbom: {{ components: [] }}
 
         // Bundled + matching digest for one, the other missing entirely.
         let pkg = Package::new(yaml.clone(), Vec::new()).with_artifact("mod.wasm", blob.clone());
-        let report = scan(&pkg, &m, &[]);
+        let report = scan(&pkg, &m, &[], &VulnFeed::default());
         let codes: Vec<&str> = report.findings.iter().map(|f| f.code.as_str()).collect();
         assert_eq!(codes, ["artifact.missing"]);
 
@@ -266,7 +296,7 @@ sbom: {{ components: [] }}
         let pkg = Package::new(yaml, Vec::new())
             .with_artifact("mod.wasm", b"tampered".to_vec())
             .with_artifact("gone.wasm", blob);
-        let report = scan(&pkg, &m, &[]);
+        let report = scan(&pkg, &m, &[], &VulnFeed::default());
         let codes: Vec<&str> = report.findings.iter().map(|f| f.code.as_str()).collect();
         assert_eq!(codes, ["artifact.digest_mismatch"]);
         assert_eq!(report.max_severity(), Some(Severity::Critical));
@@ -280,7 +310,12 @@ kind: Plugin
 metadata: { name: bare, version: 1.0.0, publisher: acme }
 "#;
         let m = manifest(yaml);
-        let report = scan(&Package::new(yaml, Vec::new()), &m, &[]);
+        let report = scan(
+            &Package::new(yaml, Vec::new()),
+            &m,
+            &[],
+            &VulnFeed::default(),
+        );
         let codes: Vec<&str> = report.findings.iter().map(|f| f.code.as_str()).collect();
         assert_eq!(codes, ["sbom.missing", "provenance.missing"]);
         assert_eq!(report.max_severity(), Some(Severity::Info));
@@ -295,9 +330,54 @@ sbom:
     - { name: leftpad, version: "0.1.0" }
 "#;
         let m = manifest(yaml);
-        let report = scan(&Package::new(yaml, Vec::new()), &m, &[]);
+        let report = scan(
+            &Package::new(yaml, Vec::new()),
+            &m,
+            &[],
+            &VulnFeed::default(),
+        );
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].code, "component.unlicensed");
+    }
+
+    /// ECO-305 acceptance: a known-vulnerable SBOM component is flagged via the
+    /// OSV feed — by range match, with the advisory id + CVE alias in the
+    /// message — and a fixed version is not.
+    #[test]
+    fn vulnerable_component_is_flagged_via_osv_feed() {
+        let feed = VulnFeed::from_osv_json(
+            r#"[{
+                "id": "RUSTSEC-2026-0042",
+                "aliases": ["CVE-2026-31337"],
+                "summary": "serde_yaml_ng unsafe alias expansion",
+                "affected": [{
+                    "package": { "ecosystem": "crates.io", "name": "serde" },
+                    "ranges": [{ "type": "SEMVER",
+                                 "events": [{ "introduced": "0" }, { "fixed": "1.0.1" }] }]
+                }]
+            }]"#,
+        )
+        .unwrap();
+
+        // ATTESTED_CLEAN's SBOM pins serde@1.0.0 — inside [0, 1.0.1).
+        let m = manifest(ATTESTED_CLEAN);
+        let pkg = Package::new(ATTESTED_CLEAN, Vec::new());
+        let report = scan(&pkg, &m, &[], &feed);
+        assert_eq!(report.findings.len(), 1, "{report:?}");
+        assert_eq!(report.findings[0].code, "component.vulnerable");
+        assert_eq!(report.max_severity(), Some(Severity::Critical));
+        assert!(
+            report.findings[0].message.contains("RUSTSEC-2026-0042")
+                && report.findings[0].message.contains("CVE-2026-31337"),
+            "message names the advisory and its CVE alias: {}",
+            report.findings[0].message
+        );
+
+        // The same feed against a fixed version: clean.
+        let fixed = ATTESTED_CLEAN.replace("1.0.0\", license: MIT", "1.0.1\", license: MIT");
+        let m = manifest(&fixed);
+        let report = scan(&Package::new(&fixed, Vec::new()), &m, &[], &feed);
+        assert!(report.findings.is_empty(), "{report:?}");
     }
 
     #[test]

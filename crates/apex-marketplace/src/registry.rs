@@ -23,6 +23,7 @@ use crate::listing::{
 use crate::policy::RegistryPolicy;
 use crate::scan::{self, ScanReport};
 use crate::store::RegistryStore;
+use crate::vuln::VulnFeed;
 use apex_common::{Error, Result};
 use apex_plugin::keyless::{IdentityPolicy, KeylessRoot};
 use apex_plugin::{CapabilityKind, Package, TrustStore};
@@ -64,16 +65,19 @@ pub struct Registry<S: RegistryStore> {
     trust: TrustStore,
     keyless: Option<(KeylessRoot, IdentityPolicy)>,
     policy: RegistryPolicy,
+    vuln_feed: VulnFeed,
 }
 
 impl<S: RegistryStore> Registry<S> {
-    /// A registry over `store`, trusting `trust`, with the default (permissive) policy.
+    /// A registry over `store`, trusting `trust`, with the default (permissive) policy
+    /// and no vulnerability feed.
     pub fn new(store: S, trust: TrustStore) -> Self {
         Self {
             store,
             trust,
             keyless: None,
             policy: RegistryPolicy::default(),
+            vuln_feed: VulnFeed::default(),
         }
     }
 
@@ -91,6 +95,21 @@ impl<S: RegistryStore> Registry<S> {
     pub fn with_policy(mut self, policy: RegistryPolicy) -> Self {
         self.policy = policy;
         self
+    }
+
+    /// Attach an OSV/CVE vulnerability `feed` (ECO-305): every publish scan
+    /// matches the package's SBOM components against it, producing Critical
+    /// `component.vulnerable` findings that the policy's scan-severity ceiling
+    /// can gate on.
+    pub fn with_vuln_feed(mut self, feed: VulnFeed) -> Self {
+        self.vuln_feed = feed;
+        self
+    }
+
+    /// The attached vulnerability feed (empty unless
+    /// [`with_vuln_feed`](Self::with_vuln_feed) was applied).
+    pub fn vuln_feed(&self) -> &VulnFeed {
+        &self.vuln_feed
     }
 
     /// The active policy.
@@ -131,7 +150,12 @@ impl<S: RegistryStore> Registry<S> {
         // 3. Automated security scan ([§6]) — the report is stored with the version
         // (consumers see it before install); a configured severity ceiling gates
         // publish fail-closed.
-        let scan = scan::scan(&package, &manifest, &self.policy.deny_components);
+        let scan = scan::scan(
+            &package,
+            &manifest,
+            &self.policy.deny_components,
+            &self.vuln_feed,
+        );
         self.policy.check_scan(&scan)?;
 
         let channel = channel.unwrap_or(DEFAULT_CHANNEL).to_string();

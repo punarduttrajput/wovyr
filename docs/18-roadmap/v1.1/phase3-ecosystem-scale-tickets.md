@@ -7,10 +7,15 @@ Document ID: RM-AIM-P3
 
 **Document ID:** RM-AIM-P3
 **File Path:** `docs/18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md`
-**Version:** 1.12.0
-**Status:** In progress — ECO-301..304, WFL-301..308 (all of WS-H), SBX-301..304 (all of WS-E), SRV-302..307 (all of WS-G), SEC-301, UI-301..306 (all of WS-K), DX-301..306 (all of WS-J), DEP-301/302 + OBS-301/302 (all of WS-L) done; remaining: ECO-305, SEC-302, RAG-301
+**Version:** 1.13.0
+**Status:** **Complete (2026-07-19)** — every Phase-3 ticket is DONE: ECO-301..305 (WS-F),
+WFL-301..308 (WS-H), SBX-301..304 (WS-E), SRV-302..307 (WS-G), SEC-301/302,
+RAG-301 (WS-C), UI-301..306 (WS-K), DX-301..306 (WS-J), DEP-301/302 +
+OBS-301/302 (WS-L). Optional sub-items deliberately left open are recorded in
+each ticket's resolution (ECO-305 wasm import-analysis) and the exit-criteria
+notes below.
 **Owner:** Engineering (Ecosystem / Platform / DX / Frontend)
-**Last Updated:** 2026-07-18
+**Last Updated:** 2026-07-19
 
 ---
 
@@ -240,7 +245,7 @@ missing artifact file rejected before anything is written; an invalid
 signing key rejected. All offline, no wasm toolchain needed (hashes
 arbitrary bytes, not specifically a compiled module).
 
-## ECO-305 `[P3]` — Marketplace OSV/CVE feed
+## ECO-305 `[P3]` — Marketplace OSV/CVE feed — **DONE (2026-07-19)**
 
 **Problem.** The scanner is static-only (manifest/digest/SBOM-deny-list/wildcard-perm),
 with a manually-maintained deny-list (`crates/apex-marketplace/src/scan.rs:14,79-172`).
@@ -252,6 +257,31 @@ wasm import-analysis for undeclared syscalls.
 **Acceptance criteria.** A test flags a known-vulnerable SBOM component via the feed.
 
 **Files.** `crates/apex-marketplace/src/scan.rs`. **Size.** M. **Depends on:** none.
+
+**Resolution.** New `apex-marketplace/src/vuln.rs`: `VulnFeed`, an immutable
+per-package-indexed advisory set parsed from **OSV-format JSON data** the
+operator supplies (a bulk export, an osv.dev query-API response body, or a
+curated subset) — the feed is *data, not a network dependency*, so the scan
+stays deterministic (same package + feed ⇒ same report) and refreshing is a
+cron/operator concern. Parser accepts the OSV subset that drives matching
+(`id`/`summary`/`aliases`/`affected[].package.name`/`versions`/`SEMVER`
+ranges), tolerates unknown fields (a feed newer than the parser still matches
+on the stable core), and fails closed on malformed JSON or an id-less record
+(never a silently smaller feed). Matching follows OSV semantics —
+`[introduced, fixed)` / `[introduced, last_affected]`, lenient `x`/`x.y`
+version padding, explicit `versions` lists exact-matched, and non-`SEMVER`
+range types (`GIT`/`ECOSYSTEM`) deliberately *not* range-guessed. `scan()`
+gained a `vuln_feed` parameter emitting **Critical** `component.vulnerable`
+findings (advisory id + CVE aliases + summary in the message) that
+`block_scan_severity` gates like any other; the deny-list stays as the
+emergency-block complement. Wired end to end: `Registry::with_vuln_feed`
+(publish + the attestation route's live re-scan), loaded from
+`~/.apex/marketplace/osv.json` by **both** the server and the CLI's local
+publish (same `policy.json` convention — absent ⇒ empty feed, corrupt ⇒
+fail-closed). 8 new tests including the acceptance case (range hit with
+alias-bearing message; the fixed version scans clean). The ticket's optional
+wasm import-analysis remains open — it needs real artifact static analysis
+(the same deferral as undeclared-usage detection).
 
 ---
 
@@ -1004,7 +1034,7 @@ trait default and the file override, filtered), `time_range_bounds_are_inclusive
 and the route-level
 `audit_route_time_range_and_cursor_page_through_the_window` in `apex-server`.
 
-## SEC-302 `[P3]` — Request-scoped secret channel
+## SEC-302 `[P3]` — Request-scoped secret channel — **DONE (2026-07-19)**
 
 **Problem.** Secrets are injected into sandboxes as `APEX_SECRET_*` env vars
 (`crates/apex-plugin/src/runtime.rs:55-59,102-110`); a verbose/compromised plugin can
@@ -1019,7 +1049,33 @@ its environment for the vsock/stdin path.
 
 **Files.** `crates/apex-plugin/src/runtime.rs`. **Size.** M. **Depends on:** none.
 
-## RAG-301 `[P3]` — Incremental re-embedding / model migration
+**Resolution.** A `SecretChannel` on both capability loaders, **`Stdin` by
+default** — "prefer the request-scoped channel" made the default posture, not
+an opt-in: resolved secrets ride inside a versioned stdin envelope
+(`{"__apex_abi": 1, "params": …, "secrets": {"APEX_SECRET_<NAME>": …}}`) and
+the guest's environment stays empty of them; `SecretChannel::Env` is the
+explicit legacy opt-out for native container entries (shell scripts,
+off-the-shelf binaries) that can't parse JSON. With no resolved secrets, stdin
+always carries bare params — zero-secret plugins never see the envelope. The
+channel logic is one pure `secret_delivery` helper (unit-tested without any
+sandbox). `apex-plugin-sdk` reads **both shapes transparently**:
+`unwrap_envelope` (pure, exported) splits envelope→params+secrets, fails
+closed on a newer `__apex_abi` than it understands (never misread as
+parameters), and `secret()` checks the envelope stash before falling back to
+the env var — an SDK-built tool needs no code change on either channel.
+Acceptance proven **from inside real guests, on both isolation paths**:
+a docker-gated container test (default channel; a `sed`-parsing script
+reports `{"token_from_stdin": "s3cr3t-t0ken", "token_from_env": ""}`) and a
+wasi test using a hand-written WAT module that outputs its own
+`environ_sizes_get` count — 0 on the stdin channel, 1 on the env channel —
+plus an echo-module assertion that the envelope (params + secrets) is exactly
+what arrived on stdin. Both executed for real on this dev box (Docker +
+Wasmtime). vsock was not needed: every loader ABI here is already
+stdin-based, so the stdin envelope covers the container and WASI paths
+uniformly (a Firecracker *plugin* loader, which would want vsock, still
+doesn't exist — see the known-gaps list).
+
+## RAG-301 `[P3]` — Incremental re-embedding / model migration — **DONE (2026-07-19)**
 
 **Problem.** Changing embedding models doesn't re-embed stored records; the store can
 silently mix vector dimensionalities. (PRD-004 R-C.6; audit Low.)
@@ -1031,6 +1087,34 @@ embedding-model id (from RAG-203) driving detection.
 verifies uniform dimensionality after.
 
 **Files.** `crates/apex-memory/src/engine.rs`. **Size.** M. **Depends on:** RAG-203.
+
+**Resolution.** `MemoryRecord` now carries `embedding_model`, stamped at every
+ingestion path (plain remembers, document chunks; parents stay empty — they're
+non-embedded by construction), mirroring RAG-203's model-id compatibility
+stance for the semantic cache. `MemoryEngine::migrate_embeddings(namespace)`
+is the job: **incremental by design** — only records whose model id differs
+from the gateway's current `resolve_embedding_model` are touched (an *empty*
+id, i.e. a pre-RAG-301 legacy record, counts as stale rather than assumed
+current), so a re-run after a partial failure or on a cron cadence only pays
+for what's left. Re-embedding is batched (32/gateway call) and written through
+a new `MemoryStore::update` — **in place by id**, preserving
+`id`/`seq`/`created_ms`, so chunk→parent links and recency ordering survive;
+an unknown id is `NotFound` (an update never silently becomes an insert), and
+the trait default fails closed for stores without an in-place write path.
+Implemented for `InMemoryStore`, `FileStore` (atomic tmp+rename rewrite, same
+as `delete`), `EncryptingMemoryStore` (re-seals sensitive content before the
+rewrite reaches disk), `PostgresStore` (guarded `UPDATE … WHERE id`), and
+`TieredStore` (Postgres first, then a Qdrant upsert that replaces the existing
+point). Migration `V4__embedding_model.sql` adds the column (`'' = legacy`),
+applied only via `apex admin migrate --target memory` as ever. The acceptance
+test ingests memories + a chunked document under the 16-dim mock model, swaps
+to a 4-dim alternate provider over the same store, migrates, and asserts:
+uniform new dimensionality + model id on every embedded record, parents still
+non-embedded, ids/seqs/timestamps/links/content byte-identical, a re-run
+migrates 0 (incremental), and retrieval still works; a second test pins the
+fail-closed error on a store without `update`. Programmatic only for now, like
+the other engine-level memory features (chunking/reranker) — a CLI/route
+surface remains an open gap.
 
 ---
 
@@ -1611,12 +1695,23 @@ documents the new file, the gauge table, and the full span taxonomy.
 7. The appliance has a systemd/install path, an upgrade runbook, and operability
    gauges/traces (DEP-301/302, OBS-301/302).
 
+**All seven criteria are met as of 2026-07-19** — each maps to tickets marked
+DONE above, with the evidence in their resolutions. Criterion 4's "secrets have
+a non-env channel" additionally became the *default* (SEC-302). Marketplace
+vulnerability scanning (ECO-305) landed beyond the criteria list. Known
+deliberate leftovers, tracked in ticket resolutions and `CLAUDE.md`'s
+known-gaps: wasm import-analysis for the publish scanner, a microVM plugin
+loader (and with it a vsock secret channel), and CLI/route surfaces for the
+programmatic-only engine features (guardrails, prompt persistence, memory
+chunking/reranker/re-embedding).
+
 ---
 
 # Revision History
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.13.0 | 2026-07-19 | ECO-305 + SEC-302 + RAG-301 implemented and marked DONE with implementation notes — **Phase 3 complete, all seven exit criteria met**: ECO-305 (deterministic OSV/CVE `VulnFeed` in the publish scanner, Critical `component.vulnerable` findings gated by the existing scan-severity ceiling, loaded from `~/.apex/marketplace/osv.json` by server and CLI alike; acceptance test flags a known-vulnerable SBOM component by semver range and clears the fixed version); SEC-302 (request-scoped `SecretChannel::Stdin` made the **default** on both capability loaders — secrets ride a versioned stdin envelope and never enter the guest environment, `Env` the explicit legacy opt-out, SDK reads both shapes transparently and fails closed on a newer ABI; proven from inside real guests on both the container path (docker-gated) and the WASI path (an `environ_sizes_get`-counting WAT module: 0 env entries on stdin channel, 1 on env channel)); RAG-301 (`embedding_model` stamped on every record + `MemoryEngine::migrate_embeddings` — incremental re-embed of only-stale records, written via a new in-place `MemoryStore::update` on all five stores incl. Postgres/Tiered with migration `V4__embedding_model.sql`; acceptance test proves uniform dimensionality/model id with ids/seqs/links preserved and an incremental no-op re-run). Status header → Complete; exit-criteria section annotated with the met-as-of date and the deliberate leftovers |
 | 1.12.0 | 2026-07-18 | OBS-301/302 + DEP-302 implemented and marked DONE with implementation notes, closing out WS-L (operability) entirely: OBS-301 (gauge instrument family in `apex-telemetry` + six operability gauges recomputed at scrape time from the durable stores — restart-proof/drift-immune by construction — with a delta-based moves-with-load acceptance test against the real router); OBS-302 (tracing spans across the workflow engine's entry points, both durable store backends, the Postgres queue, worker step, and timer poll — end-to-end nesting pinned by a hand-rolled-subscriber test — plus promtool-validated multi-window burn-rate recording/alert rules at 99.5%/30d, OBS-301-gauge backpressure alerts, and SLO-burn/operability dashboard panels); DEP-302 (end-to-end operator upgrade/migration runbook `upgrade-and-migration.md` with per-shape variants and a restore-based rollback doctrine, optional in-process Helm TLS templated fail-closed and helm-lint/template-validated, Terraform first-party artifacts explicitly scoped out in `terraform.md` v1.2.0). WS-L done; remaining Phase-3 tickets: ECO-305, SEC-302, RAG-301 |
 | 1.0.0 | 2026-07-09 | Initial Phase-3 tickets from PRD-004 / the 2026-07-09 engineering audit (ecosystem, scale, DX, UI, operability) |
 | 1.1.0 | 2026-07-14 | ECO-301 (MCP client tool-source: stdio + streamable-HTTP transports, handshake/paginated discovery/`tools/call` proxying into `ToolRegistry` as permissioned `Tool` impls, fail-closed error mapping + timeouts) implemented and marked DONE with implementation notes — Phase 3 started |

@@ -58,6 +58,14 @@ pub struct MemoryRecord {
     pub content: String,
     /// Embedding vector of `content`.
     pub embedding: Vec<f32>,
+    /// The id of the embedding model that produced `embedding` (RM-AIM-P3
+    /// RAG-301), stamped at ingestion — what re-embedding migration keys its
+    /// staleness detection on, mirroring the semantic cache's model-id
+    /// compatibility guard (RAG-203). Empty marks a legacy record written
+    /// before model ids were recorded (or a non-embedded parent): migration
+    /// treats "unknown" as stale rather than assuming it matches.
+    #[serde(default)]
+    pub embedding_model: String,
     /// Memory type (drives recency).
     #[serde(default)]
     pub memory_type: MemoryType,
@@ -293,6 +301,25 @@ pub struct DocumentIngest {
     pub parent_id: String,
     /// Ids of the chunk records linked to the parent, in document order.
     pub chunk_ids: Vec<String>,
+}
+
+/// The outcome of one [`migrate_embeddings`](crate::MemoryEngine::migrate_embeddings)
+/// run (RM-AIM-P3 RAG-301).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingMigrationReport {
+    /// The namespace that was migrated.
+    pub namespace: String,
+    /// The embedding-model id every migrated record now carries.
+    pub target_model: String,
+    /// Total records inspected in the namespace.
+    pub scanned: usize,
+    /// Records re-embedded and rewritten in place this run.
+    pub migrated: usize,
+    /// Records already on the target model, left untouched (the incremental
+    /// half: a re-run after a partial failure only pays for what's left).
+    pub already_current: usize,
+    /// Non-embedded parent documents, skipped by construction.
+    pub parents_skipped: usize,
 }
 
 #[cfg(test)]

@@ -48,6 +48,19 @@ pub trait MemoryStore: Send + Sync {
         Err(Error::invalid("this store does not support deletion"))
     }
 
+    /// Replace a stored record **in place by id** (RM-AIM-P3 RAG-301 — the
+    /// re-embedding migration's write path). Unlike [`Self::put`], the record's
+    /// existing `id` and `seq` are preserved exactly as given, so chunk→parent
+    /// links and recency ordering survive the rewrite. Fails on an unknown id
+    /// (an update must never silently become an insert). Defaults to
+    /// unsupported, fail-closed.
+    async fn update(&self, record: MemoryRecord) -> Result<()> {
+        let _ = record;
+        Err(Error::invalid(
+            "this store does not support in-place updates",
+        ))
+    }
+
     /// Whether this store implements retrieval pushdown ([`Self::vector_search`] /
     /// [`Self::keyword_search`]). When `false`, the engine ranks in-process.
     fn supports_pushdown(&self) -> bool {
@@ -116,6 +129,20 @@ impl MemoryStore for InMemoryStore {
         let mut records = self.inner.lock().expect("memory mutex poisoned");
         records.retain(|r| !want.contains(r.id.as_str()));
         Ok(())
+    }
+
+    async fn update(&self, record: MemoryRecord) -> Result<()> {
+        let mut records = self.inner.lock().expect("memory mutex poisoned");
+        match records.iter_mut().find(|r| r.id == record.id) {
+            Some(slot) => {
+                *slot = record;
+                Ok(())
+            }
+            None => Err(Error::NotFound(format!(
+                "memory record `{}` not found for update",
+                record.id
+            ))),
+        }
     }
 }
 
@@ -231,6 +258,31 @@ impl MemoryStore for FileStore {
             tokio::fs::write(&tmp, body).await?;
             tokio::fs::rename(&tmp, &path).await?;
         }
+        Ok(())
+    }
+
+    async fn update(&self, record: MemoryRecord) -> Result<()> {
+        let path = self.path(&record.namespace);
+        let mut records = self.read_ns(&path).await?;
+        let Some(slot) = records.iter_mut().find(|r| r.id == record.id) else {
+            return Err(Error::NotFound(format!(
+                "memory record `{}` not found for update",
+                record.id
+            )));
+        };
+        *slot = record;
+        let mut body = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .join("\n");
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        // Atomic replace, same as `delete`.
+        let tmp = path.with_extension("jsonl.tmp");
+        tokio::fs::write(&tmp, body).await?;
+        tokio::fs::rename(&tmp, &path).await?;
         Ok(())
     }
 }

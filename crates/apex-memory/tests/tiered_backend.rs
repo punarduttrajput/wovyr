@@ -86,6 +86,7 @@ fn rec(ns: &str, content: &str, embedding: Vec<f32>) -> MemoryRecord {
         namespace: ns.to_string(),
         content: content.to_string(),
         embedding,
+        embedding_model: String::new(),
         memory_type: MemoryType::Semantic,
         importance: 0.5,
         tags: Vec::new(),

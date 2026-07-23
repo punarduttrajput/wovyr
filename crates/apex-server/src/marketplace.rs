@@ -74,6 +74,31 @@ fn load_policy() -> Result<RegistryPolicy, ApiError> {
     }
 }
 
+/// OSV/CVE vulnerability feed from `~/.apex/marketplace/osv.json` (ECO-305), or an
+/// empty feed when absent. Same convention as `policy.json`: operator-provisioned
+/// data, read fresh per registry build, corrupt content fails closed rather than
+/// scanning against a half-loaded feed.
+fn load_vuln_feed() -> Result<apex_marketplace::VulnFeed, ApiError> {
+    let path = marketplace_dir()?.join("osv.json");
+    match std::fs::read_to_string(&path) {
+        Ok(json) => apex_marketplace::VulnFeed::from_osv_json(&json).map_err(|e| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("corrupt marketplace OSV feed: {e}"),
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(apex_marketplace::VulnFeed::default())
+        }
+        Err(e) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            e.to_string(),
+        )),
+    }
+}
+
 /// Open the durable registry store: `PostgresRegistryStore` when this binary was built
 /// with the `postgres` feature *and* `APEX_MARKETPLACE_POSTGRES_URL` is set (a shared
 /// catalog across every node running this server), else the single-node
@@ -94,7 +119,9 @@ fn open_store() -> Result<Box<dyn RegistryStore>, ApiError> {
 fn registry() -> Result<Registry<Box<dyn RegistryStore>>, ApiError> {
     let trust = plugins::load_trust()?;
     let store = open_store()?;
-    let mut reg = Registry::new(store, trust).with_policy(load_policy()?);
+    let mut reg = Registry::new(store, trust)
+        .with_policy(load_policy()?)
+        .with_vuln_feed(load_vuln_feed()?);
     if let Some(keyless) = plugins::load_keyless()? {
         reg = reg.with_keyless(keyless.root, keyless.policy);
     }
@@ -413,6 +440,7 @@ pub(crate) async fn version_attestation(
             &trust,
             listing.verified,
             &reg.policy().deny_components,
+            reg.vuln_feed(),
         )
     })
     .await?;
@@ -430,6 +458,7 @@ fn attestation_json(
     trust: &TrustStore,
     verified: bool,
     deny_components: &[String],
+    vuln_feed: &apex_marketplace::VulnFeed,
 ) -> Result<Value, ApiError> {
     let package = Package::from_apexpkg(apexpkg)?;
     // `verify` re-checks the detached signature against the trust store; a failure here
@@ -438,7 +467,7 @@ fn attestation_json(
     let signature_verified = package.verify(trust).is_ok();
     let manifest = package.manifest()?;
     let risk = PermissionRisk::classify(&manifest.permissions);
-    let scan = apex_marketplace::scan(&package, &manifest, deny_components);
+    let scan = apex_marketplace::scan(&package, &manifest, deny_components, vuln_feed);
     let package_digest = format!("sha256:{:x}", Sha256::digest(apexpkg));
     Ok(json!({
         "id": id,
@@ -979,7 +1008,15 @@ sbom:
         // Unsigned package (empty signature) checked against an empty trust store: the
         // attestation is still produced, just flagged unverified.
         let apexpkg = Package::new(ATTESTED, Vec::new()).to_apexpkg().unwrap();
-        let v = attestation_json("acme/hello", &apexpkg, &TrustStore::new(), true, &[]).unwrap();
+        let v = attestation_json(
+            "acme/hello",
+            &apexpkg,
+            &TrustStore::new(),
+            true,
+            &[],
+            &apex_marketplace::VulnFeed::default(),
+        )
+        .unwrap();
 
         assert_eq!(v["id"], "acme/hello");
         assert_eq!(v["version"], "2.1.0");
@@ -1011,6 +1048,7 @@ sbom:
             &TrustStore::new(),
             true,
             &["serde@1.0.0".to_string()],
+            &apex_marketplace::VulnFeed::default(),
         )
         .unwrap();
         assert!(
@@ -1030,7 +1068,15 @@ kind: Plugin
 metadata: { name: bare, version: 1.0.0, publisher: acme }
 "#;
         let apexpkg = Package::new(BARE, Vec::new()).to_apexpkg().unwrap();
-        let v = attestation_json("acme/bare", &apexpkg, &TrustStore::new(), false, &[]).unwrap();
+        let v = attestation_json(
+            "acme/bare",
+            &apexpkg,
+            &TrustStore::new(),
+            false,
+            &[],
+            &apex_marketplace::VulnFeed::default(),
+        )
+        .unwrap();
         assert_eq!(v["risk"], "low"); // no permissions
         assert!(v["sbom"].is_null());
         assert!(v["provenance"].is_null());

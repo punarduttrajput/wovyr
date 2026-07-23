@@ -33,8 +33,9 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use encrypting_store::EncryptingMemoryStore;
 pub use engine::MemoryEngine;
 pub use record::{
-    AccessContext, CompactionOutcome, CompactionPolicy, DocumentIngest, MemoryQuery, MemoryRecord,
-    MemoryType, RankingWeights, RetrievalStrategy, ScoreBreakdown, ScoredMemory,
+    AccessContext, CompactionOutcome, CompactionPolicy, DocumentIngest, EmbeddingMigrationReport,
+    MemoryQuery, MemoryRecord, MemoryType, RankingWeights, RetrievalStrategy, ScoreBreakdown,
+    ScoredMemory,
 };
 pub use rerank::{LlmReranker, Reranker};
 pub use store::{FileStore, InMemoryStore, MemoryStore, ScoredId};
