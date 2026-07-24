@@ -17,7 +17,7 @@
 //! process-global env vars.
 
 use apex_server::{AppState, AuthMode, InMemoryApiKeyStore};
-use apex_tenancy::InMemoryTenancyStore;
+use apex_tenancy::{InMemoryTenancyStore, TenancyStore};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
@@ -565,4 +565,106 @@ fn table_covers_every_known_route() {
         "the route table size changed — update `routes()` above (and this constant) \
          together, per RM-GA-P1 SEC-105's 100%-mutating-route-coverage requirement"
     );
+}
+
+/// Send a request carrying both an API-key credential and a (client-asserted,
+/// unverified) `X-Apex-Tenant` header.
+async fn send_as(
+    state: &Arc<AppState>,
+    method: &str,
+    uri: &str,
+    tenant: &str,
+    key: &str,
+    body: Value,
+) -> StatusCode {
+    let body = if body.is_null() {
+        Body::empty()
+    } else {
+        Body::from(body.to_string())
+    };
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {key}"))
+        .header("x-apex-tenant", tenant)
+        .body(body)
+        .unwrap();
+    apex_server::router(state.clone())
+        .oneshot(req)
+        .await
+        .unwrap()
+        .status()
+}
+
+/// RM-AR-P1 SEC-402: an org admin in one tenant cannot reach org-level operations
+/// in another by spoofing `X-Apex-Tenant`. The pre-fix `context()` granted an
+/// org-scoped role on *any* project-less request, so an `OrgAdmin` in tenant A
+/// passed `authorize("org.admin")` for tenant B's `create_org`/`list_orgs`. The
+/// fix requires the org-scoped role's org to belong to the request's tenant.
+#[tokio::test]
+async fn org_admin_cannot_cross_tenants_on_org_level_routes() {
+    use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+    let tenancy = InMemoryTenancyStore::new();
+    // Alice is an OrgAdmin of an org that lives in tenant A — and nowhere else.
+    let org_a = tenancy
+        .create_org(Organization::new("tenant-a", "Acme"))
+        .unwrap();
+    tenancy
+        .add_membership(Membership {
+            user: "alice".to_string(),
+            role: Role::OrgAdmin,
+            scope: MemberScope::Organization(org_a.id.clone()),
+        })
+        .unwrap();
+
+    let keys = InMemoryApiKeyStore::new();
+    keys.insert("alice-key", "alice");
+    let state = Arc::new(
+        AppState::from_env()
+            .await
+            .with_tenancy(Arc::new(tenancy))
+            .with_api_keys(Arc::new(keys))
+            .with_auth_mode(AuthMode::ApiKey),
+    );
+
+    // Spoofing tenant B: Alice holds no membership there, so org-level authz fails.
+    for (method, uri, body) in [
+        ("GET", "/api/v1/organizations", Value::Null),
+        ("POST", "/api/v1/organizations", json!({"name": "evil-org"})),
+        ("GET", "/api/v1/projects", Value::Null),
+    ] {
+        let status = send_as(&state, method, uri, "tenant-b", "alice-key", body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} with spoofed X-Apex-Tenant: tenant-b must be 403, got {status}"
+        );
+    }
+
+    // No regression: in her *own* tenant Alice's org.admin still works.
+    let status = send_as(
+        &state,
+        "POST",
+        "/api/v1/organizations",
+        "tenant-a",
+        "alice-key",
+        json!({"name": "Another"}),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "legitimate same-tenant org.admin must still succeed, got {status}"
+    );
+    let status = send_as(
+        &state,
+        "GET",
+        "/api/v1/organizations",
+        "tenant-a",
+        "alice-key",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "same-tenant list must succeed");
 }

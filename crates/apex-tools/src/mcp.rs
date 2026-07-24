@@ -309,6 +309,12 @@ impl HttpTransport {
     /// how long a connection is cached (RM-MCX-P1-106's idle eviction), not
     /// eliminated per-call; a caller that wants a fresh resolution need only
     /// reconnect.
+    ///
+    /// The shared [`pinned_client`](crate::builtin) also disables redirect
+    /// following (RM-AR-P1 SEC-401): the pin covers only the original host, so
+    /// chasing a `Location:` would reach an unguarded, unpinned address. A `3xx`
+    /// from the MCP server therefore surfaces as a fail-closed transport error in
+    /// [`Self::post`] rather than being silently followed.
     pub async fn connect_guarded(url: impl Into<String>) -> Result<Self, ToolError> {
         let url = url.into();
         let (host, port) = crate::builtin::parse_http_host_port(&url)?;

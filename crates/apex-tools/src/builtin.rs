@@ -303,6 +303,11 @@ impl Tool for FsWriteTool {
 /// model context with large pages.
 const MAX_BODY_BYTES: usize = 16 * 1024;
 
+/// Maximum number of HTTP redirects `http_get` will follow, each re-vetted
+/// through the SSRF guard (SEC-401). Matches reqwest's own historical default of
+/// 10; a chain longer than this fails closed rather than looping.
+const MAX_REDIRECTS: usize = 10;
+
 /// Default `User-Agent` sent with every outbound request. Many real-world sites
 /// (e.g. Wikipedia's robots policy, https://w.wiki/4wJS) reject unidentified
 /// clients with a 403 when no `User-Agent` is set — `reqwest::Client::new()`
@@ -331,25 +336,58 @@ impl Default for HttpGetTool {
 }
 
 /// Whether `ip` must never be reached by `http_get`, regardless of any egress
-/// allow-list ([RM-GA-P1 SEC-304](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md)):
-/// loopback, link-local (which includes the cloud metadata address
-/// `169.254.169.254`), private/unique-local, and unspecified. An IPv4-mapped IPv6
-/// address (`::ffff:a.b.c.d`) is classified by its embedded IPv4 address.
+/// allow-list ([RM-GA-P1 SEC-304](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md),
+/// extended by RM-AR-P1 SEC-406): loopback, link-local (which includes the cloud
+/// metadata address `169.254.169.254`), private/unique-local, unspecified,
+/// broadcast, and CGNAT (`100.64.0.0/10`, RFC 6598). Every IPv6 form that *embeds*
+/// an IPv4 address — IPv4-mapped (`::ffff:a.b.c.d`), 6to4 (`2002::/16`), NAT64
+/// (`64:ff9b::/96`), and the deprecated IPv4-compatible (`::a.b.c.d`) — is decoded
+/// to that IPv4 and re-checked against the IPv4 rules, so a DNS-controlling
+/// attacker can't smuggle a metadata/internal target through an encapsulated form.
 fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr};
     match ip {
         IpAddr::V4(v4) => {
+            // CGNAT (RFC 6598): 100.64.0.0/10 — second octet 64..=127.
+            let is_cgnat = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40;
             v4.is_loopback()
                 || v4.is_link_local()
                 || v4.is_private()
                 || v4.is_unspecified()
                 || v4.is_broadcast()
+                || is_cgnat
         }
         IpAddr::V6(v6) => {
+            // IPv4-mapped: ::ffff:a.b.c.d
             if let Some(mapped) = v6.to_ipv4_mapped() {
                 return is_blocked_ip(IpAddr::V4(mapped));
             }
             let octets = v6.octets();
+            let segments = v6.segments();
+            // 6to4: 2002::/16 — the wrapped IPv4 is bytes 2..6 (e.g.
+            // 2002:a9fe:a9fe:: wraps 169.254.169.254).
+            if segments[0] == 0x2002 {
+                let embedded = Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]);
+                return is_blocked_ip(IpAddr::V4(embedded));
+            }
+            // NAT64: 64:ff9b::/96 — the wrapped IPv4 is the low 32 bits.
+            if segments[0] == 0x0064
+                && segments[1] == 0xff9b
+                && segments[2] == 0
+                && segments[3] == 0
+                && segments[4] == 0
+                && segments[5] == 0
+            {
+                let embedded = Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
+                return is_blocked_ip(IpAddr::V4(embedded));
+            }
+            // IPv4-compatible (deprecated): ::a.b.c.d — high 96 bits zero, low 32
+            // an embedded IPv4. `::` (unspecified) and `::1` (loopback) share this
+            // prefix but are handled by the classifiers below, so exclude them here.
+            if octets[..12].iter().all(|&b| b == 0) && !v6.is_unspecified() && !v6.is_loopback() {
+                let embedded = Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
+                return is_blocked_ip(IpAddr::V4(embedded));
+            }
             let is_unique_local = (octets[0] & 0xfe) == 0xfc; // fc00::/7
             let is_link_local = octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80; // fe80::/10
             v6.is_loopback() || v6.is_unspecified() || is_unique_local || is_link_local
@@ -404,8 +442,70 @@ pub(crate) fn pinned_client(
 ) -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(DEFAULT_USER_AGENT)
+        // SEC-401: never auto-follow redirects. `resolve` pins DNS only for the
+        // *original* host, so reqwest's default of following up to 10 redirects
+        // would chase a `Location:` to an unguarded, unpinned address (e.g. a
+        // `302` to `http://169.254.169.254/`). `http_get` follows redirects
+        // manually, re-vetting every hop (see `get_following_guarded_redirects`);
+        // the MCP `Http` transport reuses this client and simply refuses to
+        // follow, surfacing a `3xx` as a fail-closed transport error.
+        .redirect(reqwest::redirect::Policy::none())
         .resolve(host, pinned)
         .build()
+}
+
+/// Perform a GET on `url`, following up to `max_redirects` redirects **manually**,
+/// re-vetting every hop's target through `guard` before connecting (SEC-401).
+///
+/// `guard(host, port)` resolves + validates a target and returns the socket
+/// address to pin the connection to (or a `PermissionDenied`). Production passes
+/// [`resolve_and_guard`]; tests inject a guard that permits a local test server
+/// while still delegating to the real guard for any redirect target, so the
+/// SSRF-via-redirect regression is exercisable without a public host.
+///
+/// A relative `Location` is resolved against the current URL; a redirect to a
+/// non-`http(s)` scheme (or a malformed target) fails closed via
+/// [`parse_http_host_port`] on the next hop.
+async fn get_following_guarded_redirects<G, Fut>(
+    url: &str,
+    max_redirects: usize,
+    guard: G,
+) -> Result<reqwest::Response, ToolError>
+where
+    G: Fn(String, u16) -> Fut,
+    Fut: std::future::Future<Output = Result<std::net::SocketAddr, ToolError>>,
+{
+    let mut current = url.to_string();
+    for _ in 0..=max_redirects {
+        let (host, port) = parse_http_host_port(&current)?;
+        let pinned = guard(host.clone(), port).await?;
+        let client = pinned_client(&host, pinned)
+            .map_err(|e| ToolError::Internal(format!("could not build HTTP client: {e}")))?;
+        let resp = client
+            .get(&current)
+            .send()
+            .await
+            .map_err(|e| ToolError::Network(format!("GET {current} failed: {e}")))?;
+
+        if resp.status().is_redirection()
+            && let Some(location) = resp.headers().get(reqwest::header::LOCATION)
+        {
+            let location = location.to_str().map_err(|_| {
+                ToolError::Network("redirect `Location` header is not valid text".into())
+            })?;
+            let next = reqwest::Url::parse(&current)
+                .and_then(|base| base.join(location))
+                .map_err(|e| {
+                    ToolError::Network(format!("invalid redirect target `{location}`: {e}"))
+                })?;
+            current = next.to_string();
+            continue;
+        }
+        return Ok(resp);
+    }
+    Err(ToolError::Network(format!(
+        "too many redirects (>{max_redirects}) fetching {url}"
+    )))
 }
 
 /// Parse an `http(s)://` URL into `(host, port)` — the shared first half of
@@ -463,21 +563,18 @@ impl Tool for HttpGetTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::Validation("missing required string field `url`".into()))?;
 
-        let (host, port) = parse_http_host_port(url)?;
+        // Fail fast on a non-http(s) scheme before any network work.
+        parse_http_host_port(url)?;
 
-        let pinned = resolve_and_guard(&host, port, ctx.egress_allowlist.as_deref()).await?;
-
-        // Pin the DNS-resolved address for this request (defeats rebinding: a second
-        // lookup at connect time could answer with a different, unsafe address) —
-        // this needs a dedicated client, since `resolve` is a client-builder setting.
-        let client = pinned_client(&host, pinned)
-            .map_err(|e| ToolError::Internal(format!("could not build HTTP client: {e}")))?;
-
-        let resp = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| ToolError::Network(format!("GET {url} failed: {e}")))?;
+        // Each hop is resolved+guarded and DNS-pinned (defeats rebinding: a second
+        // lookup at connect time could answer with a different, unsafe address),
+        // and every redirect is re-vetted the same way (SEC-401).
+        let egress = ctx.egress_allowlist.clone();
+        let resp = get_following_guarded_redirects(url, MAX_REDIRECTS, move |host, port| {
+            let egress = egress.clone();
+            async move { resolve_and_guard(&host, port, egress.as_deref()).await }
+        })
+        .await?;
 
         let status = resp.status().as_u16();
         let body = resp
@@ -1578,6 +1675,15 @@ mod tests {
             "fc00::1",          // unique-local v6 ("private" equivalent)
             "::ffff:127.0.0.1", // IPv4-mapped loopback
             "::ffff:10.0.0.1",  // IPv4-mapped private
+            // RM-AR-P1 SEC-406: encapsulated + CGNAT ranges.
+            "100.64.0.1",         // CGNAT (RFC 6598), low end
+            "100.127.255.255",    // CGNAT, high end
+            "2002:a9fe:a9fe::",   // 6to4-wrapped 169.254.169.254 (metadata)
+            "2002:0a00:0001::",   // 6to4-wrapped 10.0.0.1 (private)
+            "64:ff9b::a9fe:a9fe", // NAT64-wrapped 169.254.169.254 (metadata)
+            "64:ff9b::a00:1",     // NAT64-wrapped 10.0.0.1 (private)
+            "::a9fe:a9fe",        // IPv4-compatible 169.254.169.254 (metadata)
+            "::a00:1",            // IPv4-compatible 10.0.0.1 (private)
         ];
         for ip in blocked {
             assert!(is_blocked_ip(ip.parse().unwrap()), "{ip} should be blocked");
@@ -1587,7 +1693,11 @@ mod tests {
             "8.8.8.8",
             "1.1.1.1",
             "93.184.216.34",
+            "99.255.255.255", // just below CGNAT
+            "100.63.255.255", // just below CGNAT
+            "100.128.0.0",    // just above CGNAT
             "2606:4700:4700::1111",
+            "2002:0808:0808::", // 6to4-wrapped 8.8.8.8 (public) — not blocked
         ];
         for ip in allowed {
             assert!(
@@ -1609,6 +1719,140 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    // --- RM-AR-P1 SEC-401: SSRF via HTTP redirect ------------------------------------
+
+    /// Bind a loopback listener that replies to every connection with `response`
+    /// verbatim (a full raw HTTP/1.1 message), returning the chosen port. The
+    /// guard injected into `get_following_guarded_redirects` maps a fake public
+    /// hostname to this loopback socket, so the redirect path is exercisable
+    /// without a real public host — while any *other* target (a metadata address
+    /// reached via `Location:`) still flows through the real `resolve_and_guard`.
+    async fn spawn_raw_http(response: String) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await; // consume the request line + headers
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn http_get_refuses_a_redirect_to_the_metadata_address() {
+        use std::net::SocketAddr;
+        // A guard-passing first hop that 302-redirects to the cloud metadata IP.
+        let port = spawn_raw_http(
+            "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\n\
+             Content-Length: 0\r\n\r\n"
+                .to_string(),
+        )
+        .await;
+        let server = SocketAddr::from(([127, 0, 0, 1], port));
+        let url = format!("http://public.test:{port}/");
+
+        let err = get_following_guarded_redirects(&url, MAX_REDIRECTS, move |h: String, p: u16| {
+            async move {
+                if h == "public.test" {
+                    Ok(server) // the "public" first hop, mapped to our test server
+                } else {
+                    resolve_and_guard(&h, p, None).await // every redirect re-vetted for real
+                }
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ToolError::PermissionDenied(_)),
+            "redirect to metadata must be refused, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_get_follows_a_benign_re_guarded_redirect() {
+        use std::net::SocketAddr;
+        let final_port =
+            spawn_raw_http("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".to_string()).await;
+        let redirect_port = spawn_raw_http(format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://final.test:{final_port}/\r\n\
+             Content-Length: 0\r\n\r\n"
+        ))
+        .await;
+        let redirect = SocketAddr::from(([127, 0, 0, 1], redirect_port));
+        let final_addr = SocketAddr::from(([127, 0, 0, 1], final_port));
+        let url = format!("http://start.test:{redirect_port}/");
+
+        let resp = get_following_guarded_redirects(
+            &url,
+            MAX_REDIRECTS,
+            move |h: String, p: u16| async move {
+                match h.as_str() {
+                    "start.test" => Ok(redirect),
+                    "final.test" => Ok(final_addr),
+                    _ => resolve_and_guard(&h, p, None).await,
+                }
+            },
+        )
+        .await
+        .expect("a benign re-guarded redirect should succeed");
+
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.text().await.unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn http_get_fails_closed_on_a_redirect_loop() {
+        use std::net::SocketAddr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A server that redirects to itself forever — must bound, not spin. Bound
+        // first so the self-referential `Location:` can carry its own port.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://loop.test:{port}/\r\nContent-Length: 0\r\n\r\n"
+        );
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        let server = SocketAddr::from(([127, 0, 0, 1], port));
+        let url = format!("http://loop.test:{port}/");
+
+        let err = get_following_guarded_redirects(&url, 3, move |h: String, p: u16| async move {
+            if h == "loop.test" {
+                Ok(server)
+            } else {
+                resolve_and_guard(&h, p, None).await
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, ToolError::Network(msg) if msg.contains("too many redirects")),
+            "a redirect loop must fail closed, got {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -113,10 +113,29 @@ pub(crate) fn context(
         {
             let applies = match &m.scope {
                 MemberScope::Project(p) => project.as_deref() == Some(p.as_str()),
-                // Org roles apply to the in-scope project's org, and to org-level
-                // (project-less) operations within the tenant.
                 MemberScope::Organization(o) => {
-                    project_org.as_deref() == Some(o.as_str()) || project.is_none()
+                    if project.is_some() {
+                        // Project-scoped request: an org role applies to the
+                        // in-scope project's owning org.
+                        project_org.as_deref() == Some(o.as_str())
+                    } else {
+                        // Org-level (project-less) request: an org role applies
+                        // only if that org belongs to the *request's* tenant —
+                        // never unconditionally (RM-AR-P1 SEC-402). `X-Apex-Tenant`
+                        // is an unverified client header, so the old
+                        // `|| project.is_none()` escape let an org admin in tenant
+                        // A spoof `X-Apex-Tenant: B` and pass org-level authz
+                        // (`create_org`, `list_orgs`, `list_projects`) for tenant
+                        // B with no membership there. A genuinely tenant-global
+                        // operation is gated on `platform.admin` (pushed above),
+                        // not on the absence of a project.
+                        state
+                            .tenancy
+                            .get_org(o)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|org| org.tenant == tenant)
+                    }
                 }
             };
             if applies {
