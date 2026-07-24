@@ -65,6 +65,7 @@ New contributors should follow the [Reading Order](#reading-order) at the bottom
 | [AI Platform Maturity PRD (Post-GA capability & operability)](01-product/prd-ai-platform-maturity.md) | Available |
 | [Generative UI Trust Runtime PRD (the product repositioning — PRD-005)](01-product/prd-generative-ui-runtime.md) | Available |
 | [MCP Connection Management PRD (PRD-006)](01-product/prd-mcp-connections.md) | Available |
+| [Audit Remediation & Truth Reconciliation PRD (PRD-007)](01-product/prd-audit-remediation.md) | Available |
 | [System Overview](01-product/system-overview.md) | Available |
 | [Personas](01-product/personas.md) | Available |
 | [User Stories](01-product/user-stories.md) | Available |
@@ -395,6 +396,7 @@ Directional, per-release evolution of the platform.
 | [GA-005 — SDK Distribution & Migration Guides](18-roadmap/v1.0/A5-sdk-distribution.md) | In progress |
 | [v1.2 — Generative UI Trust Runtime](18-roadmap/v1.2-generative-ui.md) | Done (all 3 phases, 2026-07-15) |
 | [v1.3 — MCP Connection Management](18-roadmap/v1.3-mcp-connections.md) | Done (all 3 phases, 2026-07-15) |
+| [v1.4 — Audit Remediation & Truth Reconciliation](18-roadmap/v1.4-audit-remediation.md) | Planned (RM-AR-P1..P3) |
 | [Future — Beyond 1.0](18-roadmap/future.md) | Available |
 | [Future Research Bets (Tier B) — Index](18-roadmap/future/index.md) | Available |
 | [FUT-001 — Autonomous Multi-Agent Systems](18-roadmap/future/B1-multi-agent-systems.md) | Exploratory |

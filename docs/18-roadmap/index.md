@@ -7,10 +7,10 @@ Document ID: RM-INDEX-001
 
 **Document ID:** RM-INDEX-001  
 **File Path:** `docs/18-roadmap/index.md`  
-**Version:** 1.4.0  
+**Version:** 1.5.0  
 **Status:** Active  
 **Owner:** Product Team  
-**Last Updated:** 2026-07-19
+**Last Updated:** 2026-07-23
 
 ---
 
@@ -23,7 +23,10 @@ engineering scope ([PRD-003](../01-product/prd-ga-hardening.md), all four phases
 is complete, with the Tier-A GA-completion validation workstreams still open —
 see [v1.0.md](v1.0.md); **v1.1 is complete** (all three phases, 2026-07-19);
 **v1.2 (Generative UI Trust Runtime) and v1.3 (MCP Connection Management) are
-shipped**.
+shipped**. **v1.4 (Audit Remediation & Truth Reconciliation) is planned** — a
+truth-and-hardening milestone (not features) scoped by
+[PRD-007](../01-product/prd-audit-remediation.md) from a 2026-07-23 four-lens
+audit.
 
 ---
 
@@ -38,6 +41,7 @@ shipped**.
 | v1.1 | AI Platform Maturity: capable, operable, extensible (post-GA) | [v1.1/index.md](v1.1/index.md) |
 | v1.2 | **Generative UI Trust Runtime** — the product milestone: frame protocol, trust/policy engine, durable interaction loop, renderer SDK, internal-tools beachhead | [v1.2-generative-ui.md](v1.2-generative-ui.md) |
 | v1.3 | **MCP Connection Management** — a persisted, UI-managed layer over the shipped MCP client: connection store, agent-manifest wiring, dashboard panel | [v1.3-mcp-connections.md](v1.3-mcp-connections.md) |
+| v1.4 | **Audit Remediation & Truth Reconciliation** — a truth-and-hardening milestone: day-one security fixes (SSRF, cross-tenant authz, audit MAC, KMS fail-closed), AI-core correctness (Anthropic embeddings, bounded caches, default retrieval), CI/claim honesty, and a sustainability scope freeze | [v1.4-audit-remediation.md](v1.4-audit-remediation.md) |
 | Future | Beyond 1.0 — research bets | [future.md](future.md) |
 
 **v1.1 (AI Platform Maturity)** is scoped by [PRD-004](../01-product/prd-ai-platform-maturity.md)
@@ -66,6 +70,18 @@ ECO-301) — a connection store, agent-manifest wiring, and a dashboard panel, w
 `Http`-transport connections reusing the existing SSRF guard. Deliberately
 narrower than [future.md](future.md)'s exploratory outbound MCP-gateway/
 federation bet (FUT-005) — this milestone is inbound-only.
+
+**v1.4 (Audit Remediation & Truth Reconciliation)** is scoped by
+[PRD-007](../01-product/prd-audit-remediation.md) from a 2026-07-23 four-lens
+audit (QA, AI engineering, security, codebase-health/strategy) that read the
+code against the claims in `README.md`/`CLAUDE.md`/`DISTRIBUTION.md`. It is a
+**truth-and-hardening milestone, not features**: fix the concrete
+day-one findings (redirect-SSRF, cross-tenant org authz, unkeyed audit chain,
+unsandboxed native tool path, KMS ephemeral-fallback data loss, Anthropic-only
+memory breakage, unbounded caches), make "proven" mean "proven in CI," reconcile
+the version and the claims with reality, and draw a sustainability line around
+the ~20-subsystem surface. Tickets: [v1.4-audit-remediation.md](v1.4-audit-remediation.md)
+(RM-AR-P1..P3).
 
 ---
 
@@ -97,6 +113,7 @@ learning. ADRs ([section 17](../17-adr/index.md)) record decisions that reshape 
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.5.0 | 2026-07-23 | Added v1.4 (Audit Remediation & Truth Reconciliation, PRD-007/RM-AR-001) — a truth-and-hardening milestone from the 2026-07-23 four-lens audit; not a feature release |
 | 1.4.0 | 2026-07-19 | v1.1 marked complete (Phase 3 finished — ECO-305/SEC-302/RAG-301 were the last tickets) |
 | 1.3.0 | 2026-07-15 | Status-truth pass: replaced the stale "Planning / Documentation phase (v0.1.0)" claim with the real current position — v0.3.0 tagged, PRD-003 engineering scope complete, v1.1 P3 partial, v1.2/v1.3 shipped |
 | 1.2.0 | 2026-07-15 | Added v1.3 (MCP Connection Management, PRD-006/ADR-0012) — a scoped, committed milestone narrower than FUT-005's exploratory outbound MCP-gateway bet |
