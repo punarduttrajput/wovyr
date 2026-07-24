@@ -61,11 +61,40 @@ PII/secret-masked (values referenced, not stored).
 
 # 4. Integrity (Tamper-Evidence)
 
-- Audit records are **append-only**.
-- Records are hash-chained (each entry includes the prior entry's hash) so deletion
-  or modification is detectable.
+- Audit records are **append-only** and `fsync`-durable (file then directory) on
+  every append.
+- Records are **hash-chained** (each entry commits to the prior entry's hash), so
+  deletion or modification of an *interior* record is detectable.
+
+**Keyed MAC + head anchor (SEC-403).** A bare hash chain is only *consistency*
+evidence: the hash is public, so an actor who can rewrite the log file can rewrite an
+entry **and** recompute every downstream hash, and `verify()` would still pass; it also
+cannot detect **tail truncation** (a shortened chain still links cleanly). The
+production log therefore:
+
+- Chains entries with a **keyed HMAC-SHA256** whose key is held *outside* the log
+  file — `APEX_AUDIT_MAC_KEY` (hex, preferred: sourced from escrow before startup) or
+  a generate-once `~/.apex/audit/audit.key`, via `apex_config::audit::build_audit_key`,
+  the same sourcing shape as the KMS root key. Without the key an actor with full write
+  access cannot recompute the chain after editing a record.
+- Persists a monotonic **head anchor** (highest `seq`, its `hash`, and a keyed MAC over
+  the pair) to a separate `audit.head` file on every append. `verify()` fails closed if
+  the log is shorter than the anchor commits to (truncation) or if the anchor's own MAC
+  doesn't validate (a forged anchor).
+
+Key sourcing is **fail-closed** (the SEC-405 stance): a deployment with no durable key
+material refuses to start rather than silently running a forgeable, consistency-only
+chain. `APEX_AUDIT_ALLOW_UNKEYED=1` is the explicit throwaway/test opt-out (runs the
+original unkeyed SHA-256 chain, which carries no tamper-resistance claim).
+
+**Caveat.** The generate-once `audit.key` file is only as strong as the filesystem
+permissions on the audit directory — an actor who can read that file can forge the
+chain, exactly as for the KMS root-key file. The strong path is `APEX_AUDIT_MAC_KEY`
+sourced from a secrets manager/HSM/escrow, never written beside the log.
+
 - Optionally exported to a write-once store (WORM) or external SIEM for independent
-  retention.
+  retention. The `NotarizationHook` interface (published head → external anchor) is the
+  landed seam for this compliance tier; a concrete publisher is a follow-on.
 
 ---
 
@@ -149,4 +178,5 @@ anomalies, admin actions outside change windows, mass exports
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.1.0 | 2026-07-24 | SEC-403: §4 documents the keyed HMAC chain, the durable head anchor (tail-truncation detection), fail-closed key sourcing (`APEX_AUDIT_MAC_KEY`/generate-once file, `APEX_AUDIT_ALLOW_UNKEYED=1` opt-out), and the `NotarizationHook` external-anchor seam. |
 | 1.0.0 | 2026-06-27 | Initial Audit Logging specification |

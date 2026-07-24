@@ -189,9 +189,11 @@ name = "apex-audit"
 version = "0.3.0"
 dependencies = [
  "apex-common",
+ "hmac 0.12.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tracing",
 ]
 
 [[package]]

@@ -104,14 +104,30 @@ pub(crate) fn default_secrets_vault(kms: Arc<dyn apex_kms::Kms>) -> apex_secrets
 /// locking (RM-GA-P2 DUR-403) over that same directory — the CLI can append to the
 /// identical `audit.jsonl` (e.g. via `apex plugin` commands, once wired), so a
 /// second writer must extend the chain, not fork it.
+///
+/// **Keyed + tamper-evident by default (SEC-403).** The audit MAC key is sourced via
+/// `apex_config::audit::build_audit_key` (`APEX_AUDIT_MAC_KEY`, else a generate-once
+/// `~/.apex/audit/audit.key`) so the chain is a keyed HMAC an actor with write access
+/// can't forge, and a durable head anchor lets `verify` catch tail truncation. Sourcing
+/// fails closed on missing key material (the SEC-405 stance) — a misconfigured
+/// deployment halts here rather than running a forgeable, consistency-only chain;
+/// `APEX_AUDIT_ALLOW_UNKEYED=1` is the explicit throwaway/test opt-out (runs the old
+/// unkeyed chain).
 pub(crate) fn default_audit_log() -> apex_audit::AuditLog {
     let dir = apex_config::paths::audit_dir().ok();
+    let key =
+        apex_config::audit::build_audit_key().unwrap_or_else(|e| panic!("refusing to start: {e}"));
     let sink = dir
         .clone()
         .and_then(|dir| apex_audit::FileAuditSink::new(dir).ok());
-    match (sink, dir) {
-        (Some(s), Some(dir)) => apex_audit::AuditLog::open_with_lock(Box::new(s), dir)
+    match (sink, dir, key) {
+        // Keyed: HMAC chain + durable head anchor over the audit directory.
+        (Some(s), Some(dir), Some(k)) => apex_audit::AuditLog::open_keyed(Box::new(s), k, dir)
             .unwrap_or_else(|_| apex_audit::AuditLog::in_memory()),
+        // Explicit unkeyed opt-out: original SHA-256 chain, cross-process locked.
+        (Some(s), Some(dir), None) => apex_audit::AuditLog::open_with_lock(Box::new(s), dir)
+            .unwrap_or_else(|_| apex_audit::AuditLog::in_memory()),
+        // No durable sink (e.g. no HOME): ephemeral in-memory log.
         _ => apex_audit::AuditLog::in_memory(),
     }
 }

@@ -2,19 +2,58 @@
 //! ([audit §4 Integrity](../../docs/13-security/audit.md#4-integrity-tamper-evidence)).
 //!
 //! Each [`AuditEntry`] commits to the prior entry's hash, so any deletion or modification
-//! of a record breaks the chain and is detectable by [`AuditLog::verify`]. The chain math
-//! is deterministic (no clocks/randomness here — timestamps arrive on the event), so the
-//! same sequence of events always yields the same hashes.
+//! of an *interior* record breaks the chain and is detectable by [`AuditLog::verify`].
+//! The chain math is deterministic (no clocks/randomness here — timestamps arrive on the
+//! event), so the same sequence of events always yields the same hashes.
+//!
+//! # Tamper resistance vs. consistency (SEC-403)
+//!
+//! A bare SHA-256 chain is only *consistency* evidence: the hash is public, so any actor
+//! who can rewrite `audit.jsonl` can rewrite an entry **and** recompute every downstream
+//! hash, and [`verify`](AuditLog::verify) would then pass. Two changes turn the chain into
+//! real tamper *resistance*:
+//!
+//! 1. **Keyed MAC.** When opened with a key ([`open_keyed`](AuditLog::open_keyed)) the
+//!    per-entry `hash` is an **HMAC-SHA256** keyed by a secret held *outside* the log file
+//!    (sourced like the KMS root key — `APEX_AUDIT_MAC_KEY` or an escrowed/generate-once
+//!    file, via `apex_config::audit`). Without the key an attacker cannot recompute the
+//!    chain after editing a record, so an interior edit is detectable even by an actor
+//!    with full write access to the file.
+//! 2. **Head anchor.** A plain chain cannot detect **tail truncation** — lop off the last
+//!    N entries and the shortened chain still verifies. A keyed log therefore persists a
+//!    monotonic *head anchor* (highest `seq`, its `hash`, and a keyed MAC over the pair)
+//!    to a separate `audit.head` file on every append; `verify` fails closed if the log
+//!    is shorter than the anchor commits to, or if the anchor's own MAC doesn't validate.
+//!
+//! An unkeyed log ([`open`](AuditLog::open) / [`in_memory`](AuditLog::in_memory)) keeps the
+//! original plain-SHA-256 chain — it's the test/single-process path and carries no
+//! tamper-resistance claim. The `hash`/`prev_hash` field *shapes* are identical either way
+//! (hex strings); only their derivation differs, so switching a store from unkeyed to keyed
+//! (or changing the key) intentionally invalidates a pre-existing `audit.jsonl` — a
+//! breaking on-disk change, acceptable pre-real-deployment (the API-702 stance).
+//!
+//! [`NotarizationHook`] is the landed interface for the compliance tier's optional
+//! external anchor (periodic head-hash to WORM/transparency storage); the concrete
+//! publisher is a follow-on.
 
 use crate::event::AuditEvent;
 use apex_common::{Error, Result};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+type HmacSha256 = Hmac<Sha256>;
 
 fn lock_config_err(e: std::io::Error) -> Error {
     Error::config(format!("lock audit log: {e}"))
+}
+
+/// Lowercase-hex encode bytes (no `hex` crate dependency — same one-liner
+/// `apex-events`' signer uses).
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A persisted audit record: the event plus its position and hash-chain links.
@@ -33,13 +72,114 @@ pub struct AuditEntry {
 }
 
 /// Compute the chained hash for an entry's `(id, seq, event)` given `prev_hash`.
-fn chain_hash(prev_hash: &str, id: &str, seq: u64, event: &AuditEvent) -> String {
+///
+/// With `key = Some(_)` this is a **keyed HMAC-SHA256** (SEC-403) an actor who can
+/// rewrite the log cannot recompute without the externally-held key; with `key = None`
+/// it's the original plain SHA-256 (the unkeyed test/single-process path). Both produce
+/// a lowercase-hex string of the same length, so the `hash`/`prev_hash` field shapes are
+/// identical — only the derivation differs.
+fn chain_hash(
+    key: Option<&[u8; 32]>,
+    prev_hash: &str,
+    id: &str,
+    seq: u64,
+    event: &AuditEvent,
+) -> String {
     // Canonical body: serde_json preserves struct field order, so this is stable.
     let body = serde_json::to_vec(&(id, seq, event)).expect("audit event serializes");
-    let mut h = Sha256::new();
-    h.update(prev_hash.as_bytes());
-    h.update(&body);
-    format!("{:x}", h.finalize())
+    match key {
+        Some(k) => {
+            let mut mac = HmacSha256::new_from_slice(k).expect("HMAC accepts any key length");
+            mac.update(prev_hash.as_bytes());
+            mac.update(&body);
+            hex_lower(&mac.finalize().into_bytes())
+        }
+        None => {
+            let mut h = Sha256::new();
+            h.update(prev_hash.as_bytes());
+            h.update(&body);
+            format!("{:x}", h.finalize())
+        }
+    }
+}
+
+/// Filename of the durable head anchor, beside `audit.jsonl` in the log directory.
+const HEAD_FILE: &str = "audit.head";
+
+/// The persisted, keyed **head anchor** (SEC-403): the highest committed `seq`, its
+/// entry `hash`, and a keyed MAC binding the two. Written on every append; read by
+/// [`AuditLog::verify`] to detect **tail truncation** — a plain chain can't, since a
+/// shortened chain still links cleanly.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HeadAnchor {
+    seq: u64,
+    hash: String,
+    /// HMAC-SHA256 over the `(seq, hash)` pair — an attacker who truncates the log
+    /// cannot forge a matching anchor without the key.
+    mac: String,
+}
+
+/// The keyed MAC binding a head anchor's `(seq, hash)` pair (domain-separated so it
+/// can't be confused with an entry's chain MAC).
+fn head_mac(key: &[u8; 32], seq: u64, hash: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(b"apex-audit-head:v1:");
+    mac.update(&seq.to_le_bytes());
+    mac.update(b":");
+    mac.update(hash.as_bytes());
+    hex_lower(&mac.finalize().into_bytes())
+}
+
+/// Durably write the head anchor for `(seq, hash)` under `dir` (atomic whole-file
+/// write, so a crash never leaves a torn anchor).
+fn write_anchor(dir: &Path, key: &[u8; 32], seq: u64, hash: &str) -> Result<()> {
+    let anchor = HeadAnchor {
+        seq,
+        hash: hash.to_string(),
+        mac: head_mac(key, seq, hash),
+    };
+    let bytes = serde_json::to_vec(&anchor).map_err(Error::from)?;
+    // The anchor is integrity metadata (a seq + hash + keyed MAC), not secret key
+    // material — publishing it reveals nothing about the key — so it needs no
+    // owner-only lockdown (and skipping it avoids an `icacls` spawn per append on
+    // Windows). The key itself lives elsewhere, `0600`, via `apex_config::audit`.
+    apex_common::fs::atomic_write(dir.join(HEAD_FILE), bytes)
+        .map_err(|e| Error::config(format!("write audit head anchor: {e}")))
+}
+
+/// Read the head anchor under `dir`, or `None` if none has been written yet.
+fn read_anchor(dir: &Path) -> Result<Option<HeadAnchor>> {
+    match std::fs::read(dir.join(HEAD_FILE)) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).map_err(Error::from)?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::config(format!("read audit head anchor: {e}"))),
+    }
+}
+
+/// The public projection of a head anchor handed to a [`NotarizationHook`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotarizedHead {
+    /// Highest committed sequence number.
+    pub seq: u64,
+    /// The head entry's chain hash (keyed MAC for a keyed log).
+    pub hash: String,
+    /// The keyed MAC over `(seq, hash)` — the same value persisted in `audit.head`.
+    pub mac: String,
+}
+
+/// An optional hook to publish the log's head anchor to durable **external** storage —
+/// a WORM bucket, a transparency log, a notary — for the compliance tier (SEC-403).
+///
+/// This is the *interface*; a concrete publisher is a follow-on. Attach one via
+/// [`AuditLog::with_notarization`]; it's invoked after each successful append with the
+/// new head. It is **advisory external durability**, not the primary integrity
+/// mechanism (that's the keyed chain + local anchor), so a hook error is logged and
+/// does **not** fail the audited action — losing an already-recorded action because an
+/// external notary is unreachable would be strictly worse than a delayed external anchor.
+pub trait NotarizationHook: Send + Sync {
+    /// Publish `head` to external storage. Best-effort: an error is logged, not
+    /// propagated to the caller recording the event.
+    fn notarize(&self, head: &NotarizedHead) -> Result<()>;
 }
 
 /// One page of a [`AuditSink::query_page`] read: entries most-recent first, plus a
@@ -370,6 +510,15 @@ pub struct AuditLog {
     sink: Box<dyn AuditSink>,
     guard: Mutex<()>,
     lock_dir: Option<PathBuf>,
+    /// When set, entries are chained with a keyed HMAC and a durable head anchor is
+    /// maintained under [`anchor_dir`](Self::anchor_dir) (SEC-403). `None` keeps the
+    /// original unkeyed SHA-256 chain (test / single-process path).
+    key: Option<[u8; 32]>,
+    /// Directory holding `audit.head` (typically the same directory as the sink and
+    /// the cross-process lock). Only meaningful alongside `key`.
+    anchor_dir: Option<PathBuf>,
+    /// Optional external-anchor publisher (compliance tier); best-effort.
+    notarizer: Option<Arc<dyn NotarizationHook>>,
 }
 
 impl AuditLog {
@@ -377,12 +526,18 @@ impl AuditLog {
     /// a purely in-memory sink where there's nothing to protect against another
     /// process). Fails if `sink.all()` itself is broken, so a fundamentally
     /// unreadable store surfaces immediately rather than on first `record()`.
+    ///
+    /// **Unkeyed** — plain SHA-256 chain, no tamper-resistance claim. Production
+    /// deployments use [`open_keyed`](Self::open_keyed).
     pub fn open(sink: Box<dyn AuditSink>) -> Result<Self> {
         sink.all()?;
         Ok(Self {
             sink,
             guard: Mutex::new(()),
             lock_dir: None,
+            key: None,
+            anchor_dir: None,
+            notarizer: None,
         })
     }
 
@@ -391,18 +546,56 @@ impl AuditLog {
     /// re-derive-tip-then-append sequence, so a second process sharing the same
     /// directory (e.g. the CLI and server both writing `~/.apex/audit`) extends
     /// one chain instead of forking it.
+    ///
+    /// **Unkeyed** — see [`open_keyed`](Self::open_keyed) for the tamper-resistant path.
     pub fn open_with_lock(sink: Box<dyn AuditSink>, lock_dir: impl Into<PathBuf>) -> Result<Self> {
         let mut log = Self::open(sink)?;
         log.lock_dir = Some(lock_dir.into());
         Ok(log)
     }
 
-    /// A log over a fresh [`InMemoryAuditSink`].
+    /// Open a **keyed, tamper-resistant** log (SEC-403). Entries are chained with an
+    /// HMAC-SHA256 under `key` (a secret held outside the log file — sourced like the
+    /// KMS root key via `apex_config::audit`), and a durable head anchor is maintained
+    /// in `dir` so [`verify`](Self::verify) detects tail truncation as well as interior
+    /// edits. `dir` also serves as the cross-process lock/anchor directory — pass the
+    /// same directory the [`FileAuditSink`] writes `audit.jsonl` into.
+    ///
+    /// The key must be held durably and *outside* this process's control by an attacker:
+    /// the strong path is `APEX_AUDIT_MAC_KEY` sourced from escrow. A generate-once
+    /// key file beside the log (the dev/local convenience) is only as strong as the
+    /// filesystem permissions on that directory — an actor who can also read the key
+    /// can forge the chain, exactly as for the KMS root key file.
+    pub fn open_keyed(
+        sink: Box<dyn AuditSink>,
+        key: [u8; 32],
+        dir: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let dir = dir.into();
+        let mut log = Self::open(sink)?;
+        log.lock_dir = Some(dir.clone());
+        log.anchor_dir = Some(dir);
+        log.key = Some(key);
+        Ok(log)
+    }
+
+    /// Attach an optional external-anchor publisher (compliance tier, SEC-403). Called
+    /// best-effort after each append; see [`NotarizationHook`].
+    pub fn with_notarization(mut self, hook: Arc<dyn NotarizationHook>) -> Self {
+        self.notarizer = Some(hook);
+        self
+    }
+
+    /// A log over a fresh [`InMemoryAuditSink`] (unkeyed).
     pub fn in_memory() -> Self {
         Self::open(Box::new(InMemoryAuditSink::new())).expect("empty in-memory log")
     }
 
     /// Record `event`, appending a hash-chained entry. Returns the persisted entry.
+    ///
+    /// For a keyed log this also updates the durable head anchor and (best-effort)
+    /// notifies any [`NotarizationHook`], all within the same cross-process lock so a
+    /// concurrent writer can never interleave the entry and the anchor.
     pub fn record(&self, event: AuditEvent) -> Result<AuditEntry> {
         let _guard = self.guard.lock().expect("audit log poisoned");
         let _flock = match &self.lock_dir {
@@ -419,7 +612,7 @@ impl AuditLog {
             .unwrap_or((0, String::new()));
 
         let id = format!("aud-{seq}");
-        let hash = chain_hash(&prev_hash, &id, seq, &event);
+        let hash = chain_hash(self.key.as_ref(), &prev_hash, &id, seq, &event);
         let entry = AuditEntry {
             id,
             seq,
@@ -427,7 +620,23 @@ impl AuditLog {
             prev_hash,
             hash,
         };
+        // Append the entry first, then advance the anchor — so a crash between the two
+        // leaves the log *ahead* of the anchor (harmless: extra entries are still
+        // chain-verified), never behind it (which would look like truncation).
         self.sink.append(&entry)?;
+        if let (Some(key), Some(dir)) = (self.key.as_ref(), self.anchor_dir.as_ref()) {
+            write_anchor(dir, key, entry.seq, &entry.hash)?;
+            if let Some(hook) = &self.notarizer {
+                let head = NotarizedHead {
+                    seq: entry.seq,
+                    hash: entry.hash.clone(),
+                    mac: head_mac(key, entry.seq, &entry.hash),
+                };
+                if let Err(e) = hook.notarize(&head) {
+                    tracing::warn!(error = %e, seq = entry.seq, "audit notarization hook failed (advisory)");
+                }
+            }
+        }
         Ok(entry)
     }
 
@@ -461,8 +670,13 @@ impl AuditLog {
         self.sink.query_page(filter, before_seq, limit)
     }
 
-    /// Verify the hash chain: every entry's hash recomputes and links to its predecessor.
-    /// Returns the offending `seq` on the first break, or `Ok(())` if intact.
+    /// Verify integrity: every entry's hash recomputes and links to its predecessor,
+    /// and — for a keyed log (SEC-403) — the durable head anchor confirms the log has
+    /// not been **truncated**. Returns an error naming the first break, or `Ok(())`.
+    ///
+    /// For a keyed log the per-entry recompute is an HMAC an actor without the key
+    /// cannot forge, so an interior edit is caught even against a full-write-access
+    /// attacker; the head anchor catches tail truncation the chain alone cannot.
     pub fn verify(&self) -> Result<()> {
         let entries = self.sink.all()?;
         let mut prev = String::new();
@@ -479,7 +693,7 @@ impl AuditLog {
                     e.seq
                 )));
             }
-            let expected = chain_hash(&e.prev_hash, &e.id, e.seq, &e.event);
+            let expected = chain_hash(self.key.as_ref(), &e.prev_hash, &e.id, e.seq, &e.event);
             if e.hash != expected {
                 return Err(Error::invalid(format!(
                     "audit chain broken at seq {}: hash mismatch (record tampered)",
@@ -487,6 +701,55 @@ impl AuditLog {
                 )));
             }
             prev = e.hash.clone();
+        }
+
+        // Head-anchor (truncation) check — keyed logs only. A plain chain can't detect
+        // a lopped-off tail; the anchor commits to the highest seq ever appended.
+        if let (Some(key), Some(dir)) = (self.key.as_ref(), self.anchor_dir.as_ref()) {
+            match read_anchor(dir)? {
+                Some(anchor) => {
+                    if head_mac(key, anchor.seq, &anchor.hash) != anchor.mac {
+                        return Err(Error::invalid("audit head anchor tampered: MAC mismatch"));
+                    }
+                    match entries.last() {
+                        Some(last) if last.seq < anchor.seq => {
+                            return Err(Error::invalid(format!(
+                                "audit log truncated: head anchor commits to seq {} but the log ends at seq {}",
+                                anchor.seq, last.seq
+                            )));
+                        }
+                        Some(_) => {
+                            // The anchored entry must still be present and unchanged.
+                            // (The chain already validates it; this also catches a
+                            // forged anchor pointing at a mutated head.)
+                            match entries.get(anchor.seq as usize) {
+                                Some(anchored) if anchored.hash == anchor.hash => {}
+                                _ => {
+                                    return Err(Error::invalid(format!(
+                                        "audit head anchor mismatch at seq {}: log diverged from the anchored head",
+                                        anchor.seq
+                                    )));
+                                }
+                            }
+                        }
+                        None => {
+                            return Err(Error::invalid(format!(
+                                "audit log empty but head anchor commits to seq {}",
+                                anchor.seq
+                            )));
+                        }
+                    }
+                }
+                None => {
+                    // A keyed log writes an anchor on every append, so a non-empty log
+                    // with no anchor means the anchor was removed — treat as tampering.
+                    if !entries.is_empty() {
+                        return Err(Error::invalid(
+                            "audit head anchor missing for a non-empty keyed log (removed?)",
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -755,6 +1018,223 @@ mod tests {
         let log = AuditLog::open(Box::new(FileAuditSink::new(&dir).unwrap())).unwrap();
         let e = log.record(ev(2, "secret.rotate")).unwrap();
         assert_eq!(e.seq, 1, "seq continues across reopen");
+        log.verify().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- SEC-403: keyed MAC + tamper-evident head anchor ----
+
+    /// A test key with no special structure — SEC-403 keys the chain, it doesn't
+    /// interpret the bytes.
+    fn test_key() -> [u8; 32] {
+        let mut k = [0u8; 32];
+        for (i, b) in k.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+        }
+        k
+    }
+
+    /// A keyed, file-backed log under `dir` holding entries with timestamps `1..=n`.
+    fn keyed_file_log(dir: &std::path::Path, key: [u8; 32], n: u64) -> AuditLog {
+        let log =
+            AuditLog::open_keyed(Box::new(FileAuditSink::new(dir).unwrap()), key, dir).unwrap();
+        for ts in 1..=n {
+            log.record(ev(ts, "secret.rotate")).unwrap();
+        }
+        log
+    }
+
+    /// The keyed chain uses an HMAC, so the same event yields a *different* hash than
+    /// the unkeyed SHA-256 path — proving the key is actually applied to the chain.
+    #[test]
+    fn keyed_chain_hash_differs_from_unkeyed() {
+        let dir = scratch_dir("keyed_diff");
+        let keyed = AuditLog::open_keyed(
+            Box::new(FileAuditSink::new(&dir).unwrap()),
+            test_key(),
+            &dir,
+        )
+        .unwrap();
+        let k = keyed.record(ev(1, "secret.create")).unwrap();
+
+        let unkeyed = AuditLog::in_memory();
+        let u = unkeyed.record(ev(1, "secret.create")).unwrap();
+
+        // Same seq (0), same prev_hash (""), same event — only the keying differs.
+        assert_eq!(k.seq, u.seq);
+        assert_ne!(
+            k.hash, u.hash,
+            "a keyed HMAC chain must not equal the unkeyed SHA-256 chain"
+        );
+        keyed.verify().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Acceptance (a): a keyed log detects an interior record rewrite. An attacker
+    /// with full write access edits an entry's event but cannot recompute the keyed
+    /// MAC, so `verify()` catches the mismatch.
+    #[test]
+    fn keyed_log_detects_an_interior_edit() {
+        let dir = scratch_dir("keyed_interior");
+        keyed_file_log(&dir, test_key(), 4);
+        let path = dir.join("audit.jsonl");
+
+        // Rewrite entry 0's action directly in the file (leaving its stored hash).
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        let mut v: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        v["event"]["action"] = serde_json::json!("secret.read");
+        lines[0] = serde_json::to_string(&v).unwrap();
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let reopened = AuditLog::open_keyed(
+            Box::new(FileAuditSink::new(&dir).unwrap()),
+            test_key(),
+            &dir,
+        )
+        .unwrap();
+        assert!(
+            reopened.verify().is_err(),
+            "an interior edit must be detected on a keyed log"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Acceptance (b): a keyed log detects **tail truncation** — the head anchor
+    /// commits to the highest seq ever appended, so lopping off the last entries
+    /// (which a plain chain would still accept) fails closed.
+    #[test]
+    fn keyed_log_detects_tail_truncation() {
+        let dir = scratch_dir("keyed_truncate");
+        keyed_file_log(&dir, test_key(), 5); // seq 0..=4; anchor commits to seq 4
+        let path = dir.join("audit.jsonl");
+
+        // Truncate to the first 3 entries (seq 0..=2); the anchor is left untouched.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let kept: Vec<&str> = text.lines().take(3).collect();
+        std::fs::write(&path, kept.join("\n") + "\n").unwrap();
+
+        // The shortened chain links cleanly on its own...
+        let unkeyed = AuditLog::open(Box::new(FileAuditSink::new(&dir).unwrap())).unwrap();
+        // (unkeyed verify would recompute wrong hashes here since the log was written
+        // keyed, so we don't rely on it — the point is the *anchor* catches truncation)
+        let _ = unkeyed;
+
+        let reopened = AuditLog::open_keyed(
+            Box::new(FileAuditSink::new(&dir).unwrap()),
+            test_key(),
+            &dir,
+        )
+        .unwrap();
+        let err = reopened.verify().unwrap_err();
+        assert!(
+            format!("{err}").contains("truncated"),
+            "tail truncation must be detected via the head anchor: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The head anchor is itself keyed: editing it (e.g. lowering its committed seq to
+    /// hide a truncation) fails the anchor MAC check.
+    #[test]
+    fn keyed_head_anchor_tamper_is_detected() {
+        let dir = scratch_dir("keyed_anchor_tamper");
+        let log = keyed_file_log(&dir, test_key(), 3);
+        log.verify().unwrap();
+
+        let head_path = dir.join("audit.head");
+        let mut a: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&head_path).unwrap()).unwrap();
+        a["seq"] = serde_json::json!(0); // forge a lower head without a valid MAC
+        std::fs::write(&head_path, serde_json::to_vec(&a).unwrap()).unwrap();
+
+        let reopened = AuditLog::open_keyed(
+            Box::new(FileAuditSink::new(&dir).unwrap()),
+            test_key(),
+            &dir,
+        )
+        .unwrap();
+        let err = reopened.verify().unwrap_err();
+        assert!(
+            format!("{err}").contains("anchor"),
+            "a forged head anchor must fail the MAC check: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verifying a keyed log under the **wrong key** fails — the recomputed HMACs
+    /// don't match the stored ones (the "without the MAC key, the log fails" posture).
+    #[test]
+    fn keyed_log_fails_verify_under_the_wrong_key() {
+        let dir = scratch_dir("keyed_wrong_key");
+        keyed_file_log(&dir, test_key(), 3);
+
+        let mut wrong = test_key();
+        wrong[0] ^= 0xFF;
+        let reopened =
+            AuditLog::open_keyed(Box::new(FileAuditSink::new(&dir).unwrap()), wrong, &dir).unwrap();
+        assert!(
+            reopened.verify().is_err(),
+            "a keyed log must not verify under a different key"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A keyed log survives a reopen (fresh process): the anchor + chain persist and
+    /// the chain continues from the persisted tip.
+    #[test]
+    fn keyed_log_persists_and_continues_across_reopen() {
+        let dir = scratch_dir("keyed_reopen");
+        {
+            let log = keyed_file_log(&dir, test_key(), 2);
+            log.verify().unwrap();
+        }
+        let log = AuditLog::open_keyed(
+            Box::new(FileAuditSink::new(&dir).unwrap()),
+            test_key(),
+            &dir,
+        )
+        .unwrap();
+        let e = log.record(ev(3, "secret.rotate")).unwrap();
+        assert_eq!(e.seq, 2, "seq continues across reopen");
+        log.verify().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The notarization hook receives each new head (the landed compliance-tier
+    /// interface, SEC-403); a hook error is advisory and does not fail the record.
+    #[test]
+    fn notarization_hook_receives_each_head() {
+        use std::sync::Mutex as StdMutex;
+        #[derive(Default)]
+        struct RecordingHook {
+            heads: StdMutex<Vec<NotarizedHead>>,
+        }
+        impl NotarizationHook for RecordingHook {
+            fn notarize(&self, head: &NotarizedHead) -> Result<()> {
+                self.heads.lock().unwrap().push(head.clone());
+                Err(Error::config("simulated external notary outage"))
+            }
+        }
+
+        let dir = scratch_dir("keyed_notarize");
+        let hook = Arc::new(RecordingHook::default());
+        let log = AuditLog::open_keyed(
+            Box::new(FileAuditSink::new(&dir).unwrap()),
+            test_key(),
+            &dir,
+        )
+        .unwrap()
+        .with_notarization(hook.clone());
+
+        // The hook errors, but the record still succeeds (advisory external durability).
+        log.record(ev(1, "secret.create")).unwrap();
+        log.record(ev(2, "secret.rotate")).unwrap();
+
+        let heads = hook.heads.lock().unwrap();
+        assert_eq!(heads.len(), 2, "the hook sees every head");
+        assert_eq!(heads[0].seq, 0);
+        assert_eq!(heads[1].seq, 1);
         log.verify().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

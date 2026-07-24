@@ -19,6 +19,7 @@
 //! duplicated. See
 //! `docs/18-roadmap/v1.0/phase4-contract-operability-tickets.md` (HLTH-903).
 
+pub mod audit;
 pub mod env;
 pub mod kms;
 pub mod paths;
