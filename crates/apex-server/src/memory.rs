@@ -62,15 +62,24 @@ fn visible_to(required_scopes: &[String], tenant: &str) -> bool {
 /// only acts on records with `sensitive: true` (none by default) — so every read path
 /// (this engine, plus namespace/record enumeration below) sees plaintext regardless.
 /// Returns the engine plus a clone of the (wrapped) store for that enumeration.
-pub(crate) fn default_engine(kms: Arc<dyn apex_kms::Kms>) -> (MemoryEngine, Arc<dyn MemoryStore>) {
+/// Build the platform memory engine + store.
+///
+/// **Fails closed (RM-AR-P1 AIC-301)** when the environment's LLM provider
+/// cannot embed (e.g. Anthropic-only, no `OPENAI_API_KEY`): the memory routes
+/// are always mounted, so an embedding-less deployment would error on every
+/// `remember`/`query`. `MemoryEngine::try_new` surfaces that here, at startup,
+/// rather than per-call deep inside a run.
+pub(crate) fn default_engine(
+    kms: Arc<dyn apex_kms::Kms>,
+) -> apex_common::Result<(MemoryEngine, Arc<dyn MemoryStore>)> {
     let dir = apex_config::paths::memory_dir().ok();
     let inner: Arc<dyn MemoryStore> = match dir.and_then(|d| FileStore::new(d).ok()) {
         Some(s) => Arc::new(s),
         None => Arc::new(InMemoryStore::new()),
     };
     let store: Arc<dyn MemoryStore> = Arc::new(EncryptingMemoryStore::new(inner, kms));
-    let engine = MemoryEngine::new(Gateway::from_env(), store.clone());
-    (engine, store)
+    let engine = MemoryEngine::try_new(Gateway::from_env(), store.clone())?;
+    Ok((engine, store))
 }
 
 pub(crate) fn routes() -> Router<Arc<AppState>> {

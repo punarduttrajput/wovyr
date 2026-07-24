@@ -68,10 +68,22 @@ pub trait AIProvider: Send + Sync {
         Ok(Box::pin(futures::stream::iter(events)))
     }
 
+    /// Whether this provider can produce embeddings (RM-AR-P1 AIC-301).
+    ///
+    /// Defaults to `false`, matching the default [`embed`](Self::embed) that
+    /// returns an "unsupported" error; a provider that overrides `embed` also
+    /// overrides this to `true`. Lets the gateway and memory engine detect a
+    /// non-embedding deployment (e.g. Anthropic-only) at construction/startup
+    /// and fail loud, rather than erroring per-call deep inside a run.
+    fn supports_embeddings(&self) -> bool {
+        false
+    }
+
     /// Embed one or more texts.
     ///
     /// Defaults to an "unsupported" error so providers that only do chat need not
-    /// implement it; embedding-capable providers override this.
+    /// implement it; embedding-capable providers override this (and
+    /// [`supports_embeddings`](Self::supports_embeddings)).
     async fn embed(&self, _request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         Err(Error::provider(format!(
             "provider `{}` does not support embeddings",

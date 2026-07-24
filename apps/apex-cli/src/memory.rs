@@ -26,7 +26,10 @@ async fn engine() -> apex_common::Result<MemoryEngine> {
         open_store().await?,
         config::kms(),
     ));
-    Ok(MemoryEngine::new(Gateway::from_env(), store))
+    // AIC-301: fail loud with an actionable message when no embedding provider
+    // is configured (e.g. Anthropic-only, no OPENAI_API_KEY), rather than
+    // erroring deep inside the first put/query or memory-grounded agent run.
+    MemoryEngine::try_new(Gateway::from_env(), store)
 }
 
 /// The local JSON-lines file store under `~/.apex/memory`.

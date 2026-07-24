@@ -43,6 +43,11 @@ pub struct MemoryEngine {
 
 impl MemoryEngine {
     /// Build an engine over a gateway (for embeddings) and a store.
+    ///
+    /// Does **not** check that the gateway can embed — callers that construct
+    /// with a known embedding-capable gateway (tests, internal use) use this.
+    /// Deployment wiring (server/CLI) should prefer [`try_new`](Self::try_new),
+    /// which fails loud when no embedding provider is configured.
     pub fn new(gateway: Gateway, store: Arc<dyn MemoryStore>) -> Self {
         Self {
             gateway,
@@ -52,6 +57,25 @@ impl MemoryEngine {
             rrf_k: DEFAULT_RRF_K,
             clock: Arc::new(SystemClock),
         }
+    }
+
+    /// Build an engine, failing closed (`Error::Config`) when the gateway has no
+    /// embedding provider (RM-AR-P1 AIC-301). Memory ingestion and retrieval both
+    /// embed, so an embedding-less deployment (e.g. Anthropic-only, no
+    /// `OPENAI_API_KEY`) cannot serve memory at all; this surfaces that at
+    /// construction/startup with an actionable message instead of erroring deep
+    /// inside the first `remember`/`query`.
+    pub fn try_new(gateway: Gateway, store: Arc<dyn MemoryStore>) -> Result<Self> {
+        if !gateway.supports_embeddings() {
+            return Err(Error::config(format!(
+                "memory/RAG requires an embedding provider, but the configured LLM \
+                 provider `{}` cannot embed. Set OPENAI_API_KEY (its provider serves both \
+                 chat and embeddings), attach a dedicated embedding provider, or run \
+                 without a memory-enabled agent (RM-AR-P1 AIC-301).",
+                gateway.provider_name()
+            )));
+        }
+        Ok(Self::new(gateway, store))
     }
 
     /// Inject a wall-clock source (RM-AIM-P2 RAG-205); tests use
@@ -972,6 +996,33 @@ mod tests {
     fn engine() -> MemoryEngine {
         let gateway = Gateway::new(Box::new(MockProvider::new()));
         MemoryEngine::new(gateway, Arc::new(InMemoryStore::new()))
+    }
+
+    // --- RM-AR-P1 AIC-301: fail loud without an embedding provider -----------
+
+    #[test]
+    fn try_new_fails_closed_without_an_embedding_provider() {
+        use apex_provider::AnthropicProvider;
+        // An Anthropic-class chat provider can't embed; construction must fail
+        // fast with a clear config error, not at the first remember/query.
+        let gateway = Gateway::new(Box::new(AnthropicProvider::new(
+            "https://example.invalid",
+            "test-key",
+        )));
+        match MemoryEngine::try_new(gateway, Arc::new(InMemoryStore::new())) {
+            Err(Error::Config(msg)) => assert!(
+                msg.contains("embedding") && msg.contains("OPENAI_API_KEY"),
+                "error must be actionable: {msg}"
+            ),
+            Err(other) => panic!("expected a config error, got {other:?}"),
+            Ok(_) => panic!("expected fail-closed, but an engine was constructed"),
+        }
+    }
+
+    #[test]
+    fn try_new_succeeds_with_an_embedding_capable_gateway() {
+        let gateway = Gateway::new(Box::new(MockProvider::new()));
+        assert!(MemoryEngine::try_new(gateway, Arc::new(InMemoryStore::new())).is_ok());
     }
 
     #[tokio::test]

@@ -303,6 +303,10 @@ impl AIProvider for OpenAiProvider {
         Ok(Box::pin(stream))
     }
 
+    fn supports_embeddings(&self) -> bool {
+        true
+    }
+
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let body = json!({ "model": request.model, "input": request.input });
         let url = format!("{}/embeddings", self.base_url);

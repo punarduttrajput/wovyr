@@ -72,6 +72,12 @@ pub struct Gateway {
     cache_cfg: CacheConfig,
     cache: Mutex<HashMap<String, CacheEntry>>,
     semantic_cache: Box<dyn SemanticCacheStore>,
+    /// Optional dedicated embedding provider (RM-AR-P1 AIC-301), resolved
+    /// independently of the chat provider chain: a deployment whose chat
+    /// provider can't embed (e.g. Anthropic) can still serve memory/RAG by
+    /// attaching an embedding-capable provider here. `None` = embeddings use
+    /// the primary provider, as before.
+    embedding_provider: Option<Box<dyn AIProvider>>,
     hedge_cfg: HedgeConfig,
     cost: Option<Arc<dyn CostObserver>>,
     start: Instant,
@@ -104,6 +110,7 @@ impl Gateway {
             cache_cfg: CacheConfig::default(),
             cache: Mutex::new(HashMap::new()),
             semantic_cache: Box::new(InMemorySemanticCache::new()),
+            embedding_provider: None,
             hedge_cfg: HedgeConfig::default(),
             cost: None,
             start: Instant::now(),
@@ -225,6 +232,33 @@ impl Gateway {
         self.providers.first().map(|p| p.name()).unwrap_or("none")
     }
 
+    /// Attach a dedicated embedding provider (RM-AR-P1 AIC-301), used by
+    /// [`embed`](Self::embed) in place of the primary provider — so a
+    /// deployment whose chat provider can't embed (e.g. Anthropic) can still
+    /// serve memory/RAG by resolving embeddings through a separate,
+    /// embedding-capable provider.
+    pub fn with_embedding_provider(mut self, provider: Box<dyn AIProvider>) -> Self {
+        self.embedding_provider = Some(provider);
+        self
+    }
+
+    /// The provider [`embed`](Self::embed) will route to: the dedicated
+    /// embedding provider if one is attached, else the primary.
+    fn embed_provider(&self) -> Option<&dyn AIProvider> {
+        self.embedding_provider
+            .as_deref()
+            .or_else(|| self.providers.first().map(|p| p.as_ref()))
+    }
+
+    /// Whether this gateway can produce embeddings (RM-AR-P1 AIC-301) — true iff
+    /// the provider `embed` would route to supports embeddings. Lets a
+    /// memory/RAG consumer fail loud at construction on an embedding-less
+    /// deployment (e.g. Anthropic-only) instead of erroring per-call mid-run.
+    pub fn supports_embeddings(&self) -> bool {
+        self.embed_provider()
+            .is_some_and(|p| p.supports_embeddings())
+    }
+
     /// Resolve a selector (and optional pinned model) to a concrete model id.
     ///
     /// A pinned model always wins. Otherwise the class maps to a default model id
@@ -250,12 +284,16 @@ impl Gateway {
         }
     }
 
-    /// Resolve the embedding model to use.
+    /// Resolve the embedding model to use — keyed off the provider `embed`
+    /// actually routes to (the dedicated embedding provider if attached, else
+    /// the primary), so a distinct embedder picks its own model id rather than
+    /// the chat provider's.
     pub fn resolve_embedding_model(&self, pinned: Option<&str>) -> String {
         if let Some(model) = pinned {
             return model.to_string();
         }
-        match self.provider_name() {
+        let name = self.embed_provider().map(|p| p.name()).unwrap_or("none");
+        match name {
             "openai" => "text-embedding-3-small".to_string(),
             other => format!("{other}-embeddings"),
         }
@@ -525,11 +563,12 @@ impl Gateway {
         }
     }
 
-    /// Embed one or more texts via the primary provider.
+    /// Embed one or more texts via the dedicated embedding provider if one is
+    /// attached ([`with_embedding_provider`](Self::with_embedding_provider)),
+    /// else the primary provider.
     pub async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let provider = self
-            .providers
-            .first()
+            .embed_provider()
             .ok_or_else(|| Error::provider("no providers configured"))?;
         provider.embed(request).await
     }
@@ -757,6 +796,42 @@ mod tests {
         let gw = Gateway::new(Box::new(MockProvider::new()));
         assert_eq!(gw.resolve_embedding_model(None), "mock-embeddings");
         assert_eq!(gw.resolve_embedding_model(Some("custom")), "custom");
+    }
+
+    // --- RM-AR-P1 AIC-301: embedding-capability detection --------------------
+
+    #[test]
+    fn supports_embeddings_reflects_the_effective_provider() {
+        // Mock embeds (deterministically).
+        assert!(Gateway::new(Box::new(MockProvider::new())).supports_embeddings());
+
+        // An Anthropic-class chat provider does not — the broken Anthropic-only
+        // deployment the fail-loud check exists for (no network call: the
+        // capability is a pure trait method).
+        let anthropic = Gateway::new(Box::new(AnthropicProvider::new(
+            "https://example.invalid",
+            "test-key",
+        )));
+        assert!(!anthropic.supports_embeddings());
+        assert_eq!(
+            anthropic.resolve_embedding_model(None),
+            "anthropic-embeddings"
+        );
+    }
+
+    #[test]
+    fn a_dedicated_embedding_provider_makes_a_chat_only_gateway_embed() {
+        // Anthropic for chat, a distinct embedding-capable provider attached:
+        // embeddings resolve through the latter, keyed to its own model id.
+        let gw = Gateway::new(Box::new(AnthropicProvider::new(
+            "https://example.invalid",
+            "test-key",
+        )))
+        .with_embedding_provider(Box::new(MockProvider::new()));
+        assert!(gw.supports_embeddings());
+        assert_eq!(gw.resolve_embedding_model(None), "mock-embeddings");
+        // The chat provider is still Anthropic.
+        assert_eq!(gw.provider_name(), "anthropic");
     }
 
     /// A provider that fails a configurable number of times, then succeeds.

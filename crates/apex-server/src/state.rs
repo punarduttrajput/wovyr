@@ -502,7 +502,11 @@ impl AppState {
         // and workflow runs can invoke them with their tenant-scoped secrets injected.
         // Done before the registry is shared with the workflow engine below.
         plugins::register_enabled_tools(&mut registry, &secrets);
-        let (memory, memory_store) = crate::memory::default_engine(kms.clone());
+        // AIC-301: refuse to start when memory routes are mounted but no embedding
+        // provider is configured (e.g. Anthropic-only, no OPENAI_API_KEY) — a
+        // startup failure with a clear message beats erroring on every memory call.
+        let (memory, memory_store) = crate::memory::default_engine(kms.clone())
+            .unwrap_or_else(|e| panic!("refusing to start: {e}"));
         let agents = Arc::new(AgentStore::new(
             crate::config::workflows_dir().map(|d| d.join("agents.json")),
         ));

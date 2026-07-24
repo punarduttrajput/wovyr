@@ -107,6 +107,10 @@ impl AIProvider for MockProvider {
         Ok(Box::pin(futures::stream::iter(events)))
     }
 
+    fn supports_embeddings(&self) -> bool {
+        true
+    }
+
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let vectors: Vec<Vec<f32>> = request.input.iter().map(|t| mock_embedding(t)).collect();
         let prompt_tokens = request
