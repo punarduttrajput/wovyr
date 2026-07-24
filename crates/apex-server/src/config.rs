@@ -76,8 +76,16 @@ pub(crate) fn default_tenancy_store() -> Arc<dyn TenancyStore> {
 /// shared with the CLI via `apex-config` (RM-GA-P4 HLTH-903) so both processes
 /// agree on the root key + tenant-key catalog instead of each maintaining its
 /// own copy of this construction logic.
+///
+/// **Refuses to start on missing durable key material (RM-AR-P1 SEC-405):**
+/// `build_kms` fails closed when neither `APEX_KMS_ROOT_KEY` nor a persistent,
+/// writable key file is available, rather than minting an ephemeral key that
+/// would silently lose every sealed secret/memory on the next restart. A
+/// misconfigured deployment halts here with a clear message instead of coming
+/// up in a data-loss trap; `APEX_KMS_ALLOW_EPHEMERAL=1` is the explicit
+/// throwaway/test opt-out.
 pub(crate) fn default_kms() -> Arc<dyn apex_kms::Kms> {
-    apex_config::kms::build_kms()
+    apex_config::kms::build_kms().unwrap_or_else(|e| panic!("refusing to start: {e}"))
 }
 
 /// A secret [`Vault`](apex_secrets::Vault) over a durable store at

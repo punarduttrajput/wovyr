@@ -66,8 +66,8 @@ fn build_kms_agrees_across_independently_constructed_instances() {
         std::env::remove_var("APEX_KMS_ROOT_KEY");
     }
 
-    let cli_instance = apex_config::kms::build_kms();
-    let server_instance = apex_config::kms::build_kms();
+    let cli_instance = apex_config::kms::build_kms().unwrap();
+    let server_instance = apex_config::kms::build_kms().unwrap();
 
     let sealed = envelope::seal(cli_instance.as_ref(), "tenant-a", b"agreement-check").unwrap();
     let opened = envelope::open(server_instance.as_ref(), "tenant-a", &sealed).unwrap();
@@ -94,7 +94,7 @@ fn build_secrets_vault_agrees_across_independently_constructed_instances() {
         std::env::remove_var("APEX_SECRETS_PLAINTEXT");
     }
 
-    let kms = apex_config::kms::build_kms();
+    let kms = apex_config::kms::build_kms().unwrap();
     let writer = apex_config::secrets::build_secrets_vault(kms.clone());
     writer
         .create("agreement-tenant", "api-key", "s3cr3t")
@@ -143,7 +143,7 @@ fn plaintext_opt_out_still_writes_the_legacy_store() {
         std::env::set_var("APEX_SECRETS_PLAINTEXT", "1");
     }
 
-    let kms = apex_config::kms::build_kms();
+    let kms = apex_config::kms::build_kms().unwrap();
     let vault = apex_config::secrets::build_secrets_vault(kms);
     vault.create("acme", "api-key", "plain-ok").unwrap();
 
@@ -173,7 +173,7 @@ fn default_flip_migrates_an_existing_plaintext_store() {
         std::env::remove_var("APEX_SECRETS_ENCRYPT_AT_REST");
         std::env::remove_var("APEX_SECRETS_PLAINTEXT");
     }
-    let kms = apex_config::kms::build_kms();
+    let kms = apex_config::kms::build_kms().unwrap();
 
     // Yesterday: a plaintext vault (the pre-SEC-101 default), holding one secret.
     unsafe { std::env::set_var("APEX_SECRETS_PLAINTEXT", "1") };

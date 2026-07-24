@@ -53,8 +53,18 @@ pub fn credentials_path() -> Result<PathBuf> {
 /// `apex-config` (RM-GA-P4 HLTH-903) so either process can decrypt the
 /// other's sealed secrets/memories, instead of each maintaining its own copy
 /// of this construction logic.
+///
+/// Fail-closed on missing durable key material (RM-AR-P1 SEC-405): if neither
+/// `APEX_KMS_ROOT_KEY` nor a writable `~/.apex/kms` is available, this exits
+/// with a clear message rather than minting an ephemeral key that would lose
+/// sealed data on the next run. (In practice the CLI always has a home
+/// directory, so this only trips on a genuinely broken environment;
+/// `APEX_KMS_ALLOW_EPHEMERAL=1` is the throwaway/test opt-out.)
 pub fn kms() -> Arc<dyn apex_kms::Kms> {
-    apex_config::kms::build_kms()
+    apex_config::kms::build_kms().unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    })
 }
 
 /// Persist credentials, creating the config directory if needed.
