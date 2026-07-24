@@ -136,6 +136,11 @@ pub struct CacheConfig {
     /// Minimum cosine similarity for a semantic hit (a higher value trades hit
     /// rate for safety; ignored unless `mode` is `Semantic`).
     pub similarity_threshold: f32,
+    /// Hard cap on live exact-cache entries (RM-AR-P1 AIC-302). The exact cache
+    /// LRU-evicts down to this bound and TTL-sweeps expired entries on insert, so
+    /// memory and per-lookup cost stay bounded in a long-running server rather
+    /// than growing without limit. `0` disables exact caching entirely.
+    pub max_entries: usize,
 }
 
 impl Default for CacheConfig {
@@ -144,6 +149,7 @@ impl Default for CacheConfig {
             mode: CacheMode::Off,
             ttl_ms: 3_600_000,
             similarity_threshold: 0.95,
+            max_entries: 10_000,
         }
     }
 }
@@ -498,10 +504,102 @@ impl BreakerKv for InMemoryKv {
     }
 }
 
-/// A cached chat response with its insertion time.
+/// A cached chat response with its insertion time and a monotonic last-access
+/// tick used for LRU eviction (RM-AR-P1 AIC-302).
 pub(crate) struct CacheEntry {
     pub response: ChatResponse,
     pub created_ms: u64,
+    pub last_access: u64,
+}
+
+/// A bounded, LRU-evicting exact-match response cache with opportunistic TTL
+/// eviction (RM-AR-P1 AIC-302). Not thread-safe on its own — the gateway wraps
+/// it in a `Mutex`. Before this bound existed the underlying map only ever
+/// inserted and checked TTL on lookup, so expired entries were never reclaimed
+/// and the map grew without limit in a long-running server.
+pub(crate) struct ExactCache {
+    entries: std::collections::HashMap<String, CacheEntry>,
+    /// Monotonic access counter; the entry with the smallest `last_access` is the
+    /// least-recently-used eviction victim.
+    tick: u64,
+    /// Hard cap on live entries; `0` disables caching entirely.
+    max_entries: usize,
+}
+
+impl ExactCache {
+    /// A cache bounded to `max_entries` entries.
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            tick: 0,
+            max_entries,
+        }
+    }
+
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.saturating_add(1);
+        self.tick
+    }
+
+    /// Return a live (non-expired) cached response, refreshing its LRU recency.
+    /// An expired entry is *removed* on access rather than merely ignored, so a
+    /// key that is looked up but never re-inserted still gets reclaimed.
+    pub fn get(&mut self, key: &str, now_ms: u64, ttl_ms: u64) -> Option<ChatResponse> {
+        match self.entries.get(key) {
+            Some(e) if now_ms.saturating_sub(e.created_ms) > ttl_ms => {
+                self.entries.remove(key);
+                None
+            }
+            Some(_) => {
+                let tick = self.next_tick();
+                let entry = self.entries.get_mut(key)?;
+                entry.last_access = tick;
+                Some(entry.response.clone())
+            }
+            None => None,
+        }
+    }
+
+    /// Insert/replace an entry, TTL-sweeping expired entries first and then
+    /// LRU-evicting until within `max_entries`.
+    pub fn insert(&mut self, key: String, response: ChatResponse, now_ms: u64, ttl_ms: u64) {
+        if self.max_entries == 0 {
+            return;
+        }
+        // Opportunistic TTL sweep: drop everything already expired.
+        self.entries
+            .retain(|_, e| now_ms.saturating_sub(e.created_ms) <= ttl_ms);
+        let tick = self.next_tick();
+        self.entries.insert(
+            key,
+            CacheEntry {
+                response,
+                created_ms: now_ms,
+                last_access: tick,
+            },
+        );
+        // Evict the least-recently-used entry until within cap. After a sweep +
+        // single insert this runs at most once, so the O(n) min-scan is paid
+        // only when the cache is genuinely full.
+        while self.entries.len() > self.max_entries {
+            let victim = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_access)
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(k) => {
+                    self.entries.remove(&k);
+                }
+                None => break,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 /// A semantic-cache entry: the response plus the request embedding, a
@@ -550,16 +648,46 @@ pub trait SemanticCacheStore: Send + Sync {
     ) -> Result<()>;
 }
 
-/// In-process semantic cache: a linear cosine scan over recent entries.
-#[derive(Default)]
+/// Default bound on in-process semantic-cache entries (RM-AR-P1 AIC-302).
+const DEFAULT_SEMANTIC_CACHE_MAX_ENTRIES: usize = 10_000;
+
+/// In-process semantic cache: a linear cosine scan over recent entries. Bounded
+/// (RM-AR-P1 AIC-302) so both stored-entry count and the per-lookup scan stay
+/// capped — before this bound `store` pushed on every miss and never evicted,
+/// and `lookup` scanned every entry ever stored.
 pub struct InMemorySemanticCache {
     entries: Mutex<Vec<SemanticEntry>>,
+    /// Hard cap on stored entries; the oldest are evicted once exceeded. `0`
+    /// disables semantic caching entirely.
+    max_entries: usize,
+}
+
+impl Default for InMemorySemanticCache {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+            max_entries: DEFAULT_SEMANTIC_CACHE_MAX_ENTRIES,
+        }
+    }
 }
 
 impl InMemorySemanticCache {
-    /// An empty cache.
+    /// An empty cache bounded to the default entry count.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty cache bounded to `max_entries` stored entries (RM-AR-P1 AIC-302).
+    pub fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+            max_entries,
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.lock().expect("cache mutex poisoned").len()
     }
 }
 
@@ -602,16 +730,33 @@ impl SemanticCacheStore for InMemorySemanticCache {
         response: &ChatResponse,
         now_ms: u64,
     ) -> Result<()> {
-        self.entries
-            .lock()
-            .expect("cache mutex poisoned")
-            .push(SemanticEntry {
-                embedding: embedding.to_vec(),
-                param_key: param_key.to_string(),
-                embedding_model: embedding_model.to_string(),
-                response: response.clone(),
-                created_ms: now_ms,
-            });
+        if self.max_entries == 0 {
+            return Ok(());
+        }
+        let mut entries = self.entries.lock().expect("cache mutex poisoned");
+        entries.push(SemanticEntry {
+            embedding: embedding.to_vec(),
+            param_key: param_key.to_string(),
+            embedding_model: embedding_model.to_string(),
+            response: response.clone(),
+            created_ms: now_ms,
+        });
+        // Evict the oldest entries (by creation time) until within cap, so the
+        // stored-entry count — and hence the linear lookup scan — stays bounded
+        // under a flood of misses. After a single push this runs at most once.
+        while entries.len() > self.max_entries {
+            let oldest = entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, e)| e.created_ms)
+                .map(|(i, _)| i);
+            match oldest {
+                Some(i) => {
+                    entries.remove(i);
+                }
+                None => break,
+            }
+        }
         Ok(())
     }
 }
@@ -696,6 +841,94 @@ mod tests {
             same.and_then(|r| r.message.content).as_deref(),
             Some("cached"),
             "the same embedding model still hits"
+        );
+    }
+
+    /// A minimal cached response for cache-bound tests.
+    fn cached_response(text: &str) -> ChatResponse {
+        crate::types::ChatResponse {
+            message: crate::types::Message::assistant(text),
+            model: "m".to_string(),
+            usage: apex_common::Usage::new(1, 1, 0.01),
+            finish_reason: "stop".to_string(),
+        }
+    }
+
+    /// AIC-302 acceptance (exact cache): inserting well past the cap keeps the
+    /// entry count bounded (LRU eviction), and an expired entry is *evicted* on
+    /// insert, not merely ignored on lookup.
+    #[test]
+    fn exact_cache_stays_bounded_and_evicts_expired() {
+        let ttl = 1_000_u64;
+        let mut cache = ExactCache::new(4);
+        let resp = cached_response("r");
+
+        // Flood well past the cap, all within TTL.
+        for i in 0..100 {
+            cache.insert(format!("k{i}"), resp.clone(), 10, ttl);
+        }
+        assert!(
+            cache.len() <= 4,
+            "entry count stays bounded under a flood, got {}",
+            cache.len()
+        );
+
+        // A fresh cache: insert one entry, let it expire, then insert another —
+        // the expired entry is swept, not accumulated.
+        let mut cache = ExactCache::new(100);
+        cache.insert("old".to_string(), resp.clone(), 0, ttl);
+        assert_eq!(cache.len(), 1);
+        // now_ms past the TTL → the next insert sweeps "old" first.
+        cache.insert("new".to_string(), resp.clone(), ttl + 1, ttl);
+        assert_eq!(cache.len(), 1, "expired entry evicted, not accumulated");
+        assert!(
+            cache.get("old", ttl + 1, ttl).is_none(),
+            "the expired key is gone"
+        );
+        assert!(
+            cache.get("new", ttl + 1, ttl).is_some(),
+            "the fresh key survives"
+        );
+    }
+
+    /// AIC-302: LRU recency governs which entry survives eviction — a
+    /// recently-read entry is kept over an older-but-untouched one.
+    #[test]
+    fn exact_cache_evicts_least_recently_used() {
+        let ttl = 10_000_u64;
+        let mut cache = ExactCache::new(2);
+        let resp = cached_response("r");
+        cache.insert("a".to_string(), resp.clone(), 0, ttl);
+        cache.insert("b".to_string(), resp.clone(), 0, ttl);
+        // Touch "a" so it becomes most-recently-used.
+        assert!(cache.get("a", 0, ttl).is_some());
+        // Inserting "c" evicts the LRU, which is "b".
+        cache.insert("c".to_string(), resp.clone(), 0, ttl);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get("a", 0, ttl).is_some(), "recently-used survives");
+        assert!(cache.get("b", 0, ttl).is_none(), "LRU victim evicted");
+        assert!(cache.get("c", 0, ttl).is_some(), "new entry present");
+    }
+
+    /// AIC-302 acceptance (semantic cache): the stored-entry count stays bounded
+    /// under a flood of misses (before this bound `store` grew a `Vec` without
+    /// limit and `lookup` scanned every entry ever stored).
+    #[tokio::test]
+    async fn semantic_cache_stays_bounded_under_a_flood_of_misses() {
+        let cache = InMemorySemanticCache::with_max_entries(8);
+        let resp = cached_response("r");
+        for i in 0..200 {
+            // Distinct vectors so nothing ever hits — every call is a store.
+            let v = [i as f32, 1.0_f32];
+            cache
+                .store("pk", "model-a", &v, &resp, 1_000 + i as u64)
+                .await
+                .unwrap();
+        }
+        assert!(
+            cache.len() <= 8,
+            "semantic entry count stays bounded, got {}",
+            cache.len()
         );
     }
 

@@ -23,7 +23,7 @@ use crate::mock::MockProvider;
 use crate::openai::OpenAiProvider;
 use crate::provider::AIProvider;
 use crate::resilience::{
-    BreakerConfig, CacheConfig, CacheEntry, CacheMode, CircuitBreaker, CostEvent, CostObserver,
+    BreakerConfig, CacheConfig, CacheMode, CircuitBreaker, CostEvent, CostObserver, ExactCache,
     HedgeConfig, InMemorySemanticCache, Jitter, LocalCircuitBreaker, RandomJitter, RetryConfig,
     SemanticCacheStore,
 };
@@ -31,7 +31,6 @@ use crate::types::{ChatRequest, ChatResponse, Role};
 use apex_common::{Error, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -70,7 +69,7 @@ pub struct Gateway {
     retry: RetryConfig,
     max_failovers: usize,
     cache_cfg: CacheConfig,
-    cache: Mutex<HashMap<String, CacheEntry>>,
+    cache: Mutex<ExactCache>,
     semantic_cache: Box<dyn SemanticCacheStore>,
     /// Optional dedicated embedding provider (RM-AR-P1 AIC-301), resolved
     /// independently of the chat provider chain: a deployment whose chat
@@ -108,7 +107,7 @@ impl Gateway {
             retry: RetryConfig::default(),
             max_failovers: 2,
             cache_cfg: CacheConfig::default(),
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(ExactCache::new(CacheConfig::default().max_entries)),
             semantic_cache: Box::new(InMemorySemanticCache::new()),
             embedding_provider: None,
             hedge_cfg: HedgeConfig::default(),
@@ -186,9 +185,11 @@ impl Gateway {
         Ok(self)
     }
 
-    /// Override the cache configuration.
+    /// Override the cache configuration. Rebuilds the exact cache with the
+    /// configured entry cap (RM-AR-P1 AIC-302).
     pub fn with_cache(mut self, cache_cfg: CacheConfig) -> Self {
         self.cache_cfg = cache_cfg;
+        self.cache = Mutex::new(ExactCache::new(cache_cfg.max_entries));
         self
     }
 
@@ -592,24 +593,16 @@ impl Gateway {
 
     fn cache_lookup(&self, request: &ChatRequest) -> Option<ChatResponse> {
         let key = cache_key(request);
-        let cache = self.cache.lock().expect("cache mutex poisoned");
-        let entry = cache.get(&key)?;
-        if self.now_ms().saturating_sub(entry.created_ms) > self.cache_cfg.ttl_ms {
-            return None;
-        }
-        Some(entry.response.clone())
+        let now = self.now_ms();
+        let mut cache = self.cache.lock().expect("cache mutex poisoned");
+        cache.get(&key, now, self.cache_cfg.ttl_ms)
     }
 
     fn cache_store(&self, request: &ChatRequest, response: &ChatResponse) {
         let key = cache_key(request);
+        let now = self.now_ms();
         let mut cache = self.cache.lock().expect("cache mutex poisoned");
-        cache.insert(
-            key,
-            CacheEntry {
-                response: response.clone(),
-                created_ms: self.now_ms(),
-            },
-        );
+        cache.insert(key, response.clone(), now, self.cache_cfg.ttl_ms);
     }
 
     // --- semantic cache helpers --------------------------------------------
@@ -1117,6 +1110,7 @@ mod tests {
                 mode: CacheMode::Semantic,
                 ttl_ms: 60_000,
                 similarity_threshold: threshold,
+                ..CacheConfig::default()
             })
             .with_cost_observer(observer)
     }
@@ -1275,6 +1269,7 @@ mod tests {
             mode: CacheMode::Semantic,
             ttl_ms: 60_000,
             similarity_threshold: 0.9,
+            ..CacheConfig::default()
         };
         let gw_a = Gateway::with_providers(vec![Box::new(MockProvider::new())])
             .with_cache(cache_cfg)
