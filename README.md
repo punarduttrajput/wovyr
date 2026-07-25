@@ -16,7 +16,7 @@ Everything below runs offline with a deterministic mock provider — no API key
 needed. You need Rust 1.85+ (edition 2024).
 
 ```bash
-git clone https://github.com/punarduttrajput/apex && cd apex
+git clone https://github.com/punarduttrajput/Apex && cd Apex
 
 # 1. Start the all-in-one local server (builds on first run).
 APEX_ALLOW_ANONYMOUS=1 cargo run -p apex-cli -- dev
