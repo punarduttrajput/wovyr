@@ -112,6 +112,36 @@ on the host); fails closed if either is unavailable. Not yet extended to Podman
 lockdown allows only the literal egress-proxy IP, so DNS is moot for this path —
 the container needs no DNS lookup to reach it).
 
+## 5.1 The native backend's isolation is scoped, not universal (SEC-404)
+
+§5's egress-proxy + `iptables`/`nsenter` lockdown describes the **container/gVisor**
+path (verified/untrusted trust classes, or an operator-set policy floor). The
+**native** backend — first-party `shell`/`code_execute` runs, the default trust
+class — historically enforced **only resource limits** (timeout, output cap,
+`setrlimit`/Job Object): no filesystem confinement beyond the run's working
+directory, and no network isolation at all. On the default cross-platform path,
+"sandboxed tools" was accurate for resource limits and false for confinement — a
+native run could read `~/.apex/kms/root.key` and exfiltrate it over the open network.
+
+The native path now has a **confinement floor**, not parity with the container path:
+
+- **Linux**, with working unprivileged user+network namespaces: a native run is
+  confined to a deny-all egress namespace (`unshare --map-root-user --net`, no
+  interfaces configured — no route out). Probed once per process
+  (`NativeSandbox::network_isolation_available`).
+- **Windows/macOS**, and hardened Linux kernels with unprivileged namespaces
+  disabled: there is **no native egress mechanism**. A native run there is
+  unsandboxed for network access. This is never silent: it proceeds only as an
+  **explicitly-acknowledged** operator choice (the CLI/local trusted context, or
+  `APEX_ALLOW_UNSANDBOXED_NATIVE=1` on a hosted deployment) — logged loudly on every
+  such run — or the tool call is **refused** (`PermissionDenied`) if unacknowledged.
+- Filesystem confinement on the native path remains a **documented gap** on every
+  platform: the run's working directory scopes relative paths, but nothing prevents
+  an absolute path outside it, or a symlink escape. Cross-platform parity to the
+  Linux+Docker container path is an explicit non-goal for the native backend (an
+  untrusted or filesystem-sensitive run should select the container/gVisor backend
+  instead, via trust classification or a policy floor — see §3).
+
 ---
 
 # 6. Filesystem Isolation
@@ -231,5 +261,6 @@ referenced, never valued.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.2.0 | 2026-07-25 | SEC-404: new §5.1 scopes the "sandboxed tools" claim precisely for the native backend — a Linux deny-all egress floor via unprivileged netns, an explicit operator-acknowledgement-or-refusal path on Windows/macOS (never a silent unsandboxed run), and filesystem confinement on the native path named as a documented gap. |
 | 1.1.0 | 2026-07-03 | §5 Network Isolation: closed the "L3 egress bypass" gap — `apex-tools`' container backend now applies a host-side `iptables` default-deny (via `nsenter` into the container's network namespace, before the real command runs) restricting `OUTPUT` to loopback + the egress proxy's address, so a workload ignoring `HTTPS_PROXY` no longer reaches anything. Linux/Docker-specific; not yet extended to Podman. Not run against a live Docker/nsenter/iptables environment in the authoring session — flagged for verification on first real use |
 | 1.0.0 | 2026-06-27 | Initial Tool Runtime Security & Isolation specification |

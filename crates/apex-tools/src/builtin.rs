@@ -765,37 +765,69 @@ const DEFAULT_SANDBOX_IMAGE: &str = "alpine:3.20";
 /// ([RM-GA-P1 SEC-305](../../docs/18-roadmap/v1.0/phase1-security-floor-tickets.md))
 /// against this tool's [`SandboxManager`] — the node's *detected* capabilities
 /// (RM-AIM-P1 SBX-101), not a hardcoded native-only set. A first-party run resolves
-/// to the native sandbox (host shell: process + timeout + output cap); a
+/// to the native backend (host shell: process + timeout + output cap); a
 /// `Verified`/`Untrusted` run is floored to `Container`/`Gvisor` and, **when the node
 /// actually has Docker/gVisor**, runs the command inside a network-isolated Linux
 /// container via `sh -c` instead of failing closed. On a node with no strong backend
 /// (e.g. [`ShellTool::native_only`], the CLI/local default), such a run still fails
 /// closed — there is never a silent downgrade to native for untrusted provenance.
+///
+/// **Native confinement is scoped, not universal (SEC-404).** The native backend
+/// enforces resource limits always, but real *isolation* of a native run is bounded:
+/// on Linux a deny-all **egress floor** is applied via an unprivileged network
+/// namespace; filesystem confinement on the native path is only the run's `workdir`
+/// (a documented gap). On Windows/macOS there is no native isolation mechanism, so a
+/// native run there is unsandboxed — permitted only as an explicitly-acknowledged
+/// operator choice (`native_only` / `APEX_ALLOW_UNSANDBOXED_NATIVE=1`, logged loudly)
+/// or **refused**, never a silent full-host-access run. For untrusted code or strong
+/// isolation, use a container/gVisor backend.
 pub struct ShellTool {
     /// The node's backend capabilities, used to resolve the trust-class floor.
     manager: SandboxManager,
     /// OCI image used when a container/gVisor backend is selected.
     image: String,
+    /// Whether an **unsandboxed** native run (no confinement floor available on
+    /// this platform) is an explicitly-acknowledged operator choice (SEC-404).
+    /// The trusted-local [`native_only`](Self::native_only) constructor sets this;
+    /// the hosted [`with_manager`](Self::with_manager) path defaults it off and
+    /// honors `APEX_ALLOW_UNSANDBOXED_NATIVE=1`.
+    allow_unsandboxed_native: bool,
 }
 
 impl ShellTool {
     /// A shell tool for a **trusted first-party / local** context: native-only
     /// capabilities, so a verified/untrusted run fails closed (no strong backend to
     /// run it in). This is the CLI's `agents run --local` and every test's default.
+    ///
+    /// This constructor is itself the **explicit acknowledgement** (SEC-404) that a
+    /// native run may proceed unsandboxed where the platform has no egress floor
+    /// (Windows/macOS): the caller has declared a trusted-local context. Where a
+    /// floor *is* available (Linux unprivileged netns) it is still applied, and a
+    /// deliberately unconfined native run there is opt-in via
+    /// `APEX_ALLOW_UNSANDBOXED_NATIVE=1`. Either way an unsandboxed native run logs
+    /// a loud warning — it is never silent.
     pub fn native_only() -> Self {
         Self {
             manager: SandboxManager::native_only(),
             image: default_sandbox_image(),
+            allow_unsandboxed_native: true,
         }
     }
 
     /// A shell tool driven by the node's **detected** backend capabilities
     /// (RM-AIM-P1 SBX-101): a verified/untrusted run uses the strongest available
     /// backend (container/gVisor) rather than failing closed, if the node has one.
+    ///
+    /// A **first-party** run still resolves to the native backend; on a host with a
+    /// native egress floor (Linux netns) it is confined, otherwise this hosted path
+    /// **fails closed** unless the operator sets `APEX_ALLOW_UNSANDBOXED_NATIVE=1`
+    /// (SEC-404) — a network-facing deployment must not run host-process tools with
+    /// full host access by accident.
     pub fn with_manager(manager: SandboxManager) -> Self {
         Self {
             manager,
             image: default_sandbox_image(),
+            allow_unsandboxed_native: unsandboxed_native_env_ack(),
         }
     }
 
@@ -805,8 +837,20 @@ impl ShellTool {
         self
     }
 
+    /// Override the unsandboxed-native acknowledgement (builder-style; SEC-404).
+    /// Mainly for tests exercising the fail-closed vs acknowledged paths.
+    pub fn with_unsandboxed_native_ack(mut self, ack: bool) -> Self {
+        self.allow_unsandboxed_native = ack;
+        self
+    }
+
     /// Run the command on the native host shell (first-party path). Returns the raw
     /// outcome; the caller strips the cwd marker and shapes the response.
+    ///
+    /// Resolves the native confinement floor (SEC-404) first: applies the deny-all
+    /// egress floor where the host supports it, else proceeds only if the run is an
+    /// explicitly-acknowledged unsandboxed run (logging a warning), else fails
+    /// closed.
     async fn run_native(
         &self,
         command: &str,
@@ -814,7 +858,8 @@ impl ShellTool {
         workdir: &str,
         limits: ResourceLimits,
     ) -> Result<CommandOutcome, ToolError> {
-        let sandbox = NativeSandbox::with_limits(limits);
+        let confinement = resolve_native_confinement(self.allow_unsandboxed_native).await?;
+        let sandbox = NativeSandbox::with_limits(limits).with_network(confinement.native_policy());
         // Run via the requested (or platform-default) shell so users can write normal
         // command lines. PowerShell is the Windows default — it's what an interactive
         // session actually uses, unlike bare `cmd.exe`. Each command is wrapped so it
@@ -902,6 +947,91 @@ impl ShellTool {
 /// The container image for isolated shell runs: `APEX_SANDBOX_IMAGE` or a default.
 fn default_sandbox_image() -> String {
     std::env::var("APEX_SANDBOX_IMAGE").unwrap_or_else(|_| DEFAULT_SANDBOX_IMAGE.to_string())
+}
+
+/// Whether the operator has explicitly acknowledged an unsandboxed native run via
+/// `APEX_ALLOW_UNSANDBOXED_NATIVE=1` (SEC-404) — the escape hatch mirroring
+/// `APEX_ENABLE_SHELL_TOOL`/`APEX_ALLOW_ANONYMOUS`. It both permits a native run on
+/// a platform with no floor *and* opts out of the Linux egress floor for a
+/// deliberately-networked trusted-local run.
+fn unsandboxed_native_env_ack() -> bool {
+    std::env::var("APEX_ALLOW_UNSANDBOXED_NATIVE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// How a native (host-process) `shell`/`code_execute` run should proceed (SEC-404).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeConfinement {
+    /// A deny-all egress floor is enforced by the host (Linux unprivileged netns).
+    Confined,
+    /// No floor is applied — either the platform has none (Windows/macOS) or the
+    /// operator opted out — but the run was explicitly acknowledged as unsandboxed.
+    UnsandboxedAcknowledged,
+}
+
+impl NativeConfinement {
+    /// The [`NetworkPolicy`] to hand the [`NativeSandbox`]: deny-all when confined
+    /// (activates the netns floor), allow-all when acknowledged unsandboxed.
+    fn native_policy(self) -> NetworkPolicy {
+        match self {
+            NativeConfinement::Confined => NetworkPolicy {
+                default_deny: true,
+                outbound_allow: Vec::new(),
+            },
+            NativeConfinement::UnsandboxedAcknowledged => NetworkPolicy {
+                default_deny: false,
+                outbound_allow: Vec::new(),
+            },
+        }
+    }
+}
+
+/// Decide how a native run proceeds, or fail closed (SEC-404).
+///
+/// - If the host supports a native egress floor (Linux unprivileged netns) and the
+///   operator has not opted out, the run is [`Confined`](NativeConfinement::Confined).
+/// - Otherwise, if the run is explicitly acknowledged as unsandboxed
+///   (`allow_ack` — the trusted-local `native_only` constructor — or
+///   `APEX_ALLOW_UNSANDBOXED_NATIVE=1`), it proceeds
+///   [`UnsandboxedAcknowledged`](NativeConfinement::UnsandboxedAcknowledged) with a
+///   loud one-time warning.
+/// - Otherwise it **fails closed** with a clear message — never a silent
+///   full-host-access run.
+async fn resolve_native_confinement(allow_ack: bool) -> Result<NativeConfinement, ToolError> {
+    let env_ack = unsandboxed_native_env_ack();
+    if NativeSandbox::network_isolation_available().await && !env_ack {
+        return Ok(NativeConfinement::Confined);
+    }
+    if allow_ack || env_ack {
+        warn_unsandboxed_native_once();
+        return Ok(NativeConfinement::UnsandboxedAcknowledged);
+    }
+    Err(ToolError::PermissionDenied(
+        "refusing to run a native (host-process) tool with no confinement floor: \
+         filesystem and network isolation are unavailable for a native run on this \
+         platform, so the process would have full host access (able to read e.g. \
+         ~/.apex/kms/root.key and exfiltrate it). Run on a Linux host with unprivileged \
+         user namespaces for an enforced egress floor, route the run through a \
+         container/gVisor backend, or set APEX_ALLOW_UNSANDBOXED_NATIVE=1 to explicitly \
+         accept an unsandboxed native run (SEC-404)."
+            .into(),
+    ))
+}
+
+/// Warn once per process that a native run is proceeding unsandboxed (SEC-404) — so
+/// an acknowledged unsandboxed run is observable, never silent.
+fn warn_unsandboxed_native_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "running a native (host-process) tool WITHOUT a confinement floor: this \
+             platform has no native filesystem/network isolation, so the tool has full \
+             host access. This was explicitly acknowledged (native_only / \
+             APEX_ALLOW_UNSANDBOXED_NATIVE=1). Use a Linux host with unprivileged \
+             namespaces, or a container/gVisor backend, for real isolation (SEC-404)."
+        );
+    });
 }
 
 #[async_trait]
@@ -1058,10 +1188,16 @@ fn unique_suffix() -> String {
 /// run executes natively; a verified/untrusted run is floored to a
 /// network-isolated container when one is available, else fails closed — never a
 /// silent native fallback. Resource limits (timeout, memory, CPU, output cap)
-/// apply on every backend; an optional egress allow-list applies on the
-/// container path (a native run always has full host network access, the same
-/// as `ShellTool`'s native path — isolating a *trusted* first-party run's
-/// network was never this tool's job).
+/// apply on every backend; the container path enforces the `network` egress
+/// allow-list.
+///
+/// **Native confinement is scoped (SEC-404), same as [`ShellTool`]'s native
+/// path:** a native run gets a deny-all egress floor where the host supports it
+/// (Linux unprivileged netns) and otherwise is unsandboxed — permitted only as an
+/// explicitly-acknowledged operator choice (`native_only` /
+/// `APEX_ALLOW_UNSANDBOXED_NATIVE=1`, logged loudly) or refused. Selective egress
+/// (the `network` allow-list) is a container-only feature; a native floor is
+/// deny-all only.
 ///
 /// The interpreter must actually exist in the execution environment: the
 /// default sandbox image (`alpine:3.20`, [`ShellTool`]'s same default) has
@@ -1073,31 +1209,44 @@ pub struct CodeExecuteTool {
     manager: SandboxManager,
     /// OCI image used when a container/gVisor backend is selected.
     image: String,
+    /// Explicit operator acknowledgement of an unsandboxed native run where no
+    /// floor exists (SEC-404); see [`ShellTool`]'s field of the same name.
+    allow_unsandboxed_native: bool,
 }
 
 impl CodeExecuteTool {
     /// A code-execution tool for a **trusted first-party / local** context:
     /// native-only capabilities, so a verified/untrusted run fails closed. Mirrors
-    /// [`ShellTool::native_only`].
+    /// [`ShellTool::native_only`] — including SEC-404's acknowledgement that a
+    /// native run may proceed unsandboxed where the platform has no egress floor.
     pub fn native_only() -> Self {
         Self {
             manager: SandboxManager::native_only(),
             image: default_sandbox_image(),
+            allow_unsandboxed_native: true,
         }
     }
 
     /// A code-execution tool driven by the node's **detected** backend
-    /// capabilities (SBX-101). Mirrors [`ShellTool::with_manager`].
+    /// capabilities (SBX-101). Mirrors [`ShellTool::with_manager`] — a native run
+    /// with no floor fails closed unless `APEX_ALLOW_UNSANDBOXED_NATIVE=1` (SEC-404).
     pub fn with_manager(manager: SandboxManager) -> Self {
         Self {
             manager,
             image: default_sandbox_image(),
+            allow_unsandboxed_native: unsandboxed_native_env_ack(),
         }
     }
 
     /// Override the container image (builder-style; default [`DEFAULT_SANDBOX_IMAGE`]).
     pub fn with_image(mut self, image: impl Into<String>) -> Self {
         self.image = image.into();
+        self
+    }
+
+    /// Override the unsandboxed-native acknowledgement (builder-style; SEC-404).
+    pub fn with_unsandboxed_native_ack(mut self, ack: bool) -> Self {
+        self.allow_unsandboxed_native = ack;
         self
     }
 }
@@ -1206,9 +1355,28 @@ impl Tool for CodeExecuteTool {
             ..ResourceLimits::default()
         };
 
+        // SEC-404: for a native run, resolve the confinement floor up front so a
+        // fail-closed refusal happens before execution (cleaning up the staged
+        // file). A native run's egress is deny-all where the host has a floor
+        // (Linux netns); the container path keeps its own `network` allow-list.
+        let native_policy: Option<NetworkPolicy> = if matches!(backend, Ok(SandboxBackend::Native))
+        {
+            match resolve_native_confinement(self.allow_unsandboxed_native).await {
+                Ok(conf) => Some(conf.native_policy()),
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&file_path).await;
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+
         let result: Result<CommandOutcome, SandboxError> = match backend {
             Ok(SandboxBackend::Native) => {
+                let policy = native_policy.expect("native policy resolved for native backend");
                 NativeSandbox::with_limits(limits)
+                    .with_network(policy)
                     .run(interpreter, &[file_name.as_str()], workdir)
                     .await
             }
@@ -2042,6 +2210,72 @@ mod tests {
         }
     }
 
+    // --- SEC-404: native confinement floor / acknowledged-vs-fail-closed ----------
+
+    /// A native first-party run that has **not** acknowledged an unsandboxed run:
+    /// confined where the host has a native egress floor (Linux netns), and
+    /// **fails closed** where it doesn't (Windows/macOS, hardened kernel) — never a
+    /// silent full-host-access run. This is SEC-404's acceptance criterion for the
+    /// unsupported-platform half, and passes on any platform.
+    #[tokio::test]
+    async fn shell_fails_closed_on_unsandboxed_native_without_acknowledgement() {
+        let t = ShellTool::with_manager(SandboxManager::native_only())
+            .with_unsandboxed_native_ack(false);
+        let ctx = ToolContext {
+            trust_class: crate::sandbox::TrustClass::FirstParty,
+            ..ToolContext::default()
+        };
+        let result = t
+            .execute(&ctx, ToolRequest::new(json!({"command": "echo ok"})))
+            .await;
+        if NativeSandbox::network_isolation_available().await {
+            assert!(
+                result.is_ok(),
+                "a confined native run (Linux floor) should succeed: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(ToolError::PermissionDenied(_))),
+                "no floor + no acknowledgement must fail closed, got {result:?}"
+            );
+        }
+    }
+
+    /// The same native run, **explicitly acknowledged**, proceeds even where no
+    /// floor exists — the operator-acknowledged unsandboxed path (logged, not
+    /// silent).
+    #[tokio::test]
+    async fn shell_runs_native_when_unsandboxed_run_is_acknowledged() {
+        let t = ShellTool::with_manager(SandboxManager::native_only())
+            .with_unsandboxed_native_ack(true);
+        let ctx = ToolContext {
+            trust_class: crate::sandbox::TrustClass::FirstParty,
+            ..ToolContext::default()
+        };
+        let resp = t
+            .execute(&ctx, ToolRequest::new(json!({"command": "echo ack_ok"})))
+            .await
+            .unwrap();
+        assert!(
+            resp.success,
+            "acknowledged native run should proceed: {resp:?}"
+        );
+        assert!(resp.payload["stdout"].as_str().unwrap().contains("ack_ok"));
+    }
+
+    /// `native_only()` bakes in the acknowledgement (trusted-local), so it never
+    /// fails closed for lack of one — the CLI/local path keeps working on every OS.
+    #[tokio::test]
+    async fn native_only_shell_never_fails_closed_for_missing_acknowledgement() {
+        let t = ShellTool::native_only();
+        let ctx = ToolContext::default();
+        let resp = t
+            .execute(&ctx, ToolRequest::new(json!({"command": "echo local_ok"})))
+            .await
+            .unwrap();
+        assert!(resp.success, "{resp:?}");
+    }
+
     #[tokio::test]
     async fn shell_runs_command_and_reports_success() {
         let t = ShellTool::native_only();
@@ -2418,5 +2652,50 @@ mod tests {
         // Floored to Gvisor, unsupported by this native-only manager — fails
         // closed rather than silently running natively (SEC-305).
         assert!(matches!(err, ToolError::PermissionDenied(_)), "{err:?}");
+    }
+
+    /// SEC-404: a native code run with no floor and no acknowledgement fails closed
+    /// (Windows/macOS); where a floor exists (Linux netns) it is confined instead.
+    /// The staged snippet is cleaned up on the fail-closed path.
+    #[tokio::test]
+    async fn code_execute_fails_closed_on_unsandboxed_native_without_acknowledgement() {
+        let dir = tempfile_dir::TempDir::new();
+        let t = CodeExecuteTool::with_manager(SandboxManager::native_only())
+            .with_unsandboxed_native_ack(false);
+        let ctx = ToolContext {
+            trust_class: crate::sandbox::TrustClass::FirstParty,
+            workdir: dir.path().to_string_lossy().into_owned(),
+            ..ToolContext::default()
+        };
+        let result = t
+            .execute(
+                &ctx,
+                ToolRequest::new(json!({"language": "python", "code": "print(1)"})),
+            )
+            .await;
+        if NativeSandbox::network_isolation_available().await {
+            // Confined native run: must not fail closed for lack of acknowledgement
+            // (it runs the interpreter, or errors Internal if it's absent).
+            assert!(
+                !matches!(result, Err(ToolError::PermissionDenied(_))),
+                "a confined native run should not fail closed: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(ToolError::PermissionDenied(_))),
+                "no floor + no acknowledgement must fail closed, got {result:?}"
+            );
+        }
+        // The staged snippet is never left behind, regardless of outcome.
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".apex-codeexec-")
+            })
+            .collect();
+        assert!(leftover.is_empty(), "staged snippet lingered: {leftover:?}");
     }
 }
