@@ -35,6 +35,19 @@
 # container, so `systemctl` works), then enables/starts the unit and curls
 # `/healthz` — the ticket's own "smoke-tested in CI on Linux" acceptance
 # criterion, not just a lint over the shell script.
+# RM-AR-P1 QA-401 closes the last of the "proven but invoked by no CI job" gaps
+# flagged by the 2026-07-23 audit: `services-integration` gained a
+# `tenancy::redis_tests` run (SRV-307's fleet-shared-concurrency acceptance
+# test), and a new `sandbox-integration` job installs a real gVisor runtime and
+# runs the container/gVisor sandbox-backend suite (`sandbox_backends.rs`) end to
+# end — isolated from `services-integration` because registering gVisor
+# requires restarting the Docker daemon, which would otherwise kill that job's
+# already-running Postgres/Redis/Qdrant service containers. Firecracker's 2
+# tests are the one documented, permanent exclusion (no nested KVM on
+# GitHub-hosted runners); `egress_proxy.rs`/`egress_adversarial.rs` needed no
+# wiring — re-verified during this ticket, neither file is capability-gated at
+# all, so both already ran unconditionally inside the `rust` job's plain
+# `cargo test --workspace` step the whole time.
 name: ci
 
 on:
@@ -181,9 +194,41 @@ jobs:
   # cargo-llvm-cov, published as a CI artifact (lcov + human summary) on every
   # run. A separate job because the instrumented rebuild roughly doubles
   # compile time — the main `rust` job's feedback loop stays fast.
+  #
+  # RM-AR-P1 QA-402 adds the actual gate: `enforce-coverage-floor` below fails
+  # the job when line coverage drops below COVERAGE_FLOOR_LINES — previously
+  # this job only measured and uploaded a report with nothing enforcing it, so a
+  # PR could drop coverage to any level and still pass (PRD-007 finding 13).
+  #
+  # **The floor is a deliberately conservative placeholder, not a real
+  # measurement of "today's coverage" as the ticket asks for** — this job has
+  # never once completed successfully in this repo's CI history (every run,
+  # including ones predating this milestone, failed before ever reaching a
+  # coverage percentage). The proximate cause was almost certainly the same
+  # root issue QA-401 found and fixed: `apex-tools/tests/sandbox_backends.rs`
+  # had no feature gate, so it ran unconditionally inside `cargo llvm-cov
+  # --workspace` too (that command runs the workspace's tests exactly like
+  # `cargo test --workspace` does, just instrumented) and hit the same 3
+  # pre-existing, environment-specific Docker-backend failures documented on
+  # `sandbox-integration` above — almost certainly failing this job's test run
+  # before it ever produced a summary. That file is now gated behind
+  # `sandbox-integration-tests` (off by default), so this job's `cargo llvm-cov
+  # --workspace` no longer touches it either. This session's dev environment
+  # has no way to run an instrumented coverage build itself (Windows: the GNU
+  # toolchain lacks `profiler_builtins`, the MSVC toolchain here has no working
+  # linker), so the exact number this now-hopefully-fixed job reports on its
+  # first real run is still unknown. `COVERAGE_FLOOR_LINES=45` is a
+  # conservative floor chosen to almost certainly sit well below this
+  # workspace's real coverage (an extensively-tested ~79k-LOC codebase) while
+  # still catching a catastrophic regression (e.g. large swaths of tests
+  # deleted or disabled) — **tighten it to just below the number this job
+  # actually reports once it completes successfully**, per the ticket's
+  # original intent.
   coverage:
     name: coverage (cargo-llvm-cov)
     runs-on: ubuntu-latest
+    env:
+      COVERAGE_FLOOR_LINES: "45"
     steps:
       - uses: actions/checkout@v4
 
@@ -208,13 +253,24 @@ jobs:
           { echo '### Coverage'; echo '```'; tail -3 coverage-summary.txt; echo '```'; } \
             >> "$GITHUB_STEP_SUMMARY"
 
+      # Always uploaded, even if the floor check below fails — a maintainer
+      # investigating a coverage-floor failure needs to see the actual numbers,
+      # not just a red X.
       - name: Upload coverage report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: |
             lcov.info
             coverage-summary.txt
+
+      # A separate, clearly-named step (not folded into the measurement step
+      # above) so a coverage regression reads as its own distinct finding.
+      # Re-derives the check from the profile data the measurement step already
+      # collected — no recompilation, no test re-run.
+      - name: Enforce coverage floor (QA-402)
+        run: cargo llvm-cov report --fail-under-lines "$COVERAGE_FLOOR_LINES"
 
   # DX-302 (benchmark half): criterion benchmarks over the budgeting hot path
   # (apex-provider/benches/tokenizer.rs), tracked across runs with
@@ -325,13 +381,37 @@ jobs:
         # with; readiness is checked from the runner in the wait step below.
         image: qdrant/qdrant:latest
         ports: ["6333:6333"]
+      # RM-AR-P1 QA-403: a real S3-compatible endpoint for the SigV4 backup/
+      # restore round trip. Plain GitHub Actions `services:` containers can't be
+      # given a custom command (needed for the official `minio/minio` image's
+      # `server /data` argument), so this uses the purpose-built wrapper image
+      # that bakes that command in — the same reason `bitnami/minio` (which has
+      # its own well-documented startup flakiness as a bare services: container)
+      # is avoided here. No credentials are baked into the image itself; MinIO
+      # falls back to its own long-standing default (`minioadmin`/`minioadmin`)
+      # when `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` aren't set, which is what
+      # the `APEX_S3_*` env vars below point the S3 client at.
+      minio:
+        image: fclairamb/minio-github-actions
+        ports: ["9000:9000"]
     env:
       APEX_WORKFLOW_POSTGRES_URL: postgres://apex:apex@localhost:5432/apex
       APEX_MARKETPLACE_POSTGRES_URL: postgres://apex:apex@localhost:5432/apex
       APEX_MEMORY_POSTGRES_URL: postgres://apex:apex@localhost:5432/apex
+      APEX_S3_ENDPOINT: http://localhost:9000
+      APEX_S3_REGION: us-east-1
+      APEX_S3_ACCESS_KEY_ID: minioadmin
+      APEX_S3_SECRET_ACCESS_KEY: minioadmin
+      APEX_S3_TEST_BUCKET: apex-ci-backups
       APEX_MEMORY_QDRANT_URL: http://localhost:6333
       APEX_QDRANT_URL: http://localhost:6333
       APEX_REDIS_URL: redis://localhost:6379
+      # RM-AR-P1 QA-403: a second, TLS-enabled Postgres for the sslmode=require
+      # leg — distinct from APEX_WORKFLOW_POSTGRES_URL's plaintext instance
+      # above (a `services:` container can't be given the custom cert/key mount
+      # a TLS setup needs, so this one is started as an ordinary `docker run`
+      # step instead; see "Start a TLS-enabled Postgres" below).
+      APEX_WORKFLOW_POSTGRES_TLS_URL: postgres://apex:apex@localhost:5433/apex?sslmode=require
     steps:
       - uses: actions/checkout@v4
 
@@ -350,6 +430,64 @@ jobs:
           echo "qdrant never became ready" >&2
           exit 1
 
+      # RM-AR-P1 QA-403: wait for MinIO, then create the test bucket via the
+      # official `mc` client — this S3 client only ever does PUT/GET/
+      # ListObjectsV2 against an already-existing bucket (matching production
+      # scope: an operator provisions the bucket, `apex admin backup` doesn't),
+      # so CI has to do that provisioning step itself.
+      - name: Wait for MinIO and create the test bucket
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:9000/minio/health/live && break
+            if [ "$i" -eq 30 ]; then
+              echo "minio never became ready" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+          mc alias set ci "$APEX_S3_ENDPOINT" "$APEX_S3_ACCESS_KEY_ID" "$APEX_S3_SECRET_ACCESS_KEY"
+          mc mb "ci/$APEX_S3_TEST_BUCKET"
+
+      # RM-AR-P1 QA-403: a genuinely TLS-enabled Postgres for the
+      # `resolve_tls_mode`/`sslmode=require` path — a plain `services:` Postgres
+      # (the APEX_WORKFLOW_POSTGRES_URL instance above) has no way to be handed
+      # a custom cert/key mount, since GitHub Actions services containers can't
+      # take extra bind mounts before the repo is even checked out. This starts
+      # a second Postgres as an ordinary `docker run` step instead (Docker
+      # itself is always present on ubuntu-latest, independent of the
+      # `services:` mechanism), with a self-signed cert generated on the fly.
+      # `postgres:16`'s image runs as uid/gid 999 and refuses to start if the
+      # private key is group/world-readable, so both permissions and ownership
+      # are set explicitly before the container starts.
+      - name: Start a TLS-enabled Postgres (QA-403)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pg-tls-certs
+          openssl req -new -x509 -days 3650 -nodes \
+            -out /tmp/pg-tls-certs/server.crt \
+            -keyout /tmp/pg-tls-certs/server.key \
+            -subj "/CN=localhost"
+          chmod 600 /tmp/pg-tls-certs/server.key
+          sudo chown 999:999 /tmp/pg-tls-certs/server.crt /tmp/pg-tls-certs/server.key
+
+          docker run -d --name pg-tls \
+            -p 5433:5432 \
+            -e POSTGRES_USER=apex -e POSTGRES_PASSWORD=apex -e POSTGRES_DB=apex \
+            -v /tmp/pg-tls-certs:/certs:ro \
+            postgres:16 \
+            -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
+
+          for i in $(seq 1 30); do
+            docker exec pg-tls pg_isready -U apex && exit 0
+            sleep 2
+          done
+          echo "TLS postgres never became ready" >&2
+          docker logs pg-tls || true
+          exit 1
+
       # RM-GA-P3 MIG-A1: PostgresStore::connect only ever *reads* the schema
       # version now, it never runs DDL — so the three Postgres-backed schemas
       # must be migrated explicitly before the capability-gated tests below can
@@ -364,6 +502,10 @@ jobs:
             --target memory --database-url "$APEX_MEMORY_POSTGRES_URL"
           cargo run -p apex-cli --features postgres,tiered-memory -- admin migrate \
             --target marketplace --database-url "$APEX_MARKETPLACE_POSTGRES_URL"
+          # QA-403's TLS instance — `run_migrations` resolves TLS via the same
+          # `resolve_tls_mode`/`sslmode=require` path `connect` uses.
+          cargo run -p apex-cli --features postgres,tiered-memory -- admin migrate \
+            --target workflow --database-url "$APEX_WORKFLOW_POSTGRES_TLS_URL"
 
       # RM-GA-P4 HLTH-902: the CLI's marketplace commands (publish/search/get/report)
       # call the sync `postgres` crate's `Client::connect` directly from this
@@ -408,6 +550,115 @@ jobs:
           # SRV-201: shared rate limiting — inline (RateLimiter is pub(crate)), so
           # filter the lib suite to the rate_limit module rather than a tests/ file.
           run_gated cargo test -p apex-server --features redis --lib rate_limit
+          # RM-AR-P1 QA-401: SRV-307 fleet-shared concurrency — also inline
+          # (QuotaTracker/admit_run are pub(crate)), filter to tenancy::redis_tests.
+          # This was "proven"/"closed" in the roadmap but invoked by no CI job
+          # before this — closing that gap is QA-401's whole point.
+          run_gated cargo test -p apex-server --features redis --lib tenancy::redis_tests
+          # RM-AR-P1 QA-403: the S3 SigV4 backup/restore round trip against a
+          # real MinIO endpoint — the `apex-cli` binary's own test (no lib
+          # target to run as a separate `tests/` integration file against; see
+          # `apps/apex-cli/src/admin.rs`'s test module).
+          run_gated cargo test -p apex-cli --bin apex \
+            admin::tests::s3_backup_restore_round_trips_against_a_live_endpoint
+          # RM-AR-P1 QA-403: the real rustls TLS handshake path
+          # (`resolve_tls_mode`'s `sslmode=require` branch), against the
+          # TLS-enabled Postgres started above — not just the pure
+          # connection-string-parsing unit tests in `postgres.rs`.
+          run_gated cargo test -p apex-workflow --features postgres --test postgres_store \
+            connects_over_a_real_tls_handshake_with_sslmode_require
+
+  # RM-AR-P1 QA-401: the container/gVisor sandbox-backend suite
+  # (crates/apex-tools/tests/sandbox_backends.rs, 17 tests) was "proven"/"closed"
+  # in the roadmap but invoked by no CI job before this. Worse: the file had no
+  # feature gate at all, so it silently ran unconditionally inside the plain
+  # `rust` job's `cargo test --workspace` on every push whenever that runner
+  # happened to have Docker (which ubuntu-latest does by default) — discovered
+  # when 3 of its Container-backend tests failed for real there, unrelated to
+  # any code change, quietly turning that job red despite fmt/clippy/build all
+  # passing. The file is now gated behind the `sandbox-integration-tests` cargo
+  # feature (off by default: 0 tests compiled without it) so plain `cargo test
+  # --workspace` no longer touches it at all; this job is the one place it's
+  # built and run, with `--features sandbox-integration-tests` explicit.
+  #
+  # A separate job from services-integration, deliberately: making the gVisor
+  # tests real requires restarting the Docker daemon to register the runsc
+  # runtime, and services-integration's Postgres/Redis/Qdrant `services:`
+  # containers are already running before any step in that job executes —
+  # restarting Docker there would kill them and cascade-fail unrelated tests.
+  # Firecracker's 2 tests are an explicit, named, permanent exclusion (mirroring
+  # SEC-404's own Firecracker note): GitHub-hosted runners have no nested KVM, so
+  # a real microVM can never run here — `--skip firecracker` keeps them from
+  # executing at all rather than printing a skip line this job's gate would
+  # otherwise (wrongly) fail on.
+  #
+  # **Known, tracked, currently-red gap**: the 3 Container-backend tests found
+  # failing above (container_egress_lockdown_blocks_direct_bypass_of_the_proxy,
+  # container_pids_limit_contains_a_fork_bomb,
+  # egress_proxy_denies_non_allowlisted_host_from_container) are pre-existing —
+  # untouched by any commit in this milestone — and fail against this runner's
+  # Docker/cgroups/iptables setup regardless of gVisor. Deliberately left
+  # failing rather than `#[ignore]`d: the point of this job is that these
+  # specific security-relevant behaviors (fork-bomb containment, egress
+  # lockdown, in-container proxy denial) do not currently hold in this
+  # environment, and that fact should be visible, not hidden behind a green
+  # check. Tracked as its own follow-up (fix the real container/cgroups/iptables
+  # gap or the tests' environment assumptions — needs a live Docker host to
+  # diagnose, not guesswork). Every *other* test — Container and gVisor alike —
+  # is expected to run for real and pass; a `skipping:` line from any of them
+  # still fails this job (a capability silently absent is a different, and
+  # worse, failure mode than a known behavioral gap).
+  sandbox-integration:
+    name: sandbox backend integration (Docker + gVisor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # gVisor's official Docker-runtime install
+      # (https://gvisor.dev/docs/user_guide/install/): download runsc + its
+      # containerd shim, verify against the published checksums, register as a
+      # docker runtime, then restart the daemon so the registration takes
+      # effect. Runs on gVisor's ptrace platform (no KVM required), which
+      # GitHub-hosted runners support — this job has no service containers to
+      # lose, so a daemon restart here is safe (see the job-level comment above).
+      - name: Install gVisor (runsc) as a Docker runtime
+        run: |
+          set -euo pipefail
+          (
+            set -e
+            cd "$(mktemp -d)"
+            ARCH=$(uname -m)
+            URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+            wget -q "${URL}/runsc" "${URL}/runsc.sha512" \
+              "${URL}/containerd-shim-runsc-v1" "${URL}/containerd-shim-runsc-v1.sha512"
+            sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
+            chmod a+rx runsc containerd-shim-runsc-v1
+            sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+          )
+          sudo /usr/local/bin/runsc install
+          sudo systemctl restart docker
+          # Fail loud right here, with a named step, if registration didn't take
+          # — a legible install failure beats a buried "skipping:" line deep in
+          # a test run.
+          docker info 2>&1 | grep -qi runsc
+
+      - name: Run sandbox backend integration tests (QA-401)
+        run: |
+          set -euo pipefail
+          out=$(mktemp)
+          cargo test -p apex-tools --features sandbox-integration-tests \
+            --test sandbox_backends -- --nocapture --skip firecracker \
+            2>&1 | tee "$out"
+          if grep -q "skipping:" "$out"; then
+            echo "::error::a sandbox-backend test skipped despite Docker+gVisor being installed" >&2
+            exit 1
+          fi
 
   # RM-GA-P4 API-704: the API contract gate (PRD-003 R-7.4). Boots a real `apex
   # dev` server from this PR's code, then runs `redocly lint` and both SDKs'

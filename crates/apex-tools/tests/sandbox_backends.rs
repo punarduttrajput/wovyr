@@ -6,6 +6,19 @@
 //! nodes without a container runtime. The deterministic argv/config construction is
 //! covered by the unit tests in `src/sandbox.rs`; this file verifies that the
 //! constructed commands actually isolate and enforce.
+//!
+//! **Only compiled with `--features sandbox-integration-tests`** (RM-AR-P1
+//! QA-401). Runtime capability-gating alone isn't enough: a plain `cargo test
+//! --workspace` on a machine that genuinely *has* Docker (any contributor's
+//! machine, or the ordinary `rust` CI job on a stock `ubuntu-latest` runner)
+//! still exercises real container networking/cgroups/iptables behavior this
+//! workspace doesn't control there — 3 of these tests failed for real in exactly
+//! that job, unrelated to any change in this crate, silently turning the whole
+//! job red despite fmt/clippy/build all passing. CI's dedicated
+//! `sandbox-integration` job (which installs a real gVisor runtime) is the one
+//! place this file is built and run.
+
+#![cfg(feature = "sandbox-integration-tests")]
 
 use apex_tools::{
     CommandOutcome, ContainerSandbox, FirecrackerConfig, FirecrackerSandbox, NetworkPolicy,
@@ -438,8 +451,16 @@ async fn shell_tool_first_party_run_stays_native_even_when_containers_exist() {
     }
     // Even on a container-capable node, a first-party run uses the native host shell
     // (the strongest requirement is only Native), so a host-only command succeeds.
+    // `with_unsandboxed_native_ack(true)` (SEC-404): this test is about *backend
+    // selection* (native vs. container), not about the native confinement floor —
+    // that's covered by its own dedicated tests in `builtin.rs`/`native.rs`. Without
+    // the acknowledgement, a `with_manager()`-constructed `ShellTool` now fails
+    // closed on a host with no netns egress floor, which would make this
+    // selection test fail for an unrelated reason on such a host.
     let manager = SandboxManager::detect().await;
-    let shell = ShellTool::with_manager(manager).with_image(IMAGE);
+    let shell = ShellTool::with_manager(manager)
+        .with_image(IMAGE)
+        .with_unsandboxed_native_ack(true);
     let ctx = ToolContext {
         trust_class: TrustClass::FirstParty,
         ..ToolContext::default()

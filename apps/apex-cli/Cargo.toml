@@ -63,8 +63,9 @@ apex-server.workspace = true
 apex-secrets.workspace = true
 # `rt-multi-thread` + `macros` for the binary's own `#[tokio::main]` (also covers
 # `plugin.rs`'s `spawn_blocking` and `workflow.rs`'s local `#[tokio::test]`s — RM-GA-P4
-# HLTH-904).
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# HLTH-904). `process` is for `tests/cross_process_kms.rs` (QA-403), which spawns
+# the built `apex` binary itself twice (CLI + server) via `tokio::process::Command`.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 # Rendering the digest-complete `plugin.yaml` that `apex plugin build` stages

@@ -1170,6 +1170,133 @@ async fn memory_is_isolated_per_tenant() {
     );
 }
 
+/// The memory route's `sensitive: true` flag is sealed at rest through the platform
+/// KMS (RM-AIM-P1 SEC-101-adjacent — the memory-engine equivalent of the secret
+/// vault's encrypt-at-rest default), transparently, alongside an ordinary
+/// non-sensitive record in the *same* namespace: the raw on-disk `.jsonl` must show
+/// ciphertext for the sensitive record and plaintext for the non-sensitive one, while
+/// every API read path (list + hybrid query) returns both in plaintext regardless.
+/// A real `FileStore` (not `InMemoryStore`) is used specifically so the on-disk bytes
+/// can be inspected directly.
+#[tokio::test]
+async fn sensitive_memory_record_is_ciphertext_on_disk_and_plaintext_over_the_api() {
+    use apex_memory::{EncryptingMemoryStore, FileStore, MemoryEngine, MemoryStore};
+    use apex_provider::Gateway;
+    use apex_tenancy::{MemberScope, Membership, Organization, Role};
+
+    let dir = std::env::temp_dir().join(format!(
+        "apex_server_sensitive_memory_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let inner: Arc<dyn MemoryStore> = Arc::new(FileStore::new(&dir).unwrap());
+    let store: Arc<dyn MemoryStore> = Arc::new(EncryptingMemoryStore::new(inner, test_kms()));
+    let engine = MemoryEngine::new(Gateway::from_env(), store.clone());
+
+    let tenancy = Arc::new(InMemoryTenancyStore::new());
+    let org = tenancy
+        .create_org(Organization::new("acme", "Acme"))
+        .unwrap();
+    tenancy
+        .add_membership(Membership {
+            user: "alice".to_string(),
+            role: Role::OrgAdmin,
+            scope: MemberScope::Organization(org.id.clone()),
+        })
+        .unwrap();
+    let state = Arc::new(
+        AppState::from_env()
+            .await
+            .with_tenancy(tenancy)
+            .with_memory(engine, store),
+    );
+
+    const SECRET: &str = "sensitive-payload-do-not-leak";
+    const PLAIN: &str = "ordinary-non-sensitive-note";
+
+    let (st, _) = tenant_req(
+        &state,
+        "POST",
+        "/api/v1/memory/records",
+        "acme",
+        "alice",
+        json!({ "namespace": "mixed", "content": SECRET, "sensitive": true }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = tenant_req(
+        &state,
+        "POST",
+        "/api/v1/memory/records",
+        "acme",
+        "alice",
+        json!({ "namespace": "mixed", "content": PLAIN, "sensitive": false }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // The raw on-disk file: the sensitive record's content must not appear in
+    // plaintext, while the non-sensitive one is untouched.
+    let raw = std::fs::read_to_string(dir.join("mixed.jsonl")).unwrap();
+    assert!(
+        !raw.contains(SECRET),
+        "the sensitive record's content must be sealed (ciphertext) on disk, found \
+         plaintext in: {raw}"
+    );
+    assert!(
+        raw.contains(PLAIN),
+        "the non-sensitive record's content must remain plaintext on disk: {raw}"
+    );
+
+    // Every API read path unseals transparently — both come back in plaintext.
+    let (st, list) = tenant_req(
+        &state,
+        "GET",
+        "/api/v1/memory/records?namespace=mixed",
+        "acme",
+        "alice",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let contents: Vec<&str> = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["content"].as_str())
+        .collect();
+    assert!(contents.contains(&SECRET), "{contents:?}");
+    assert!(contents.contains(&PLAIN), "{contents:?}");
+
+    let (st, q) = tenant_req(
+        &state,
+        "POST",
+        "/api/v1/memory:query",
+        "acme",
+        "alice",
+        json!({ "text": "sensitive-payload" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let found: Vec<&str> = q["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["content"].as_str())
+        .collect();
+    assert!(
+        found.contains(&SECRET),
+        "hybrid query must return the sensitive record's plaintext content: {found:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The secret vault is tenant-scoped, RBAC-gated, and never returns a value over the
 /// API (values leave the vault only via the resolution/injection path).
 #[tokio::test]

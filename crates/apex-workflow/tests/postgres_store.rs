@@ -24,7 +24,8 @@
 
 use apex_workflow::{
     ActivityError, ActivityState, CheckpointStore, ClosureExecutor, Definition, DefinitionResolver,
-    Engine, EventLog, ExecutionFilter, PostgresStore, RunOutcome, WorkQueue, Worker, WorkflowState,
+    Engine, EventLog, ExecutionFilter, PostgresStore, RunOutcome, WorkQueue, Worker, WorkflowEvent,
+    WorkflowState,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -472,4 +473,52 @@ async fn filtered_list_never_decodes_a_non_matching_rows_corrupt_snapshot() {
     )
     .await
     .unwrap();
+}
+
+/// WFL-103 / QA-403: exercises the *real* rustls TLS handshake
+/// (`resolve_tls_mode`'s `sslmode=require` branch → `rustls_connector`) end to
+/// end, not just the pure connection-string-parsing unit tests in
+/// `postgres.rs` (which never open a socket at all). Reads a distinct
+/// `APEX_WORKFLOW_POSTGRES_TLS_URL` — with `sslmode=require` already in the
+/// URL — so this can run against a genuinely TLS-configured Postgres alongside
+/// the plaintext one `APEX_WORKFLOW_POSTGRES_URL` points at; CI's
+/// `services-integration` job stands up both. Skips cleanly when unset (no
+/// TLS-configured Postgres to point at in local/offline dev).
+#[tokio::test]
+async fn connects_over_a_real_tls_handshake_with_sslmode_require() {
+    let url = match std::env::var("APEX_WORKFLOW_POSTGRES_TLS_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("skipping: APEX_WORKFLOW_POSTGRES_TLS_URL not set");
+            return;
+        }
+    };
+    assert!(
+        url.contains("sslmode=require"),
+        "this test exercises the sslmode=require path specifically; got: {url}"
+    );
+    let store = match PostgresStore::connect(&url).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("skipping: TLS postgres unreachable at {url}: {e}");
+            return;
+        }
+    };
+
+    // A real write + read through the encrypted connection — proves the TLS
+    // handshake didn't just complete but the connection is actually usable.
+    let exec_id = format!("wf-pg-tls-{}", nonce());
+    store
+        .append(
+            &exec_id,
+            WorkflowEvent::WorkflowCreated {
+                workflow: "tls-check".to_string(),
+                version: "1".to_string(),
+            },
+        )
+        .await
+        .expect("append over TLS");
+    let events = store.load(&exec_id).await.expect("load over TLS");
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], WorkflowEvent::WorkflowCreated { .. }));
 }

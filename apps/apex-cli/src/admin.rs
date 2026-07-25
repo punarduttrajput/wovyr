@@ -73,23 +73,33 @@ pub async fn backup_cmd(dest: &str) -> Result<()> {
             source.display()
         )));
     }
-
-    let count = if S3Uri::is_s3(dest) {
-        let uri = S3Uri::parse(dest)?;
-        let staging = staging_dir("backup")?;
-        let count = backup_dir(&source, &staging)?;
-        let upload_result = crate::s3::upload_dir(S3Config::from_env()?, &uri, &staging).await;
-        let _ = fs::remove_dir_all(&staging);
-        upload_result?;
-        count
-    } else {
-        backup_dir(&source, Path::new(dest))?
-    };
+    let count = run_backup(&source, dest).await?;
     println!(
         "backed up {count} file(s) from {} to {dest}",
         source.display()
     );
     Ok(())
+}
+
+/// The backup core, parameterized on an explicit local `source` — unlike
+/// `backup_cmd`, which always resolves this to the real `~/.apex` via
+/// `config::config_dir()`. This is what lets a test exercise the real `s3://`
+/// upload path (QA-403) against a scratch source directory and a live
+/// MinIO/S3 endpoint without mutating the process-global `HOME`/`USERPROFILE`
+/// env vars `config::config_dir` reads — the same parameterization rationale
+/// `backup_dir`/`restore_dir` already use for the local-destination case.
+async fn run_backup(source: &Path, dest: &str) -> Result<usize> {
+    if S3Uri::is_s3(dest) {
+        let uri = S3Uri::parse(dest)?;
+        let staging = staging_dir("backup")?;
+        let count = backup_dir(source, &staging)?;
+        let upload_result = crate::s3::upload_dir(S3Config::from_env()?, &uri, &staging).await;
+        let _ = fs::remove_dir_all(&staging);
+        upload_result?;
+        Ok(count)
+    } else {
+        backup_dir(source, Path::new(dest))
+    }
 }
 
 /// `apex admin restore <src> --yes` — restore `~/.apex` from a backup made by
@@ -110,22 +120,29 @@ pub async fn restore_cmd(src: &str, confirmed: bool) -> Result<()> {
     }
     let dest = config::config_dir()?;
     fs::create_dir_all(&dest)?;
-
-    let count = if S3Uri::is_s3(src) {
-        let uri = S3Uri::parse(src)?;
-        let staging = staging_dir("restore")?;
-        let download_result = crate::s3::download_dir(S3Config::from_env()?, &uri, &staging).await;
-        let restore_result = download_result.and_then(|_| restore_dir(&staging, &dest));
-        let _ = fs::remove_dir_all(&staging);
-        restore_result?
-    } else {
-        restore_dir(Path::new(src), &dest)?
-    };
+    let count = run_restore(src, &dest).await?;
     println!(
         "restored {count} file(s) from {src} into {}",
         dest.display()
     );
     Ok(())
+}
+
+/// The restore core, parameterized on an explicit local `dest` — the
+/// restore-side mirror of [`run_backup`], for the identical QA-403
+/// testability reason: `restore_cmd` always resolves `dest` to the real
+/// `~/.apex`, but a test needs a scratch directory instead.
+async fn run_restore(src: &str, dest: &Path) -> Result<usize> {
+    if S3Uri::is_s3(src) {
+        let uri = S3Uri::parse(src)?;
+        let staging = staging_dir("restore")?;
+        let download_result = crate::s3::download_dir(S3Config::from_env()?, &uri, &staging).await;
+        let restore_result = download_result.and_then(|_| restore_dir(&staging, dest));
+        let _ = fs::remove_dir_all(&staging);
+        restore_result
+    } else {
+        restore_dir(Path::new(src), dest)
+    }
 }
 
 /// A guaranteed-unique local scratch directory for staging an `s3://` backup's
@@ -505,6 +522,64 @@ mod tests {
         );
 
         for dir in [&source, &dest] {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    /// QA-403: the `s3://` backup→restore round trip, exercised through the real
+    /// `run_backup`/`run_restore` cores (the same code `backup_cmd`/`restore_cmd`
+    /// drive) against a **live** S3-compatible endpoint — closing the gap the
+    /// module's own doc comment used to admit ("not validated against a live
+    /// S3-compatible endpoint"). Capability-gated like every other live-backend
+    /// test in this workspace (`tenancy::redis_tests`, `sandbox_backends.rs`):
+    /// skip cleanly when `APEX_S3_ENDPOINT` isn't set, so this suite still passes
+    /// offline; CI's `services-integration` job points it at a real MinIO
+    /// service container.
+    #[tokio::test]
+    async fn s3_backup_restore_round_trips_against_a_live_endpoint() {
+        if std::env::var("APEX_S3_ENDPOINT").is_err() {
+            eprintln!("skipping: APEX_S3_ENDPOINT not set");
+            return;
+        }
+        // `APEX_S3_TEST_BUCKET` must already exist (this client only ever does
+        // PUT/GET/ListObjectsV2 against an existing bucket, matching production
+        // scope — bucket creation is a one-time CI setup step, not something the
+        // backup/restore path itself does).
+        let bucket =
+            std::env::var("APEX_S3_TEST_BUCKET").unwrap_or_else(|_| "apex-ci-backups".to_string());
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dest = format!("s3://{bucket}/qa403-{}-{nonce}", std::process::id());
+
+        let source = scratch_dir("s3_roundtrip_source");
+        let restored = scratch_dir("s3_roundtrip_restored");
+        fs::create_dir_all(source.join("kms")).unwrap();
+        fs::write(source.join("kms/root.key"), b"s3-roundtrip-deadbeef").unwrap();
+        fs::create_dir_all(source.join("secrets")).unwrap();
+        fs::write(source.join("secrets/secrets.json"), b"{\"a\":1}").unwrap();
+
+        let uploaded = run_backup(&source, &dest)
+            .await
+            .expect("s3 backup must succeed against a live endpoint");
+        assert_eq!(uploaded, 2);
+
+        let downloaded = run_restore(&dest, &restored)
+            .await
+            .expect("s3 restore must succeed against a live endpoint");
+        assert_eq!(downloaded, 2);
+
+        assert_eq!(
+            fs::read(restored.join("kms/root.key")).unwrap(),
+            b"s3-roundtrip-deadbeef"
+        );
+        assert_eq!(
+            fs::read(restored.join("secrets/secrets.json")).unwrap(),
+            b"{\"a\":1}"
+        );
+
+        for dir in [&source, &restored] {
             let _ = fs::remove_dir_all(dir);
         }
     }

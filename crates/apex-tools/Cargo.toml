@@ -11,6 +11,21 @@ description = "Tool framework: the Tool trait, registry, and built-in tools for 
 # The WASI/WASM sandbox backend. Off by default: it pulls Wasmtime, a heavy
 # dependency, so only builds/tests that exercise the backend pay the compile cost.
 wasi = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasi-common"]
+# Gates `tests/sandbox_backends.rs` (RM-AR-P1 QA-401) — a test-only marker feature
+# with no dependency of its own. That file's tests are runtime-capability-gated
+# (they skip cleanly when Docker/gVisor/Firecracker is absent), but a *present*
+# Docker daemon on a plain `cargo test --workspace` run (the ordinary `rust` CI
+# job, any contributor's machine) still exercises real container networking/
+# cgroups/iptables behavior this workspace never controls or verifies there —
+# discovered when 3 of its tests failed for real in that job on a stock
+# ubuntu-latest runner, unrelated to any change in this crate. Without this gate
+# that failure silently blocks the *whole* `rust` job's signal (fmt/clippy/build
+# all pass; only these environment-sensitive tests don't). The dedicated
+# `sandbox-integration` CI job (which installs gVisor and is the properly
+# capability-aware place for this suite) builds with `--features
+# sandbox-integration-tests` explicitly; plain `cargo test --workspace` no longer
+# compiles this file at all.
+sandbox-integration-tests = []
 
 [dependencies]
 apex-common.workspace = true
