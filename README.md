@@ -209,6 +209,28 @@ every doc's status header says whether it describes shipped or target-state
 behavior — `docs/` still contains future milestones not yet built; check the
 status header before assuming a described feature exists.
 
+## Where to start
+
+It's a big workspace — but you don't need most of it to be productive. The
+**flagship surface is the Generative UI Trust Runtime**; the rest of the crates
+are the platform substrate it runs on and are safe to ignore on day one.
+
+- **Just want to see it work?** Run the [Quickstart](#quickstart-5-minutes)
+  above (offline, no API key), then click through the browser demo in
+  [`examples/ui/checkout-demo`](examples/ui/) — present a frame → trust layer
+  judges it → a human decides → the run resumes.
+- **Want to understand the core idea?** Read, in order:
+  [`apex-ui`](crates/apex-ui/) (the safe frame protocol) →
+  [`apex-ui-guard`](crates/apex-ui-guard/) (the fail-closed policy layer) →
+  `crates/apex-server/src/ui.rs` (where a frame is judged, audited, and
+  rendered) → [`sdks/ui-react`](sdks/ui-react/) (the renderer). That's the whole
+  loop; everything else (`apex-workflow`, `apex-memory`, `apex-kms`,
+  `apex-marketplace`, …) is infrastructure you can treat as a black box until
+  you need it.
+- **Want to contribute?** Start with a doc/test/small-surface change in one of
+  those four flagship crates before venturing into the platform internals, and
+  see [CONTRIBUTING.md](CONTRIBUTING.md) (DCO sign-off required).
+
 ---
 
 # Technology Stack
