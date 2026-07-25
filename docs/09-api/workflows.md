@@ -65,7 +65,7 @@ and submitted as YAML or JSON:
   "object": "workflow",
   "name": "invoice-approval",
   "definition_format": "yaml",
-  "definition": "apiVersion: workflow.apex.io/v1\nkind: Workflow\n...",
+  "definition": "apiVersion: workflow.wovyr.io/v1\nkind: Workflow\n...",
   "version": "2.1.0",
   "status": "published"
 }

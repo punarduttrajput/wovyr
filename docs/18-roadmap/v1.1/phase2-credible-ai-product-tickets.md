@@ -17,7 +17,7 @@ Document ID: RM-AIM-P2
 # Purpose
 
 Phase 2 of [PRD-004 §8](../../01-product/prd-ai-platform-maturity.md) — the
-capabilities that make Apex a *credible* AI product rather than a thin loop: native
+capabilities that make Wovyr a *credible* AI product rather than a thin loop: native
 Anthropic support, structured output, a real RAG middle (chunking + reranking), a
 correct semantic cache, guardrails, an evaluation *gate*, and correct multi-node
 quotas.
@@ -56,7 +56,7 @@ OBS-201 (per-tenant metrics)
 ## PRV-201 `[P1]` — First-class `AnthropicProvider` — **DONE (2026-07-13)**
 
 **Problem.** Only mock, OpenAI-compatible, and local mistralrs providers exist
-(`crates/apex-provider/src/lib.rs:12-33`); Claude is reachable only via an
+(`crates/wovyr-provider/src/lib.rs:12-33`); Claude is reachable only via an
 OpenAI-compatible shim, losing native tool-use, system-prompt handling, prompt
 caching, and extended thinking. (PRD-004 R-B.2; audit High.)
 
@@ -69,13 +69,13 @@ streaming deltas via `chat_stream`.
 a tool round-trip through the Anthropic provider; `cost_usd` uses PRV-101's price
 table for Claude models.
 
-**Files.** `crates/apex-provider/src/` (new `anthropic.rs`), `gateway.rs` resolution.
+**Files.** `crates/wovyr-provider/src/` (new `anthropic.rs`), `gateway.rs` resolution.
 **Size.** L. **Depends on:** PRV-101.
 
-**Implementation notes (2026-07-13).** New `apex-provider::anthropic` module: an
+**Implementation notes (2026-07-13).** New `wovyr-provider::anthropic` module: an
 `AnthropicProvider` implementing `AIProvider` against the native Messages API
 (`POST /v1/messages`, `x-api-key` + `anthropic-version` headers), constructed from
-`ANTHROPIC_API_KEY`/`APEX_ANTHROPIC_BASE_URL`. Translation: `Role::System` messages
+`ANTHROPIC_API_KEY`/`WOVYR_ANTHROPIC_BASE_URL`. Translation: `Role::System` messages
 hoist to the top-level `system` block list; assistant `tool_calls` become
 `tool_use` blocks (JSON-string `arguments` ↔ JSON-object `input`); `Role::Tool`
 results become `tool_result` blocks in a `user` turn, with consecutive results
@@ -106,7 +106,7 @@ asserting both the parsed tool call and the wire bodies it sends back
 computed from PRV-101's table for `claude-opus-4-8` including the 0.1× cache-read
 rate; `streams_text_deltas_then_done`/`streams_tool_use_assembled_from_partial_json`
 cover the SSE path; 15 unit tests cover the translation edge cases. Verified live
-end to end: `apex agents run --local --provider anthropic` against a canned local
+end to end: `wovyr agents run --local --provider anthropic` against a canned local
 Messages-API server streamed real deltas and reported the exact table-computed
 cost. Deferred to their own tickets: `tool_choice`/structured output (PRV-202) and
 extended thinking / multimodal content parts (PRV-204).
@@ -114,7 +114,7 @@ extended thinking / multimodal content parts (PRV-204).
 ## PRV-202 `[P1]` — Structured output / forced tool — **DONE (2026-07-13)**
 
 **Problem.** `ChatRequest` has no `response_format`/`tool_choice`/`json_schema`
-(`crates/apex-provider/src/types.rs:107-123`); mistralrs hardcodes `ToolChoice::Auto`
+(`crates/wovyr-provider/src/types.rs:107-123`); mistralrs hardcodes `ToolChoice::Auto`
 (`mistralrs_provider.rs:166`). JSON mode and "must call tool X" can't be requested.
 (PRD-004 R-B.3; audit Med.)
 
@@ -126,7 +126,7 @@ supported).
 schema-valid output (against a provider that supports it) and that forced-tool
 selects the named tool.
 
-**Files.** `crates/apex-provider/src/{types.rs,openai.rs,anthropic.rs,mistralrs_provider.rs}`.
+**Files.** `crates/wovyr-provider/src/{types.rs,openai.rs,anthropic.rs,mistralrs_provider.rs}`.
 **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-13).** `ChatRequest` gained two optional fields
@@ -167,7 +167,7 @@ can ride a later slice (e.g. SAF-202's prompt registry) once a consumer needs it
 
 **Problem.** Tool `parameters` JSON is forwarded verbatim to providers
 (`openai.rs:62-79`); no normalization/`strict` mode. Malformed tool arguments are
-swallowed to `Value::Null` (`crates/apex-agent/src/runtime.rs:335`), so a tool
+swallowed to `Value::Null` (`crates/wovyr-agent/src/runtime.rs:335`), so a tool
 silently receives null. (PRD-004 R-B.4; audit Med.)
 
 **Change.** Validate/normalize tool JSON-schema (strip unsupported keywords, optional
@@ -177,11 +177,11 @@ passing `null`.
 **Acceptance criteria.** A test asserts a malformed tool-arg produces a
 model-visible error turn (not a null-arg tool invocation).
 
-**Files.** `crates/apex-provider/src/openai.rs`, `crates/apex-agent/src/runtime.rs`.
+**Files.** `crates/wovyr-provider/src/openai.rs`, `crates/wovyr-agent/src/runtime.rs`.
 **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-13).** Two halves. **(1) Schema normalization:**
-new `apex-provider::schema` module with `normalize_strict(schema)` — a pure,
+new `wovyr-provider::schema` module with `normalize_strict(schema)` — a pure,
 recursive rewrite into the vendor strict-mode JSON-Schema subset: strips the
 keywords strict validators reject (`minimum`/`maximum`/`multipleOf`,
 `minLength`/`maxLength`/`pattern`/`format`, array/property bounds,
@@ -200,7 +200,7 @@ tools: providers ignore unknown keywords in normal mode but honor bounds like
 `minimum`, so unconditional stripping would silently discard real constraints.
 mistral.rs needs no normalization (its `Function.parameters` is passthrough
 and it has no strict mode). **(2) Surfaced arg-parse errors:**
-`execute_tool_call` (`crates/apex-agent/src/runtime.rs`) no longer swallows
+`execute_tool_call` (`crates/wovyr-agent/src/runtime.rs`) no longer swallows
 malformed tool arguments to `Value::Null` — a parse failure now returns a
 failed `ToolOutcome` whose text carries the serde error and an instruction to
 re-issue the call, which the existing loop feeds back as the tool-result turn,
@@ -208,7 +208,7 @@ so the model sees and can correct it; the tool itself is never invoked. An
 *empty* argument string is the conventional no-arg call and still invokes the
 tool with `{}` (providers' stream accumulators already normalize empty to
 `"{}"`, but a scripted/foreign provider may not). **Acceptance:**
-`crates/apex-agent/tests/tool_loop.rs::malformed_tool_arguments_surface_as_a_model_visible_error_turn`
+`crates/wovyr-agent/tests/tool_loop.rs::malformed_tool_arguments_surface_as_a_model_visible_error_turn`
 drives the real `run_agent` loop with a recording tool and a scripted provider
 issuing `{"ping": pong` — asserts the tool never executed, the model's next
 turn observed the "not valid JSON" error text, and the sink saw a failed tool
@@ -233,7 +233,7 @@ compatible string coercion; translate per provider.
 **Acceptance criteria.** A test round-trips an image content part through a
 multimodal-capable provider path.
 
-**Files.** `crates/apex-provider/src/types.rs` + provider translators. **Size.** M.
+**Files.** `crates/wovyr-provider/src/types.rs` + provider translators. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-13).** `Message` gained a `parts: Vec<ContentPart>`
@@ -266,9 +266,9 @@ equivalent `openai::tests::multimodal_user_message_encodes_as_content_blocks`/
 cases; `types::tests::message_with_parts_round_trips`/
 `message_without_parts_keeps_its_old_wire_shape_and_deserializes_back`/
 `content_parts_serialize_internally_tagged` cover the wire-shape/back-compat
-contract. `ChatRequest`/message-construction call sites across `apex-agent`
+contract. `ChatRequest`/message-construction call sites across `wovyr-agent`
 (`context.rs`, `runtime.rs`, `tool_loop.rs` tests, `tokenizer.rs` tests) updated for
-the new field; full workspace build + `apex-provider`/`apex-agent` suites (108
+the new field; full workspace build + `wovyr-provider`/`wovyr-agent` suites (108
 tests) pass. Not yet surfaced in the agent manifest YAML DSL or the CLI — callers
 attach parts programmatically; manifest wiring (e.g. `--image <path>`) can ride a
 later slice once a consumer needs it.
@@ -276,7 +276,7 @@ later slice once a consumer needs it.
 ## PRV-205 `[P3]` — Retry jitter + `Retry-After` — **DONE (2026-07-13)**
 
 **Problem.** Backoff is pure exponential, no jitter
-(`crates/apex-provider/src/resilience.rs:46-49`); `is_transient` keys only on the
+(`crates/wovyr-provider/src/resilience.rs:46-49`); `is_transient` keys only on the
 `Error::Provider` variant (`gateway.rs:607-609`), not distinguishing 429 vs 5xx nor
 honoring server backoff. (PRD-004 R-B.6; audit Low.)
 
@@ -285,7 +285,7 @@ honoring server backoff. (PRD-004 R-B.6; audit Low.)
 **Acceptance criteria.** A test asserts jittered delays and that a `Retry-After` hint
 is respected.
 
-**Files.** `crates/apex-provider/src/{resilience.rs,gateway.rs}`. **Size.** S.
+**Files.** `crates/wovyr-provider/src/{resilience.rs,gateway.rs}`. **Size.** S.
 **Depends on:** none.
 
 **Implementation notes (2026-07-13).** `Error::Provider(String)` became a struct
@@ -318,9 +318,9 @@ cap is deliberately huge — 10s — so the test would time out/mismatch if eith
 mechanism weren't actually wired in) plus `resilience::tests::
 jittered_backoff_is_deterministic_under_a_fixed_source`/`random_jitter_stays_within_bounds`/
 `retry_after_header_parses_as_milliseconds`/`missing_or_non_numeric_retry_after_is_none`.
-Changing the `Provider` variant's shape touched 7 files total (`apex-common/error.rs`,
-`apex-provider/{gateway,openai,anthropic}.rs`, `apex-provider/tests/chaos.rs`,
-`apex-server/agents.rs`'s error-envelope mapping, `apex-plugin/rekor.rs`'s direct
+Changing the `Provider` variant's shape touched 7 files total (`wovyr-common/error.rs`,
+`wovyr-provider/{gateway,openai,anthropic}.rs`, `wovyr-provider/tests/chaos.rs`,
+`wovyr-server/agents.rs`'s error-envelope mapping, `wovyr-plugin/rekor.rs`'s direct
 tuple constructions switched to the `Error::provider(...)` helper) — full workspace
 build/test/clippy/fmt all pass. 429-vs-5xx classification itself was already correct
 pre-existing behavior (`classify_http_error` already routed both to `Error::Provider`
@@ -335,7 +335,7 @@ now done.
 ## RAG-201 `[P1]` — Document chunking with parent-document linkage — **DONE (2026-07-13)**
 
 **Problem.** `remember_full` embeds the entire `content` as one vector
-(`crates/apex-memory/src/engine.rs:91-105`); long docs get one diluted embedding, no
+(`crates/wovyr-memory/src/engine.rs:91-105`); long docs get one diluted embedding, no
 splitter, no parent linkage. (PRD-004 R-C.1; audit High.)
 
 **Change.** Add a configurable splitter (token/char windows + overlap) that stores
@@ -345,14 +345,14 @@ the parent.
 **Acceptance criteria.** A test asserts a long document is split into linked chunks and
 that retrieval scores a relevant chunk above an irrelevant one from the same document.
 
-**Files.** `crates/apex-memory/src/engine.rs` + record model. **Size.** L.
+**Files.** `crates/wovyr-memory/src/engine.rs` + record model. **Size.** L.
 **Depends on:** none.
 
-**Implementation notes (2026-07-13).** New `apex-memory::chunk` module:
+**Implementation notes (2026-07-13).** New `wovyr-memory::chunk` module:
 `ChunkPolicy { max_chars, overlap_chars }` (default 1200/200 — ~300/~50 tokens at
 the ~4 chars/token heuristic) and `split()` — a pure, deterministic splitter over
 **character windows with word-boundary snapping** (characters as a dependency-free
-token proxy, the same documented-estimate stance as `apex_provider`'s
+token proxy, the same documented-estimate stance as `wovyr_provider`'s
 `HeuristicTokenizer`; a word is never cut mid-way, an over-long single word is kept
 whole, and overlap is clamped below the window so every step provably advances).
 **Record model:** `MemoryRecord` gained `parent_id: Option<String>` (chunk → parent
@@ -374,7 +374,7 @@ ABAC check, and a dangling `parent_id` (parent deleted) is skipped silently.
 `compress` excludes parents *and* chunks from compaction candidates outright —
 consolidating one half would tear the linkage. **Tiered backend:** migration
 `V2__parent_linkage.sql` adds the two columns + a partial index on `parent_id`
-(existing deployments fail closed with "run `apex admin migrate --target memory`"
+(existing deployments fail closed with "run `wovyr admin migrate --target memory`"
 until migrated — the MIG-A1 contract working as designed); `TieredStore::put`
 skips the Qdrant upsert for parent records. **Acceptance:**
 `engine::tests::a_long_document_is_split_into_linked_chunks` (parent marked +
@@ -408,10 +408,10 @@ cross-encoder-backed) applied to the top-N candidates; make `RRF_K` configurable
 **Acceptance criteria.** A test asserts the reranker reorders a fused candidate list
 and that it's off by default (opt-in), preserving current behavior.
 
-**Files.** `crates/apex-memory/src/engine.rs` + new `rerank.rs`. **Size.** L.
+**Files.** `crates/wovyr-memory/src/engine.rs` + new `rerank.rs`. **Size.** L.
 **Depends on:** none.
 
-**Implementation notes (2026-07-13).** New `apex-memory::rerank` module: a
+**Implementation notes (2026-07-13).** New `wovyr-memory::rerank` module: a
 `Reranker` trait (`rerank(query, candidates) -> Vec<f32>` — **scores in `[0,1]`,
 not a permutation**, so reranked relevance flows through the existing weighted
 ranker with recency/importance still applied, and stays visible in each result's
@@ -447,13 +447,13 @@ schema-shaped/bare/fenced parsing, clamping, length-mismatch and garbage errors,
 the empty-candidates short-circuit, and that the outbound request carries the
 JSON-schema constraint + numbered candidates. Not yet surfaced: the server's
 `memory:query` route and the CLI construct their engines without a reranker —
-wiring an opt-in (e.g. `APEX_MEMORY_RERANK=llm`) is a follow-on slice, as is a
+wiring an opt-in (e.g. `WOVYR_MEMORY_RERANK=llm`) is a follow-on slice, as is a
 real cross-encoder backend.
 
 ## RAG-203 `[P1]` — Semantic-cache key + embedding-model id — **DONE (2026-07-13)**
 
 **Problem.** The canonical text embedded for lookup is only the User turns
-(`crates/apex-provider/src/gateway.rs:589-597`); system prompt + tools are excluded and
+(`crates/wovyr-provider/src/gateway.rs:589-597`); system prompt + tools are excluded and
 `param_key` guards only model+temperature (`:601-603`), so same user text + different
 system/tools → wrong-context hit. Entries record no embedding-model id
 (`resilience.rs:444-449`); a changed/mixed embedding model yields silently wrong
@@ -467,7 +467,7 @@ doesn't match the current one.
 **Acceptance criteria.** Tests: same user text + different system prompt does **not**
 hit; an entry from a different embedding model is not served.
 
-**Files.** `crates/apex-provider/src/{gateway.rs,resilience.rs}`. **Size.** M.
+**Files.** `crates/wovyr-provider/src/{gateway.rs,resilience.rs}`. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-13).** **Context compatibility:** the embedded
@@ -520,7 +520,7 @@ branch to match the FTS backend's ranking character.
 **Acceptance criteria.** A test asserts BM25 ranks a term-frequency-relevant doc above
 a single-mention doc; parity smoke vs the FTS path on a shared fixture.
 
-**Files.** `crates/apex-memory/src/engine.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-memory/src/engine.rs`. **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-13).** `keyword_relevance` is now **BM25 over
 stemmed tokens** (`k1 = 1.2`, `b = 0.75`, Lucene's non-negative
@@ -556,7 +556,7 @@ deliberately scoped claim). All pre-existing keyword/hybrid tests
 ## RAG-205 `[P2]` — Real timestamps + range/time metadata filters — **DONE (2026-07-13)**
 
 **Problem.** `seq` is an insertion counter, not a timestamp
-(`crates/apex-memory/src/record.rs:66-68`), so "recency" (`engine.rs:459-465`) shifts
+(`crates/wovyr-memory/src/record.rs:66-68`), so "recency" (`engine.rs:459-465`) shifts
 as records are added and is incomparable across namespaces; filters are tag-any +
 min-importance + ABAC only (`engine.rs:349-353`). (PRD-004 R-C.5; audit Low.)
 
@@ -566,7 +566,7 @@ clock-free-core rule); add time-range and numeric-range metadata filters.
 **Acceptance criteria.** A test asserts recency uses wall-clock age and a time-range
 filter excludes out-of-window records.
 
-**Files.** `crates/apex-memory/src/{record.rs,engine.rs}`. **Size.** M.
+**Files.** `crates/wovyr-memory/src/{record.rs,engine.rs}`. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-13).** **Timestamps:** `MemoryRecord` gained
@@ -574,7 +574,7 @@ filter excludes out-of-window records.
 ingestion by the engine from a new injected `Clock` trait (`clock.rs`:
 `SystemClock` default, `ManualClock` for deterministic tests,
 `MemoryEngine::with_clock` — the same boundary-injection pattern as
-`apex-workflow`'s clock, so core ranking stays a pure function of its inputs;
+`wovyr-workflow`'s clock, so core ranking stays a pure function of its inputs;
 `remember_document` reads the clock once so a parent and all its chunks share
 one creation instant). **Recency:** ranking now decays by real wall-clock age
 — `exp(-age_ms / half_life_ms)` with `MemoryType::half_life_ms()` finally
@@ -616,7 +616,7 @@ is a follow-on, consistent with the rest of WS-C. **This closes WS-C
 ## EVL-201 `[P1]` — LLM-as-judge + semantic scoring — **DONE (2026-07-13)**
 
 **Problem.** `score` supports only `contains`/`contains_all`/`equals`
-(`crates/apex-eval/src/score.rs:24-72`); no LLM-as-judge, semantic similarity, or
+(`crates/wovyr-eval/src/score.rs:24-72`); no LLM-as-judge, semantic similarity, or
 rubric scoring. (PRD-004 R-D.1; audit High.)
 
 **Change.** Add a judge/`Scorer` abstraction: an LLM-as-judge scorer (rubric prompt →
@@ -627,7 +627,7 @@ matchers.
 semantically-correct-but-non-substring answer as passing where `contains` would fail
 (against a scripted judge provider for determinism).
 
-**Files.** `crates/apex-eval/src/score.rs` + new `judge.rs`. **Size.** M.
+**Files.** `crates/wovyr-eval/src/score.rs` + new `judge.rs`. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-13).** **Expectations:** the `Expectation` one-of
@@ -670,10 +670,10 @@ similarity via a scripted embedder, both missing-configuration paths) + 4 new
 `fixture::tests`. Not yet: wiring a judge into the CI eval gate's suites
 (EVL-202's territory) or the CLI.
 
-## EVL-202 `[P1]` — Turn `apex-eval` into a regression gate — **DONE (2026-07-13)**
+## EVL-202 `[P1]` — Turn `wovyr-eval` into a regression gate — **DONE (2026-07-13)**
 
 **Problem.** No baselines, thresholds, variance measurement, telemetry, or trend
-comparison — explicitly a prototype (`crates/apex-eval/src/lib.rs:19-26`). (PRD-004
+comparison — explicitly a prototype (`crates/wovyr-eval/src/lib.rs:19-26`). (PRD-004
 R-D.2; audit High.)
 
 **Change.** Add golden-baseline reports, pass-rate thresholds, repeat-N variance, and
@@ -683,7 +683,7 @@ committed baseline (extending the existing CI eval step).
 **Acceptance criteria.** A CI-runnable command fails when the pass rate drops below the
 baseline threshold and passes when it meets it; variance-over-N is reported.
 
-**Files.** `crates/apex-eval/src/*`, `.github/workflows/ci.yml`. **Size.** L.
+**Files.** `crates/wovyr-eval/src/*`, `.github/workflows/ci.yml`. **Size.** L.
 **Depends on:** PRV-101 (cost in reports), EVL-201.
 
 **Implementation notes (2026-07-13).** New `gate.rs`. **Golden baselines:**
@@ -706,7 +706,7 @@ byte-distinct serialized reports, so *any* nondeterminism is a visible number,
 not an invisible flake). **Committed fixtures:** `suites/capital-facts.yaml`
 (3 cases, one a judge-graded paraphrase so the gate exercises EVL-201's path
 end to end) + `baselines/capital-facts.json` (min_pass_rate 1.0). **The
-CI-runnable command:** `cargo test -p apex-eval --test regression_gate` —
+CI-runnable command:** `cargo test -p wovyr-eval --test regression_gate` —
 `committed_suite_meets_the_committed_baseline_with_zero_variance` (pass
 direction + variance-over-3 asserting `distinct_reports == 1`) and
 `the_gate_fails_a_regressed_run_against_the_same_baseline` (fail direction:
@@ -716,12 +716,12 @@ the gate *mechanism* is alive in both directions, not merely that nothing
 changed; plus `committed_baseline_and_suite_agree_on_the_case_set` (a drift
 tripwire between the two committed files). **Artifact persistence:** the gate
 test writes `report.json`/`variance.json`/`gate.json` into
-`APEX_EVAL_ARTIFACT_DIR` when set; CI's eval step (renamed "Eval regression
+`WOVYR_EVAL_ARTIFACT_DIR` when set; CI's eval step (renamed "Eval regression
 gate (FUT-006 / EVL-202)") sets it and a new `actions/upload-artifact` step
 (`if: always()`) publishes the directory as the `eval-report` artifact —
 verified locally by running the test with the env var set and inspecting the
-three JSON files. **Refresh flow:** `APEX_EVAL_UPDATE_BASELINE=1 cargo test
--p apex-eval --test regression_gate` rewrites the committed golden file from
+three JSON files. **Refresh flow:** `WOVYR_EVAL_UPDATE_BASELINE=1 cargo test
+-p wovyr-eval --test regression_gate` rewrites the committed golden file from
 the current run (then still gates against it — a fresh snapshot must gate
 clean). The CI step also now runs `llm_judge_scoring.rs` explicitly alongside
 the pre-existing suites. 9 `gate::tests` unit tests cover both directions,
@@ -735,7 +735,7 @@ artifacts) and telemetry — EVL-203 (below) covers the RAG/max_steps eval path.
 ## EVL-203 `[P2]` — Evaluate the RAG path + `max_steps` + retrieval metrics — **DONE (2026-07-13)**
 
 **Problem.** `run_suite` calls `run_agent` with a bare `RunOptions::new`, ignoring
-memory grounding and `spec.max_steps` (`crates/apex-eval/src/runner.rs:27-29`); no
+memory grounding and `spec.max_steps` (`crates/wovyr-eval/src/runner.rs:27-29`); no
 recall@k/nDCG/MRR retriever harness. (PRD-004 R-D.3; audit High/Med.)
 
 **Change.** Add a `run_agent_with_memory` eval path and honor manifest `max_steps`
@@ -745,11 +745,11 @@ fixtures.
 **Acceptance criteria.** A test grades a RAG fixture and computes recall@k against a
 labeled relevant set.
 
-**Files.** `crates/apex-eval/src/runner.rs` + new retrieval-eval module. **Size.** M.
+**Files.** `crates/wovyr-eval/src/runner.rs` + new retrieval-eval module. **Size.** M.
 **Depends on:** AIC-103, RAG-201.
 
 **Implementation notes (2026-07-13).** `run_suite_with_memory` (new, `runner.rs`)
-drives `apex_agent::run_agent_with_memory` instead of the bare `run_agent`, so a
+drives `wovyr_agent::run_agent_with_memory` instead of the bare `run_agent`, so a
 suite grades the retrieval-grounded agent a deployment actually runs; both
 entry points now funnel through a shared `run_cases` so `spec.max_steps` is
 honored on every runner path (AIC-103 already applies it inside the loop
@@ -761,8 +761,8 @@ YAML fixture (`relevant: [ids]`, per-suite `k`), and pure metric functions
 (`recall_at_k`, `reciprocal_rank`, `ndcg_at_k` with an ideal-DCG normalizer
 that accounts for `k` smaller than the relevant set) aggregated by
 `evaluate_retrieval` into a `RetrievalReport` (per-case + mean recall/MRR).
-Proven against the **real** `apex-memory` engine (not a mock), via a
-dev-only dependency on `apex-memory` (the library spine stays memory-free —
+Proven against the **real** `wovyr-memory` engine (not a mock), via a
+dev-only dependency on `wovyr-memory` (the library spine stays memory-free —
 same stance as the CLI owning its own engine adapter): `tests/rag_eval.rs`
 seeds a real `MemoryEngine`/`InMemoryStore` with two refund facts + two
 distractors, and drives both halves — `memory_grounded_suite_passes_where_
@@ -786,7 +786,7 @@ wired into CI" framing EVL-201/202 had already made untrue. This closes out
 ## SRV-201 `[P1]` — Distributed rate limiting — **DONE (2026-07-14)**
 
 **Problem.** Token buckets live in a `Mutex<HashMap>` in `AppState`
-(`crates/apex-server/src/rate_limit.rs:29-34,57-81`); N nodes each grant the full
+(`crates/wovyr-server/src/rate_limit.rs:29-34,57-81`); N nodes each grant the full
 budget. (PRD-004 R-G.5; audit High.)
 
 **Change.** Back the limiter with a shared store (Redis, reusing the existing
@@ -796,15 +796,15 @@ single-node.
 **Acceptance criteria.** A gated test asserts two limiter instances over a shared
 store enforce a combined budget, not 2×.
 
-**Files.** `crates/apex-server/src/rate_limit.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-server/src/rate_limit.rs`. **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-14).** `RateLimiter` now holds the in-process
 `LocalBuckets` (today's logic, unchanged) *plus* an optional Redis-shared
-backend behind a new `apex-server` `redis` cargo feature (same version/shape as
-`apex-provider`'s; `apex-cli` forwards it so the embedded `apex dev` picks it
-up), selected at runtime by `APEX_RATE_LIMIT_REDIS_URL` via
+backend behind a new `wovyr-server` `redis` cargo feature (same version/shape as
+`wovyr-provider`'s; `wovyr-cli` forwards it so the embedded `wovyr dev` picks it
+up), selected at runtime by `WOVYR_RATE_LIMIT_REDIS_URL` via
 `RateLimiter::from_env` — a dedicated variable rather than reusing
-`APEX_REDIS_URL`, so CI's service-container job (which sets the latter for the
+`WOVYR_REDIS_URL`, so CI's service-container job (which sets the latter for the
 breaker tests) doesn't silently flip every server test onto shared limiting.
 The shared path keeps **token-bucket semantics identical to the local one**
 (not a fixed-window approximation): the refill-then-take runs as one atomic
@@ -812,7 +812,7 @@ Lua `EVAL` inside Redis (state = a per-key hash `{t, ts}`; `ts` never moves
 backwards, so a fleet node with a slower clock can't rewind a bucket into
 double refill; token counts travel as strings because Lua→Redis integer
 replies truncate fractions), keys are namespaced per tier
-(`apex:rl:{standard|sensitive}:{key}`) so the two tiers never share a bucket,
+(`wovyr:rl:{standard|sensitive}:{key}`) so the two tiers never share a bucket,
 and every touch re-arms a `PEXPIRE` at worst-case-full-refill + slack — the
 shared-store equivalent of the local sweep. **Failure mode: degrade to
 per-node limiting, never to unlimited** — the connection is dialed lazily,
@@ -831,13 +831,13 @@ alternating across two limiter instances over one prefix, 5th rejected on
 *both* — one budget, not 2×), per-key/per-tier isolation, and continuous
 refill; and the full 129-test server suite run `--features redis` against a
 real Redis 7 container locally — all green. CI's service-container job gained
-`run_gated cargo test -p apex-server --features redis --lib rate_limit`.
+`run_gated cargo test -p wovyr-server --features redis --lib rate_limit`.
 
 ## SRV-202 `[P1]` — Per-tenant token quotas; enforce/remove dead dimensions — **DONE (2026-07-14)**
 
 **Problem.** `QuotaLimits` declares `tool_executions_per_minute` and `memory_records`
 but `admit_run` enforces only concurrent runs + daily USD cost
-(`crates/apex-tenancy/src/model.rs:125-138`, `apex-server/src/tenancy.rs:553,560`);
+(`crates/wovyr-tenancy/src/model.rs:125-138`, `wovyr-server/src/tenancy.rs:553,560`);
 cost is USD-only with no token budget, and the rate limiter is per-principal not
 per-tenant. (PRD-004 R-G.6; audit Med.)
 
@@ -847,7 +847,7 @@ dimensions; add a per-tenant rate tier.
 **Acceptance criteria.** Tests assert a token budget blocks at threshold and that the
 previously-dead dimensions are either enforced or gone.
 
-**Files.** `crates/apex-tenancy/src/{model.rs,quota.rs}`, `apex-server/src/tenancy.rs`.
+**Files.** `crates/wovyr-tenancy/src/{model.rs,quota.rs}`, `wovyr-server/src/tenancy.rs`.
 **Size.** M. **Depends on:** PRV-101 (real token accounting).
 
 **Implementation notes (2026-07-14).** Three parts. **Token budget:**
@@ -855,8 +855,8 @@ previously-dead dimensions are either enforced or gone.
 vendor-bill-independent twin of the cost budget (a local model is $0/token but
 still burns capacity). The server's `QuotaTracker` accumulates tokens alongside
 cost (`record_run_cost` → `record_run_usage(cost, tokens)`;
-`AgentResolver::record` in `apex-runtime` now takes the full
-`apex_common::Usage` so every platform's hook sees tokens without a second
+`AgentResolver::record` in `wovyr-runtime` now takes the full
+`wovyr_common::Usage` so every platform's hook sees tokens without a second
 method), `admit_run` checks it with the same observe-then-enforce boundary as
 cost (admitted while within budget; the *next* run after crossing is refused
 `429`), and the accumulator's persisted entries grew `[day, usd]` →
@@ -876,8 +876,8 @@ Neither field was ever in `openapi.yaml` or the SDKs — only the dashboard's
 settings form, updated in lockstep (`llm_tokens_per_day` input added, dead
 inputs removed; `openapi.yaml`'s quota PATCH schema and
 `docs/09-api/projects.md` §5 updated too). **Per-tenant rate tier:**
-`APEX_RATE_LIMIT_TENANT_PER_MIN` (opt-in; unset = no tier, exactly the old
-behavior) enables a third `RateLimiter` keyed `tenant:{X-Apex-Tenant}` (falling
+`WOVYR_RATE_LIMIT_TENANT_PER_MIN` (opt-in; unset = no tier, exactly the old
+behavior) enables a third `RateLimiter` keyed `tenant:{X-Wovyr-Tenant}` (falling
 back to `default`, so anonymous traffic is bounded too), checked in the same
 `enforce` middleware after the per-principal bucket so the tenant budget is
 only consumed by requests the caller's own budget admitted — and shareable
@@ -898,7 +898,7 @@ by_tenant` (two principals under one tenant exhaust the shared budget, a third
 ## SRV-203 `[P2]` — Tenant-configurable daily-cost reset boundary — **DONE (2026-07-14)**
 
 **Problem.** `current_day()` = epoch-seconds/86400, so budgets reset at 00:00 UTC for
-everyone (`crates/apex-server/src/tenancy.rs:497-502`). (PRD-004 R-G.7; audit Med.)
+everyone (`crates/wovyr-server/src/tenancy.rs:497-502`). (PRD-004 R-G.7; audit Med.)
 
 **Change.** Make the reset boundary tenant-configurable (timezone/offset), read only
 at the server boundary per the clock-free-core rule.
@@ -906,7 +906,7 @@ at the server boundary per the clock-free-core rule.
 **Acceptance criteria.** A test asserts a tenant with a non-UTC offset resets at its
 local midnight.
 
-**Files.** `crates/apex-server/src/tenancy.rs`, tenancy model. **Size.** S.
+**Files.** `crates/wovyr-server/src/tenancy.rs`, tenancy model. **Size.** S.
 **Depends on:** none.
 
 **Implementation notes (2026-07-14).**
@@ -947,7 +947,7 @@ all done.
 ## AIC-201 `[P1]` — Step-error recovery + forced final answer — **DONE (2026-07-13)**
 
 **Problem.** A provider/stream error aborts the whole run via `?`
-(`crates/apex-agent/src/runtime.rs:247`); on budget exhaustion with pending tool
+(`crates/wovyr-agent/src/runtime.rs:247`); on budget exhaustion with pending tool
 calls the loop hard-errors with no answer (`:273-278`). (PRD-004 R-A.4; audit Med.)
 
 **Change.** Retry a recoverable model-step error; on the last step, re-call the model
@@ -956,10 +956,10 @@ with tools disabled to force a final answer instead of erroring.
 **Acceptance criteria.** Tests: a transient step error retries and completes; a run at
 the step cap returns a tool-less final answer, not `Error::Runtime`.
 
-**Files.** `crates/apex-agent/src/runtime.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-agent/src/runtime.rs`. **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-13).** Both halves live in `run_agent_inner`
-(`crates/apex-agent/src/runtime.rs`), nothing else on the spine changed.
+(`crates/wovyr-agent/src/runtime.rs`), nothing else on the spine changed.
 **Step retry:** the `stream_chat` call is wrapped in a bounded re-issue loop —
 a step that fails with `Error::Provider { .. }` (the same transient
 classification the gateway's own `is_transient` uses) is re-issued up to
@@ -1010,7 +1010,7 @@ mistralrs has no real streaming (`provider.rs:38-46`). (PRD-004 R-A.5; audit Low
 **Acceptance criteria.** A test asserts tool-call-argument deltas are emitted during a
 streamed tool turn.
 
-**Files.** `crates/apex-agent/src/{runtime.rs,events.rs}`, CLI/dashboard sinks.
+**Files.** `crates/wovyr-agent/src/{runtime.rs,events.rs}`, CLI/dashboard sinks.
 **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-13).** The channel is plumbed end to end,
@@ -1065,7 +1065,7 @@ from CI as too heavy a compile).
 
 **Problem.** The shared executor's `ai` activity ignores temperature/max_tokens/tools
 and always uses the default fast model, and classifies every failure `Retryable`
-even for permanent bad-request errors (`crates/apex-runtime/src/lib.rs:197-217`).
+even for permanent bad-request errors (`crates/wovyr-runtime/src/lib.rs:197-217`).
 (PRD-004 R-A.4; audit Med.)
 
 **Change.** Let an `ai` step pin a model and pass temperature/max_tokens/response_format;
@@ -1074,7 +1074,7 @@ classify permanent (validation/bad-request) errors as non-retryable.
 **Acceptance criteria.** A test asserts an `ai` step honors a pinned model and that a
 validation error is not retried.
 
-**Files.** `crates/apex-runtime/src/lib.rs`. **Size.** M. **Depends on:** PRV-202.
+**Files.** `crates/wovyr-runtime/src/lib.rs`. **Size.** M. **Depends on:** PRV-202.
 
 **Implementation notes (2026-07-13).** The `ai` branch of
 `PlatformActivityExecutor::execute` now reads `inputs.model` (pinned via
@@ -1097,7 +1097,7 @@ agent manifest referencing an unknown tool is `Error::Config` and now fails
 its activity permanently instead of retrying into the same config error;
 admission rejections stay `Retryable` exactly as before, per the existing
 `AgentResolver::admit` contract and its test). Proven by five new
-`apex-runtime` tests against a request-recording provider:
+`wovyr-runtime` tests against a request-recording provider:
 `ai_activity_honors_pinned_model_params_and_response_format` (all four fields
 asserted on the wire request),
 `ai_activity_without_params_keeps_the_resolved_default_model` (back-compat),
@@ -1111,7 +1111,7 @@ advertise *tools* — a tool-using step is what `agent` activities are for.
 ## RUN-202 `[P2]` — Sub-agent run observability + real cost — **DONE (2026-07-13)**
 
 **Problem.** `agent` activities run with `NullSink` and record only cost
-(`crates/apex-runtime/src/lib.rs:253,257`) — which is $0 for real providers until
+(`crates/wovyr-runtime/src/lib.rs:253,257`) — which is $0 for real providers until
 PRV-101, making server budget enforcement a no-op. (PRD-004 R-B.1; audit Low.)
 
 **Change.** Attach a real event sink (or a span-emitting sink) to sub-agent runs and
@@ -1120,26 +1120,26 @@ record the PRV-101 cost against the parent project budget.
 **Acceptance criteria.** A test asserts a sub-agent activity's cost is non-zero and is
 charged to the project's daily accumulator.
 
-**Files.** `crates/apex-runtime/src/lib.rs`. **Size.** S. **Depends on:** PRV-101.
+**Files.** `crates/wovyr-runtime/src/lib.rs`. **Size.** S. **Depends on:** PRV-101.
 
 **Implementation notes (2026-07-13).** **Observability:** the `agent` branch's
-`NullSink` is replaced by a `TracingSink` (in `apex-runtime`) emitting each
+`NullSink` is replaced by a `TracingSink` (in `wovyr-runtime`) emitting each
 sub-agent run's lifecycle as structured `tracing` events under target
-`apex.runtime.agent`, keyed by the owning workflow activity id + agent name —
+`wovyr.runtime.agent`, keyed by the owning workflow activity id + agent name —
 `Start` (model/provider) and `Done` (total tokens + cost) at `info`,
 memory-retrieval and tool call/result at `debug`; token-level streams
 (`Delta`/`ToolCallDelta`/`ReasoningDelta`) deliberately unlogged (per-token log
 lines are noise, and the OTLP `agent.run` span already carries run timing).
-These flow to OTLP logs automatically via `apex-telemetry`'s existing
+These flow to OTLP logs automatically via `wovyr-telemetry`'s existing
 appender bridge — no new wiring needed. **Cost:** the accounting *plumbing*
 already existed (`AgentResolver::record` → the server's
 `tenancy::record_run_cost`) and PRV-101 already made `usage.cost_usd` real —
 what RUN-202 adds is *proof the chain actually works end to end*, which no
-test asserted: `apex-runtime`'s `agent_activity_records_a_non_zero_run_cost`
+test asserted: `wovyr-runtime`'s `agent_activity_records_a_non_zero_run_cost`
 (a recording resolver sees exactly one `record` call with cost > 0 from a
-provider that reports real usage) and `apex-server`'s
+provider that reports real usage) and `wovyr-server`'s
 `agent_activity_cost_is_charged_to_the_project_accumulator` (a full
-HTTP-submitted agent workflow with `X-Apex-Project` completes and the
+HTTP-submitted agent workflow with `X-Wovyr-Project` completes and the
 project's daily accumulator shows a non-zero spend — read back via a new
 test-only `QuotaTracker::spent_today` accessor, the read half of
 `record_run_cost`). This closes **WS-A / WS-runtime entirely** —
@@ -1161,10 +1161,10 @@ or annotate per policy.
 **Acceptance criteria.** A test asserts a configured guardrail can block/redact a
 flagged input and output; absent config, behavior is unchanged.
 
-**Files.** `crates/apex-agent/src/runtime.rs` + new `guardrail.rs`. **Size.** L.
+**Files.** `crates/wovyr-agent/src/runtime.rs` + new `guardrail.rs`. **Size.** L.
 **Depends on:** none.
 
-**Implementation notes (2026-07-14).** New `crates/apex-agent/src/guardrail.rs`:
+**Implementation notes (2026-07-14).** New `crates/wovyr-agent/src/guardrail.rs`:
 a `Guardrail` trait (`check(stage, content) -> GuardrailDecision` —
 `Allow`/`Redact(replacement)`/`Block(reason)`; `applies_to(stage)` lets a cheap
 input-only filter opt out of the output stage so its mere presence doesn't
@@ -1175,7 +1175,7 @@ every pre-existing runtime test passing unchanged). Applied at two points in
 `run_agent`: the user turn immediately after extraction — **before retrieval**,
 so a redaction also keeps PII out of the memory engine's query, and a block
 costs zero model calls — and the final answer before it returns. **Fail-closed,
-deliberately** (the `apex-eval` stance, not the memory-reranker degrade — a
+deliberately** (the `wovyr-eval` stance, not the memory-reranker degrade — a
 safety control whose failure mode is "no safety" isn't one): a guardrail
 *error* fails the run with a "failing closed" `Runtime` error; a *block*
 surfaces as `Error::Forbidden` — permanent, so neither the gateway nor a
@@ -1209,7 +1209,7 @@ as PRV-202/PRV-204; manifest/API wiring is a follow-on.
 
 ## SAF-202 `[P2]` — Prompt template/versioning registry — **DONE (2026-07-14)**
 
-**Problem.** Instructions are a raw YAML string (`crates/apex-agent/src/definition.rs:39`);
+**Problem.** Instructions are a raw YAML string (`crates/wovyr-agent/src/definition.rs:39`);
 only workflow `${...}` interpolation exists — no versioned prompt registry, variables,
 or A/B. (PRD-004 R-I.2; audit Med.)
 
@@ -1219,9 +1219,9 @@ agents reference a template + version; support A/B selection.
 **Acceptance criteria.** A test resolves a versioned template with variables and pins a
 version across runs.
 
-**Files.** `crates/apex-agent/src/` (new `prompt.rs`). **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-agent/src/` (new `prompt.rs`). **Size.** M. **Depends on:** none.
 
-**Implementation notes (2026-07-14).** New `crates/apex-agent/src/prompt.rs`:
+**Implementation notes (2026-07-14).** New `crates/wovyr-agent/src/prompt.rs`:
 a `PromptTemplate` (name + `u32` version + body + declared `VariableSpec`s —
 `string`/`integer`/`number`/`boolean` with an optional typed `default`; a
 variable without a default is required) held in a `PromptRegistry`
@@ -1273,7 +1273,7 @@ follow-on, the same stance as SAF-201/PRV-202/PRV-204.
 ## OBS-201 `[P1]` — Per-tenant / per-project metric labels — **DONE (2026-07-14)**
 
 **Problem.** RED metrics are labeled only `route`/`method`/`status`
-(`crates/apex-server/src/hardening.rs:1008-1020`); LLM cost/token metrics are labeled
+(`crates/wovyr-server/src/hardening.rs:1008-1020`); LLM cost/token metrics are labeled
 by `model` only (`config.rs:385-406`) — a noisy tenant is invisible. (PRD-004 R-L.1;
 audit Med.)
 
@@ -1283,11 +1283,11 @@ per-tenant aggregate) to request and LLM metrics.
 **Acceptance criteria.** A test asserts a request/LLM metric carries a tenant label and
 that cardinality stays bounded (a capped/hashed label set).
 
-**Files.** `crates/apex-server/src/{hardening.rs,config.rs}`. **Size.** M.
+**Files.** `crates/wovyr-server/src/{hardening.rs,config.rs}`. **Size.** M.
 **Depends on:** PRV-101 (real cost to label).
 
 **Implementation notes.** Took the ticket's "separate aggregate" branch rather than
-adding `tenant` directly to the existing `apex_api_requests_total`/
+adding `tenant` directly to the existing `wovyr_api_requests_total`/
 `_duration_seconds` (labeled `route`/`method`/`status`) — multiplying that
 dimension by a tenant count would have made an already sizeable route × method ×
 status series count multiply further. Instead: a new `TenantLabelCap`
@@ -1298,15 +1298,15 @@ past that into `"other"` — mirroring how `route_label` already falls back to
 table. One `TenantLabelCap` instance lives on `AppState` (fresh per instance — no
 process-global static, so tests stay isolated) and is shared by both new metrics so
 they agree on which tenants/projects are "known":
-- `apex_api_requests_by_tenant_total{tenant, status_class}` — wired into
+- `wovyr_api_requests_by_tenant_total{tenant, status_class}` — wired into
   `track_metrics`, the existing whole-app RED-metrics middleware; reads
-  `X-Apex-Tenant` (unverified at this outer, pre-auth layer, the same caveat as the
+  `X-Wovyr-Tenant` (unverified at this outer, pre-auth layer, the same caveat as the
   tenant rate-limit tier). Deliberately coarse on the second dimension
   (`status_class` = `2xx`/`3xx`/`4xx`/`5xx`/`other`, not the full route/status) to
   keep the worst case `tenant(≤201) × status_class(5)` rather than multiplying every
   route.
-- `apex_llm_cost_usd_by_tenant_total{tenant, project}` /
-  `apex_llm_tokens_by_tenant_total{tenant, project}` — a new
+- `wovyr_llm_cost_usd_by_tenant_total{tenant, project}` /
+  `wovyr_llm_tokens_by_tenant_total{tenant, project}` — a new
   `record_llm_usage_metrics` fn, called at every site that already resolves
   `tenancy::record_run_usage` (three in `agents.rs`: the sync, async-submit, and SSE
   run paths; one in `workflow_runner.rs`'s `StoredAgentResolver::record`, so a
@@ -1334,7 +1334,7 @@ and `workflow_runner::tests::agent_activity_cost_is_charged_to_the_project_accum
 1. Claude is a first-class provider; structured output and multimodal exist (PRV-201/202/204).
 2. Memory chunks + reranks; the semantic cache never serves a wrong-context or
    wrong-model hit; keyword parity across backends (RAG-201..205).
-3. `apex-eval` fails CI on a real quality regression and can grade RAG (EVL-201..203).
+3. `wovyr-eval` fails CI on a real quality regression and can grade RAG (EVL-201..203).
 4. Multi-node rate limits + per-tenant token quotas are correct; daily windows are
    tenant-local (SRV-201..203).
 5. The agent loop recovers from step errors and always returns an answer; guardrails
@@ -1365,9 +1365,9 @@ and `workflow_runner::tests::agent_activity_cost_is_charged_to_the_project_accum
 | 1.15.0 | 2026-07-13 | AIC-202 (richer streaming events: tool-call-argument + reasoning deltas, wire → sink → CLI/SSE/dashboard) implemented and marked DONE with implementation notes |
 | 1.16.0 | 2026-07-13 | RUN-201 (`ai` activity honors model/temperature/max_tokens/response_format; gateway errors classify Retryable-vs-Permanent by kind) implemented and marked DONE with implementation notes |
 | 1.17.0 | 2026-07-13 | RUN-202 (sub-agent runs get a TracingSink instead of NullSink; non-zero run cost proven to reach the project's daily accumulator end to end) implemented and marked DONE with implementation notes — all of WS-A / WS-runtime is now done |
-| 1.18.0 | 2026-07-14 | SRV-201 (Redis-shared rate limiting: atomic Lua token bucket, per-tier prefixes, degrade-to-per-node on Redis failure, `APEX_RATE_LIMIT_REDIS_URL` + `redis` feature, gated combined-budget test wired into CI) implemented and marked DONE with implementation notes |
+| 1.18.0 | 2026-07-14 | SRV-201 (Redis-shared rate limiting: atomic Lua token bucket, per-tier prefixes, degrade-to-per-node on Redis failure, `WOVYR_RATE_LIMIT_REDIS_URL` + `redis` feature, gated combined-budget test wired into CI) implemented and marked DONE with implementation notes |
 | 1.19.0 | 2026-07-14 | SRV-202 (`llm_tokens_per_day` budget with back-compat accumulator persistence; dead `tool_executions_per_minute`/`memory_records` dimensions removed; opt-in per-tenant rate tier) implemented and marked DONE with implementation notes |
 | 1.20.0 | 2026-07-14 | SRV-203 (per-quota `day_reset_offset_minutes` daily-reset boundary; pure `day_bucket` math; admission/recording bucket agreement) implemented and marked DONE with implementation notes — all of WS-G (Multi-Node Quotas) is now done |
 | 1.21.0 | 2026-07-14 | SAF-201 (pluggable `Guardrail` trait on input/output: block/redact, fail-closed, buffered streaming; blocklist/PII-redactor/LLM-moderator implementations) implemented and marked DONE with implementation notes |
-| 1.22.0 | 2026-07-14 | OBS-201 (bounded per-tenant/per-project metric labels: `TenantLabelCap` cardinality bound shared between a new low-cardinality `apex_api_requests_by_tenant_total` RED aggregate and new `apex_llm_{cost_usd,tokens}_by_tenant_total` LLM usage metrics, wired into every `record_run_usage` call site including the workflow sub-agent path) implemented and marked DONE with implementation notes — all of WS-L (Per-Tenant Metrics) is now done; only SAF-202 remains in Phase 2 |
+| 1.22.0 | 2026-07-14 | OBS-201 (bounded per-tenant/per-project metric labels: `TenantLabelCap` cardinality bound shared between a new low-cardinality `wovyr_api_requests_by_tenant_total` RED aggregate and new `wovyr_llm_{cost_usd,tokens}_by_tenant_total` LLM usage metrics, wired into every `record_run_usage` call site including the workflow sub-agent path) implemented and marked DONE with implementation notes — all of WS-L (Per-Tenant Metrics) is now done; only SAF-202 remains in Phase 2 |
 | 1.23.0 | 2026-07-14 | SAF-202 (prompt template/versioning registry: immutable named+versioned templates with typed variables, fail-closed `{{var}}` rendering, deterministic FNV-1a-keyed A/B arms, `spec.prompt` manifest reference + `resolve_instructions`, unresolved-reference run guard) implemented and marked DONE with implementation notes — **Phase 2 is fully done** |

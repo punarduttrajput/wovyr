@@ -16,7 +16,7 @@ Document ID: IMPL-005
 
 # 1. Purpose
 
-This document describes how to contribute to the Apex AI Platform — the workflow
+This document describes how to contribute to the Wovyr AI Platform — the workflow
 from idea to merged change, review expectations, and community norms. It is the
 canonical content behind the repository's `CONTRIBUTING.md`.
 
@@ -86,7 +86,7 @@ PRs must follow the [coding standards](coding-standards.md).
 - Docs live in `docs/` and follow the existing format (metadata header, numbered
   sections, revision history) — see any current spec for the pattern.
 - Update [SUMMARY.md](../SUMMARY.md) when adding/removing documents.
-- The canonical product name is **Apex AI Platform** (short: **Apex**).
+- The canonical product name is **Wovyr AI Platform** (short: **Wovyr**).
 
 ---
 

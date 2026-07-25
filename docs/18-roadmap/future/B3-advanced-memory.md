@@ -31,7 +31,7 @@ Exploratory — graduates only via an [ADR](../../17-adr/index.md).
 
 The memory engine today is strong but flat: hybrid retrieval (vector + keyword
 fused with RRF), a weighted ranker, MMR diversification, ABAC filtering, and
-compression, over text content ([`apex-memory`](../../../crates/apex-memory/src/lib.rs)).
+compression, over text content ([`wovyr-memory`](../../../crates/wovyr-memory/src/lib.rs)).
 It cannot reason over *relationships* between memories, store non-text modalities,
 answer "what did we know at time T," fuse memory across agents, or express
 confidence.

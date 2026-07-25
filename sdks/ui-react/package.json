@@ -1,11 +1,11 @@
 {
-  "name": "@apex/ui-react",
+  "name": "@wovyr/ui-react",
   "version": "0.1.0",
-  "description": "React renderer for Apex's generative-UI frame protocol (PRD-005 RDR-4xx): consumes trust-layer-validated UiFrames and turns human decisions into typed, boundary-validated API calls.",
+  "description": "React renderer for Wovyr's generative-UI frame protocol (PRD-005 RDR-4xx): consumes trust-layer-validated UiFrames and turns human decisions into typed, boundary-validated API calls.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/punarduttrajput/Apex.git",
+    "url": "git+https://github.com/punarduttrajput/Wovyr.git",
     "directory": "sdks/ui-react"
   },
   "type": "module",

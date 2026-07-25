@@ -4,12 +4,12 @@
 **Version:** 1.0.1
 **Status:** Draft — Day-1 target-state component diagram, unrevised since
 project inception. **Corrected 2026-07-07:** the components below are real
-(as in-process Rust modules within one `apex-server` binary — see the
+(as in-process Rust modules within one `wovyr-server` binary — see the
 [README](../../README.md)'s architecture section and each crate's own doc
 comments for the kept-current, per-crate description),
 but the "Cross-container" communication row using gRPC does not exist (no
 gRPC anywhere in the codebase) and "Event notification" is not NATS
-JetStream (no message broker exists — `apex-events` is a custom in-process
+JetStream (no message broker exists — `wovyr-events` is a custom in-process
 system; see [ADR-0005](../17-adr/ADR-0005-nats.md)'s current-status note).
 This is consistent with [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)'s
 Path A single-node decision.
@@ -20,7 +20,7 @@ Path A single-node decision.
 
 # 1. Purpose
 
-This document describes the internal component architecture of the Apex AI Platform.
+This document describes the internal component architecture of the Wovyr AI Platform.
 
 Where the Container Diagram defines deployable applications, this document defines the major software components inside those containers.
 
@@ -62,7 +62,7 @@ Components should satisfy the following principles:
 # 4. Component Hierarchy
 
 ```text
-                           Apex AI Platform
+                           Wovyr AI Platform
                                    │
         ┌──────────────────────────┼──────────────────────────┐
         │                          │                          │

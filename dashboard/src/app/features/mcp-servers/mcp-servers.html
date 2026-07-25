@@ -39,7 +39,7 @@
             <input type="radio" name="kind" value="stdio" [(ngModel)]="kind" [disabled]="!stdioEnabled()" />
             Stdio (local command)
             @if (!stdioEnabled()) {
-              <span class="muted mini"> — disabled: operator hasn't set APEX_ENABLE_MCP_STDIO=1</span>
+              <span class="muted mini"> — disabled: operator hasn't set WOVYR_ENABLE_MCP_STDIO=1</span>
             }
           </label>
         </div>

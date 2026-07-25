@@ -10,7 +10,7 @@
 
 # 1. Purpose
 
-This document defines the Persistence Layer architecture for the Apex Workflow Engine.
+This document defines the Persistence Layer architecture for the Wovyr Workflow Engine.
 
 The Persistence Layer is responsible for durable storage of all workflow runtime data while remaining independent of the underlying database technology.
 

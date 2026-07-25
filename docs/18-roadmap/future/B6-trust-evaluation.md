@@ -9,7 +9,7 @@ Document ID: FUT-006
 **File Path:** `docs/18-roadmap/future/B6-trust-evaluation.md`
 **Version:** 1.6.0
 **Status:** Exploratory — research bet, not committed. A prototype spike now
-exists in code (`crates/apex-eval`, §8) — it gathers evidence for the
+exists in code (`crates/wovyr-eval`, §8) — it gathers evidence for the
 graduation gate below, but does not itself fully satisfy it. The harness has
 been pointed at FUT-001's multi-agent workflow (§8.1) via a new `compare`
 module, and at the real `mistralrs` provider (§8.2) — 4 out of 4 real runs (1
@@ -66,13 +66,13 @@ The opportunity:
   agent runs, but (learned while building the §8 spike) it always echoes a
   fixed template regardless of the fixture, so it cannot itself produce
   per-fixture "correct" vs. "wrong" answers for scoring — a purpose-built
-  deterministic provider (mirroring `apex-agent/tests/tool_loop.rs`'s
+  deterministic provider (mirroring `wovyr-agent/tests/tool_loop.rs`'s
   `ScriptedProvider`) is still needed per suite.
-- **Telemetry** — the `apex-telemetry` `Metrics` registry can carry quality
+- **Telemetry** — the `wovyr-telemetry` `Metrics` registry can carry quality
   metrics alongside RED/cost.
 - **Policy Engine + supply chain** — the governance surface
   ([policy-engine](../../04-agent-framework/policy-engine.md)) and
-  provenance/SBOM (`apex-plugin`) are what policy-as-code and attestation mature.
+  provenance/SBOM (`wovyr-plugin`) are what policy-as-code and attestation mature.
 
 ---
 
@@ -130,11 +130,11 @@ Becomes an ADR + roadmap slot only when it can show:
 
 Per the user's explicit choice, this bet's implementation started with a
 **code spike before the ADR** — the ADR should be informed by what the spike
-teaches, not speculate ahead of it. `crates/apex-eval` (new crate, ~350 lines +
+teaches, not speculate ahead of it. `crates/wovyr-eval` (new crate, ~350 lines +
 tests) is the result.
 
 **What it is:** a small, deterministic, fixture-based evaluation harness that
-drives the real `apex_agent::run_agent` loop (no new execution path) and scores
+drives the real `wovyr_agent::run_agent` loop (no new execution path) and scores
 the final answer against a YAML-defined [`EvalSuite`]:
 - `EvalSuite::from_yaml` — validate-on-load, mirroring
   `AgentDefinition::from_yaml`'s shape (fails closed on an empty suite, an
@@ -152,7 +152,7 @@ the final answer against a YAML-defined [`EvalSuite`]:
 - `run_suite` — runs every case, scores it, aggregates an `EvalReport`
   (pass rate + accumulated `Usage`).
 
-**What it proves** (`crates/apex-eval/tests/regression_detection.rs`, run
+**What it proves** (`crates/wovyr-eval/tests/regression_detection.rs`, run
 against the real `run_agent` loop, not mocked):
 1. **Reproducibility** — the identical suite run twice against the identical
    deterministic provider produces a **byte-identical** `EvalReport`
@@ -169,12 +169,12 @@ against the real `run_agent` loop, not mocked):
   tests is deterministic. Evaluating a real, non-deterministic model — where
   "stable variance" in [§7](#7-graduation-gate)'s graduation gate actually
   means something — is untouched. **A real, local, non-deterministic provider
-  now exists in the platform** (`apex-provider`'s optional `mistralrs` feature
+  now exists in the platform** (`wovyr-provider`'s optional `mistralrs` feature
   — a small real model via [mistral.rs](https://github.com/EricLBuehler/mistral.rs),
   verified end to end running the real `run_agent` tool-calling loop against a
-  real HTTP fetch), but `apex-eval` has not been pointed at it — this narrows
+  real HTTP fetch), but `wovyr-eval` has not been pointed at it — this narrows
   the gap (a real target now exists to run against) without closing it.
-- No LLM-as-judge, no telemetry (`apex-eval` emits no metrics yet), and no CLI
+- No LLM-as-judge, no telemetry (`wovyr-eval` emits no metrics yet), and no CLI
   surface. `MockProvider` cannot drive this harness at all (§3, corrected). A
   first named CI step now exists (§8.3) but it's hard-coded assertions, not a
   quantified threshold/baseline system.
@@ -185,7 +185,7 @@ against the real `run_agent` loop, not mocked):
 
 ## 8.1 Pointed at FUT-001 (2026-07-05)
 
-`crates/apex-eval` gained a `compare` module (`src/compare.rs`) and a new
+`crates/wovyr-eval` gained a `compare` module (`src/compare.rs`) and a new
 `run_comparison` entry point: run the same fixtures both as a single agent
 (reusing `run_suite` unchanged) and as a workflow (a minimal, eval-local
 `ActivityExecutor` — the third instance of the "resolve `${...}`, dispatch
@@ -213,12 +213,12 @@ output on real tasks — that still needs the same real-provider wiring already
 recorded as open above (`mistralrs` exists but isn't pointed at this harness).
 Also: the workflow side's `EvalReport::usage` is always zero, since a workflow
 activity's output is a bare JSON value, not a `Usage`-carrying struct — per-case
-workflow cost isn't surfaced through `apex_workflow::ExecutionState` today.
+workflow cost isn't surfaced through `wovyr_workflow::ExecutionState` today.
 
 ## 8.2 A real-model run (2026-07-05)
 
-`crates/apex-eval` gained an optional `mistralrs` feature
-(`mistralrs = ["apex-provider/mistralrs"]`) and
+`crates/wovyr-eval` gained an optional `mistralrs` feature
+(`mistralrs = ["wovyr-provider/mistralrs"]`) and
 `tests/real_model_comparison.rs`, which points `run_comparison` at the real
 `MistralRsProvider` (Qwen2.5-0.5B-Instruct via mistral.rs) instead of the
 scripted `BalancedViewProvider`. Since the provider sets no sampling
@@ -242,7 +242,7 @@ visible in the `detail` string, not the binary `pass_rate` — but not enough to
 flip `contains_all` from fail to pass, so `pass_rate` was `0.0` on both sides
 and `workflow_wins()` returns `false`. This is an honest, expected outcome
 given Qwen2.5-0.5B's already-documented quality ceiling
-(`apex-provider/src/mistralrs_provider.rs`'s own module doc), not a bug in the
+(`wovyr-provider/src/mistralrs_provider.rs`'s own module doc), not a bug in the
 harness — the comparison mechanism worked exactly as designed and surfaced a
 real, nuanced, non-binary result.
 
@@ -278,7 +278,7 @@ Broader fixtures and a larger/more capable model remain the honest next step.
 ## 8.3 A first CI regression gate (2026-07-05)
 
 `.github/workflows/ci.yml`'s `rust` job gained a named **"Eval regression
-gate (FUT-006)"** step, running `apex-eval`'s two deterministic suites
+gate (FUT-006)"** step, running `wovyr-eval`'s two deterministic suites
 (`regression_detection.rs`, `multi_agent_vs_single_agent.rs`) explicitly with
 `--nocapture`. Both suites already ran as part of the preceding `cargo test
 --workspace` step — the point of the new step isn't new coverage, it's
@@ -325,9 +325,9 @@ For that reason it is the natural **first** bet to graduate.
 - [`01-product/prd-future.md`](../../01-product/prd-future.md) §6.6
 - [`04-agent-framework/policy-engine.md`](../../04-agent-framework/policy-engine.md)
 - [`15-testing/index.md`](../../15-testing/index.md)
-- `crates/apex-eval` — the prototype spike (§8), extended with `compare` (§8.1) and the real `mistralrs` run (§8.2)
+- `crates/wovyr-eval` — the prototype spike (§8), extended with `compare` (§8.1) and the real `mistralrs` run (§8.2)
 - [B1-multi-agent-systems.md](B1-multi-agent-systems.md) — the consumer of §8.1/§8.2's comparison harness
-- `crates/apex-provider/src/mistralrs_provider.rs` — the real provider §8.2 points the harness at (see its doc comment for the determinism correction)
+- `crates/wovyr-provider/src/mistralrs_provider.rs` — the real provider §8.2 points the harness at (see its doc comment for the determinism correction)
 - `.github/workflows/ci.yml` — the "Eval regression gate (FUT-006)" step (§8.3)
 
 ---
@@ -338,8 +338,8 @@ For that reason it is the natural **first** bet to graduate.
 |---------|------|-------------|
 | 1.6.0 | 2026-07-05 | Added §8.3: a named "Eval regression gate (FUT-006)" CI step running the deterministic suites with `--nocapture`, plus `println!`s so each report is visible on success. Closes "no CI gate at all"; the quantified-threshold version §4 describes is still open |
 | 1.5.0 | 2026-07-05 | §8.2: repeated the real-model run 3 more times (`real_model_comparison_variance_over_n_runs`) — all 4 runs tied identically, correcting the assumption (stated in `mistralrs_provider.rs`'s own doc and carried into this doc at 1.2.0) that this provider is "genuinely non-deterministic." Zero observed variance so far, though only across one repeated prompt on one tiny model |
-| 1.4.0 | 2026-07-05 | Added §8.2: pointed the comparison harness at the real `mistralrs` provider (new optional feature on `apex-eval`). One real run produced a tie — both paths failed the fixture, though the workflow's answer covered one of two required perspectives vs. the single agent's zero. One uncontrolled data point, not the quantified variance study the gate needs |
-| 1.3.0 | 2026-07-05 | Added §8.1: `apex-eval` gained a `compare` module pointed at FUT-001's `research-team.yaml` — proves the single-agent-vs-workflow comparison mechanism works and is reproducible on an illustrative fixture; explicitly not the real-model benchmark either bet's graduation gate needs |
-| 1.2.0 | 2026-07-05 | Noted a real, local, non-deterministic provider now exists (`apex-provider`'s `mistralrs` feature, verified end to end against a real HTTP fetch) — a real target `apex-eval` could eventually run against, closing part of §8's "not proven" gap without wiring the two together yet |
-| 1.1.0 | 2026-07-05 | Added §8 Prototype Spike: `crates/apex-eval` built and tested, proving reproducible fixture-based scoring and deterministic regression detection against the real `run_agent` loop. Corrected §3's claim about `MockProvider` (it cannot drive per-fixture scoring). Still pre-ADR — the spike gathers evidence for §7's graduation gate, it doesn't satisfy it |
+| 1.4.0 | 2026-07-05 | Added §8.2: pointed the comparison harness at the real `mistralrs` provider (new optional feature on `wovyr-eval`). One real run produced a tie — both paths failed the fixture, though the workflow's answer covered one of two required perspectives vs. the single agent's zero. One uncontrolled data point, not the quantified variance study the gate needs |
+| 1.3.0 | 2026-07-05 | Added §8.1: `wovyr-eval` gained a `compare` module pointed at FUT-001's `research-team.yaml` — proves the single-agent-vs-workflow comparison mechanism works and is reproducible on an illustrative fixture; explicitly not the real-model benchmark either bet's graduation gate needs |
+| 1.2.0 | 2026-07-05 | Noted a real, local, non-deterministic provider now exists (`wovyr-provider`'s `mistralrs` feature, verified end to end against a real HTTP fetch) — a real target `wovyr-eval` could eventually run against, closing part of §8's "not proven" gap without wiring the two together yet |
+| 1.1.0 | 2026-07-05 | Added §8 Prototype Spike: `crates/wovyr-eval` built and tested, proving reproducible fixture-based scoring and deterministic regression detection against the real `run_agent` loop. Corrected §3's claim about `MockProvider` (it cannot drive per-fixture scoring). Still pre-ADR — the spike gathers evidence for §7's graduation gate, it doesn't satisfy it |
 | 1.0.0 | 2026-07-05 | Initial exploration doc for the trust-&-evaluation research bet |

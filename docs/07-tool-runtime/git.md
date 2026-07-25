@@ -80,7 +80,7 @@ are never cached.
 # 7. Example
 
 ```bash
-apex tools invoke git.diff --input '{"cwd":"/workspace/repo"}'
+wovyr tools invoke git.diff --input '{"cwd":"/workspace/repo"}'
 ```
 
 ---

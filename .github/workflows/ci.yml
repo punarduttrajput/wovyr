@@ -1,4 +1,4 @@
-# CI pipeline for the Apex AI Platform.
+# CI pipeline for the Wovyr AI Platform.
 # Mirrors docs/19-implementation-guide/build-system.md §8:
 #   fmt+clippy → build → unit → integration
 # Automated security scanning (docs/15-testing/security-testing.md §8) gates the
@@ -10,12 +10,12 @@
 # explicitly even though they already execute as part of `cargo test --workspace`
 # above — so a failure reads as a specific, legible finding rather than being buried
 # in the full test count:
-#   - RM-GA-P1 SEC-105's negative-authorization matrix (`crates/apex-server/tests/
+#   - RM-GA-P1 SEC-105's negative-authorization matrix (`crates/wovyr-server/tests/
 #     authz_matrix.rs`): every mutating/secret/KMS/plugin/marketplace/audit route
 #     must reject a missing or under-scoped credential. A route added without a
 #     matching table entry fails its own hand-maintained coverage tripwire.
 #   - FUT-006's eval regression gate (docs/18-roadmap/future/B6-trust-evaluation.md
-#     §8.3): apex-eval's deterministic fixture-based suites, run with --nocapture so
+#     §8.3): wovyr-eval's deterministic fixture-based suites, run with --nocapture so
 #     pass rates are visible in the log.
 # RM-GA-P2 CI-901 adds the feature matrix (`feature-matrix` below): the `rust` job
 # only ever compiles default features, so feature-gated code was never linted and
@@ -28,7 +28,7 @@
 # real server, not mocks) only ever ran manually — nothing stopped a handler's
 # response shape from silently diverging from the contract the already-published
 # PyPI SDK was written against. Both suites skip cleanly (not fail) when no server
-# answers, so the job boots a real `apex dev` and waits for `/healthz` before
+# answers, so the job boots a real `wovyr dev` and waits for `/healthz` before
 # running them, rather than relying on that offline fallback ever exercising them.
 # RM-AIM-P3 DEP-301 adds `systemd-install`: runs `deployment/install.sh` for real
 # on a genuine systemd host (the ubuntu-latest runner is a full VM, not a
@@ -99,35 +99,35 @@ jobs:
       # under-scoped principal (403 expected), or if the route table's hand-maintained
       # coverage count has drifted from the server's actual route registrations.
       - name: Negative-authorization gate (SEC-105)
-        run: cargo test -p apex-server --test authz_matrix -- --nocapture
+        run: cargo test -p wovyr-server --test authz_matrix -- --nocapture
 
-      # FUT-006 eval regression gate: apex-eval's deterministic fixture-based
+      # FUT-006 eval regression gate: wovyr-eval's deterministic fixture-based
       # suites, named explicitly (not folded silently into the step above) so
       # a failure here reads as "quality regression detected," and run with
       # --nocapture so each suite's EvalReport/ComparisonReport (pass rates,
       # per-case detail) is visible in the log. Scripted deterministic
-      # providers only — the real `mistralrs` path (crates/apex-eval/tests/
+      # providers only — the real `mistralrs` path (crates/wovyr-eval/tests/
       # real_model_comparison.rs) stays off in CI, same as every other
       # optional/expensive feature-gated test in this workspace (Redis,
       # Qdrant, Postgres): it needs network access to download model weights
       # and real CPU inference time neither is guaranteed here.
       # RM-AIM-P2 EVL-202 makes the gate *quantified*: regression_gate runs the
-      # committed suite (crates/apex-eval/suites/) against the committed golden
-      # baseline (crates/apex-eval/baselines/), fails on a dropped pass rate or
+      # committed suite (crates/wovyr-eval/suites/) against the committed golden
+      # baseline (crates/wovyr-eval/baselines/), fails on a dropped pass rate or
       # any per-case regression, reports variance over N repeated runs, and
-      # writes report/variance/gate JSON into APEX_EVAL_ARTIFACT_DIR — uploaded
+      # writes report/variance/gate JSON into WOVYR_EVAL_ARTIFACT_DIR — uploaded
       # below so every CI run's eval scores persist as an inspectable artifact.
       # To refresh the baseline after an intentional change:
-      # APEX_EVAL_UPDATE_BASELINE=1 cargo test -p apex-eval --test regression_gate
+      # WOVYR_EVAL_UPDATE_BASELINE=1 cargo test -p wovyr-eval --test regression_gate
       - name: Eval regression gate (FUT-006 / EVL-202)
         env:
-          APEX_EVAL_ARTIFACT_DIR: ${{ github.workspace }}/eval-artifacts
+          WOVYR_EVAL_ARTIFACT_DIR: ${{ github.workspace }}/eval-artifacts
         run: |
-          cargo test -p apex-eval --test regression_gate -- --nocapture
-          cargo test -p apex-eval --test regression_detection -- --nocapture
-          cargo test -p apex-eval --test multi_agent_vs_single_agent -- --nocapture
-          cargo test -p apex-eval --test llm_judge_scoring -- --nocapture
-          cargo test -p apex-eval --test rag_eval -- --nocapture
+          cargo test -p wovyr-eval --test regression_gate -- --nocapture
+          cargo test -p wovyr-eval --test regression_detection -- --nocapture
+          cargo test -p wovyr-eval --test multi_agent_vs_single_agent -- --nocapture
+          cargo test -p wovyr-eval --test llm_judge_scoring -- --nocapture
+          cargo test -p wovyr-eval --test rag_eval -- --nocapture
       - name: Upload eval artifacts (EVL-202)
         if: always()
         uses: actions/upload-artifact@v4
@@ -205,7 +205,7 @@ jobs:
   # never once completed successfully in this repo's CI history (every run,
   # including ones predating this milestone, failed before ever reaching a
   # coverage percentage). The proximate cause was almost certainly the same
-  # root issue QA-401 found and fixed: `apex-tools/tests/sandbox_backends.rs`
+  # root issue QA-401 found and fixed: `wovyr-tools/tests/sandbox_backends.rs`
   # had no feature gate, so it ran unconditionally inside `cargo llvm-cov
   # --workspace` too (that command runs the workspace's tests exactly like
   # `cargo test --workspace` does, just instrumented) and hit the same 3
@@ -285,7 +285,7 @@ jobs:
         run: cargo llvm-cov report --fail-under-lines "$COVERAGE_FLOOR_LINES"
 
   # DX-302 (benchmark half): criterion benchmarks over the budgeting hot path
-  # (apex-provider/benches/tokenizer.rs), tracked across runs with
+  # (wovyr-provider/benches/tokenizer.rs), tracked across runs with
   # github-action-benchmark against a cache-persisted baseline — a run whose
   # benchmarks land >150% of the baseline fails the job (the threshold
   # tolerates shared-runner noise; a real algorithmic regression is far
@@ -305,7 +305,7 @@ jobs:
 
       - name: Run criterion benches (bencher output)
         run: |
-          cargo bench -p apex-provider --bench tokenizer -- --output-format bencher \
+          cargo bench -p wovyr-provider --bench tokenizer -- --output-format bencher \
             | tee bench-output.txt
 
       - name: Restore benchmark baseline
@@ -335,7 +335,7 @@ jobs:
   # a multi-tens-of-minutes compile that would dominate the whole pipeline — the
   # same cost/benefit call that keeps its runtime tests out of CI (see the eval-gate
   # comment above). It remains compilable locally via
-  #   cargo clippy -p apex-provider --features mistralrs
+  #   cargo clippy -p wovyr-provider --features mistralrs
   feature-matrix:
     name: feature matrix (clippy each feature)
     runs-on: ubuntu-latest
@@ -371,12 +371,12 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: apex
-          POSTGRES_PASSWORD: apex
-          POSTGRES_DB: apex
+          POSTGRES_USER: wovyr
+          POSTGRES_PASSWORD: wovyr
+          POSTGRES_DB: wovyr
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U apex"
+          --health-cmd "pg_isready -U wovyr"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -402,28 +402,28 @@ jobs:
       # is avoided here. No credentials are baked into the image itself; MinIO
       # falls back to its own long-standing default (`minioadmin`/`minioadmin`)
       # when `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` aren't set, which is what
-      # the `APEX_S3_*` env vars below point the S3 client at.
+      # the `WOVYR_S3_*` env vars below point the S3 client at.
       minio:
         image: fclairamb/minio-github-actions
         ports: ["9000:9000"]
     env:
-      APEX_WORKFLOW_POSTGRES_URL: postgres://apex:apex@localhost:5432/apex
-      APEX_MARKETPLACE_POSTGRES_URL: postgres://apex:apex@localhost:5432/apex
-      APEX_MEMORY_POSTGRES_URL: postgres://apex:apex@localhost:5432/apex
-      APEX_S3_ENDPOINT: http://localhost:9000
-      APEX_S3_REGION: us-east-1
-      APEX_S3_ACCESS_KEY_ID: minioadmin
-      APEX_S3_SECRET_ACCESS_KEY: minioadmin
-      APEX_S3_TEST_BUCKET: apex-ci-backups
-      APEX_MEMORY_QDRANT_URL: http://localhost:6333
-      APEX_QDRANT_URL: http://localhost:6333
-      APEX_REDIS_URL: redis://localhost:6379
+      WOVYR_WORKFLOW_POSTGRES_URL: postgres://wovyr:wovyr@localhost:5432/wovyr
+      WOVYR_MARKETPLACE_POSTGRES_URL: postgres://wovyr:wovyr@localhost:5432/wovyr
+      WOVYR_MEMORY_POSTGRES_URL: postgres://wovyr:wovyr@localhost:5432/wovyr
+      WOVYR_S3_ENDPOINT: http://localhost:9000
+      WOVYR_S3_REGION: us-east-1
+      WOVYR_S3_ACCESS_KEY_ID: minioadmin
+      WOVYR_S3_SECRET_ACCESS_KEY: minioadmin
+      WOVYR_S3_TEST_BUCKET: wovyr-ci-backups
+      WOVYR_MEMORY_QDRANT_URL: http://localhost:6333
+      WOVYR_QDRANT_URL: http://localhost:6333
+      WOVYR_REDIS_URL: redis://localhost:6379
       # RM-AR-P1 QA-403: a second, TLS-enabled Postgres for the sslmode=require
-      # leg — distinct from APEX_WORKFLOW_POSTGRES_URL's plaintext instance
+      # leg — distinct from WOVYR_WORKFLOW_POSTGRES_URL's plaintext instance
       # above (a `services:` container can't be given the custom cert/key mount
       # a TLS setup needs, so this one is started as an ordinary `docker run`
       # step instead; see "Start a TLS-enabled Postgres" below).
-      APEX_WORKFLOW_POSTGRES_TLS_URL: postgres://apex:apex@localhost:5433/apex?sslmode=require
+      WOVYR_WORKFLOW_POSTGRES_TLS_URL: postgres://wovyr:wovyr@localhost:5433/wovyr?sslmode=require
     steps:
       - uses: actions/checkout@v4
 
@@ -445,7 +445,7 @@ jobs:
       # RM-AR-P1 QA-403: wait for MinIO, then create the test bucket via the
       # official `mc` client — this S3 client only ever does PUT/GET/
       # ListObjectsV2 against an already-existing bucket (matching production
-      # scope: an operator provisions the bucket, `apex admin backup` doesn't),
+      # scope: an operator provisions the bucket, `wovyr admin backup` doesn't),
       # so CI has to do that provisioning step itself.
       - name: Wait for MinIO and create the test bucket
         run: |
@@ -460,12 +460,12 @@ jobs:
           done
           curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
-          mc alias set ci "$APEX_S3_ENDPOINT" "$APEX_S3_ACCESS_KEY_ID" "$APEX_S3_SECRET_ACCESS_KEY"
-          mc mb "ci/$APEX_S3_TEST_BUCKET"
+          mc alias set ci "$WOVYR_S3_ENDPOINT" "$WOVYR_S3_ACCESS_KEY_ID" "$WOVYR_S3_SECRET_ACCESS_KEY"
+          mc mb "ci/$WOVYR_S3_TEST_BUCKET"
 
       # RM-AR-P1 QA-403: a genuinely TLS-enabled Postgres for the
       # `resolve_tls_mode`/`sslmode=require` path — a plain `services:` Postgres
-      # (the APEX_WORKFLOW_POSTGRES_URL instance above) has no way to be handed
+      # (the WOVYR_WORKFLOW_POSTGRES_URL instance above) has no way to be handed
       # a custom cert/key mount, since GitHub Actions services containers can't
       # take extra bind mounts before the repo is even checked out. This starts
       # a second Postgres as an ordinary `docker run` step instead (Docker
@@ -487,13 +487,13 @@ jobs:
 
           docker run -d --name pg-tls \
             -p 5433:5432 \
-            -e POSTGRES_USER=apex -e POSTGRES_PASSWORD=apex -e POSTGRES_DB=apex \
+            -e POSTGRES_USER=wovyr -e POSTGRES_PASSWORD=wovyr -e POSTGRES_DB=wovyr \
             -v /tmp/pg-tls-certs:/certs:ro \
             postgres:16 \
             -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
 
           for i in $(seq 1 30); do
-            docker exec pg-tls pg_isready -U apex && exit 0
+            docker exec pg-tls pg_isready -U wovyr && exit 0
             sleep 2
           done
           echo "TLS postgres never became ready" >&2
@@ -508,22 +508,22 @@ jobs:
       - name: Migrate Postgres schemas (workflow, memory, marketplace)
         run: |
           set -euo pipefail
-          cargo run -p apex-cli --features postgres,tiered-memory -- admin migrate \
-            --target workflow --database-url "$APEX_WORKFLOW_POSTGRES_URL"
-          cargo run -p apex-cli --features postgres,tiered-memory -- admin migrate \
-            --target memory --database-url "$APEX_MEMORY_POSTGRES_URL"
-          cargo run -p apex-cli --features postgres,tiered-memory -- admin migrate \
-            --target marketplace --database-url "$APEX_MARKETPLACE_POSTGRES_URL"
+          cargo run -p wovyr-cli --features postgres,tiered-memory -- admin migrate \
+            --target workflow --database-url "$WOVYR_WORKFLOW_POSTGRES_URL"
+          cargo run -p wovyr-cli --features postgres,tiered-memory -- admin migrate \
+            --target memory --database-url "$WOVYR_MEMORY_POSTGRES_URL"
+          cargo run -p wovyr-cli --features postgres,tiered-memory -- admin migrate \
+            --target marketplace --database-url "$WOVYR_MARKETPLACE_POSTGRES_URL"
           # QA-403's TLS instance — `run_migrations` resolves TLS via the same
           # `resolve_tls_mode`/`sslmode=require` path `connect` uses.
-          cargo run -p apex-cli --features postgres,tiered-memory -- admin migrate \
-            --target workflow --database-url "$APEX_WORKFLOW_POSTGRES_TLS_URL"
+          cargo run -p wovyr-cli --features postgres,tiered-memory -- admin migrate \
+            --target workflow --database-url "$WOVYR_WORKFLOW_POSTGRES_TLS_URL"
 
       # RM-GA-P4 HLTH-902: the CLI's marketplace commands (publish/search/get/report)
       # call the sync `postgres` crate's `Client::connect` directly from this
       # `#[tokio::main]` binary's async `run()` — which panics ("Cannot start a
       # runtime from within a runtime") unless wrapped in `spawn_blocking`, the exact
-      # bug `apex-server`'s `with_registry` already fixed on the server side. Nothing
+      # bug `wovyr-server`'s `with_registry` already fixed on the server side. Nothing
       # above exercises the CLI binary itself against Postgres (only the underlying
       # crates' own tests), so this bug shipped undetected even after CI-901 landed.
       # A plain `plugin search` against the just-migrated marketplace schema is
@@ -532,10 +532,10 @@ jobs:
       - name: CLI marketplace command against Postgres — no panic (HLTH-902)
         run: |
           set -euo pipefail
-          out=$(cargo run -p apex-cli --features postgres -- plugin search 2>&1)
+          out=$(cargo run -p wovyr-cli --features postgres -- plugin search 2>&1)
           echo "$out"
           if echo "$out" | grep -qi "panicked"; then
-            echo "::error::apex plugin search panicked against a Postgres-backed registry" >&2
+            echo "::error::wovyr plugin search panicked against a Postgres-backed registry" >&2
             exit 1
           fi
 
@@ -554,34 +554,34 @@ jobs:
               exit 1
             fi
           }
-          run_gated cargo test -p apex-workflow --features postgres --test postgres_store
-          run_gated cargo test -p apex-marketplace --features postgres --test postgres_store
-          run_gated cargo test -p apex-memory --features tiered --test tiered_backend
-          run_gated cargo test -p apex-provider --features qdrant --test semantic_cache_qdrant
-          run_gated cargo test -p apex-provider --features redis --test redis_breaker
+          run_gated cargo test -p wovyr-workflow --features postgres --test postgres_store
+          run_gated cargo test -p wovyr-marketplace --features postgres --test postgres_store
+          run_gated cargo test -p wovyr-memory --features tiered --test tiered_backend
+          run_gated cargo test -p wovyr-provider --features qdrant --test semantic_cache_qdrant
+          run_gated cargo test -p wovyr-provider --features redis --test redis_breaker
           # SRV-201: shared rate limiting — inline (RateLimiter is pub(crate)), so
           # filter the lib suite to the rate_limit module rather than a tests/ file.
-          run_gated cargo test -p apex-server --features redis --lib rate_limit
+          run_gated cargo test -p wovyr-server --features redis --lib rate_limit
           # RM-AR-P1 QA-401: SRV-307 fleet-shared concurrency — also inline
           # (QuotaTracker/admit_run are pub(crate)), filter to tenancy::redis_tests.
           # This was "proven"/"closed" in the roadmap but invoked by no CI job
           # before this — closing that gap is QA-401's whole point.
-          run_gated cargo test -p apex-server --features redis --lib tenancy::redis_tests
+          run_gated cargo test -p wovyr-server --features redis --lib tenancy::redis_tests
           # RM-AR-P1 QA-403: the S3 SigV4 backup/restore round trip against a
-          # real MinIO endpoint — the `apex-cli` binary's own test (no lib
+          # real MinIO endpoint — the `wovyr-cli` binary's own test (no lib
           # target to run as a separate `tests/` integration file against; see
-          # `apps/apex-cli/src/admin.rs`'s test module).
-          run_gated cargo test -p apex-cli --bin apex \
+          # `apps/wovyr-cli/src/admin.rs`'s test module).
+          run_gated cargo test -p wovyr-cli --bin wovyr \
             admin::tests::s3_backup_restore_round_trips_against_a_live_endpoint
           # RM-AR-P1 QA-403: the real rustls TLS handshake path
           # (`resolve_tls_mode`'s `sslmode=require` branch), against the
           # TLS-enabled Postgres started above — not just the pure
           # connection-string-parsing unit tests in `postgres.rs`.
-          run_gated cargo test -p apex-workflow --features postgres --test postgres_store \
+          run_gated cargo test -p wovyr-workflow --features postgres --test postgres_store \
             connects_over_a_real_tls_handshake_with_sslmode_require
 
   # RM-AR-P1 QA-401: the container/gVisor sandbox-backend suite
-  # (crates/apex-tools/tests/sandbox_backends.rs, 17 tests) was "proven"/"closed"
+  # (crates/wovyr-tools/tests/sandbox_backends.rs, 17 tests) was "proven"/"closed"
   # in the roadmap but invoked by no CI job before this. Worse: the file had no
   # feature gate at all, so it silently ran unconditionally inside the plain
   # `rust` job's `cargo test --workspace` on every push whenever that runner
@@ -666,7 +666,7 @@ jobs:
         run: |
           set -euo pipefail
           out=$(mktemp)
-          cargo test -p apex-tools --features sandbox-integration-tests \
+          cargo test -p wovyr-tools --features sandbox-integration-tests \
             --test sandbox_backends -- --nocapture --skip firecracker \
             2>&1 | tee "$out"
           if grep -q "skipping:" "$out"; then
@@ -674,11 +674,11 @@ jobs:
             exit 1
           fi
 
-  # RM-GA-P4 API-704: the API contract gate (PRD-003 R-7.4). Boots a real `apex
+  # RM-GA-P4 API-704: the API contract gate (PRD-003 R-7.4). Boots a real `wovyr
   # dev` server from this PR's code, then runs `redocly lint` and both SDKs'
   # integration suites against it — a required gate, not an informational one:
-  # `APEX_ALLOW_ANONYMOUS=1` (loopback-only, so this is safe) and
-  # `APEX_PLATFORM_ADMINS=sdk-test-admin` are exactly what both suites'
+  # `WOVYR_ALLOW_ANONYMOUS=1` (loopback-only, so this is safe) and
+  # `WOVYR_PLATFORM_ADMINS=sdk-test-admin` are exactly what both suites'
   # docstrings say they need to exercise every route, including the org/project
   # ones that have no anonymous-default-tenant bypass — without them the suites
   # would silently skip instead of actually gating anything.
@@ -686,8 +686,8 @@ jobs:
     name: API contract gate (redocly lint + TS/Python SDK suites)
     runs-on: ubuntu-latest
     env:
-      APEX_ALLOW_ANONYMOUS: "1"
-      APEX_PLATFORM_ADMINS: sdk-test-admin
+      WOVYR_ALLOW_ANONYMOUS: "1"
+      WOVYR_PLATFORM_ADMINS: sdk-test-admin
     steps:
       - uses: actions/checkout@v4
 
@@ -711,12 +711,12 @@ jobs:
       # for the rest of the job (same runner VM, not a separate container) until
       # the cleanup step below kills it. `$!` must be captured in this same
       # `run:` block — it only refers to the immediately-preceding background job.
-      - name: Start apex dev server
+      - name: Start wovyr dev server
         run: |
-          cargo run -p apex-cli -- dev > apex-dev.log 2>&1 &
-          echo $! > apex-dev.pid
+          cargo run -p wovyr-cli -- dev > wovyr-dev.log 2>&1 &
+          echo $! > wovyr-dev.pid
 
-      # A cold cache compiles apex-cli's full dependency tree on first boot, same
+      # A cold cache compiles wovyr-cli's full dependency tree on first boot, same
       # as services-integration's migration step below it — a generous window
       # avoids flaking on that, not on the server itself being slow to start.
       - name: Wait for the server to be ready
@@ -725,8 +725,8 @@ jobs:
             curl -fsS http://127.0.0.1:8080/healthz > /dev/null 2>&1 && exit 0
             sleep 3
           done
-          echo "::error::apex dev server never became ready" >&2
-          cat apex-dev.log
+          echo "::error::wovyr dev server never became ready" >&2
+          cat wovyr-dev.log
           exit 1
 
       # `npm test` = lint:openapi (redocly, against the *generated*
@@ -748,11 +748,11 @@ jobs:
 
       - name: Server log
         if: always()
-        run: cat apex-dev.log || true
+        run: cat wovyr-dev.log || true
 
-      - name: Stop apex dev server
+      - name: Stop wovyr dev server
         if: always()
-        run: kill "$(cat apex-dev.pid)" 2>/dev/null || true
+        run: kill "$(cat wovyr-dev.pid)" 2>/dev/null || true
 
   security:
     name: dependency + secret scanning
@@ -800,12 +800,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build the apex image
+      - name: Build the wovyr image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deployment/docker/Dockerfile
-          tags: apex:ci
+          tags: wovyr:ci
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -815,7 +815,7 @@ jobs:
       - name: Scan image for vulnerabilities (Trivy)
         uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: apex:ci
+          image-ref: wovyr:ci
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
@@ -832,19 +832,19 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build the apex-cli release binary
-        run: cargo build --release -p apex-cli
+      - name: Build the wovyr-cli release binary
+        run: cargo build --release -p wovyr-cli
 
       - name: Run the install script
         run: sudo ./deployment/install.sh
 
       - name: Enable and start the service
         run: |
-          sudo systemctl enable --now apex
+          sudo systemctl enable --now wovyr
           # Give the unit a moment before asserting it's actually up, rather
           # than racing the very first health check.
           sleep 2
-          sudo systemctl is-active apex
+          sudo systemctl is-active wovyr
 
       - name: Wait for /healthz
         run: |
@@ -852,21 +852,21 @@ jobs:
             curl -fsS http://127.0.0.1:8080/healthz > /dev/null 2>&1 && exit 0
             sleep 1
           done
-          echo "::error::apex.service never became healthy" >&2
-          sudo systemctl status apex --no-pager || true
-          sudo journalctl -u apex --no-pager || true
+          echo "::error::wovyr.service never became healthy" >&2
+          sudo systemctl status wovyr --no-pager || true
+          sudo journalctl -u wovyr --no-pager || true
           exit 1
 
       - name: "Re-run install.sh (idempotency: must not clobber the env file)"
         run: |
-          sudo md5sum /etc/apex/apex.env > /tmp/env-before.md5
+          sudo md5sum /etc/wovyr/wovyr.env > /tmp/env-before.md5
           sudo ./deployment/install.sh
           sudo md5sum -c /tmp/env-before.md5
 
       - name: Service log (always shown for debugging)
         if: always()
-        run: sudo journalctl -u apex --no-pager || true
+        run: sudo journalctl -u wovyr --no-pager || true
 
       - name: Stop the service
         if: always()
-        run: sudo systemctl disable --now apex || true
+        run: sudo systemctl disable --now wovyr || true

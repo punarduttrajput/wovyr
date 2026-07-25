@@ -1,14 +1,14 @@
 **Document ID:** EXEC-002
 **Version:** 1.0.0
 **Status:** Draft
-**Owner:** Apex AI Platform Team
+**Owner:** Wovyr AI Platform Team
 **Last Updated:** 2026-06-26
 
 ---
 
 # Purpose
 
-This document defines the mission of the Apex AI Platform.
+This document defines the mission of the Wovyr AI Platform.
 
 While the Vision describes **where the platform is going**, the Mission defines **what the project does every day** to achieve that vision.
 
@@ -32,7 +32,7 @@ Today's AI application ecosystem presents several recurring challenges:
 * Vendor lock-in limits portability across AI providers and deployment environments.
 * Enterprise requirements such as auditing, governance, security, and scalability are often secondary considerations.
 
-Apex AI Platform aims to provide an integrated foundation that addresses these challenges while remaining modular and extensible.
+Wovyr AI Platform aims to provide an integrated foundation that addresses these challenges while remaining modular and extensible.
 
 ---
 
@@ -224,7 +224,7 @@ The engineering organization follows these architectural approaches where they a
 
 # Target Outcomes
 
-Within five years, Apex AI Platform aims to provide:
+Within five years, Wovyr AI Platform aims to provide:
 
 * A production-ready workflow engine
 * A provider-agnostic LLM gateway

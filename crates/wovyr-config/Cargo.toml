@@ -1,0 +1,14 @@
+[package]
+name = "wovyr-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Shared `~/.wovyr` directory layout, WOVYR_* env-var reading, and KMS/secrets backend construction for wovyr-server and wovyr-cli (RM-GA-P4 HLTH-903)."
+
+[dependencies]
+wovyr-common.workspace = true
+wovyr-kms.workspace = true
+wovyr-secrets.workspace = true
+tracing.workspace = true

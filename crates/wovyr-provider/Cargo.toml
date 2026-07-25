@@ -1,0 +1,69 @@
+[package]
+name = "wovyr-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Provider SDK and LLM gateway: a vendor-neutral chat interface for the Wovyr AI Platform."
+
+[features]
+# Redis-shared circuit-breaker state, so a fleet of gateways reacts to a failing
+# provider consistently. Off by default (pulls the redis client).
+redis = ["dep:redis"]
+# Qdrant-backed distributed semantic cache (shared across a gateway fleet). Uses the
+# reqwest client already in deps; off by default to keep the surface opt-in. Needs
+# tokio's `sync` feature for its internal `Mutex` — wired here rather than the base
+# `[dependencies]` tokio entry so a non-qdrant build doesn't pay for it (RM-GA-P4
+# HLTH-904).
+qdrant = ["tokio/sync"]
+# A real, local, offline LLM (mistral.rs) as an AIProvider backend. Off by default —
+# pulls a large inference-engine dependency and, at runtime, downloads model weights.
+# Deliberately not chained into Gateway::from_env()'s default resolution; a caller
+# opts in explicitly via MistralRsProvider::from_env(). Needs tokio's multi-threaded
+# scheduler for the `mistralrs_research` example's own `#[tokio::main]`.
+mistralrs = ["dep:mistralrs", "tokio/rt-multi-thread"]
+
+[dependencies]
+wovyr-common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures = "0.3"
+async-stream = "0.3"
+reqwest.workspace = true
+# `macros` for the hedged-dispatch `tokio::select!`; `time` for retry-backoff sleeps
+# (RM-GA-P4 HLTH-904 — the caller's runtime supplies `rt`, so this crate's library
+# code doesn't need it itself).
+tokio = { workspace = true, features = ["macros", "time"] }
+tracing.workspace = true
+# Retry-jitter source (RM-AIM-P2 PRV-205) — injected behind the `Jitter` trait so
+# core retry logic stays deterministic in tests; only `RandomJitter` touches this.
+rand = "0.8"
+redis = { version = "0.24", default-features = false, features = ["tokio-comp"], optional = true }
+# Pure-Rust default features (no CUDA/Metal/MKL, no C compiler needed) — chosen
+# deliberately for portability over this backend's max performance.
+mistralrs = { version = "0.8", optional = true }
+
+[[example]]
+name = "mistralrs_research"
+required-features = ["mistralrs"]
+
+[dev-dependencies]
+# `rt` to actually execute `#[tokio::test]`s; `test-util` for the paused-clock hedging
+# tests (`start_paused = true`).
+tokio = { workspace = true, features = ["rt", "test-util"] }
+# For the mistralrs_research example only (a dev-dependency cycle back to
+# wovyr-provider is fine — Cargo excludes dev-deps from the graph it resolves
+# for downstream consumers).
+wovyr-agent.workspace = true
+wovyr-tools.workspace = true
+# DX-302: criterion benchmarks over the budgeting hot path (benches/tokenizer.rs).
+# Default features off — no plotters/HTML reports; CI consumes `--output-format
+# bencher` text and tracks it with github-action-benchmark.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "tokenizer"
+harness = false

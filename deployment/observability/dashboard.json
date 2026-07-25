@@ -1,6 +1,6 @@
 {
-  "title": "Apex — RED + LLM Cost/Tokens",
-  "uid": "apex-red-llm",
+  "title": "Wovyr — RED + LLM Cost/Tokens",
+  "uid": "wovyr-red-llm",
   "description": "Starter dashboard (RM-GA-P4 OBS-803) over the series RM-GA-P4 OBS-801's `hardening::track_metrics` and the LLM/webhook counters emit. Import into Grafana with a Prometheus datasource named `Prometheus` (or edit each panel's `datasource` field to match an existing one).",
   "schemaVersion": 39,
   "version": 1,
@@ -8,14 +8,14 @@
   "timezone": "utc",
   "time": { "from": "now-6h", "to": "now" },
   "refresh": "30s",
-  "tags": ["apex", "red", "llm"],
+  "tags": ["wovyr", "red", "llm"],
   "templating": {
     "list": [
       {
         "name": "route",
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "Prometheus" },
-        "query": "label_values(apex_api_requests_total, route)",
+        "query": "label_values(wovyr_api_requests_total, route)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
@@ -33,7 +33,7 @@
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "targets": [
         {
-          "expr": "sum(rate(apex_api_requests_total{route=~\"$route\"}[5m])) by (route)",
+          "expr": "sum(rate(wovyr_api_requests_total{route=~\"$route\"}[5m])) by (route)",
           "legendFormat": "{{route}}"
         }
       ]
@@ -47,7 +47,7 @@
       "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] },
       "targets": [
         {
-          "expr": "sum(rate(apex_api_requests_total{route=~\"$route\",status=~\"5..\"}[5m])) by (route) / sum(rate(apex_api_requests_total{route=~\"$route\"}[5m])) by (route)",
+          "expr": "sum(rate(wovyr_api_requests_total{route=~\"$route\",status=~\"5..\"}[5m])) by (route) / sum(rate(wovyr_api_requests_total{route=~\"$route\"}[5m])) by (route)",
           "legendFormat": "{{route}}"
         }
       ]
@@ -61,15 +61,15 @@
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(apex_api_request_duration_seconds_bucket{route=~\"$route\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(wovyr_api_request_duration_seconds_bucket{route=~\"$route\"}[5m])) by (le))",
           "legendFormat": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(apex_api_request_duration_seconds_bucket{route=~\"$route\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(wovyr_api_request_duration_seconds_bucket{route=~\"$route\"}[5m])) by (le))",
           "legendFormat": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(apex_api_request_duration_seconds_bucket{route=~\"$route\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(wovyr_api_request_duration_seconds_bucket{route=~\"$route\"}[5m])) by (le))",
           "legendFormat": "p99"
         }
       ]
@@ -83,7 +83,7 @@
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "targets": [
         {
-          "expr": "sum(rate(apex_api_requests_total{route=\"unmatched\"}[5m]))",
+          "expr": "sum(rate(wovyr_api_requests_total{route=\"unmatched\"}[5m]))",
           "legendFormat": "unmatched"
         }
       ]
@@ -97,7 +97,7 @@
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "targets": [
         {
-          "expr": "sum(rate(apex_llm_tokens_total[5m])) by (model, type)",
+          "expr": "sum(rate(wovyr_llm_tokens_total[5m])) by (model, type)",
           "legendFormat": "{{model}} ({{type}})"
         }
       ]
@@ -111,7 +111,7 @@
       "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
       "targets": [
         {
-          "expr": "sum(rate(apex_llm_cost_usd_total[1h])) by (model) * 3600",
+          "expr": "sum(rate(wovyr_llm_cost_usd_total[1h])) by (model) * 3600",
           "legendFormat": "{{model}}"
         }
       ]
@@ -124,7 +124,7 @@
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
       "targets": [
-        { "expr": "sum(rate(apex_cache_savings_usd_total[1h])) * 3600" }
+        { "expr": "sum(rate(wovyr_cache_savings_usd_total[1h])) * 3600" }
       ]
     },
     {
@@ -136,7 +136,7 @@
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "targets": [
         {
-          "expr": "sum(rate(apex_webhook_deliveries_total[5m])) by (result)",
+          "expr": "sum(rate(wovyr_webhook_deliveries_total[5m])) by (result)",
           "legendFormat": "{{result}}"
         }
       ]
@@ -150,7 +150,7 @@
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "targets": [
         {
-          "expr": "sum(rate(apex_api_requests_total{route=~\"$route\"}[5m])) by (status)",
+          "expr": "sum(rate(wovyr_api_requests_total{route=~\"$route\"}[5m])) by (status)",
           "legendFormat": "{{status}}"
         }
       ]
@@ -182,11 +182,11 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "apex:api_error_ratio:rate5m", "legendFormat": "5m" },
-        { "expr": "apex:api_error_ratio:rate30m", "legendFormat": "30m" },
-        { "expr": "apex:api_error_ratio:rate1h", "legendFormat": "1h" },
-        { "expr": "apex:api_error_ratio:rate6h", "legendFormat": "6h" },
-        { "expr": "apex:api_error_ratio:rate3d", "legendFormat": "3d" }
+        { "expr": "wovyr:api_error_ratio:rate5m", "legendFormat": "5m" },
+        { "expr": "wovyr:api_error_ratio:rate30m", "legendFormat": "30m" },
+        { "expr": "wovyr:api_error_ratio:rate1h", "legendFormat": "1h" },
+        { "expr": "wovyr:api_error_ratio:rate6h", "legendFormat": "6h" },
+        { "expr": "wovyr:api_error_ratio:rate3d", "legendFormat": "3d" }
       ]
     },
     {
@@ -198,12 +198,12 @@
       "description": "Recomputed at every /metrics scrape from the durable stores (never inc/dec bookkeeping), so values survive restarts and cannot drift.",
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
       "targets": [
-        { "expr": "apex_async_runs_in_flight", "legendFormat": "async runs in flight" },
-        { "expr": "apex_quota_runs_in_flight", "legendFormat": "quota-admitted runs" },
-        { "expr": "apex_workflow_executions_active", "legendFormat": "active workflow executions" },
-        { "expr": "apex_workflow_timers_pending", "legendFormat": "pending workflow timers" },
-        { "expr": "apex_webhook_outbox_pending", "legendFormat": "webhook outbox pending" },
-        { "expr": "apex_webhook_dlq_size", "legendFormat": "webhook DLQ size" }
+        { "expr": "wovyr_async_runs_in_flight", "legendFormat": "async runs in flight" },
+        { "expr": "wovyr_quota_runs_in_flight", "legendFormat": "quota-admitted runs" },
+        { "expr": "wovyr_workflow_executions_active", "legendFormat": "active workflow executions" },
+        { "expr": "wovyr_workflow_timers_pending", "legendFormat": "pending workflow timers" },
+        { "expr": "wovyr_webhook_outbox_pending", "legendFormat": "webhook outbox pending" },
+        { "expr": "wovyr_webhook_dlq_size", "legendFormat": "webhook DLQ size" }
       ]
     }
   ]

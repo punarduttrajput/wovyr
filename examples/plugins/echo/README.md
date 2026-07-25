@@ -1,6 +1,6 @@
 # Example plugin: `echo`
 
-A minimal **third-party plugin** for the Apex platform, demonstrating the Plugin SDK
+A minimal **third-party plugin** for the Wovyr platform, demonstrating the Plugin SDK
 end to end ([docs/08-plugin-sdk](../../../docs/08-plugin-sdk/overview.md)): a signed
 package is built → installed → granted → enabled → **used**.
 
@@ -21,27 +21,27 @@ it back as the JSON response on stdout.**
 The capability *runs* only when the CLI is built with the WASM loader:
 
 ```bash
-cargo build -p apex-cli --features plugin-wasi
-alias apex=target/debug/apex
-export APEX_LOG=warn          # quiet the sandbox's trace logging
+cargo build -p wovyr-cli --features plugin-wasi
+alias wovyr=target/debug/wovyr
+export WOVYR_LOG=warn          # quiet the sandbox's trace logging
 ```
 
 1. **Generate a publisher signing key** (the plugin author does this once):
 
    ```bash
-   apex plugin keygen acme --dir ./keys
+   wovyr plugin keygen acme --dir ./keys
    ```
 
 2. **Trust the publisher** (the operator installing the plugin):
 
    ```bash
-   apex plugin trust acme --key ./keys/acme.pub
+   wovyr plugin trust acme --key ./keys/acme.pub
    ```
 
 3. **Sign the package** — the detached signature covers the manifest bytes:
 
    ```bash
-   apex plugin sign --key ./keys/acme.key --manifest examples/plugins/echo/plugin.yaml
+   wovyr plugin sign --key ./keys/acme.key --manifest examples/plugins/echo/plugin.yaml
    # writes examples/plugins/echo/plugin.sig
    ```
 
@@ -50,46 +50,46 @@ export APEX_LOG=warn          # quiet the sandbox's trace logging
    ungranted permission):
 
    ```bash
-   apex plugin install examples/plugins/echo --grant 'net:egress:api.example.com'
-   apex plugin list
+   wovyr plugin install examples/plugins/echo --grant 'net:egress:api.example.com'
+   wovyr plugin list
    ```
 
 5. **Enable** — the capability goes live and is registered into the tool registry:
 
    ```bash
-   apex plugin enable acme/echo
+   wovyr plugin enable acme/echo
    ```
 
 6. **Use it** — invoke the capability directly through the engine's WASM runtime
    (`plugin run` is an operator test path; an agent calls the same registered tool):
 
    ```bash
-   apex plugin run echo.run --input '{"message":"hello from a plugin","n":7}'
+   wovyr plugin run echo.run --input '{"message":"hello from a plugin","n":7}'
    # => { "message": "hello from a plugin", "n": 7 }
    ```
 
-   Enabled plugin tools are also wired into `apex agents run --local`, so an agent whose
+   Enabled plugin tools are also wired into `wovyr agents run --local`, so an agent whose
    model emits a `echo.run` tool call invokes the same capability.
 
 ## Distributing as a single file
 
-Bundle the signed package directory into one content-addressed `.apexpkg` and install
+Bundle the signed package directory into one content-addressed `.wovyrpkg` and install
 from it directly (distribution §2 / §5 "Local file"):
 
 ```bash
-apex plugin pack examples/plugins/echo --out echo.apexpkg
-apex plugin install echo.apexpkg --grant 'net:egress:api.example.com'
+wovyr plugin pack examples/plugins/echo --out echo.wovyrpkg
+wovyr plugin install echo.wovyrpkg --grant 'net:egress:api.example.com'
 ```
 
 ## Lifecycle extras
 
 ```bash
-apex plugin disable acme/echo      # withdraw the capability (state retained)
-apex plugin uninstall acme/echo    # remove it and its staged artifacts
+wovyr plugin disable acme/echo      # withdraw the capability (state retained)
+wovyr plugin uninstall acme/echo    # remove it and its staged artifacts
 ```
 
 Building a new version of `plugin.yaml` (bump `metadata.version`) lets you exercise
-`apex plugin upgrade examples/plugins/echo` and `apex plugin rollback acme/echo`.
+`wovyr plugin upgrade examples/plugins/echo` and `wovyr plugin rollback acme/echo`.
 
 > A real plugin compiles its capability from a higher-level language (e.g. Rust →
 > `wasm32-wasi`) and parses/produces structured JSON; `echo` keeps the module trivial so

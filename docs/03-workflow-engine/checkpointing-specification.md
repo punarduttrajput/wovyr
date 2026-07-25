@@ -10,7 +10,7 @@
 
 # 1. Purpose
 
-This document defines the checkpointing architecture used by the Apex Workflow Engine.
+This document defines the checkpointing architecture used by the Wovyr Workflow Engine.
 
 Checkpointing enables:
 

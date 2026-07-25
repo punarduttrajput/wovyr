@@ -16,7 +16,7 @@ Document ID: LLM-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and architecture index** for the LLM Gateway in the Apex AI Platform.
+This document is the **central navigation and architecture index** for the LLM Gateway in the Wovyr AI Platform.
 
 The LLM Gateway is the single, governed entry point through which every subsystem reaches an AI model provider. It turns the in-process [Provider SDK](../04-agent-framework/provider-sdk.md) into a shared, network-accessible platform service with centralized routing, resilience, cost control, caching, and observability.
 

@@ -1,8 +1,8 @@
 # Firecracker microVM sandbox assets
 
-The [`FirecrackerSandbox`](../../crates/apex-tools/src/sandbox.rs) runs a command
+The [`FirecrackerSandbox`](../../crates/wovyr-tools/src/sandbox.rs) runs a command
 inside a [Firecracker](https://github.com/firecracker-microvm/firecracker) microVM. It
-needs two host assets — a guest **kernel** and a **rootfs** carrying the Apex guest
+needs two host assets — a guest **kernel** and a **rootfs** carrying the Wovyr guest
 agent (`init.sh`) as `/init`. Neither is checked in (they are large binaries); build
 them with the steps below.
 
@@ -36,9 +36,9 @@ The microVM integration test skips unless KVM + `firecracker` are present **and*
 asset paths are provided:
 
 ```bash
-APEX_FC_KERNEL=deployment/firecracker/assets/vmlinux.bin \
-APEX_FC_ROOTFS=deployment/firecracker/assets/rootfs.ext4 \
-  cargo test -p apex-tools --test sandbox_backends firecracker -- --nocapture
+WOVYR_FC_KERNEL=deployment/firecracker/assets/vmlinux.bin \
+WOVYR_FC_ROOTFS=deployment/firecracker/assets/rootfs.ext4 \
+  cargo test -p wovyr-tools --test sandbox_backends firecracker -- --nocapture
 ```
 
 ## Execution protocol

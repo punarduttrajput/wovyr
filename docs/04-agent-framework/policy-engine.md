@@ -16,7 +16,7 @@ Document ID: AGENT-007
 
 # 1. Purpose
 
-The Policy Engine is the centralized governance component of the Apex AI Platform responsible for enforcing security, compliance, operational, and business rules across every subsystem.
+The Policy Engine is the centralized governance component of the Wovyr AI Platform responsible for enforcing security, compliance, operational, and business rules across every subsystem.
 
 Every request executed by an Agent, Workflow, Tool, API, or Human Approval passes through the Policy Engine before execution.
 
@@ -194,7 +194,7 @@ Published policies are immutable.
 Example:
 
 ```yaml
-apiVersion: apex.ai/v1
+apiVersion: wovyr.ai/v1
 
 kind: Policy
 

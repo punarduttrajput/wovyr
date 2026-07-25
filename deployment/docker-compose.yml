@@ -1,40 +1,40 @@
-# Docker Compose topology for the Apex AI Platform — reflecting the actual
+# Docker Compose topology for the Wovyr AI Platform — reflecting the actual
 # v0.1 single-binary architecture, not the aspirational multi-service split
-# (separate `apex/api-gateway`, `apex/memory-engine`, … images) described in
+# (separate `wovyr/api-gateway`, `wovyr/memory-engine`, … images) described in
 # docs/12-deployment/docker-compose.md's C4 diagram. There is one real
-# deployable artifact today: the `apex` binary (deployment/docker/Dockerfile).
+# deployable artifact today: the `wovyr` binary (deployment/docker/Dockerfile).
 #
 # What's actually wired to Postgres/Qdrant, and by which process:
-#   - The `apex` service (`apex dev`, the embedded single-node server) selects
+#   - The `wovyr` service (`wovyr dev`, the embedded single-node server) selects
 #     a Postgres-backed marketplace registry when built with the `postgres`
-#     feature and `APEX_MARKETPLACE_POSTGRES_URL` is set — real, server-side.
+#     feature and `WOVYR_MARKETPLACE_POSTGRES_URL` is set — real, server-side.
 #   - The tiered memory backend (Postgres + Qdrant) is CLI-only today
-#     (`apex memory put/query`, built with `tiered-memory`) — `apex dev`'s
+#     (`wovyr memory put/query`, built with `tiered-memory`) — `wovyr dev`'s
 #     embedded server does NOT route memory through Postgres/Qdrant, it always
 #     uses the local file store. Qdrant is included here so `docker compose
-#     run apex memory put ...` can exercise that real path against the same
-#     network; it is not a dependency of the long-running `apex` service.
+#     run wovyr memory put ...` can exercise that real path against the same
+#     network; it is not a dependency of the long-running `wovyr` service.
 #
 # Bring up:
 #   docker compose -f deployment/docker-compose.yml up -d --build
 #   curl http://localhost:8080/healthz
 #
-# RM-GA-P1 SEC-101/102/202: `apex dev` binds 0.0.0.0 here (not loopback), so it now
-# refuses to boot without either real auth (`APEX_AUTH_MODE`, set below to `apikey`)
-# or TLS configured/declared (`APEX_TLS_TERMINATED_UPSTREAM=1` — this compose stack
+# RM-GA-P1 SEC-101/102/202: `wovyr dev` binds 0.0.0.0 here (not loopback), so it now
+# refuses to boot without either real auth (`WOVYR_AUTH_MODE`, set below to `apikey`)
+# or TLS configured/declared (`WOVYR_TLS_TERMINATED_UPSTREAM=1` — this compose stack
 # doesn't terminate TLS itself; put a real reverse proxy in front for anything beyond
 # local/integration use). Mint a key before calling the API:
-#   docker compose -f deployment/docker-compose.yml run --rm apex \
+#   docker compose -f deployment/docker-compose.yml run --rm wovyr \
 #     auth create-key demo-user
-# (the `apex-home` volume below is what makes that minted key visible to the
-# long-running `apex` service — both share the same `~/.apex/auth`.)
+# (the `wovyr-home` volume below is what makes that minted key visible to the
+# long-running `wovyr` service — both share the same `~/.wovyr/auth`.)
 #
 # Exercise the CLI-side tiered memory backend against the same stack:
-#   docker compose -f deployment/docker-compose.yml run --rm apex \
+#   docker compose -f deployment/docker-compose.yml run --rm wovyr \
 #     memory put --namespace demo --content "hello from compose"
 
 services:
-  apex:
+  wovyr:
     build:
       context: ..
       dockerfile: deployment/docker/Dockerfile
@@ -42,16 +42,16 @@ services:
         FEATURES: "tiered-memory,postgres"
     ports: ["8080:8080"]
     environment:
-      APEX_MARKETPLACE_POSTGRES_URL: postgres://apex:apex@postgres:5432/apex
-      APEX_MEMORY_POSTGRES_URL: postgres://apex:apex@postgres:5432/apex
-      APEX_MEMORY_QDRANT_URL: http://qdrant:6333
-      # Real auth (SEC-101) — mint a key with `run --rm apex auth create-key <name>`.
-      APEX_AUTH_MODE: apikey
+      WOVYR_MARKETPLACE_POSTGRES_URL: postgres://wovyr:wovyr@postgres:5432/wovyr
+      WOVYR_MEMORY_POSTGRES_URL: postgres://wovyr:wovyr@postgres:5432/wovyr
+      WOVYR_MEMORY_QDRANT_URL: http://qdrant:6333
+      # Real auth (SEC-101) — mint a key with `run --rm wovyr auth create-key <name>`.
+      WOVYR_AUTH_MODE: apikey
       # This stack doesn't terminate TLS itself (SEC-202) — front it with a real
       # reverse proxy for anything beyond local/integration use.
-      APEX_TLS_TERMINATED_UPSTREAM: "1"
-    volumes: ["apex-home:/home/apex/.apex"]
-    entrypoint: ["apex"]
+      WOVYR_TLS_TERMINATED_UPSTREAM: "1"
+    volumes: ["wovyr-home:/home/wovyr/.wovyr"]
+    entrypoint: ["wovyr"]
     command: ["dev", "--addr", "0.0.0.0:8080"]
     depends_on:
       postgres:
@@ -66,12 +66,12 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: apex
-      POSTGRES_PASSWORD: apex
-      POSTGRES_DB: apex
+      POSTGRES_USER: wovyr
+      POSTGRES_PASSWORD: wovyr
+      POSTGRES_DB: wovyr
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U apex"]
+      test: ["CMD-SHELL", "pg_isready -U wovyr"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -84,4 +84,4 @@ services:
 volumes:
   pgdata: {}
   qdrant-data: {}
-  apex-home: {}
+  wovyr-home: {}

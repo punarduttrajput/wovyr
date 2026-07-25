@@ -18,7 +18,7 @@
      * and SDK can never drift. Type-only imports are erased at compile time —
      * nothing from the SDK is bundled and no dist build is needed. */
     "paths": {
-      "@apex-ai/sdk-types": ["../sdks/typescript/src/types"]
+      "@wovyr/sdk-types": ["../sdks/typescript/src/types"]
     }
   },
   "angularCompilerOptions": {

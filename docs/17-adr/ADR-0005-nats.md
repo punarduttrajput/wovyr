@@ -14,7 +14,7 @@ Document ID: ADR-0005
 
 # Current Status (added 2026-07-07)
 
-This decision was never executed. The shipped `apex-events` crate is a
+This decision was never executed. The shipped `wovyr-events` crate is a
 **custom in-process event/webhook/audit system** (domain events, HMAC-signed
 webhook deliveries with retry/backoff, a tamper-evident audit chain) — no
 NATS, no JetStream, no message broker of any kind exists anywhere in the
@@ -96,5 +96,5 @@ Rationale:
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.1.0 | 2026-07-07 | Added a Current Status section: this decision was never implemented (`apex-events` is a custom in-process system, no NATS/JetStream anywhere); deferred, not superseded, and now tracked as ticket DIST-B9 for the v1.1 Scale-Out milestone. Found during a project-wide doc review |
+| 1.1.0 | 2026-07-07 | Added a Current Status section: this decision was never implemented (`wovyr-events` is a custom in-process system, no NATS/JetStream anywhere); deferred, not superseded, and now tracked as ticket DIST-B9 for the v1.1 Scale-Out milestone. Found during a project-wide doc review |
 | 1.0.0 | 2026-06-27 | Initial decision: NATS with JetStream as the event bus |

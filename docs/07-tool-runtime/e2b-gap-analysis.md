@@ -19,11 +19,11 @@ filesystem/process APIs, streaming) — those all remain open
 
 # 1. Purpose
 
-This document captures the **gaps that matter** between Apex's `apex-tools`
+This document captures the **gaps that matter** between Wovyr's `wovyr-tools`
 sandbox layer and E2B (the agent code-execution sandbox), scoped as the next
 development phase. It is deliberately narrow: it lists only the gaps a team
-evaluating Apex for *agent code execution* would hit, and that are worth closing
-given Apex's positioning. Capabilities that conflict with Apex's embedded,
+evaluating Wovyr for *agent code execution* would hit, and that are worth closing
+given Wovyr's positioning. Capabilities that conflict with Wovyr's embedded,
 security-first model — or that are pure hosted-product surface — are
 **out of scope** (see [§6](#6-explicitly-not-doing)).
 
@@ -34,19 +34,19 @@ positioning note in [§7](#7-related).
 
 # 2. Framing
 
-Apex and E2B optimize for different jobs:
+Wovyr and E2B optimize for different jobs:
 
 - **E2B** is a **persistent sandbox-as-a-service**: spawn a long-lived microVM,
   run many commands against it over its lifetime (stateful filesystem, processes,
   a code-interpreter REPL), driven by **Python/JS SDKs**.
-- **Apex `apex-tools`** is an **embedded, one-shot isolation primitive**: a Rust
+- **Wovyr `wovyr-tools`** is an **embedded, one-shot isolation primitive**: a Rust
   library compiled into the agent binary that runs *one* `SandboxCommand` and
   returns a `CommandOutcome`, picking the **strongest of** (tool preference,
   tenant floor, trust class) across a backend **spectrum**
   (native → WASI → container → gVisor → Firecracker → k8s), then checking node
   capability.
 
-Apex's differentiators — the isolation spectrum, trust-graded floors,
+Wovyr's differentiators — the isolation spectrum, trust-graded floors,
 deny-by-default egress, and fully embedded/air-gapped operation — are **stronger
 than E2B** on the dimensions they cover. The gaps below are everything *above*
 the isolation primitive: the stateful, interactive, developer-facing surface that
@@ -58,7 +58,7 @@ the embedded, security-first model.
 # 3. Gaps In Scope (priority order)
 
 Effort is rough (S ≤ 1 wk, M ≈ 1–3 wk, L ≈ 1 mo+, per engineer). Impact is the
-perceived value to a team evaluating Apex for agent code execution.
+perceived value to a team evaluating Wovyr for agent code execution.
 
 | # | Gap | Impact | Effort | Status |
 |---|-----|--------|--------|--------|
@@ -204,10 +204,10 @@ session/FS/process/stream surface; nothing bespoke.
 
 **Acceptance.**
 - A Python and a JS example create a sandbox, write a file, run code, and stream
-  output against a running `apex-server`.
+  output against a running `wovyr-server`.
 - SDK surface is documented and versioned with the server contract.
 
-**Touches.** `apex-server` (session/FS/process routes), new `sdk/python` +
+**Touches.** `wovyr-server` (session/FS/process routes), new `sdk/python` +
 `sdk/js` clients, [`execution-api.md`](execution-api.md).
 
 ---
@@ -251,7 +251,7 @@ existing image/rootfs plumbing; no marketplace — that stays a
 
 - Every gap preserves the security model: path confinement, read-only rootfs,
   cgroup/`setrlimit` resource caps, and **deny-by-default egress** via the
-  [`EgressProxy`](../../crates/apex-tools/src/egress.rs) all hold for sessions,
+  [`EgressProxy`](../../crates/wovyr-tools/src/egress.rs) all hold for sessions,
   not just one-shot calls ([security-isolation.md](security-isolation.md)).
 - Backend *selection* stays pure and deterministic; only node capability
   detection and the guest-agent channel do ambient I/O.
@@ -264,16 +264,16 @@ existing image/rootfs plumbing; no marketplace — that stays a
 
 # 6. Explicitly Not Doing
 
-These E2B characteristics are **out of scope** because they conflict with Apex's
+These E2B characteristics are **out of scope** because they conflict with Wovyr's
 positioning or are pure hosted-product surface, not because they were overlooked:
 
-- **Hosted multi-tenant cloud service + billing/metering dashboard** — Apex is an
+- **Hosted multi-tenant cloud service + billing/metering dashboard** — Wovyr is an
   embedded, self-hosted library; managed-service surface is a separate product
   bet, not a runtime feature.
-- **Internet-on-by-default networking** — Apex is deliberately deny-by-default
-  ([`EgressProxy`](../../crates/apex-tools/src/egress.rs)); convenience networking
+- **Internet-on-by-default networking** — Wovyr is deliberately deny-by-default
+  ([`EgressProxy`](../../crates/wovyr-tools/src/egress.rs)); convenience networking
   would undercut the security differentiator.
-- **Single fixed isolation backend** — Apex's spectrum + trust-graded floors are a
+- **Single fixed isolation backend** — Wovyr's spectrum + trust-graded floors are a
   feature, not a gap to "simplify away."
 - **Desktop / GUI (computer-use) sandboxes** — revisit only if a concrete agent
   use case appears; not core to code execution.
@@ -289,7 +289,7 @@ positioning or are pure hosted-product surface, not because they were overlooked
   [`worker-pool.md`](worker-pool.md)
 - [`18-roadmap/v0.2.md`](../18-roadmap/v0.2.md) (streaming, egress proxy) ·
   [`18-roadmap/v0.3.md`](../18-roadmap/v0.3.md) (marketplace / dashboard)
-- Implementation: [`crates/apex-tools`](../../crates/apex-tools/src/lib.rs) ·
+- Implementation: [`crates/wovyr-tools`](../../crates/wovyr-tools/src/lib.rs) ·
   [`deployment/firecracker/`](../../deployment/firecracker)
 - Sibling analysis: [`03-workflow-engine/temporal-gap-analysis.md`](../03-workflow-engine/temporal-gap-analysis.md)
 

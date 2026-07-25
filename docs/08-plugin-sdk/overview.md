@@ -16,7 +16,7 @@ Document ID: PLG-001
 
 # 1. Purpose
 
-This document specifies the **plugin system** of the Apex AI Platform — the Plugin SDK developers use to build extensions and the **Plugin Engine** service that installs, governs, and loads them.
+This document specifies the **plugin system** of the Wovyr AI Platform — the Plugin SDK developers use to build extensions and the **Plugin Engine** service that installs, governs, and loads them.
 
 The plugin system is what makes the platform extensible without forking or recompiling it: tools, providers, memory backends, policies, and workflow activities all arrive as plugins.
 
@@ -92,7 +92,7 @@ Tool capabilities follow the
 ## 5.1 Authoring (SDK)
 
 The [Plugin SDK](plugin-api.md) provides traits, a manifest schema, codegen, and a
-CLI (`apex plugin new|build|sign|publish`) so a developer can scaffold, implement,
+CLI (`wovyr plugin new|build|sign|publish`) so a developer can scaffold, implement,
 and package a capability.
 
 ## 5.2 Installation

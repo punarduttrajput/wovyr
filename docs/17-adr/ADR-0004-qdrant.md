@@ -15,8 +15,8 @@ Document ID: ADR-0004
 # Current Status (added 2026-07-07)
 
 This decision is real and shipped, but opt-in rather than mandatory: Qdrant
-backs `apex-memory`'s tiered store only when built with the `tiered-memory`
-cargo feature and `APEX_MEMORY_QDRANT_URL` is set. The default (GA, Path A —
+backs `wovyr-memory`'s tiered store only when built with the `tiered-memory`
+cargo feature and `WOVYR_MEMORY_QDRANT_URL` is set. The default (GA, Path A —
 [ADR-0010](ADR-0010-ga-deployment-topology.md)) single-node memory backend is
 file-based/in-process hybrid retrieval, with no vector database at all. This
 is a correct, honest default for a single-node appliance; nothing here
@@ -87,5 +87,5 @@ Rationale:
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.1.0 | 2026-07-07 | Added a Current Status section: Qdrant is real but opt-in (`tiered-memory` feature + `APEX_MEMORY_QDRANT_URL`), not a mandatory dependency — the GA default is file-based hybrid retrieval. Found during a project-wide doc review |
+| 1.1.0 | 2026-07-07 | Added a Current Status section: Qdrant is real but opt-in (`tiered-memory` feature + `WOVYR_MEMORY_QDRANT_URL`), not a mandatory dependency — the GA default is file-based hybrid retrieval. Found during a project-wide doc review |
 | 1.0.0 | 2026-06-27 | Initial decision: Qdrant for vector search |

@@ -16,7 +16,7 @@ Document ID: LLM-001
 
 # 1. Purpose
 
-This document specifies the **LLM Gateway**, the deployable service that fronts every AI model provider used by the Apex AI Platform.
+This document specifies the **LLM Gateway**, the deployable service that fronts every AI model provider used by the Wovyr AI Platform.
 
 The Gateway provides a single, governed, provider-neutral endpoint for model inference. It centralizes everything that should not be re-implemented inside each calling service: credentials, routing, failover, caching, rate limiting, token accounting, cost control, and observability.
 

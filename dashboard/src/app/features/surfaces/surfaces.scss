@@ -35,9 +35,9 @@
   padding:10px 12px; overflow-x:auto; margin:0;
 }
 
-/* Reuse @apex/ui-react's own integrity-warning styling for a blocked-frame
+/* Reuse @wovyr/ui-react's own integrity-warning styling for a blocked-frame
  * notice — same "don't act on this" register, different trigger (a policy
  * block, not a hash mismatch). */
-.apex-ui-integrity-warning { margin-bottom:6px; }
-.apex-ui-integrity-warning strong { display:block; margin-bottom:4px; }
-.apex-ui-integrity-warning p { margin:0; font-size:12.5px; }
+.wovyr-ui-integrity-warning { margin-bottom:6px; }
+.wovyr-ui-integrity-warning strong { display:block; margin-bottom:4px; }
+.wovyr-ui-integrity-warning p { margin:0; font-size:12.5px; }

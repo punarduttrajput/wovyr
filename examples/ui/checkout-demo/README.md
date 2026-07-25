@@ -1,7 +1,7 @@
 # The killer demo — Generative UI Trust Runtime
 
 Reproduces PRD-005 §9's acceptance narrative end to end, for real, against a
-running `apex-server`:
+running `wovyr-server`:
 
 > A procurement agent is asked to reorder lab supplies. It composes a
 > checkout confirmation. **Take 1**: the model (steered by a poisoned vendor
@@ -10,7 +10,7 @@ running `apex-server`:
 > variant renders; the user approves it; the workflow resumes and completes.
 
 The same flow is proven as an automated integration test at the Rust layer
-(`crates/apex-server/src/ui.rs`'s `uc1_frame_survives_restart_...` /
+(`crates/wovyr-server/src/ui.rs`'s `uc1_frame_survives_restart_...` /
 `uc4_credential_frame_is_blocked_...`) and at the SDK layer
 (`sdks/typescript/test/client.test.ts`'s `ui:` suite). This app is the
 human-visible third leg — the renderer actually showing (and blocking) a
@@ -23,20 +23,20 @@ frame in a real browser.
    opened for the Vite dev server's origin:
 
    ```bash
-   APEX_UI_POLICY=examples/policies/default-ui-policy.yaml \
-   APEX_PLATFORM_ADMINS=sdk-test-admin \
-   APEX_ALLOW_ANONYMOUS=1 \
-   APEX_CORS_ALLOWED_ORIGINS=http://localhost:5173 \
-     cargo run -p apex-cli -- dev --addr 127.0.0.1:8080
+   WOVYR_UI_POLICY=examples/policies/default-ui-policy.yaml \
+   WOVYR_PLATFORM_ADMINS=sdk-test-admin \
+   WOVYR_ALLOW_ANONYMOUS=1 \
+   WOVYR_CORS_ALLOWED_ORIGINS=http://localhost:5173 \
+     cargo run -p wovyr-cli -- dev --addr 127.0.0.1:8080
    ```
 
-   (`APEX_PLATFORM_ADMINS=sdk-test-admin` + submitting/deciding as that
+   (`WOVYR_PLATFORM_ADMINS=sdk-test-admin` + submitting/deciding as that
    principal is the same real-credential requirement every other mutating
-   route has — see `crates/apex-server/src/tenancy.rs`. `APEX_ALLOW_ANONYMOUS`
+   route has — see `crates/wovyr-server/src/tenancy.rs`. `WOVYR_ALLOW_ANONYMOUS`
    only lets the *request* authenticate; it's the admin principal that
    actually grants `workflows:run`/`workflows:read`.)
 
-2. **Build `@apex/ui-react`** if you haven't already (this app depends on it
+2. **Build `@wovyr/ui-react`** if you haven't already (this app depends on it
    via a `file:` path, so it needs a `dist/` to resolve against):
 
    ```bash
@@ -58,9 +58,9 @@ frame in a real browser.
 
 - **"Submit poisoned checkout"** first — the activity log reports the
   execution failed, and no frame ever appears in "Pending frames". That's
-  the trust layer: `apex-ui-guard`'s sensitive-input-name rule matched
+  the trust layer: `wovyr-ui-guard`'s sensitive-input-name rule matched
   `card_number` and blocked the frame before it reached this page at all.
-  Check `GET /api/v1/audit` (or the CLI's `apex audit` surface) for the
+  Check `GET /api/v1/audit` (or the CLI's `wovyr audit` surface) for the
   `ui.frame.block` record naming the rule.
 - **"Submit safe checkout"** — a real, validated frame appears under
   "Pending frames" within ~1.5s (the pull-polling interval). Fill in a PO
@@ -84,8 +84,8 @@ frame in a real browser.
   and [`ui-checkout-block.yaml`](../../workflows/ui-checkout-block.yaml)
   verbatim (a static demo can't read server-side files at runtime).
 - `web-component.html` / `src/webComponentDemo.js` — a second, deliberately
-  React-free entry point proving `<apex-ui-frame>` (RDR-402,
-  `@apex/ui-react/web-component`) renders and dispatches a `decide`
+  React-free entry point proving `<wovyr-ui-frame>` (RDR-402,
+  `@wovyr/ui-react/web-component`) renders and dispatches a `decide`
   `CustomEvent` from a page that never imports React itself — the shape a
   non-React host (the dashboard's Angular shell, a design partner's own app)
   would actually use. Open `/web-component.html` with the same `npm run dev`

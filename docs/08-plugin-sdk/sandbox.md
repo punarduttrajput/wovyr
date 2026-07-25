@@ -69,11 +69,11 @@ verbatim; this document focuses on how the *other* kinds are contained.
 language-portable, and cheap to instantiate. Native in-process loading is reserved
 for first-party plugins.
 
-**Implemented today** (`apex-plugin`'s `runtime` module): the WASM loader
+**Implemented today** (`wovyr-plugin`'s `runtime` module): the WASM loader
 (`WasiCapabilityRuntime`, behind the `wasi` cargo feature) and the container loader
 (`ContainerCapabilityRuntime` — Docker/Podman, gVisor via `runsc`; always compiled,
 ECO-303). Both speak the same capability ABI (request JSON on stdin → response JSON
-on stdout, `APEX_SECRET_*` env injection); a capability picks its loader via the
+on stdout, `WOVYR_SECRET_*` env injection); a capability picks its loader via the
 manifest's `sandbox` field (`wasm` vs `container`/`gvisor`), and each loader refuses
 the other's capabilities fail-closed — a `gvisor` capability is refused by a
 plain-Docker runtime rather than demoted. The out-of-process (IPC/gRPC) and microVM

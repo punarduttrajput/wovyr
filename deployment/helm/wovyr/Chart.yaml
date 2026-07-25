@@ -1,0 +1,17 @@
+apiVersion: v2
+name: wovyr
+description: >-
+  Helm chart for the Wovyr AI Platform's real, single-binary v0.1 topology
+  (one `wovyr` server + Postgres + Qdrant) — the same shape as
+  deployment/docker-compose.yml, not the aspirational multi-service split
+  described in docs/12-deployment/kubernetes.md and helm.md. See this
+  chart's README.md for exactly what that means and what's still open.
+type: application
+version: 0.3.0
+appVersion: "0.3.0"
+keywords:
+  - wovyr
+  - agent-platform
+home: https://github.com/punarduttrajput/Wovyr
+sources:
+  - https://github.com/punarduttrajput/Wovyr

@@ -1,6 +1,6 @@
-# Apex AI Platform — Documentation Index
+# Wovyr AI Platform — Documentation Index
 
-> Apex — the Generative UI Trust Runtime, built on an enterprise AI agent
+> Wovyr — the Generative UI Trust Runtime, built on an enterprise AI agent
 > platform written in Rust
 
 Version: **1.18.0**
@@ -262,7 +262,7 @@ operating, and monitoring the platform. A client of the [Platform API](09-api/in
 
 # 11 CLI — `11-cli/`
 
-The `apex` command-line interface — a client of the [Platform API](09-api/index.md)
+The `wovyr` command-line interface — a client of the [Platform API](09-api/index.md)
 and a local development toolchain
 (see [C4 Container §4.10](02-architecture/c4-container.md)).
 
@@ -461,7 +461,7 @@ New contributors should read the documentation in the following sequence:
 * Keep implementation details separate from product requirements.
 * Record major architectural decisions as ADRs (section 17).
 * Update the roadmap and ADRs whenever significant design changes occur.
-* The canonical product name is **Apex AI Platform** (short form: **Apex**).
+* The canonical product name is **Wovyr AI Platform** (short form: **Wovyr**).
 
 ---
 
@@ -486,5 +486,5 @@ New contributors should read the documentation in the following sequence:
 | 1.4.0   | 2026-06-27 | Added 08 Plugin SDK section (8 documents)                |
 | 1.3.0   | 2026-06-27 | Added 07 Tool Runtime section (7 documents)              |
 | 1.2.0   | 2026-06-27 | Added 06 Memory Engine section (9 documents)             |
-| 1.1.0   | 2026-06-27 | Reconciled index with on-disk structure; added 05 LLM Gateway; standardized naming to Apex AI Platform |
+| 1.1.0   | 2026-06-27 | Reconciled index with on-disk structure; added 05 LLM Gateway; standardized naming to Wovyr AI Platform |
 | 1.0.0   | 2026-06-26 | Initial documentation index                             |

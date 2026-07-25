@@ -16,7 +16,7 @@ Document ID: OBS-003
 
 # 1. Purpose
 
-This document defines **distributed tracing** across the Apex AI Platform — how a single request is traced end to end through services, and how traces correlate with logs and metrics.
+This document defines **distributed tracing** across the Wovyr AI Platform — how a single request is traced end to end through services, and how traces correlate with logs and metrics.
 
 ---
 
@@ -64,10 +64,10 @@ work (workflow steps, cost events) joins the same trace where applicable.
 
 | Attribute | Example |
 |-----------|---------|
-| `apex.tenant` | `acme` |
-| `apex.principal` | `agent:order-assistant` |
-| `apex.resource.id` | `run_01H...` |
-| `apex.subsystem` | `llm-gateway` |
+| `wovyr.tenant` | `acme` |
+| `wovyr.principal` | `agent:order-assistant` |
+| `wovyr.resource.id` | `run_01H...` |
+| `wovyr.subsystem` | `llm-gateway` |
 | Semantic conventions | `http.*`, `rpc.*`, `db.*` |
 
 Sensitive values are never placed in span attributes (same masking rules as

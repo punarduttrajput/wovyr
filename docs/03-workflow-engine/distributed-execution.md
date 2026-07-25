@@ -3,9 +3,9 @@
 **Document ID:** WF-012
 **Version:** 1.1.0
 **Status:** Draft. **The `WorkQueue`/`Worker`/lease/partition machinery this
-document describes is real, tested library code in `apex-workflow`
+document describes is real, tested library code in `wovyr-workflow`
 (§33's measured baselines are real runs, not projections) — but it is
-**not wired into the shipping `apex-server` binary**.
+**not wired into the shipping `wovyr-server` binary**.
 `default_workflows_engine` hardwires a single-process `FileStore`; there is
 no queue, no lease, no worker pool in the running server today.
 [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md) ratified a
@@ -24,7 +24,7 @@ running platform.**
 
 # 1. Purpose
 
-This document defines the Distributed Execution architecture for the Apex Workflow Engine.
+This document defines the Distributed Execution architecture for the Wovyr Workflow Engine.
 
 Distributed Execution enables workflows to execute across multiple worker nodes while maintaining deterministic execution, fault tolerance, scalability, and consistency.
 
@@ -727,7 +727,7 @@ partitions).
 ## 33.3 Measured baselines
 
 Assertion-style baselines from
-[`crates/apex-workflow/tests/perf.rs`](../../crates/apex-workflow/tests/perf.rs),
+[`crates/wovyr-workflow/tests/perf.rs`](../../crates/wovyr-workflow/tests/perf.rs),
 trivial single-activity workflow, in-memory stores, **single core, debug build** on a
 developer machine (2026-06-29) — a software-overhead ceiling, *not* a distributed
 figure:
@@ -773,4 +773,4 @@ floor and prints the live number so regressions surface.
 |---------|------|-------------|
 | 1.0.0 | 2026-06-26 | Initial Distributed Execution Specification |
 | 1.1.0 | 2026-06-29 | Added §33 Scaling Envelope (G6): partitioning + measured baselines |
-| 1.2.0 | 2026-07-07 | RM-GA-P3 DOC-A2: added a top-level status note clarifying this machinery is tested library code not wired into the shipping `apex-server` binary — wiring it is the v1.1 "Scale-Out" milestone per ADR-0010 |
+| 1.2.0 | 2026-07-07 | RM-GA-P3 DOC-A2: added a top-level status note clarifying this machinery is tested library code not wired into the shipping `wovyr-server` binary — wiring it is the v1.1 "Scale-Out" milestone per ADR-0010 |

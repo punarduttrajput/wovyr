@@ -1,4 +1,4 @@
-apiVersion: plugin.apex.io/v1
+apiVersion: plugin.wovyr.io/v1
 kind: Plugin
 metadata:
   name: echo

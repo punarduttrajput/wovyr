@@ -53,7 +53,7 @@ skip = [
 ]
 # Note: `cargo tree --duplicates` also shows a `rand`/`rand_core`/`rand_chacha`/
 # `getrandom` 0.8-vs-0.9-generation split (production JWT/crypto stack vs.
-# `proptest`, a dev-dependency of apex-plugin/apex-workflow's fuzz tests) —
+# `proptest`, a dev-dependency of wovyr-plugin/wovyr-workflow's fuzz tests) —
 # cargo-deny's own graph resolution doesn't surface it as a `bans` violation
 # (confirmed: adding skip entries for it produces "unmatched-skip" warnings,
 # meaning cargo-deny doesn't count it as a duplicate in the first place), so

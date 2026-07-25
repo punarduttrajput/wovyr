@@ -14,7 +14,7 @@ Document ID: ADR-0011
 
 # 1. Context
 
-Apex was conceived and documented as a horizontal "Enterprise AI Agent Operating
+Wovyr was conceived and documented as a horizontal "Enterprise AI Agent Operating
 System" ("the Linux of AI Agents"). Through v1.1 Phase 2 that produced a deep,
 hardened platform: durable event-sourced workflows with human-in-the-loop
 suspension, a sandbox spectrum with real egress lockdown, fail-closed tool
@@ -50,25 +50,25 @@ browser is not required to capture the trust-layer value.
    with durable human-in-the-loop decisions. Three combined plays, per PRD-005:
    the trust/policy layer, generative internal tools as the beachhead vertical,
    and the UI runtime for the broader agent economy (embeddable, MCP-addressable).
-2. **The platform becomes the engine, not the pitch.** Apex's crates remain the
+2. **The platform becomes the engine, not the pitch.** Wovyr's crates remain the
    foundation and keep their names and contracts; horizontal platform breadth
    (v1.1 P3 "ecosystem & scale" and beyond) is re-prioritized strictly by what
    the trust runtime needs.
 3. **Adopt open UI shapes; do not invent a proprietary standard.** The frame
-   protocol (`apex-ui`) is designed for versioned mapping to/from the emerging
+   protocol (`wovyr-ui`) is designed for versioned mapping to/from the emerging
    open component-JSON shapes (A2UI-style, MCP Apps conventions). We compete on
    the runtime and enforcement point, not on schema ownership.
 4. **The renderable surface is a constrained, declarative component vocabulary.**
    No raw model-authored HTML/JS is ever rendered. This is the load-bearing
    security decision: most deception/injection classes become *structurally
    impossible* rather than detected.
-5. **New code lands as two crates on the existing spine**: `apex-ui` (frame
-   protocol, transport events, interop mapping) and `apex-ui-guard` (policy
+5. **New code lands as two crates on the existing spine**: `wovyr-ui` (frame
+   protocol, transport events, interop mapping) and `wovyr-ui-guard` (policy
    engine, guardrail-stage enforcement, audit integration) — plus a TypeScript
-   renderer SDK (`@apex/ui-react` + web-component build) outside the Cargo
+   renderer SDK (`@wovyr/ui-react` + web-component build) outside the Cargo
    workspace. Existing primitives are reused, not duplicated: frames ride
    `RunEventSink`/SSE, decisions ride the `human`-approval signal path, verdicts
-   ride `apex-audit`, templates ride plugin signing, custom validators ride
+   ride `wovyr-audit`, templates ride plugin signing, custom validators ride
    `WasiSandbox`.
 6. **No browser.** Explicit non-goal (PRD-005 §4.2).
 
@@ -114,5 +114,5 @@ browser is not required to capture the trust-layer value.
 
 Accepted; executing. PRD-005 defines requirements; the v1.2 roadmap phases them
 (P1 protocol & trust core → P2 renderer & interaction loop → P3 beachhead &
-embeddability). No code exists yet for `apex-ui`/`apex-ui-guard`; nothing in this
+embeddability). No code exists yet for `wovyr-ui`/`wovyr-ui-guard`; nothing in this
 ADR changes shipped contracts.

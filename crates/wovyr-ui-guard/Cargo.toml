@@ -1,0 +1,14 @@
+[package]
+name = "wovyr-ui-guard"
+description = "The generative-UI trust layer: declarative UiPolicy evaluation over wovyr-ui frames, fail-closed (PRD-005 GRD-2xx)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wovyr-common = { workspace = true }
+wovyr-ui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }

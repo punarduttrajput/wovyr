@@ -16,13 +16,13 @@ import { Injectable, signal } from '@angular/core';
  * first load — the key is adopted into `sessionStorage` and **scrubbed** from the
  * persisted blob, so upgraded users don't keep a residual copy in the weaker store.
  * (An httpOnly-cookie BFF remains the preferred end state, but the dashboard talks
- * directly to apex-server today — BFF deferred, per the dashboard's own docs.)
+ * directly to wovyr-server today — BFF deferred, per the dashboard's own docs.)
  *
- * Three credential shapes exist server-side (`crates/apex-server/src/auth.rs`):
- * `disabled-loopback` (the default dev mode — trusts `X-Apex-Tenant`/
- * `X-Apex-Principal` verbatim, no real verification), `apikey` (a bearer token minted
- * via `apex auth create-key`, verified by `authenticate` which then *overwrites*
- * `X-Apex-Principal` from the verified key), and `jwt` (a pre-issued bearer token).
+ * Three credential shapes exist server-side (`crates/wovyr-server/src/auth.rs`):
+ * `disabled-loopback` (the default dev mode — trusts `X-Wovyr-Tenant`/
+ * `X-Wovyr-Principal` verbatim, no real verification), `apikey` (a bearer token minted
+ * via `wovyr auth create-key`, verified by `authenticate` which then *overwrites*
+ * `X-Wovyr-Principal` from the verified key), and `jwt` (a pre-issued bearer token).
  * There is no username/password login endpoint anywhere in the platform — an
  * operator who wants real auth pastes an already-minted API key or JWT here, rather
  * than the dashboard collecting a password it has nowhere to send. `apiKey` is sent
@@ -30,9 +30,9 @@ import { Injectable, signal } from '@angular/core';
  * whichever credential type it is; the tenant is a separate field because a bearer
  * credential resolves a *principal*, not a tenant.
  */
-const STORAGE_KEY = 'apex.session.v1';
+const STORAGE_KEY = 'wovyr.session.v1';
 /** sessionStorage key for the bearer credential (UI-101). */
-const CREDENTIAL_KEY = 'apex.credential.v1';
+const CREDENTIAL_KEY = 'wovyr.credential.v1';
 
 interface StoredSession {
   tenant: string;
@@ -43,7 +43,7 @@ interface StoredSession {
 
 const DEFAULTS: StoredSession = {
   tenant: 'acme',
-  principal: 'admin@apex.local',
+  principal: 'admin@wovyr.local',
 };
 
 /** Load tenant/principal from localStorage, migrating a legacy embedded apiKey. */

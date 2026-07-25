@@ -4,7 +4,7 @@
       <div class="eyebrow">Build / Memory Explorer</div>
       <h1>Memory Explorer</h1>
       <p>Browse, search and manage agent memory with transparent, tunable hybrid ranking.
-        Backed by the platform memory engine under <code>~/.apex/memory</code>.</p>
+        Backed by the platform memory engine under <code>~/.wovyr/memory</code>.</p>
     </div>
     <div class="head-actions">
       <button class="btn" (click)="toggleAdd()">{{ showAdd() ? 'Close' : '+ Add / seed memory' }}</button>
@@ -109,7 +109,7 @@
         } @empty {
           <div class="pad muted">
             @if (mode() === 'search') { No matches. Try different terms or widen the namespace. }
-            @else { No records{{ selectedNs() ? ' in ' + selectedNs() : '' }}. Use <strong>+ Add / seed memory</strong> to create a knowledge base (e.g. <code>product-kb</code> for the RAG docs-bot), or seed from the CLI with <code>apex memory put</code>. }
+            @else { No records{{ selectedNs() ? ' in ' + selectedNs() : '' }}. Use <strong>+ Add / seed memory</strong> to create a knowledge base (e.g. <code>product-kb</code> for the RAG docs-bot), or seed from the CLI with <code>wovyr memory put</code>. }
           </div>
         }
       </div>

@@ -1,5 +1,5 @@
-import { ApexApiError, type ApexErrorBody } from "./errors.js";
-import type { ApexClientOptions, RetryOptions } from "./types.js";
+import { WovyrApiError, type WovyrErrorBody } from "./errors.js";
+import type { WovyrClientOptions, RetryOptions } from "./types.js";
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
 const DEFAULT_MAX_RETRIES = 2;
@@ -21,7 +21,7 @@ export interface RequestOptions {
 
 /** The shared request/response plumbing every resource method calls through:
  * base-URL joining, default tenant/principal headers, query-string building,
- * JSON encode/decode, and error-envelope mapping into {@link ApexApiError}. */
+ * JSON encode/decode, and error-envelope mapping into {@link WovyrApiError}. */
 export class HttpClient {
   private readonly baseUrl: string;
   private readonly tenant: string | undefined;
@@ -30,7 +30,7 @@ export class HttpClient {
   private readonly maxRetries: number;
   private readonly baseDelayMs: number;
 
-  constructor(options: ApexClientOptions) {
+  constructor(options: WovyrClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.tenant = options.tenant;
     this.principal = options.principal;
@@ -49,8 +49,8 @@ export class HttpClient {
 
   private defaultHeaders(extra?: Record<string, string>): Record<string, string> {
     const headers: Record<string, string> = { ...extra };
-    if (this.tenant !== undefined) headers["X-Apex-Tenant"] = this.tenant;
-    if (this.principal !== undefined) headers["X-Apex-Principal"] = this.principal;
+    if (this.tenant !== undefined) headers["X-Wovyr-Tenant"] = this.tenant;
+    if (this.principal !== undefined) headers["X-Wovyr-Principal"] = this.principal;
     return headers;
   }
 
@@ -60,7 +60,7 @@ export class HttpClient {
    * mutating requests **only when an `Idempotency-Key` header rides along**
    * (DX-301) — the server's replay middleware then guarantees a retried
    * mutation can't double-execute, which is exactly the property a keyless
-   * retry would violate. See {@link ApexClientOptions.retry}. */
+   * retry would violate. See {@link WovyrClientOptions.retry}. */
   async raw(method: string, path: string, body?: unknown, options?: RequestOptions): Promise<Response> {
     const headers = this.defaultHeaders(options?.headers);
     const init: RequestInit = { method, headers };
@@ -87,7 +87,7 @@ export class HttpClient {
     }
   }
 
-  /** Perform a request and decode the JSON body, throwing {@link ApexApiError}
+  /** Perform a request and decode the JSON body, throwing {@link WovyrApiError}
    * on any non-2xx status. `T` is `void` for `204 No Content` responses. */
   async request<T>(method: string, path: string, body?: unknown, options?: RequestOptions): Promise<T> {
     const response = await this.raw(method, path, body, options);
@@ -96,15 +96,15 @@ export class HttpClient {
     }
     const text = await response.text();
     if (!response.ok) {
-      let errorBody: ApexErrorBody | undefined;
+      let errorBody: WovyrErrorBody | undefined;
       try {
-        const parsed = JSON.parse(text) as { error?: ApexErrorBody };
+        const parsed = JSON.parse(text) as { error?: WovyrErrorBody };
         errorBody = parsed.error;
       } catch {
         // Non-JSON error body (e.g. a proxy in front of the server) — fall
-        // back to the raw text captured in ApexApiError.message.
+        // back to the raw text captured in WovyrApiError.message.
       }
-      throw new ApexApiError(response.status, errorBody, text);
+      throw new WovyrApiError(response.status, errorBody, text);
     }
     if (text.length === 0) {
       return undefined as T;
@@ -123,13 +123,13 @@ export class HttpClient {
     const response = await this.raw(method, path, body, options);
     const text = await response.text();
     if (!response.ok) {
-      let errorBody: ApexErrorBody | undefined;
+      let errorBody: WovyrErrorBody | undefined;
       try {
-        errorBody = (JSON.parse(text) as { error?: ApexErrorBody }).error;
+        errorBody = (JSON.parse(text) as { error?: WovyrErrorBody }).error;
       } catch {
         // see request()
       }
-      throw new ApexApiError(response.status, errorBody, text);
+      throw new WovyrApiError(response.status, errorBody, text);
     }
     return { data: (text.length ? JSON.parse(text) : undefined) as T, headers: response.headers };
   }

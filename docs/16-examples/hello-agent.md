@@ -26,7 +26,7 @@ core loop: **define → run → observe**.
 `agents/hello.yaml`:
 
 ```yaml
-apiVersion: agent.apex.io/v1
+apiVersion: agent.wovyr.io/v1
 kind: Agent
 metadata:
   name: hello
@@ -44,7 +44,7 @@ The [model selector](../05-llm-gateway/routing.md#5-model-classes) lets the
 # 3. Run (Local)
 
 ```bash
-apex agents run --local -f agents/hello.yaml \
+wovyr agents run --local -f agents/hello.yaml \
   --input '{"message":"Hi, who are you?"}' --stream
 ```
 
@@ -64,10 +64,10 @@ done   · tokens: 48, cost_usd: 0.0001
 Publish, then run against a server:
 
 ```bash
-apex agents create -f agents/hello.yaml
-ID=$(apex agents list -o json | jq -r '.data[]|select(.name=="hello").id')
-apex agents publish "$ID"
-apex agents run "$ID" --input '{"message":"Hello!"}'
+wovyr agents create -f agents/hello.yaml
+ID=$(wovyr agents list -o json | jq -r '.data[]|select(.name=="hello").id')
+wovyr agents publish "$ID"
+wovyr agents run "$ID" --input '{"message":"Hello!"}'
 ```
 
 ---

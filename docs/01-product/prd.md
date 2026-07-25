@@ -8,17 +8,17 @@ multi-service, horizontally-scaled platform implied below. **Current reality
 vs. §2 "Primary Technologies"** (corrected 2026-07-07; see the
 [README](../../README.md)'s architecture section for the kept-current
 architecture description): Rust and Angular are real. **NestJS is not
-built** — the dashboard SPA talks directly to `apex-server`; the NestJS BFF
+built** — the dashboard SPA talks directly to `wovyr-server`; the NestJS BFF
 is explicitly deferred until production auth needs it
 ([dashboard overview](../10-dashboard/overview.md)). **NATS is not
-built** — there is no message broker; `apex-events` is a custom in-process
+built** — there is no message broker; `wovyr-events` is a custom in-process
 event/webhook system (see [ADR-0005](../17-adr/ADR-0005-nats.md)'s
 current-status note). **PostgreSQL, Redis, and Qdrant are all real but
 optional**, feature-gated backends (`postgres`/`redis`/`tiered-memory` cargo
 features) — the shipping single-node binary's default is file-based storage
-under `~/.apex`, not a hard dependency on any of the three. **Kubernetes**:
+under `~/.wovyr`, not a hard dependency on any of the three. **Kubernetes**:
 a real, offline-validated Helm chart exists for the single-binary topology
-(`deployment/helm/apex/`, `replicas: 1` by product decision), not the
+(`deployment/helm/wovyr/`, `replicas: 1` by product decision), not the
 multi-replica HA cluster this vision implies, and it has never been applied
 to a live cluster. **Docker** is real (`deployment/docker-compose.yml`).
 Anything described here that isn't built and isn't yet tracked in
@@ -30,14 +30,14 @@ added to the latter as of this revision — see §25 below. **Positioning note
 the current product is the **Generative UI Trust Runtime**
 ([PRD-005](prd-generative-ui-runtime.md), shipped v1.2 scope) with this
 platform as its engine; see the updated [vision](../00-executive/vision.md).
-**Owner:** Apex AI Platform Team
+**Owner:** Wovyr AI Platform Team
 **Last Updated:** 2026-07-15
 
 ---
 
 # 1. Purpose
 
-This Product Requirements Document (PRD) defines the product vision, scope, objectives, high-level requirements, and release strategy for the Apex AI Platform.
+This Product Requirements Document (PRD) defines the product vision, scope, objectives, high-level requirements, and release strategy for the Wovyr AI Platform.
 
 It serves as the authoritative reference for product planning and aligns engineering, architecture, documentation, testing, and roadmap decisions.
 
@@ -49,7 +49,7 @@ Detailed functional specifications are maintained in companion documents.
 
 ## Product Name
 
-Apex AI Platform
+Wovyr AI Platform
 
 ---
 
@@ -104,7 +104,7 @@ Organizations currently face several challenges when building AI-powered systems
 * Poor extensibility
 * High maintenance costs
 
-Apex AI Platform addresses these challenges through a cohesive, modular architecture.
+Wovyr AI Platform addresses these challenges through a cohesive, modular architecture.
 
 ---
 
@@ -498,7 +498,7 @@ dropped:
   alongside the existing MCP-gateway direction.
 * **S3-compatible object storage** — nothing in the codebase uses object
   storage; plugin packages are local content-addressed files and
-  `apex admin backup` writes to a local path. Tracked as a remote-destination
+  `wovyr admin backup` writes to a local path. Tracked as a remote-destination
   option under **GA-002**,
   [`18-roadmap/v1.0/A2-reliability-ha-dr.md`](../18-roadmap/v1.0/A2-reliability-ha-dr.md)
   §4.1.

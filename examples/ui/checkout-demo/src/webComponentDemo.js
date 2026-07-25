@@ -1,9 +1,9 @@
 // Deliberately plain JS, no JSX/build-time React authored here — this is the
-// smoke test that `<apex-ui-frame>` (RDR-402) is usable by a host that has
+// smoke test that `<wovyr-ui-frame>` (RDR-402) is usable by a host that has
 // never touched React, proving the web-component wrapper actually decouples
-// @apex/ui-react from a React-authored host page.
-import "@apex/ui-react/web-component";
-import "@apex/ui-react/styles.css";
+// @wovyr/ui-react from a React-authored host page.
+import "@wovyr/ui-react/web-component";
+import "@wovyr/ui-react/styles.css";
 
 const sampleFrame = {
   schema_version: "1.0.0",
@@ -27,5 +27,5 @@ el.addEventListener("decide", (event) => {
   const { decision } = event.detail;
   log.textContent = `decide event received: action=${decision.action}`;
   // Resolve immediately — a real host would attach the actual API call here:
-  // event.detail.result = apexClient.ui.decide(frameId, decision);
+  // event.detail.result = wovyrClient.ui.decide(frameId, decision);
 });

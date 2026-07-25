@@ -15,9 +15,9 @@ Document ID: ADR-0013
 # 1. Context
 
 Two hand-written first-party clients exist and are maintained in lockstep:
-`sdks/typescript` (`@apex-ai/sdk`) and `sdks/python` (`apex-ai-sdk`, on PyPI).
+`sdks/typescript` (`@wovyr/sdk`) and `sdks/python` (`wovyr-sdk`, on PyPI).
 Both mirror the server's real routes 1:1, both carry integration suites CI
-runs against a live `apex dev` (the contract gate), and both cost real work
+runs against a live `wovyr dev` (the contract gate), and both cost real work
 on every wire change — the "update both SDKs + openapi.yaml in lockstep"
 convention is the tax the repo already pays for two languages.
 

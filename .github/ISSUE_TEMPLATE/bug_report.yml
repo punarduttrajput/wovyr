@@ -14,7 +14,7 @@ body:
       label: What happened?
       description: What did you do, what did you expect, what happened instead?
       placeholder: |
-        1. Ran `apex ...`
+        1. Ran `wovyr ...`
         2. Expected ...
         3. Got ...
     validations:
@@ -41,5 +41,5 @@ body:
     id: logs
     attributes:
       label: Relevant log output
-      description: Run with `APEX_LOG=debug` if possible. Redact anything sensitive.
+      description: Run with `WOVYR_LOG=debug` if possible. Redact anything sensitive.
       render: text

@@ -7,7 +7,7 @@ import { ToastService } from '../../core/toast.service';
 import { ConfirmService } from '../../shared/confirm';
 import { Tabs, TabSpec } from '../../shared/tabs';
 
-/** Capability-kind filter options for browse (mirrors `apex_plugin::CapabilityKind`). */
+/** Capability-kind filter options for browse (mirrors `wovyr_plugin::CapabilityKind`). */
 const CAPABILITY_KINDS = [
   'tool',
   'provider',
@@ -227,7 +227,7 @@ export class Marketplace implements OnInit {
 
   installPlugin(): void {
     if (!this.pendingApkgBase64) {
-      this.status.set('Error: select an .apexpkg file first');
+      this.status.set('Error: select an .wovyrpkg file first');
       return;
     }
     const grants = this.installGrants

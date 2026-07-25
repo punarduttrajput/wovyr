@@ -5,7 +5,7 @@ import { SurfacesService, UiFrame } from './surfaces.service';
 
 /** RM-GUI-P3 EMB-701: pins the exact request shape this service sends against
  * the standalone middleware routes — a drifted method/URL/body here would
- * silently 404/400 against a real `apex-server` without any type error. */
+ * silently 404/400 against a real `wovyr-server` without any type error. */
 describe('SurfacesService', () => {
   let service: SurfacesService;
   let http: HttpTestingController;

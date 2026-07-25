@@ -1,7 +1,7 @@
-# Changelog — `@apex-ai/sdk`
+# Changelog — `@wovyr/sdk`
 
 The SDK's version tracks the platform release it targets: same major.minor as
-`apex-server` means same API surface (DX-303). Patch versions are SDK-only
+`wovyr-server` means same API surface (DX-303). Patch versions are SDK-only
 fixes. `health()` warns (once per client) when it detects a server whose
 major.minor differs.
 
@@ -14,7 +14,7 @@ major.minor differs.
   never retry.
 - **`workflows.waitForCompletion(id, {intervalMs, timeoutMs})`** (DX-301):
   polls to a terminal status (`completed`/`failed`/`cancelled`) and returns
-  the final snapshot; throws the new `ApexTimeoutError` on deadline.
+  the final snapshot; throws the new `WovyrTimeoutError` on deadline.
 - **Version handshake** (DX-303): `health()` compares the server's version
   against `SDK_VERSION` and `console.warn`s on a major.minor skew — once per
   client, never thrown. `SDK_VERSION` and `versionSkew()` are exported.

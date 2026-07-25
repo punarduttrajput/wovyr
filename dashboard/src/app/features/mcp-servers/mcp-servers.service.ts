@@ -11,7 +11,7 @@ import {
 
 /** `GET /api/v1/mcp/connections`'s envelope: the standard `Page` plus
  * `stdio_enabled` (RM-MCX-P3-302) — whether the operator has set
- * `APEX_ENABLE_MCP_STDIO=1`, so the panel knows to hide the `stdio` transport
+ * `WOVYR_ENABLE_MCP_STDIO=1`, so the panel knows to hide the `stdio` transport
  * option before the operator fills out a form, not after a rejected submit. */
 interface McpConnectionsPage extends Page<McpConnection> {
   stdio_enabled: boolean;

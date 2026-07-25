@@ -16,7 +16,7 @@ Document ID: TEST-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and strategy index** for testing the Apex AI Platform — the layers of testing, what each guarantees, and how they combine into a confident release pipeline.
+This document is the **central navigation and strategy index** for testing the Wovyr AI Platform — the layers of testing, what each guarantees, and how they combine into a confident release pipeline.
 
 ---
 

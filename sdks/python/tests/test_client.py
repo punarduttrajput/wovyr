@@ -1,17 +1,17 @@
-"""Integration tests against a real, locally running `apex dev` server
-(`cargo run -p apex-cli -- dev --addr 127.0.0.1:8080`) — not mocked. Run with
+"""Integration tests against a real, locally running `wovyr dev` server
+(`cargo run -p wovyr-cli -- dev --addr 127.0.0.1:8080`) — not mocked. Run with
 the server already up:
 
     python3 -m unittest discover -s tests -v
 
-Skips cleanly (not failing) if no server answers at `APEX_TEST_BASE_URL`
+Skips cleanly (not failing) if no server answers at `WOVYR_TEST_BASE_URL`
 (default `http://127.0.0.1:8080`), so this suite doesn't fail an offline run
 that never started one.
 
 Like the TypeScript suite, almost every mutating/tenant-scoped flow below
 (workflows submit/poll, memory, secrets, both pagination tests, org/project)
 uses `_admin_client()` and needs the server started with
-`APEX_PLATFORM_ADMINS=sdk-test-admin` (SEC-105: nothing tenant-scoped is
+`WOVYR_PLATFORM_ADMINS=sdk-test-admin` (SEC-105: nothing tenant-scoped is
 reachable via anonymity alone); those tests error with a 403 otherwise.
 Run-only agent routes and reads (`health`, `tools`, `validate`) stay
 anonymous.
@@ -28,21 +28,21 @@ import urllib.request
 from email.message import Message
 from typing import Any, Optional
 
-from apex_sdk import (
-    ApexApiError,
-    ApexClient,
-    ApexTimeoutError,
-    ApexVersionSkewWarning,
+from wovyr_sdk import (
+    WovyrApiError,
+    WovyrClient,
+    WovyrTimeoutError,
+    WovyrVersionSkewWarning,
     RetryOptions,
     paginate_all,
     sdk_version,
 )
-from apex_sdk.http import Opener
+from wovyr_sdk.http import Opener
 
-BASE_URL = os.environ.get("APEX_TEST_BASE_URL", "http://127.0.0.1:8080")
+BASE_URL = os.environ.get("WOVYR_TEST_BASE_URL", "http://127.0.0.1:8080")
 
 HELLO_MANIFEST = """
-apiVersion: agent.apex.io/v1
+apiVersion: agent.wovyr.io/v1
 kind: Agent
 metadata:
   name: hello
@@ -61,20 +61,20 @@ def _server_available() -> bool:
         return False
 
 
-def _client() -> ApexClient:
-    return ApexClient(BASE_URL)
+def _client() -> WovyrClient:
+    return WovyrClient(BASE_URL)
 
 
-def _admin_client() -> ApexClient:
+def _admin_client() -> WovyrClient:
     """Org/project management routes need a real `org.admin`/`platform.admin`
     role. The test server is expected to run with
-    `APEX_PLATFORM_ADMINS=sdk-test-admin`, making this principal a platform
+    `WOVYR_PLATFORM_ADMINS=sdk-test-admin`, making this principal a platform
     admin."""
-    return ApexClient(BASE_URL, principal="sdk-test-admin")
+    return WovyrClient(BASE_URL, principal="sdk-test-admin")
 
 
-@unittest.skipUnless(_server_available(), f"no apex-server reachable at {BASE_URL}")
-class ApexClientIntegrationTests(unittest.TestCase):
+@unittest.skipUnless(_server_available(), f"no wovyr-server reachable at {BASE_URL}")
+class WovyrClientIntegrationTests(unittest.TestCase):
     def test_health_reports_ok(self) -> None:
         health = _client().health()
         self.assertEqual(health["status"], "ok")
@@ -94,8 +94,8 @@ class ApexClientIntegrationTests(unittest.TestCase):
         self.assertGreater(len(result["output"]["message"]), 0)
         self.assertGreaterEqual(result["steps"], 1)
 
-    def test_agents_run_with_a_malformed_manifest_raises_apex_api_error_400(self) -> None:
-        with self.assertRaises(ApexApiError) as ctx:
+    def test_agents_run_with_a_malformed_manifest_raises_wovyr_api_error_400(self) -> None:
+        with self.assertRaises(WovyrApiError) as ctx:
             _client().agents.run({"manifest": "not: [valid, agent"})
         err = ctx.exception
         self.assertEqual(err.status, 400)
@@ -122,7 +122,7 @@ class ApexClientIntegrationTests(unittest.TestCase):
         self.assertEqual(valid["name"], "sdk-test")
         self.assertEqual(valid["activity_count"], 1)
 
-        with self.assertRaises(ApexApiError) as ctx:
+        with self.assertRaises(WovyrApiError) as ctx:
             _client().workflows.validate("not a workflow")
         self.assertEqual(ctx.exception.status, 400)
 
@@ -152,15 +152,15 @@ class ApexClientIntegrationTests(unittest.TestCase):
         client.memory.put(
             {
                 "namespace": namespace,
-                "content": "The Apex Python SDK integration test wrote this record.",
+                "content": "The Wovyr Python SDK integration test wrote this record.",
                 "tags": ["sdk-test"],
             }
         )
         res = client.memory.query(
-            {"text": "Apex Python SDK integration test", "namespace": namespace, "strategy": "keyword"}
+            {"text": "Wovyr Python SDK integration test", "namespace": namespace, "strategy": "keyword"}
         )
         self.assertGreaterEqual(len(res["data"]), 1)
-        self.assertIn("Apex Python SDK", res["data"][0]["content"])
+        self.assertIn("Wovyr Python SDK", res["data"][0]["content"])
 
     def test_secrets_create_get_rotate_delete_round_trip(self) -> None:
         name = f"sdk-test-secret-{int(time.time() * 1000)}"
@@ -176,7 +176,7 @@ class ApexClientIntegrationTests(unittest.TestCase):
         self.assertEqual(rotated["version"], 2)
 
         client.secrets.delete(name)
-        with self.assertRaises(ApexApiError) as ctx:
+        with self.assertRaises(WovyrApiError) as ctx:
             client.secrets.get(name)
         self.assertEqual(ctx.exception.status, 404)
 
@@ -185,9 +185,9 @@ class ApexClientIntegrationTests(unittest.TestCase):
         org_name = f"sdk-test-org-{int(time.time() * 1000)}"
         try:
             org = client.organizations.create(org_name)
-        except ApexApiError as err:
+        except WovyrApiError as err:
             if err.status == 403:
-                self.skipTest("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin")
+                self.skipTest("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin")
             raise
 
         project, etag = client.projects.create(f"sdk-test-project-{int(time.time() * 1000)}", org["id"])
@@ -198,7 +198,7 @@ class ApexClientIntegrationTests(unittest.TestCase):
         self.assertNotEqual(updated_etag, etag)
 
         # Re-using the now-stale original etag must be rejected.
-        with self.assertRaises(ApexApiError) as ctx:
+        with self.assertRaises(WovyrApiError) as ctx:
             client.projects.update(project["id"], settings={"a": 2}, if_match=etag)
         self.assertEqual(ctx.exception.status, 409)
 
@@ -212,7 +212,7 @@ class ApexClientIntegrationTests(unittest.TestCase):
         created = []
         for i in range(3):
             manifest = (
-                f"apiVersion: agent.apex.io/v1\nkind: Agent\nmetadata:\n"
+                f"apiVersion: agent.wovyr.io/v1\nkind: Agent\nmetadata:\n"
                 f"  name: paginate-test-{i}-{int(time.time() * 1000)}\n"
                 f"spec:\n  model_selector: {{ capability: chat, class: fast }}\n  instructions: hi\n"
             )
@@ -225,7 +225,7 @@ class ApexClientIntegrationTests(unittest.TestCase):
             for agent_id in created:
                 try:
                     client.agents.delete(agent_id)
-                except ApexApiError:
+                except WovyrApiError:
                     pass
 
 
@@ -269,7 +269,7 @@ class _FlakyOpener(Opener):
 class HttpClientRetryTests(unittest.TestCase):
     def test_get_retries_a_503_and_eventually_succeeds(self) -> None:
         opener = _FlakyOpener(fail_count=2)
-        client = ApexClient(
+        client = WovyrClient(
             "http://unit-test.invalid", opener=opener, retry=RetryOptions(max_retries=2, base_delay_s=0.001)
         )
         health = client.health()
@@ -278,19 +278,19 @@ class HttpClientRetryTests(unittest.TestCase):
 
     def test_get_gives_up_after_exhausting_retries(self) -> None:
         opener = _FlakyOpener(fail_count=5)
-        client = ApexClient(
+        client = WovyrClient(
             "http://unit-test.invalid", opener=opener, retry=RetryOptions(max_retries=2, base_delay_s=0.001)
         )
-        with self.assertRaises(ApexApiError):
+        with self.assertRaises(WovyrApiError):
             client.health()
         self.assertEqual(opener.calls, 3)  # 1 initial + 2 retries, then surfaces the error
 
     def test_post_is_never_auto_retried_even_on_a_503(self) -> None:
         opener = _FlakyOpener(fail_count=1)
-        client = ApexClient(
+        client = WovyrClient(
             "http://unit-test.invalid", opener=opener, retry=RetryOptions(max_retries=2, base_delay_s=0.001)
         )
-        with self.assertRaises(ApexApiError):
+        with self.assertRaises(WovyrApiError):
             client.agents.run({"manifest": "x"})
         self.assertEqual(opener.calls, 1)
 
@@ -314,7 +314,7 @@ class IdempotentMutationRetryTests(unittest.TestCase):
 
     def test_a_keyed_mutation_retries_a_503_and_succeeds(self) -> None:
         opener = _RecordingFlakyOpener(fail_count=2)
-        client = ApexClient(
+        client = WovyrClient(
             "http://unit-test.invalid", opener=opener, retry=RetryOptions(max_retries=2, base_delay_s=0.001)
         )
         client.secrets.create("token", "v1", idempotency_key="sdk-key-1")
@@ -324,10 +324,10 @@ class IdempotentMutationRetryTests(unittest.TestCase):
 
     def test_the_same_mutation_without_a_key_still_never_retries(self) -> None:
         opener = _RecordingFlakyOpener(fail_count=1)
-        client = ApexClient(
+        client = WovyrClient(
             "http://unit-test.invalid", opener=opener, retry=RetryOptions(max_retries=2, base_delay_s=0.001)
         )
-        with self.assertRaises(ApexApiError):
+        with self.assertRaises(WovyrApiError):
             client.secrets.create("token", "v1")
         self.assertEqual(opener.calls, 1)
 
@@ -351,10 +351,10 @@ class _StatusSequenceOpener(Opener):
 
 class WaitForCompletionTests(unittest.TestCase):
     """DX-301: `workflows.wait_for_completion` — polls to a terminal status,
-    treats `failed` as terminal, and raises `ApexTimeoutError` on deadline."""
+    treats `failed` as terminal, and raises `WovyrTimeoutError` on deadline."""
 
-    def _client(self, opener: Opener) -> ApexClient:
-        return ApexClient("http://unit-test.invalid", opener=opener)
+    def _client(self, opener: Opener) -> WovyrClient:
+        return WovyrClient("http://unit-test.invalid", opener=opener)
 
     def test_polls_until_terminal_and_returns_the_final_snapshot(self) -> None:
         opener = _StatusSequenceOpener(["running", "running", "completed"])
@@ -367,9 +367,9 @@ class WaitForCompletionTests(unittest.TestCase):
         got = self._client(opener).workflows.wait_for_completion("wf-1", interval_s=0.001)
         self.assertEqual(got["execution"]["status"], "failed")
 
-    def test_raises_apex_timeout_error_once_the_deadline_passes(self) -> None:
+    def test_raises_wovyr_timeout_error_once_the_deadline_passes(self) -> None:
         opener = _StatusSequenceOpener(["running"])
-        with self.assertRaises(ApexTimeoutError):
+        with self.assertRaises(WovyrTimeoutError):
             self._client(opener).workflows.wait_for_completion(
                 "wf-1", interval_s=0.005, timeout_s=0.02
             )
@@ -398,27 +398,27 @@ class VersionSkewTests(unittest.TestCase):
     def test_matching_major_minor_is_silent(self) -> None:
         import warnings as w
 
-        client = ApexClient("http://unit-test.invalid", opener=self._health_opener(sdk_version()))
+        client = WovyrClient("http://unit-test.invalid", opener=self._health_opener(sdk_version()))
         with w.catch_warnings():
-            w.simplefilter("error", ApexVersionSkewWarning)
+            w.simplefilter("error", WovyrVersionSkewWarning)
             client.health()  # would raise if it warned
 
     def test_minor_skew_warns_once_per_client(self) -> None:
-        client = ApexClient("http://unit-test.invalid", opener=self._health_opener("0.99.0"))
-        with self.assertWarns(ApexVersionSkewWarning):
+        client = WovyrClient("http://unit-test.invalid", opener=self._health_opener("0.99.0"))
+        with self.assertWarns(WovyrVersionSkewWarning):
             client.health()
         import warnings as w
 
         with w.catch_warnings():
-            w.simplefilter("error", ApexVersionSkewWarning)
+            w.simplefilter("error", WovyrVersionSkewWarning)
             client.health()  # second call: already warned, stays silent
 
     def test_unparseable_dev_version_is_silent(self) -> None:
         import warnings as w
 
-        client = ApexClient("http://unit-test.invalid", opener=self._health_opener("dry-run"))
+        client = WovyrClient("http://unit-test.invalid", opener=self._health_opener("dry-run"))
         with w.catch_warnings():
-            w.simplefilter("error", ApexVersionSkewWarning)
+            w.simplefilter("error", WovyrVersionSkewWarning)
             client.health()
 
 
@@ -430,7 +430,7 @@ class VersionLockstepTests(unittest.TestCase):
         import pathlib
         import re
 
-        from apex_sdk.version import _FALLBACK_VERSION
+        from wovyr_sdk.version import _FALLBACK_VERSION
 
         pyproject = (pathlib.Path(__file__).parent.parent / "pyproject.toml").read_text()
         m = re.search(r'^version = "([^"]+)"', pyproject, re.M)

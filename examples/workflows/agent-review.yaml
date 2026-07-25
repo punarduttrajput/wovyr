@@ -1,4 +1,4 @@
-apiVersion: workflow.apex.io/v1
+apiVersion: workflow.wovyr.io/v1
 kind: Workflow
 metadata:
   name: agent-review
@@ -8,7 +8,7 @@ spec:
   # depending on how you run this workflow:
   #   - Server: `name` is a *stored* agent id — register one first, e.g.
   #     POST /api/v1/agents { "manifest": "<the hello.yaml contents>" }  (stores it as `hello`)
-  #   - CLI: `apex workflows run --local -f examples/workflows/agent-review.yaml \
+  #   - CLI: `wovyr workflows run --local -f examples/workflows/agent-review.yaml \
   #       --agents-dir examples/agents --input '{"ticketText": "..."}'`
   #     resolves `name` as `<agents-dir>/<name>.yaml` on disk (no server needed).
   activities:

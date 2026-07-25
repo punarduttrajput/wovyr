@@ -1,14 +1,14 @@
 **Document ID:** EXEC-004
 **Version:** 1.0.0
 **Status:** Draft
-**Owner:** Apex AI Platform Team
+**Owner:** Wovyr AI Platform Team
 **Last Updated:** 2026-06-26
 
 ---
 
 # Purpose
 
-This document defines the measurable success criteria for the Apex AI Platform.
+This document defines the measurable success criteria for the Wovyr AI Platform.
 
 The metrics described here establish how the project evaluates progress across product development, engineering quality, operational excellence, ecosystem growth, and community adoption.
 
@@ -18,7 +18,7 @@ These metrics guide roadmap prioritization and continuous improvement.
 
 # Executive Summary
 
-The success of Apex AI Platform cannot be measured by source code volume or feature count alone.
+The success of Wovyr AI Platform cannot be measured by source code volume or feature count alone.
 
 A successful platform demonstrates:
 

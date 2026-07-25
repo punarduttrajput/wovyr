@@ -46,9 +46,9 @@ This section provides **worked examples** that combine the platform's building b
 # 4. Prerequisites
 
 ```bash
-apex login            # or APEX_API_KEY for CI
-apex context use <ctx>
-apex doctor
+wovyr login            # or WOVYR_API_KEY for CI
+wovyr context use <ctx>
+wovyr doctor
 ```
 
 See [CLI Installation](../11-cli/installation.md) and

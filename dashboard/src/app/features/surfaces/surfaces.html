@@ -49,7 +49,7 @@
       </div>
 
       @if (blockedReason()) {
-        <div class="apex-ui-integrity-warning" role="alert">
+        <div class="wovyr-ui-integrity-warning" role="alert">
           <strong>Blocked by the trust layer.</strong>
           <p>{{ blockedReason() }}</p>
         </div>
@@ -60,7 +60,7 @@
           <span>frame_id <code>{{ pf.frame_id }}</code></span>
           <span>policy <code>{{ pf.policy_ref }}</code></span>
         </div>
-        <apex-ui-frame #frameEl (decide)="onDecide($event)"></apex-ui-frame>
+        <wovyr-ui-frame #frameEl (decide)="onDecide($event)"></wovyr-ui-frame>
       }
 
       @if (outcome(); as o) {

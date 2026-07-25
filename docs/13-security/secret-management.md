@@ -16,7 +16,7 @@ Document ID: SEC-005
 
 # 1. Purpose
 
-This document defines how the Apex AI Platform stores, references, injects, and rotates **secrets** — provider API keys, database credentials, signing keys, and integration tokens — without ever exposing them in code, config, logs, or responses.
+This document defines how the Wovyr AI Platform stores, references, injects, and rotates **secrets** — provider API keys, database credentials, signing keys, and integration tokens — without ever exposing them in code, config, logs, or responses.
 
 ---
 

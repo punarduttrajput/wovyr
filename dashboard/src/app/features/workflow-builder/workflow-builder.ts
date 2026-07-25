@@ -142,9 +142,9 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
 
   /** Names of workflows saved in this browser (localStorage). */
   readonly savedNames = signal<string[]>([]);
-  private readonly WF_INDEX = 'apex.wf.index';
+  private readonly WF_INDEX = 'wovyr.wf.index';
   private wfKey(name: string): string {
-    return `apex.wf:${name}`;
+    return `wovyr.wf:${name}`;
   }
 
   private pollSub?: Subscription;

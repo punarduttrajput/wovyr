@@ -9,11 +9,11 @@ Document ID: SEC-001
 **File Path:** `docs/13-security/authentication.md`  
 **Version:** 1.1.0  
 **Status:** Draft — target-state security model. **Current implementation**
-(RM-GA-P1 SEC-101/SEC-102, added 2026-07-07): `crates/apex-server/src/auth.rs`
+(RM-GA-P1 SEC-101/SEC-102, added 2026-07-07): `crates/wovyr-server/src/auth.rs`
 verifies a JWT (HS256/RS256) or hashed API-key bearer credential before any
 handler runs, fail-closed by default — the `disabled-loopback` mode (no
 verification, today's back-compat behavior) requires an explicit
-`APEX_ALLOW_ANONYMOUS=1` opt-in that a startup check
+`WOVYR_ALLOW_ANONYMOUS=1` opt-in that a startup check
 (`auth::refuse_anonymous_on_non_loopback`) refuses to honor on any
 non-loopback bind. **API-key lifecycle is now real** (RM-AIM-P1 SRV-104,
 2026-07-14): create-with-TTL, list, revoke, and rotate-with-grace, with
@@ -67,7 +67,7 @@ bring their own identity provider and SSO.
 | Refresh token | Longer-lived, rotated on use, revocable |
 | Storage | Server-side (BFF) / OS keychain (CLI); never browser localStorage |
 | Signing | Asymmetric keys, rotated on schedule, JWKS published |
-| Audience binding | Tokens scoped to `apex-api` |
+| Audience binding | Tokens scoped to `wovyr-api` |
 
 Compromised tokens are contained by short TTLs, rotation, and a revocation
 blocklist.

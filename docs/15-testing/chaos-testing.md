@@ -16,7 +16,7 @@ Document ID: TEST-005
 
 # 1. Purpose
 
-This document defines **chaos testing** — deliberately injecting failures to verify the Apex AI Platform degrades gracefully and recovers, validating the resilience mechanisms specified across subsystems.
+This document defines **chaos testing** — deliberately injecting failures to verify the Wovyr AI Platform degrades gracefully and recovers, validating the resilience mechanisms specified across subsystems.
 
 ---
 

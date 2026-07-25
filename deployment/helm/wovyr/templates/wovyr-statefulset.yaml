@@ -1,0 +1,117 @@
+# The `wovyr` server (`wovyr dev --addr 0.0.0.0:8080`) — mirrors
+# deployment/docker-compose.yml's `wovyr` service exactly. A StatefulSet, not
+# a Deployment: wovyr's durable state is local files on a PVC
+# (/home/wovyr/.wovyr/{tenancy,kms,secrets,webhooks,workflows,memory,audit}),
+# not shared across replicas — replicaCount is fixed at 1 in values.yaml
+# until the platform supports sharding/multi-region (not yet built).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "wovyr.fullname" . }}
+  labels:
+    {{- include "wovyr.labels" . | nindent 4 }}
+    {{- include "wovyr.server.selectorLabels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "wovyr.fullname" . }}
+  replicas: {{ .Values.wovyr.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "wovyr.server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "wovyr.labels" . | nindent 8 }}
+        {{- include "wovyr.server.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "wovyr.fullname" . }}
+      # Postgres must be reachable before wovyr starts — docker-compose.yml
+      # expresses this via `depends_on: condition: service_healthy`; K8s has
+      # no equivalent for StatefulSets, so an init container polls instead.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h {{ include "wovyr.fullname" . }}-postgres -U "$POSTGRES_USER"; do
+                echo "waiting for postgres..."
+                sleep 2
+              done
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "wovyr.fullname" . }}-secrets
+                  key: POSTGRES_USER
+      containers:
+        - name: wovyr
+          image: "{{ .Values.wovyr.image.repository }}:{{ .Values.wovyr.image.tag }}"
+          imagePullPolicy: {{ .Values.wovyr.image.pullPolicy }}
+          command: ["wovyr"]
+          args: ["dev", "--addr", "0.0.0.0:{{ .Values.wovyr.port }}"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.wovyr.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "wovyr.fullname" . }}-config
+            - secretRef:
+                name: {{ include "wovyr.fullname" . }}-secrets
+          # `/healthz` is a pure liveness check (no dependency probing —
+          # crates/wovyr-server/src/lib.rs's handler just returns
+          # {"status":"ok"}), so readinessProbe here only proves the process
+          # is up, not that Postgres/Qdrant are reachable. There is no
+          # `/readyz` in wovyr-server today; the initContainer above is what
+          # actually gates the pod on Postgres being ready before wovyr ever
+          # starts. Documented explicitly in this chart's README.md rather
+          # than implying readinessProbe means more than it does.
+          # With in-process TLS (wovyr.tls.enabled, RM-AIM-P3 DEP-302) the
+          # probes must speak HTTPS — the kubelet skips certificate
+          # verification on HTTPS probes, so a self-signed/cert-manager cert
+          # both work.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              {{- if .Values.wovyr.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              {{- if .Values.wovyr.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.wovyr.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /home/wovyr/.wovyr
+            {{- if .Values.wovyr.tls.enabled }}
+            - name: tls
+              mountPath: /etc/wovyr/tls
+              readOnly: true
+            {{- end }}
+      {{- if .Values.wovyr.tls.enabled }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.wovyr.tls.secretName | quote }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.wovyr.persistence.storageClassName }}
+        storageClassName: {{ .Values.wovyr.persistence.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.wovyr.persistence.size }}

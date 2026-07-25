@@ -1,7 +1,7 @@
-# Apex observability starter (RM-GA-P4 OBS-803 + RM-AIM-P3 OBS-302)
+# Wovyr observability starter (RM-GA-P4 OBS-803 + RM-AIM-P3 OBS-302)
 
 A **starter** Prometheus alert-rule file and Grafana dashboard for the single-node
-Apex appliance, built directly on the real metric series the server emits — not the
+Wovyr appliance, built directly on the real metric series the server emits — not the
 aspirational SLO/dashboard catalog in `docs/14-observability/{alerting,dashboards}.md`
 (those documents describe a future multi-service fleet's full observability stack;
 this directory is what actually exists to point a Prometheus/Grafana pair at today).
@@ -15,7 +15,7 @@ this directory is what actually exists to point a Prometheus/Grafana pair at tod
   alert. Validated with `promtool check rules alerts.yml` (7 rules, all pass) — a
   portable `promtool`/`prometheus` binary was downloaded from the project's GitHub
   releases specifically to validate this offline, the same approach this repo's Helm
-  chart used for `kubeconform` (see `deployment/helm/apex/README.md`).
+  chart used for `kubeconform` (see `deployment/helm/wovyr/README.md`).
 - **`burn-rates.yml`** (RM-AIM-P3 OBS-302) — multi-window, multi-burn-rate SLO rules
   per the SRE-workbook pattern, against a 99.5%-availability SLO over a 30-day
   budget: recording rules for the 5xx error ratio at 5m/30m/1h/6h/3d, paired
@@ -40,37 +40,37 @@ this directory is what actually exists to point a Prometheus/Grafana pair at tod
 ## What this is not
 
 Neither file is wired into `deployment/docker-compose.yml` or the Helm chart — there
-is no Prometheus/Grafana *service* in either, only the `apex` binary's `/metrics`
+is no Prometheus/Grafana *service* in either, only the `wovyr` binary's `/metrics`
 endpoint for an operator-supplied Prometheus to scrape. Adding actual Prometheus/
 Grafana services (and provisioning these files into them automatically) is future
 work, matching the "reliability first slice" scoping already used for compose/Helm.
 
 ## Metric series these rules/panels reference
 
-All confirmed live in `crates/apex-server/src/hardening.rs` (`track_metrics`,
+All confirmed live in `crates/wovyr-server/src/hardening.rs` (`track_metrics`,
 RM-GA-P4 OBS-801) and `config.rs` (`MetricsCostObserver`)/`webhooks.rs`:
 
 | Metric | Type | Labels |
 |---|---|---|
-| `apex_api_requests_total` | counter | `route`, `method`, `status` |
-| `apex_api_request_duration_seconds` | histogram | `route`, `method` |
-| `apex_llm_tokens_total` | counter | `model`, `type` (`prompt`/`completion`) |
-| `apex_llm_cost_usd_total` | counter | `model` |
-| `apex_cache_savings_usd_total` | counter | `subsystem` |
-| `apex_webhook_deliveries_total` | counter | `result` (`delivered`/`failed`) |
-| `apex_async_runs_in_flight` | gauge | — |
-| `apex_quota_runs_in_flight` | gauge | — |
-| `apex_workflow_executions_active` | gauge | — |
-| `apex_workflow_timers_pending` | gauge | — |
-| `apex_webhook_outbox_pending` | gauge | — |
-| `apex_webhook_dlq_size` | gauge | — |
+| `wovyr_api_requests_total` | counter | `route`, `method`, `status` |
+| `wovyr_api_request_duration_seconds` | histogram | `route`, `method` |
+| `wovyr_llm_tokens_total` | counter | `model`, `type` (`prompt`/`completion`) |
+| `wovyr_llm_cost_usd_total` | counter | `model` |
+| `wovyr_cache_savings_usd_total` | counter | `subsystem` |
+| `wovyr_webhook_deliveries_total` | counter | `result` (`delivered`/`failed`) |
+| `wovyr_async_runs_in_flight` | gauge | — |
+| `wovyr_quota_runs_in_flight` | gauge | — |
+| `wovyr_workflow_executions_active` | gauge | — |
+| `wovyr_workflow_timers_pending` | gauge | — |
+| `wovyr_webhook_outbox_pending` | gauge | — |
+| `wovyr_webhook_dlq_size` | gauge | — |
 
-The six gauges (RM-AIM-P3 OBS-301, `apex-server`'s `refresh_operability_gauges`)
+The six gauges (RM-AIM-P3 OBS-301, `wovyr-server`'s `refresh_operability_gauges`)
 are recomputed from the durable stores at every `/metrics` scrape — never
 inc/dec bookkeeping — so they survive restarts and cannot drift.
 
-`up{job="apex"}` (`ApexTargetDown`) is a standard Prometheus-generated series for
-any scrape job named `apex` — set the job name in the caller's own scrape config.
+`up{job="wovyr"}` (`WovyrTargetDown`) is a standard Prometheus-generated series for
+any scrape job named `wovyr` — set the job name in the caller's own scrape config.
 
 ## Traces
 
@@ -83,4 +83,4 @@ OBS-302) the workflow engine's `workflow.start`/`workflow.resume`/
 checkpoint save/load — labeled `backend = file|postgres`), `workflow.queue.*`
 (enqueue/lease/remove), `workflow.worker.step`, and `workflow.timer.poll` — so a
 trace view shows one nested handler→engine→store/queue chain per execution
-(pinned by `apex-workflow/tests/tracing_spans.rs`).
+(pinned by `wovyr-workflow/tests/tracing_spans.rs`).

@@ -39,7 +39,7 @@ remediation. High-privilege; read-only by default.
 
 ```json
 // input
-{ "context": "secret://acme/kubeconfig-staging", "kind": "pods", "namespace": "apex" }
+{ "context": "secret://acme/kubeconfig-staging", "kind": "pods", "namespace": "wovyr" }
 // output
 { "items": [ { "name": "api-gateway-...", "status": "Running" } ] }
 ```
@@ -80,7 +80,7 @@ Read ops may be cached briefly; mutating ops never cached.
 # 7. Example
 
 ```bash
-apex tools invoke k8s.get --input '{"context":"secret://acme/kubeconfig-staging","kind":"deployments","namespace":"apex"}'
+wovyr tools invoke k8s.get --input '{"context":"secret://acme/kubeconfig-staging","kind":"deployments","namespace":"wovyr"}'
 ```
 
 ---

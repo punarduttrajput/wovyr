@@ -1,4 +1,4 @@
-# Task runner for the Apex AI Platform.
+# Task runner for the Wovyr AI Platform.
 # See docs/19-implementation-guide/build-system.md.
 
 .PHONY: build test lint fmt run-hello docker-build docker-run-hello compose-up compose-down clean
@@ -19,21 +19,21 @@ fmt:
 # Run the hello agent locally with the embedded runtime (mock provider unless
 # OPENAI_API_KEY is set). See docs/16-examples/hello-agent.md.
 run-hello:
-	cargo run -p apex-cli -- agents run --local \
+	cargo run -p wovyr-cli -- agents run --local \
 		-f examples/agents/hello.yaml \
 		--input '{"message":"Hi, who are you?"}' --stream
 
 # Build the single-binary dev image (see deployment/docker/Dockerfile).
 docker-build:
-	docker build -f deployment/docker/Dockerfile -t apex:dev .
+	docker build -f deployment/docker/Dockerfile -t wovyr:dev .
 
 # Run the hello agent inside the dev image (offline mock provider).
 docker-run-hello: docker-build
-	docker run --rm apex:dev agents run --local \
+	docker run --rm wovyr:dev agents run --local \
 		-f examples/agents/hello.yaml \
 		--input '{"message":"Hi, who are you?"}' --stream
 
-# Bring up apex + Postgres + Qdrant (see deployment/docker-compose.yml).
+# Bring up wovyr + Postgres + Qdrant (see deployment/docker-compose.yml).
 compose-up:
 	docker compose -f deployment/docker-compose.yml up -d --build
 

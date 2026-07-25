@@ -16,7 +16,7 @@ Document ID: AGENT-004
 
 # 1. Purpose
 
-The Planning Engine is responsible for transforming high-level objectives into executable plans that AI agents can execute within the Apex AI Platform.
+The Planning Engine is responsible for transforming high-level objectives into executable plans that AI agents can execute within the Wovyr AI Platform.
 
 Instead of directly asking an LLM to produce a final answer, the Planning Engine decomposes complex goals into smaller, deterministic tasks that can be executed by tools, workflows, humans, or other agents.
 

@@ -13,8 +13,8 @@
 
   @if (forbidden()) {
     <div class="status-bar err">
-      <b>403 — not authorized.</b> The server authorizes by <code>X-Apex-Principal</code>.
-      Run it with <code>APEX_PLATFORM_ADMINS={{ principal }}</code> so this identity can administer the tenant.
+      <b>403 — not authorized.</b> The server authorizes by <code>X-Wovyr-Principal</code>.
+      Run it with <code>WOVYR_PLATFORM_ADMINS={{ principal }}</code> so this identity can administer the tenant.
     </div>
   } @else if (status()) {
     <div class="status-bar" [class.err]="status().startsWith('Error')">{{ status() }}</div>
@@ -136,7 +136,7 @@
         </tbody>
       </table></div>
       <div class="inline-form col">
-        <input type="text" [(ngModel)]="newWebhook.url" placeholder="https://example.com/hooks/apex" />
+        <input type="text" [(ngModel)]="newWebhook.url" placeholder="https://example.com/hooks/wovyr" />
         <div class="inline-form">
           <input type="text" [(ngModel)]="newWebhook.events" placeholder="event patterns, comma-separated" />
           <input type="text" [(ngModel)]="newWebhook.secret" placeholder="signing secret" />
@@ -147,7 +147,7 @@
     <div class="note">
       <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 8v5m0 3h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       <span><b>API Keys</b> and <b>Audit log</b> are specified in the settings spec but have no
-        platform API endpoint yet — they'll be wired when the users/audit routes land on apex-server.</span>
+        platform API endpoint yet — they'll be wired when the users/audit routes land on wovyr-server.</span>
     </div>
   }
 </section>

@@ -20,7 +20,7 @@ export class Playground implements OnDestroy {
   private agents = inject(AgentService);
 
   system = 'You are a concise assistant.';
-  message = 'In two sentences: what is Apex?';
+  message = 'In two sentences: what is Wovyr?';
   /** Model class for the selector — or a pinned model that overrides it. */
   modelClass = 'balanced';
   pinnedModel = '';

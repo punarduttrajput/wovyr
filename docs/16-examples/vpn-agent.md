@@ -32,7 +32,7 @@ A `vpn` plugin ships tools that call a VPN provider's API.
 `plugin.yaml` (excerpt):
 
 ```yaml
-apiVersion: plugin.apex.io/v1
+apiVersion: plugin.wovyr.io/v1
 kind: Plugin
 metadata: { name: acme/vpn, version: 1.0.0, publisher: acme }
 compatibility: { platform_api: ">=1.0.0 <2.0.0" }
@@ -53,11 +53,11 @@ needs — egress to one host and one secret reference.
 # 3. Build, Sign, Publish
 
 ```bash
-apex plugin new vpn --kind tool
+wovyr plugin new vpn --kind tool
 # implement capabilities/tools/*
-apex plugin build && apex plugin test
-apex plugin sign --key ~/.keys/acme.key
-apex plugin publish --registry https://registry.apex.example.com
+wovyr plugin build && wovyr plugin test
+wovyr plugin sign --key ~/.keys/acme.key
+wovyr plugin publish --registry https://registry.wovyr.example.com
 ```
 
 Packaging follows [distribution](../08-plugin-sdk/distribution.md) (signed,
@@ -68,12 +68,12 @@ SBOM, provenance).
 # 4. Install & Grant
 
 ```bash
-apex plugins install acme/vpn@1.0.0
-PID=$(apex plugins list -o json | jq -r '.data[]|select(.name=="acme/vpn").id')
-apex plugins grants add "$PID" --project netops \
+wovyr plugins install acme/vpn@1.0.0
+PID=$(wovyr plugins list -o json | jq -r '.data[]|select(.name=="acme/vpn").id')
+wovyr plugins grants add "$PID" --project netops \
   --permission net:egress:api.vpnprovider.com \
   --permission secret:read:vpn-admin-token
-apex plugins enable "$PID"
+wovyr plugins enable "$PID"
 ```
 
 The admin token is stored in the [secret vault](../13-security/secret-management.md)
@@ -103,7 +103,7 @@ spec:
 # 6. Run
 
 ```bash
-apex agents run -f agents/vpn-ops.yaml --stream \
+wovyr agents run -f agents/vpn-ops.yaml --stream \
   --input '{"message":"Grant contractor alex@x.com access to staging for 8 hours."}'
 ```
 

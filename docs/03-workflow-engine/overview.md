@@ -10,7 +10,7 @@
 
 # 1. Purpose
 
-The Workflow Engine is the core orchestration runtime of the Apex AI Platform.
+The Workflow Engine is the core orchestration runtime of the Wovyr AI Platform.
 
 It is responsible for executing durable, long-running, event-driven workflows that coordinate:
 

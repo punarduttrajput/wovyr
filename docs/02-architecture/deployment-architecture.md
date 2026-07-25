@@ -7,15 +7,15 @@ project inception; **superseded for GA by
 [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)** (Path A,
 2026-07-06): GA ships as a single-node appliance, not the multi-service HA
 topology described below. **Corrected 2026-07-07:** what's real is
-`deployment/docker-compose.yml` (one `apex` binary + optional Postgres +
-Qdrant) and `deployment/helm/apex/` (the same single-binary topology,
+`deployment/docker-compose.yml` (one `wovyr` binary + optional Postgres +
+Qdrant) and `deployment/helm/wovyr/` (the same single-binary topology,
 `replicas: 1` by product decision, offline-validated only, never applied to
 a live cluster). NATS JetStream and S3-compatible/MinIO object storage are
 not built at all (see [ADR-0005](../17-adr/ADR-0005-nats.md)'s
 current-status note and [`prd.md` §25](../01-product/prd.md#25-technology-gaps-tracked-for-future-versions)
 for where the object-storage gap is now tracked — [GA-002](../18-roadmap/v1.0/A2-reliability-ha-dr.md)).
 mTLS between services is moot since there's only one process; the real
-security floor is `apex-server`'s own auth/TLS layer (RM-GA-P1). The
+security floor is `wovyr-server`'s own auth/TLS layer (RM-GA-P1). The
 multi-replica/HA remainder of this document is the acknowledged, still-open
 gap tracked in [GA-002](../18-roadmap/v1.0/A2-reliability-ha-dr.md) and
 Track B of [phase3-scale-distribution-tickets.md](../18-roadmap/v1.0/phase3-scale-distribution-tickets.md)
@@ -27,7 +27,7 @@ Track B of [phase3-scale-distribution-tickets.md](../18-roadmap/v1.0/phase3-scal
 
 # 1. Purpose
 
-This document defines the deployment architecture of the Apex AI Platform.
+This document defines the deployment architecture of the Wovyr AI Platform.
 
 It describes supported deployment models, infrastructure topology, networking, service discovery, scaling, high availability, disaster recovery, secrets management, and operational considerations.
 

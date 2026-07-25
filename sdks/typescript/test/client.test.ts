@@ -1,5 +1,5 @@
-/** Integration tests against a real, locally running `apex dev` server
- * (`cargo run -p apex-cli -- dev --addr 127.0.0.1:8080`) — not mocked. Run
+/** Integration tests against a real, locally running `wovyr dev` server
+ * (`cargo run -p wovyr-cli -- dev --addr 127.0.0.1:8080`) — not mocked. Run
  * with the server already up:
  *
  * ```bash
@@ -7,13 +7,13 @@
  * ```
  *
  * Skips cleanly (logging, not failing) if no server answers at
- * `APEX_TEST_BASE_URL` (default `http://127.0.0.1:8080`), so this suite
+ * `WOVYR_TEST_BASE_URL` (default `http://127.0.0.1:8080`), so this suite
  * doesn't fail an offline CI run that never started one.
  *
  * **Almost every mutating/tenant-scoped route needs
- * `APEX_PLATFORM_ADMINS=sdk-test-admin`** (SEC-105: nothing tenant-scoped is
+ * `WOVYR_PLATFORM_ADMINS=sdk-test-admin`** (SEC-105: nothing tenant-scoped is
  * reachable "for free" via anonymity alone — see
- * `crates/apex-server/src/tenancy.rs`'s `tenant_authorize` doc comment).
+ * `crates/wovyr-server/src/tenancy.rs`'s `tenant_authorize` doc comment).
  * Concretely: `health()` and `tools.list()` are the only two tests in this
  * file that work fully anonymously; `workflows.validate()` (parse-only, no
  * side effects) also needs no credential. Every other test below —
@@ -25,12 +25,12 @@
  * wasn't started with that principal granted. Start the server with:
  *
  * ```bash
- * APEX_PLATFORM_ADMINS=sdk-test-admin APEX_ALLOW_ANONYMOUS=1 \
- *   cargo run -p apex-cli -- dev
+ * WOVYR_PLATFORM_ADMINS=sdk-test-admin WOVYR_ALLOW_ANONYMOUS=1 \
+ *   cargo run -p wovyr-cli -- dev
  * ```
  *
  * The `ui:` suite's approve test additionally needs
- * `APEX_UI_POLICY=examples/policies/default-ui-policy.yaml` (GRD-207: absent
+ * `WOVYR_UI_POLICY=examples/policies/default-ui-policy.yaml` (GRD-207: absent
  * a policy, the hosted floor denies *every* interactive frame, including a
  * legitimate one). The block test needs no such setup: the hosted floor
  * already denies its frame the same way a real policy's sensitive-input
@@ -39,9 +39,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { before, describe, test } from "node:test";
-import { ApexClient, ApexApiError, ApexTimeoutError, SDK_VERSION, paginateAll, type PendingUiFrame } from "../src/index.js";
+import { WovyrClient, WovyrApiError, WovyrTimeoutError, SDK_VERSION, paginateAll, type PendingUiFrame } from "../src/index.js";
 
-const baseUrl = process.env.APEX_TEST_BASE_URL ?? "http://127.0.0.1:8080";
+const baseUrl = process.env.WOVYR_TEST_BASE_URL ?? "http://127.0.0.1:8080";
 
 let serverAvailable = false;
 
@@ -53,25 +53,25 @@ before(async () => {
     serverAvailable = false;
   }
   if (!serverAvailable) {
-    console.warn(`skipping integration tests: no apex-server reachable at ${baseUrl}`);
+    console.warn(`skipping integration tests: no wovyr-server reachable at ${baseUrl}`);
   }
 });
 
-function client(): ApexClient {
-  return new ApexClient({ baseUrl });
+function client(): WovyrClient {
+  return new WovyrClient({ baseUrl });
 }
 
 /** Org/project management routes (unlike agents/workflows/memory) have no
  * anonymous-default-tenant back-compat bypass — they need a real
  * `org.admin`/`platform.admin` role. The test server is started with
- * `APEX_PLATFORM_ADMINS=sdk-test-admin` (see the `test` npm script) so this
+ * `WOVYR_PLATFORM_ADMINS=sdk-test-admin` (see the `test` npm script) so this
  * principal is always platform admin. */
-function adminClient(): ApexClient {
-  return new ApexClient({ baseUrl, principal: "sdk-test-admin" });
+function adminClient(): WovyrClient {
+  return new WovyrClient({ baseUrl, principal: "sdk-test-admin" });
 }
 
 const HELLO_MANIFEST = `
-apiVersion: agent.apex.io/v1
+apiVersion: agent.wovyr.io/v1
 kind: Agent
 metadata:
   name: hello
@@ -81,7 +81,7 @@ spec:
     You are a friendly assistant. Greet the user and answer briefly.
 `;
 
-describe("ApexClient (integration)", () => {
+describe("WovyrClient (integration)", () => {
   test("health() reports ok", async (t) => {
     if (!serverAvailable) return t.skip("no server");
     const health = await client().health();
@@ -110,12 +110,12 @@ describe("ApexClient (integration)", () => {
     assert.ok(result.steps >= 1);
   });
 
-  test("agents.run() with a malformed manifest throws ApexApiError(400)", async (t) => {
+  test("agents.run() with a malformed manifest throws WovyrApiError(400)", async (t) => {
     if (!serverAvailable) return t.skip("no server");
     await assert.rejects(
       () => client().agents.run({ manifest: "not: [valid, agent" }),
       (err: unknown) => {
-        assert.ok(err instanceof ApexApiError);
+        assert.ok(err instanceof WovyrApiError);
         assert.equal(err.status, 400);
         assert.equal(err.code, "validation_failed");
         assert.ok(err.requestId && err.requestId.length > 0);
@@ -152,7 +152,7 @@ describe("ApexClient (integration)", () => {
 
     await assert.rejects(
       () => client().workflows.validate("not a workflow"),
-      (err: unknown) => err instanceof ApexApiError && err.status === 400,
+      (err: unknown) => err instanceof WovyrApiError && err.status === 400,
     );
   });
 
@@ -166,7 +166,7 @@ describe("ApexClient (integration)", () => {
     // An explicit, randomized execution id (matching every other test's own
     // convention below) rather than relying on the server's auto-incrementing
     // counter: that counter resets to 1 on every server boot, but the durable
-    // `~/.apex/workflows` store persists forever — across repeated local `dev`
+    // `~/.wovyr/workflows` store persists forever — across repeated local `dev`
     // restarts, an un-randomized id collides with a prior run's real on-disk
     // event history and can surface as a stale-data deserialization error,
     // not a bug in this test or the route it exercises.
@@ -179,8 +179,8 @@ describe("ApexClient (integration)", () => {
         execution_id: `sdk-submit-test-${Date.now()}`,
       }));
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403) {
-        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      if (err instanceof WovyrApiError && err.status === 403) {
+        return t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
       }
       throw err;
     }
@@ -204,22 +204,22 @@ describe("ApexClient (integration)", () => {
     try {
       await c.memory.put({
         namespace,
-        content: "The Apex TypeScript SDK integration test wrote this record.",
+        content: "The Wovyr TypeScript SDK integration test wrote this record.",
         tags: ["sdk-test"],
       });
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403) {
-        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      if (err instanceof WovyrApiError && err.status === 403) {
+        return t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
       }
       throw err;
     }
     const { data } = await c.memory.query({
-      text: "Apex TypeScript SDK integration test",
+      text: "Wovyr TypeScript SDK integration test",
       namespace,
       strategy: "keyword",
     });
     assert.ok(data.length >= 1);
-    assert.match(data[0]!.content, /Apex TypeScript SDK/);
+    assert.match(data[0]!.content, /Wovyr TypeScript SDK/);
   });
 
   test("secrets: create, get, rotate, delete round-trip (value never returned)", async (t) => {
@@ -230,8 +230,8 @@ describe("ApexClient (integration)", () => {
     try {
       created = await c.secrets.create(name, "s3cr3t-v1");
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403) {
-        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      if (err instanceof WovyrApiError && err.status === 403) {
+        return t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
       }
       throw err;
     }
@@ -247,7 +247,7 @@ describe("ApexClient (integration)", () => {
     await c.secrets.delete(name);
     await assert.rejects(
       () => c.secrets.get(name),
-      (err: unknown) => err instanceof ApexApiError && err.status === 404,
+      (err: unknown) => err instanceof WovyrApiError && err.status === 404,
     );
   });
 
@@ -259,8 +259,8 @@ describe("ApexClient (integration)", () => {
     try {
       org = (await c.organizations.create(orgName)) as { id: string };
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403) {
-        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      if (err instanceof WovyrApiError && err.status === 403) {
+        return t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
       }
       throw err;
     }
@@ -275,18 +275,18 @@ describe("ApexClient (integration)", () => {
     // Re-using the now-stale original etag must be rejected.
     await assert.rejects(
       () => c.projects.update(project.id as string, { settings: { a: 2 } }, etag),
-      (err: unknown) => err instanceof ApexApiError && err.status === 409,
+      (err: unknown) => err instanceof WovyrApiError && err.status === 409,
     );
   });
 
   test("pagination: agents.list() honors limit", async (t) => {
     if (!serverAvailable) return t.skip("no server");
-    let page: Awaited<ReturnType<ApexClient["agents"]["list"]>>;
+    let page: Awaited<ReturnType<WovyrClient["agents"]["list"]>>;
     try {
       page = await adminClient().agents.list({ limit: 1 });
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403) {
-        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      if (err instanceof WovyrApiError && err.status === 403) {
+        return t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
       }
       throw err;
     }
@@ -301,13 +301,13 @@ describe("ApexClient (integration)", () => {
     try {
       for (let i = 0; i < 3; i++) {
         const { id } = await c.agents.create(
-          `apiVersion: agent.apex.io/v1\nkind: Agent\nmetadata:\n  name: paginate-test-${i}-${Date.now()}\nspec:\n  model_selector: { capability: chat, class: fast }\n  instructions: hi\n`,
+          `apiVersion: agent.wovyr.io/v1\nkind: Agent\nmetadata:\n  name: paginate-test-${i}-${Date.now()}\nspec:\n  model_selector: { capability: chat, class: fast }\n  instructions: hi\n`,
         );
         created.push(id);
       }
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403) {
-        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      if (err instanceof WovyrApiError && err.status === 403) {
+        return t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
       }
       throw err;
     }
@@ -326,7 +326,7 @@ describe("ApexClient (integration)", () => {
 describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
   // GRD-207: with no ui policy configured, the hosted floor denies *every*
   // interactive frame — including this legitimate approve flow. Point the
-  // server at examples/policies/default-ui-policy.yaml (`APEX_UI_POLICY=...`)
+  // server at examples/policies/default-ui-policy.yaml (`WOVYR_UI_POLICY=...`)
   // to exercise the real policy path (allows this frame; blocks the
   // credential one below via the sensitive-input rule) rather than the floor.
   const APPROVE_MANIFEST =
@@ -338,9 +338,9 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
   /** Polls until either a pending frame for `executionId` appears, or the
    * execution reaches a terminal status first — distinguishing "the frame is
    * on its way" from "policy denied it" (the hosted floor, absent
-   * `APEX_UI_POLICY`) without a fixed race between the two. */
+   * `WOVYR_UI_POLICY`) without a fixed race between the two. */
   async function waitForPendingFrameOrTerminal(
-    c: ApexClient,
+    c: WovyrClient,
     executionId: string,
   ): Promise<{ frame: PendingUiFrame } | { terminalStatus: string }> {
     for (let i = 0; i < 100; i++) {
@@ -357,7 +357,7 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
     throw new Error(`execution ${executionId} settled into neither a pending frame nor a terminal status`);
   }
 
-  async function waitForWorkflowStatus(c: ApexClient, executionId: string, status: string): Promise<void> {
+  async function waitForWorkflowStatus(c: WovyrClient, executionId: string, status: string): Promise<void> {
     for (let i = 0; i < 100; i++) {
       const { execution } = await c.workflows.get(executionId);
       if ((execution as { status?: string }).status === status) return;
@@ -380,8 +380,8 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
         execution_id: executionId,
       }));
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403) {
-        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      if (err instanceof WovyrApiError && err.status === 403) {
+        return t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
       }
       throw err;
     }
@@ -390,7 +390,7 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
     const outcome = await waitForPendingFrameOrTerminal(c, executionId);
     if ("terminalStatus" in outcome) {
       return t.skip(
-        "no ui policy configured (server started without APEX_UI_POLICY) — the hosted " +
+        "no ui policy configured (server started without WOVYR_UI_POLICY) — the hosted " +
           "floor denies this legitimate frame too; see examples/policies/default-ui-policy.yaml",
       );
     }
@@ -406,7 +406,7 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
     // reaches the workflow.
     await assert.rejects(
       () => c.ui.decide(pending.frame_id, { action: "launch" }),
-      (err: unknown) => err instanceof ApexApiError && err.status === 400,
+      (err: unknown) => err instanceof WovyrApiError && err.status === 400,
     );
 
     // The valid approval resumes the execution to completion.
@@ -425,8 +425,8 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
     try {
       await c.workflows.submit({ manifest: BLOCK_MANIFEST, execution_id: executionId });
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403) {
-        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      if (err instanceof WovyrApiError && err.status === 403) {
+        return t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
       }
       throw err;
     }
@@ -444,11 +444,11 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
     await assert.rejects(
       () => adminClient().ui.decide("uif-does-not-exist", { action: "approve" }),
       (err: unknown) => {
-        if (err instanceof ApexApiError && err.status === 403) {
-          t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+        if (err instanceof WovyrApiError && err.status === 403) {
+          t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
           return true;
         }
-        return err instanceof ApexApiError && err.status === 404;
+        return err instanceof WovyrApiError && err.status === 404;
       },
     );
   });
@@ -474,10 +474,10 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
     try {
       pending = await c.ui.present(frame);
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403 && err.code === "forbidden") {
-        return t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+      if (err instanceof WovyrApiError && err.status === 403 && err.code === "forbidden") {
+        return t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
       }
-      if (err instanceof ApexApiError && err.code === "blocked") {
+      if (err instanceof WovyrApiError && err.code === "blocked") {
         return t.skip(
           "no ui policy configured — see examples/policies/default-ui-policy.yaml",
         );
@@ -489,7 +489,7 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
 
     await assert.rejects(
       () => c.ui.getDecision(pending.frame_id),
-      (err: unknown) => err instanceof ApexApiError && err.status === 404,
+      (err: unknown) => err instanceof WovyrApiError && err.status === 404,
     );
 
     const decided = await c.ui.decide(pending.frame_id, { action: "approve" });
@@ -503,7 +503,7 @@ describe("ui: generative-UI frames + decisions (PRD-005 RM-GUI-P1)", () => {
 });
 
 // PRD-006 / RM-MCX: persisted MCP connection management. The stdio lifecycle
-// test additionally needs the server started with `APEX_ENABLE_MCP_STDIO=1`
+// test additionally needs the server started with `WOVYR_ENABLE_MCP_STDIO=1`
 // (ADR-0012's operator opt-in) and skips gracefully without it, the same way
 // the `ui:` suite skips without a configured policy.
 describe("mcp:", () => {
@@ -530,11 +530,11 @@ rl.on('line', (line) => {
           transport: { kind: "http", url: "http://10.1.2.3:9/mcp" },
         }),
       (err: unknown) => {
-        if (err instanceof ApexApiError && err.status === 403) {
-          t.skip("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin");
+        if (err instanceof WovyrApiError && err.status === 403) {
+          t.skip("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin");
           return true;
         }
-        return err instanceof ApexApiError && err.status === 502;
+        return err instanceof WovyrApiError && err.status === 502;
       },
     );
   });
@@ -550,9 +550,9 @@ rl.on('line', (line) => {
         transport: { kind: "stdio", command: "node", args: ["-e", stdioEchoScript] },
       });
     } catch (err) {
-      if (err instanceof ApexApiError && err.status === 403) {
+      if (err instanceof WovyrApiError && err.status === 403) {
         return t.skip(
-          "server not started with mcp:admin granted + APEX_ENABLE_MCP_STDIO=1",
+          "server not started with mcp:admin granted + WOVYR_ENABLE_MCP_STDIO=1",
         );
       }
       throw err;
@@ -578,7 +578,7 @@ rl.on('line', (line) => {
     await c.mcp.delete(name);
     await assert.rejects(
       () => c.mcp.get(name),
-      (err: unknown) => err instanceof ApexApiError && err.status === 404,
+      (err: unknown) => err instanceof WovyrApiError && err.status === 404,
     );
   });
 });
@@ -601,7 +601,7 @@ describe("HttpClient retry (unit, mocked fetch)", () => {
 
   test("GET retries a 503 and eventually succeeds", async () => {
     const { fetchImpl, callCount } = flakyFetch(2);
-    const c = new ApexClient({
+    const c = new WovyrClient({
       baseUrl: "http://unit-test.invalid",
       fetchImpl,
       retry: { maxRetries: 2, baseDelayMs: 1 },
@@ -613,23 +613,23 @@ describe("HttpClient retry (unit, mocked fetch)", () => {
 
   test("GET gives up after exhausting retries", async () => {
     const { fetchImpl, callCount } = flakyFetch(5);
-    const c = new ApexClient({
+    const c = new WovyrClient({
       baseUrl: "http://unit-test.invalid",
       fetchImpl,
       retry: { maxRetries: 2, baseDelayMs: 1 },
     });
-    await assert.rejects(() => c.health(), ApexApiError);
+    await assert.rejects(() => c.health(), WovyrApiError);
     assert.equal(callCount(), 3); // 1 initial + 2 retries, then surfaces the error
   });
 
   test("POST is never auto-retried, even on a 503", async () => {
     const { fetchImpl, callCount } = flakyFetch(1);
-    const c = new ApexClient({
+    const c = new WovyrClient({
       baseUrl: "http://unit-test.invalid",
       fetchImpl,
       retry: { maxRetries: 2, baseDelayMs: 1 },
     });
-    await assert.rejects(() => c.agents.run({ manifest: "x" }), ApexApiError);
+    await assert.rejects(() => c.agents.run({ manifest: "x" }), WovyrApiError);
     assert.equal(callCount(), 1);
   });
 });
@@ -654,7 +654,7 @@ describe("DX-301: idempotency-keyed mutation retry (unit, mocked fetch)", () => 
 
   test("a keyed submit retries a 502 and succeeds", async () => {
     const { fetchImpl, callCount, keys } = flakySubmit(2);
-    const c = new ApexClient({
+    const c = new WovyrClient({
       baseUrl: "http://unit-test.invalid",
       fetchImpl,
       retry: { maxRetries: 2, baseDelayMs: 1 },
@@ -672,12 +672,12 @@ describe("DX-301: idempotency-keyed mutation retry (unit, mocked fetch)", () => 
 
   test("the same submit without a key still never retries", async () => {
     const { fetchImpl, callCount } = flakySubmit(1);
-    const c = new ApexClient({
+    const c = new WovyrClient({
       baseUrl: "http://unit-test.invalid",
       fetchImpl,
       retry: { maxRetries: 2, baseDelayMs: 1 },
     });
-    await assert.rejects(() => c.workflows.submit({ manifest: "m" }), ApexApiError);
+    await assert.rejects(() => c.workflows.submit({ manifest: "m" }), WovyrApiError);
     assert.equal(callCount(), 1);
   });
 });
@@ -698,7 +698,7 @@ describe("DX-301: workflows.waitForCompletion (unit, mocked fetch)", () => {
 
   test("polls until terminal and returns the final snapshot", async () => {
     const { fetchImpl, callCount } = statusSequence(["running", "running", "completed"]);
-    const c = new ApexClient({ baseUrl: "http://unit-test.invalid", fetchImpl });
+    const c = new WovyrClient({ baseUrl: "http://unit-test.invalid", fetchImpl });
     const { execution } = await c.workflows.waitForCompletion("wf-1", { intervalMs: 1 });
     assert.equal(execution["status"], "completed");
     assert.equal(callCount(), 3);
@@ -706,17 +706,17 @@ describe("DX-301: workflows.waitForCompletion (unit, mocked fetch)", () => {
 
   test("failed is terminal too — the helper returns it rather than spinning", async () => {
     const { fetchImpl } = statusSequence(["failed"]);
-    const c = new ApexClient({ baseUrl: "http://unit-test.invalid", fetchImpl });
+    const c = new WovyrClient({ baseUrl: "http://unit-test.invalid", fetchImpl });
     const { execution } = await c.workflows.waitForCompletion("wf-1", { intervalMs: 1 });
     assert.equal(execution["status"], "failed");
   });
 
-  test("throws ApexTimeoutError once the deadline passes", async () => {
+  test("throws WovyrTimeoutError once the deadline passes", async () => {
     const { fetchImpl } = statusSequence(["running"]);
-    const c = new ApexClient({ baseUrl: "http://unit-test.invalid", fetchImpl });
+    const c = new WovyrClient({ baseUrl: "http://unit-test.invalid", fetchImpl });
     await assert.rejects(
       () => c.workflows.waitForCompletion("wf-1", { intervalMs: 5, timeoutMs: 20 }),
-      ApexTimeoutError,
+      WovyrTimeoutError,
     );
   });
 });
@@ -741,11 +741,11 @@ describe("DX-303: version handshake (unit, mocked fetch)", () => {
     const warnings: string[] = [];
     t.mock.method(console, "warn", (msg: string) => warnings.push(msg));
 
-    const same = new ApexClient({ baseUrl: "http://u.invalid", fetchImpl: healthFetch(SDK_VERSION) });
+    const same = new WovyrClient({ baseUrl: "http://u.invalid", fetchImpl: healthFetch(SDK_VERSION) });
     await same.health();
     assert.equal(warnings.length, 0);
 
-    const skewed = new ApexClient({ baseUrl: "http://u.invalid", fetchImpl: healthFetch("0.99.0") });
+    const skewed = new WovyrClient({ baseUrl: "http://u.invalid", fetchImpl: healthFetch("0.99.0") });
     await skewed.health();
     await skewed.health(); // once per client, not per call
     assert.equal(warnings.length, 1);
@@ -755,7 +755,7 @@ describe("DX-303: version handshake (unit, mocked fetch)", () => {
   test("an unparseable dev version stays silent", async (t) => {
     const warnings: string[] = [];
     t.mock.method(console, "warn", (msg: string) => warnings.push(msg));
-    const c = new ApexClient({ baseUrl: "http://u.invalid", fetchImpl: healthFetch("dry-run") });
+    const c = new WovyrClient({ baseUrl: "http://u.invalid", fetchImpl: healthFetch("dry-run") });
     await c.health();
     assert.equal(warnings.length, 0);
   });

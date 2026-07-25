@@ -22,7 +22,7 @@ Document ID: PRD-005
 made it a capable, operable AI product. This PRD answers the question neither of
 them asked: **what is the product, and who buys it?**
 
-It repositions Apex from a horizontal "AI Agent Operating System" — a crowded,
+It repositions Wovyr from a horizontal "AI Agent Operating System" — a crowded,
 capital-intensive category — into a focused wedge product built *on* that platform:
 the **Generative UI Trust Runtime**: the infrastructure that lets AI agents render
 rich, interactive interfaces to humans **safely, auditable, and with a durable
@@ -33,12 +33,12 @@ The product thesis combines three market plays into one coherent offering:
 1. **The trust & security layer for generative UI** — when an AI draws the
    interface at runtime, every existing security assumption of the web breaks. A
    generated form can be a hallucinated phishing vector; prompt injection can
-   manifest *as UI*. Apex validates, constrains, sandboxes, and audits every
+   manifest *as UI*. Wovyr validates, constrains, sandboxes, and audits every
    generated interface before a human sees it.
 2. **Generative UI for enterprise internal tools** — the beachhead vertical.
    Internal dashboards, admin panels, and ops consoles that generate themselves
    around the operator's intent, backed by the platform's tenancy, RBAC, and audit.
-3. **The UI layer for the agent economy** — the runtime any agent (Apex-native or
+3. **The UI layer for the agent economy** — the runtime any agent (Wovyr-native or
    external, via MCP) uses when it needs to *show* a human something or *ask* a
    human for a decision: structured UI frames out, validated human decisions back,
    durably, with the workflow suspended in between.
@@ -84,7 +84,7 @@ problem:
 
 ## 2.2 The positioning problem
 
-As a horizontal agent platform, Apex competes with LangGraph, Temporal, the Vercel
+As a horizontal agent platform, Wovyr competes with LangGraph, Temporal, the Vercel
 AI SDK, and every cloud vendor's agent framework. As **the trust and interaction
 runtime for agent-generated UI**, it competes with almost nobody today, and the
 platform's existing depth (sandboxing, audit, signing, durable workflows) converts
@@ -101,11 +101,11 @@ The repositioning is credible precisely because the hard backend half exists:
 | Durable workflow engine — `ActivityError::Interrupted`, `wait`/`signal`, `human` activities that suspend durably and resume via server signal | The **decision loop**: agent renders UI → execution suspends durably → human decision arrives as a signal → execution resumes. Crash-safe by construction |
 | Agent run loop streaming structured events over SSE (`RunEventSink`: deltas, tool-call fragments, reasoning) | The **transport**: UI frames become a new event type on an already-shipped channel |
 | `Guardrail` trait — staged Allow/Redact/Block, fail-closed, output buffering | The **architectural pattern** for the UI policy engine: a UI frame is checked before anything renders, or nothing renders |
-| Tamper-evident hash-chained audit log (`apex-audit`) | The **provenance layer**: a verifiable record of every frame shown and every decision taken |
+| Tamper-evident hash-chained audit log (`wovyr-audit`) | The **provenance layer**: a verifiable record of every frame shown and every decision taken |
 | Plugin signing (ed25519) + marketplace + human-review verified badge | The **signed component registry**: UI component templates as signed, reviewed, versioned artifacts |
 | Sandbox spectrum (native/WASI/container/gVisor/microVM) incl. in-process Wasmtime with fuel/memory limits | **Isolation for untrusted UI logic** (validators, custom component behaviors) |
 | Multi-tenancy, RBAC, quotas, KMS, secrets vault | The **enterprise floor** the beachhead sale requires |
-| MCP client (`apex-tools::mcp`) | The **interop on-ramp**: external agents and tool servers reach the UI runtime through open protocol |
+| MCP client (`wovyr-tools::mcp`) | The **interop on-ramp**: external agents and tool servers reach the UI runtime through open protocol |
 | TypeScript + Python SDKs | The **base** for the renderer SDK |
 
 **The gap this PRD closes:** the entire UI-facing half — a frame protocol, a policy
@@ -122,7 +122,7 @@ makes all of it embeddable in *someone else's* stack in an afternoon.
   representation of agent-generated interfaces, transported over the existing
   agent/workflow event stream, designed for compatibility with emerging open
   standards (A2UI / MCP Apps shapes) rather than as a proprietary invention.
-- **G2 — Ship the trust layer (`apex-ui-guard`)**: declarative policy validation
+- **G2 — Ship the trust layer (`wovyr-ui-guard`)**: declarative policy validation
   of every frame before render (forbidden field classes, intent-consistency,
   deception-shape checks), fail-closed, with every allow/redact/block decision
   recorded in the tamper-evident audit chain.
@@ -184,11 +184,11 @@ makes all of it embeddable in *someone else's* stack in an afternoon.
   workflows for tenant X in the last hour, with retry buttons" — the surface
   generates itself, every action button mapped to a permission-checked API call,
   destructive ones gated by the human-approval activity.
-- **UC3 — External agent, embedded trust**: a team's existing (non-Apex) agent
+- **UC3 — External agent, embedded trust**: a team's existing (non-Wovyr) agent
   emits frames to the runtime over HTTP/MCP; gets back policy verdicts and,
-  eventually, the user's decision — Apex as middleware, not as their framework.
+  eventually, the user's decision — Wovyr as middleware, not as their framework.
 - **UC4 — Injection containment**: a poisoned retrieval document steers a model
-  toward rendering a credential-harvesting form; `apex-ui-guard` blocks the frame
+  toward rendering a credential-harvesting form; `wovyr-ui-guard` blocks the frame
   class, the block lands in the audit log, the user never sees it.
 
 ---
@@ -200,7 +200,7 @@ Requirement IDs are stable and referenced by roadmap tickets
 testable; "fail-closed" carries the same meaning as in PRD-003/004: an error or an
 unvalidated state must never degrade into rendering.
 
-## WS1 — UI Frame Protocol (`apex-ui`, new crate) — UIP-1xx
+## WS1 — UI Frame Protocol (`wovyr-ui`, new crate) — UIP-1xx
 
 - **UIP-101** Define `UiFrame`: a versioned, declarative, JSON-serializable tree
   over a constrained component vocabulary (layout, text, media-by-reference,
@@ -219,14 +219,14 @@ unvalidated state must never degrade into rendering.
   fetch of the current pending frame via REST for pull-based hosts.
 - **UIP-105** **Interop mapping**: documented, tested translation to/from the
   emerging open shapes (A2UI-style component JSON; MCP Apps resource/tool
-  conventions) so external agents can target the runtime without adopting Apex
+  conventions) so external agents can target the runtime without adopting Wovyr
   end-to-end. The mapping is versioned; unsupported foreign constructs fail
   closed with a named reason.
 - **UIP-106** Protocol versioning: `UiFrame` carries a semver'd schema version;
   runtime rejects newer-than-understood frames (same stance as MIG-A1's
   schema-version refusal).
 
-## WS2 — UI Trust & Policy Engine (`apex-ui-guard`, new crate) — GRD-2xx
+## WS2 — UI Trust & Policy Engine (`wovyr-ui-guard`, new crate) — GRD-2xx
 
 - **GRD-201** A `UiPolicy` declarative document (YAML, like agent/workflow
   manifests): rules over frame structure and content — forbidden component
@@ -250,15 +250,15 @@ unvalidated state must never degrade into rendering.
   structural: there simply is no "browser chrome" component; credential-input
   classes are deny-by-default per GRD-201).
 - **GRD-205** Every verdict (allow/redact/block, rule id, frame hash) is recorded
-  through `apex-audit`'s hash chain. A blocked frame's *content* is retained
+  through `wovyr-audit`'s hash chain. A blocked frame's *content* is retained
   (encrypted at rest via the existing KMS envelope path) for forensics, policy-
   controlled.
-- **GRD-206** Policies are tenant-scoped (via `apex-tenancy`), versioned, and
+- **GRD-206** Policies are tenant-scoped (via `wovyr-tenancy`), versioned, and
   immutable-once-referenced (SAF-202 pin semantics); a run records which policy
   version judged its frames.
 - **GRD-207** Fail-closed floor for hosted runs: a hosted deployment with no UI
   policy configured denies frames carrying input/action nodes (display-only
-  frames pass) — mirror of SEC-303's deny-all default; `APEX_UNRESTRICTED_UI=1`
+  frames pass) — mirror of SEC-303's deny-all default; `WOVYR_UNRESTRICTED_UI=1`
   is the documented trusted-first-party escape hatch.
 - **GRD-208** Custom validators run sandboxed: a tenant-supplied validation hook
   executes as a `wasm32-wasi` module in the existing `WasiSandbox` (fuel/memory
@@ -288,10 +288,10 @@ unvalidated state must never degrade into rendering.
 
 ## WS4 — Renderer SDK — RDR-4xx
 
-- **RDR-401** `@apex/ui-react`: a React component that consumes the SSE frame
+- **RDR-401** `@wovyr/ui-react`: a React component that consumes the SSE frame
   stream (or pull API), renders the component vocabulary with a themeable
   design-token system, and posts decisions to HIL-303. Zero required backend
-  besides the Apex server.
+  besides the Wovyr server.
 - **RDR-402** A framework-agnostic web-component build sharing the same core, for
   non-React hosts (incl. the Angular dashboard).
 - **RDR-403** The renderer verifies frame integrity (hash) and renders **only**
@@ -322,7 +322,7 @@ unvalidated state must never degrade into rendering.
 
 - **ITS-601** A dashboard "Surfaces" area: operator intent (natural language) →
   agent-composed internal tool frame over the platform's own APIs (workflow list,
-  memory, tenancy admin) — dogfooding UC2 on Apex's own operational surface.
+  memory, tenancy admin) — dogfooding UC2 on Wovyr's own operational surface.
 - **ITS-602** Every action node binds to a permission-checked API call under the
   operator's own RBAC identity — the generated UI can never do what its viewer
   cannot (enforced server-side at decision time, HIL-303, not just at render).
@@ -335,7 +335,7 @@ unvalidated state must never degrade into rendering.
 
 - **EMB-701** **Standalone mode**: the trust runtime (WS1+WS2+WS3 API) runs as a
   middleware service in front of *any* agent stack — frames in over HTTP, verdicts
-  and decisions out — no Apex agent/workflow adoption required. One binary, the
+  and decisions out — no Wovyr agent/workflow adoption required. One binary, the
   appliance stance of ADR-0010.
 - **EMB-702** MCP surface: expose the runtime as MCP tools (`ui_present`,
   `ui_await_decision`) so MCP-speaking agents get governed UI with zero custom
@@ -355,7 +355,7 @@ Detailed tickets live in the [v1.2 roadmap](../18-roadmap/v1.2-generative-ui.md)
 |---|---|---|---|
 | **P1 — Protocol & Trust Core** | Frames exist and are governed | UIP-1xx, GRD-201..207, HIL-301..303 | UC1/UC4 pass end-to-end against the server API (no renderer yet — assertions over the SSE stream + audit chain) |
 | **P2 — Renderer & Interaction Loop** | Humans see and decide | RDR-4xx, HIL-304..306, GRD-208, CMP-5xx | The killer demo (§9) runs from a fresh clone in <10 min; SDK quickstart <30 min |
-| **P3 — Beachhead & Embeddability** | Sellable and adoptable | ITS-6xx, EMB-7xx | Dashboard Surfaces dogfooded on Apex's own ops; standalone mode + MCP surface documented; ≥5 design partners onboarded |
+| **P3 — Beachhead & Embeddability** | Sellable and adoptable | ITS-6xx, EMB-7xx | Dashboard Surfaces dogfooded on Wovyr's own ops; standalone mode + MCP surface documented; ≥5 design partners onboarded |
 
 ---
 
@@ -379,11 +379,11 @@ Detailed tickets live in the [v1.2 roadmap](../18-roadmap/v1.2-generative-ui.md)
 
 > A procurement agent is asked to reorder lab supplies. It composes a checkout
 > confirmation. **Take 1**: the model (steered by a poisoned vendor page) includes
-> a card-number input — `apex-ui-guard` blocks the frame, the block is in the
+> a card-number input — `wovyr-ui-guard` blocks the frame, the block is in the
 > audit chain, the user never sees it. **Take 2**: the safe variant renders in the
 > React SDK; the workflow is durably suspended; the server is killed and
 > restarted; the frame is still pending; the user clicks Approve; the workflow
-> resumes and completes; `apex audit verify` proves the whole exchange — what was
+> resumes and completes; `wovyr audit verify` proves the whole exchange — what was
 > shown, what was blocked, who approved, when.
 
 Every clause above maps to a requirement; the demo is an integration test first
@@ -422,4 +422,4 @@ and a sales asset second.
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.1 | 2026-07-15 | Status updated Draft → Shipped (v1.2 scope): RM-GUI Phases 1–3 all landed per the [v1.2 roadmap](../18-roadmap/v1.2-generative-ui.md); no content changed |
-| 1.0.0 | 2026-07-14 | Initial PRD: repositioning Apex as the Generative UI Trust Runtime — trust layer + internal-tools beachhead + agent UI runtime |
+| 1.0.0 | 2026-07-14 | Initial PRD: repositioning Wovyr as the Generative UI Trust Runtime — trust layer + internal-tools beachhead + agent UI runtime |

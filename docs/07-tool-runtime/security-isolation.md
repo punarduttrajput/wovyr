@@ -93,7 +93,7 @@ network:
   inbound: deny
 ```
 
-**Implemented:** `apex-tools`' [`EgressProxy`](../../crates/apex-tools/src/egress.rs)
+**Implemented:** `wovyr-tools`' [`EgressProxy`](../../crates/wovyr-tools/src/egress.rs)
 is a host-side HTTP `CONNECT` tunnel enforcing the host allow-list; the container
 backend points a sandboxed workload at it via `HTTPS_PROXY`. That alone was only
 **cooperative** — a workload that ignored the env var and dialed out directly had
@@ -102,7 +102,7 @@ gap noted in earlier revisions of this platform). This is now closed: before the
 real command ever runs, the *host* attaches to the container's network namespace
 via `nsenter` and applies an `iptables` default-deny to its `OUTPUT` chain,
 allowing only loopback and the egress proxy's address
-([`egress_lockdown`](../../crates/apex-tools/src/egress_lockdown.rs)) — so ignoring
+([`egress_lockdown`](../../crates/wovyr-tools/src/egress_lockdown.rs)) — so ignoring
 `HTTPS_PROXY` now reaches nothing. The container starts running an inert
 placeholder and only receives the real command via `docker exec` once the
 lockdown is confirmed in place, so there is no window where untrusted code runs
@@ -121,7 +121,7 @@ class — historically enforced **only resource limits** (timeout, output cap,
 `setrlimit`/Job Object): no filesystem confinement beyond the run's working
 directory, and no network isolation at all. On the default cross-platform path,
 "sandboxed tools" was accurate for resource limits and false for confinement — a
-native run could read `~/.apex/kms/root.key` and exfiltrate it over the open network.
+native run could read `~/.wovyr/kms/root.key` and exfiltrate it over the open network.
 
 The native path now has a **confinement floor**, not parity with the container path:
 
@@ -133,7 +133,7 @@ The native path now has a **confinement floor**, not parity with the container p
   disabled: there is **no native egress mechanism**. A native run there is
   unsandboxed for network access. This is never silent: it proceeds only as an
   **explicitly-acknowledged** operator choice (the CLI/local trusted context, or
-  `APEX_ALLOW_UNSANDBOXED_NATIVE=1` on a hosted deployment) — logged loudly on every
+  `WOVYR_ALLOW_UNSANDBOXED_NATIVE=1` on a hosted deployment) — logged loudly on every
   such run — or the tool call is **refused** (`PermissionDenied`) if unacknowledged.
 - Filesystem confinement on the native path remains a **documented gap** on every
   platform: the run's working directory scopes relative paths, but nothing prevents
@@ -262,5 +262,5 @@ referenced, never valued.
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.2.0 | 2026-07-25 | SEC-404: new §5.1 scopes the "sandboxed tools" claim precisely for the native backend — a Linux deny-all egress floor via unprivileged netns, an explicit operator-acknowledgement-or-refusal path on Windows/macOS (never a silent unsandboxed run), and filesystem confinement on the native path named as a documented gap. |
-| 1.1.0 | 2026-07-03 | §5 Network Isolation: closed the "L3 egress bypass" gap — `apex-tools`' container backend now applies a host-side `iptables` default-deny (via `nsenter` into the container's network namespace, before the real command runs) restricting `OUTPUT` to loopback + the egress proxy's address, so a workload ignoring `HTTPS_PROXY` no longer reaches anything. Linux/Docker-specific; not yet extended to Podman. Not run against a live Docker/nsenter/iptables environment in the authoring session — flagged for verification on first real use |
+| 1.1.0 | 2026-07-03 | §5 Network Isolation: closed the "L3 egress bypass" gap — `wovyr-tools`' container backend now applies a host-side `iptables` default-deny (via `nsenter` into the container's network namespace, before the real command runs) restricting `OUTPUT` to loopback + the egress proxy's address, so a workload ignoring `HTTPS_PROXY` no longer reaches anything. Linux/Docker-specific; not yet extended to Podman. Not run against a live Docker/nsenter/iptables environment in the authoring session — flagged for verification on first real use |
 | 1.0.0 | 2026-06-27 | Initial Tool Runtime Security & Isolation specification |

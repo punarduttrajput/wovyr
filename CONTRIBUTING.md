@@ -1,6 +1,6 @@
-# Contributing to Apex AI Platform
+# Contributing to Wovyr AI Platform
 
-Thanks for your interest in contributing to the **Apex AI Platform**.
+Thanks for your interest in contributing to the **Wovyr AI Platform**.
 
 The full, authoritative contributor guide lives in the documentation:
 
@@ -18,7 +18,7 @@ New to the project? Start with the [documentation index](docs/SUMMARY.md) and th
 ## Quick start
 
 ```bash
-git clone <repo> && cd apex
+git clone <repo> && cd wovyr
 make setup        # toolchain + hooks
 make dev          # run the all-in-one platform locally
 make test         # unit + integration
@@ -31,7 +31,7 @@ for details.
 
 ## Developer Certificate of Origin (DCO)
 
-Apex is licensed under [Apache 2.0](LICENSE). To keep the provenance of every
+Wovyr is licensed under [Apache 2.0](LICENSE). To keep the provenance of every
 contribution clear, we require the [Developer Certificate of Origin](https://developercertificate.org/)
 instead of a CLA: by signing off a commit you certify you have the right to
 submit it under the project's license.

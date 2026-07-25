@@ -16,7 +16,7 @@ Document ID: OBS-001
 
 # 1. Purpose
 
-This document defines **structured logging** standards for all Apex AI Platform services — format, levels, correlation, and privacy.
+This document defines **structured logging** standards for all Wovyr AI Platform services — format, levels, correlation, and privacy.
 
 ---
 
@@ -53,7 +53,7 @@ Structured logs are queryable and correlate to traces/metrics via `request_id` /
 | `debug` | Detailed diagnostics (non-prod default off) |
 | `trace` | Very verbose (opt-in) |
 
-Level is configurable per service via `APEX_LOG`
+Level is configurable per service via `WOVYR_LOG`
 ([deployment config](../12-deployment/docker.md#5-configuration)).
 
 ---

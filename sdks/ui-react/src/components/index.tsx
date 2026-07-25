@@ -25,21 +25,21 @@ export function renderNode(node: UiNode, key: string, ctx: RenderCtx): React.Rea
   switch (node.type) {
     case "column":
       return (
-        <div className="apex-ui-column" key={key} role="group">
+        <div className="wovyr-ui-column" key={key} role="group">
           {node.children.map((child, i) => renderNode(child, `${key}.${i}`, ctx))}
         </div>
       );
     case "row":
       return (
-        <div className="apex-ui-row" key={key} role="group">
+        <div className="wovyr-ui-row" key={key} role="group">
           {node.children.map((child, i) => renderNode(child, `${key}.${i}`, ctx))}
         </div>
       );
     case "card":
       return (
-        <section className="apex-ui-card" key={key} aria-label={node.title}>
+        <section className="wovyr-ui-card" key={key} aria-label={node.title}>
           {node.title && (
-            <p className="apex-ui-card-title" role="heading" aria-level={2}>
+            <p className="wovyr-ui-card-title" role="heading" aria-level={2}>
               {node.title}
             </p>
           )}
@@ -47,11 +47,11 @@ export function renderNode(node: UiNode, key: string, ctx: RenderCtx): React.Rea
         </section>
       );
     case "divider":
-      return <hr className="apex-ui-divider" key={key} />;
+      return <hr className="wovyr-ui-divider" key={key} />;
     case "text":
       return (
         <p
-          className={`apex-ui-text${node.style ? ` apex-ui-text-${node.style}` : ""}`}
+          className={`wovyr-ui-text${node.style ? ` wovyr-ui-text-${node.style}` : ""}`}
           key={key}
         >
           {node.text}
@@ -60,7 +60,7 @@ export function renderNode(node: UiNode, key: string, ctx: RenderCtx): React.Rea
     case "badge":
       return (
         <span
-          className={`apex-ui-badge${node.tone && node.tone !== "neutral" ? ` apex-ui-badge-${node.tone}` : ""}`}
+          className={`wovyr-ui-badge${node.tone && node.tone !== "neutral" ? ` wovyr-ui-badge-${node.tone}` : ""}`}
           key={key}
         >
           {node.text}
@@ -68,7 +68,7 @@ export function renderNode(node: UiNode, key: string, ctx: RenderCtx): React.Rea
       );
     case "key_value":
       return (
-        <dl className="apex-ui-keyvalue" key={key}>
+        <dl className="wovyr-ui-keyvalue" key={key}>
           {node.entries.map((entry, i) => (
             <div key={`${key}.${i}`} style={{ display: "contents" }}>
               <dt>{entry.key}</dt>
@@ -78,7 +78,7 @@ export function renderNode(node: UiNode, key: string, ctx: RenderCtx): React.Rea
         </dl>
       );
     case "image":
-      return <img className="apex-ui-image" key={key} src={node.url} alt={node.alt} />;
+      return <img className="wovyr-ui-image" key={key} src={node.url} alt={node.alt} />;
     case "text_input":
       return (
         <TextInputNode key={key} node={node} ctx={ctx} />
@@ -100,7 +100,7 @@ function useFieldId(name: string): string {
   // useId gives a stable, SSR-safe unique suffix; the field `name` stays the
   // human-readable/debuggable part of the id.
   const reactId = useId();
-  return `apex-ui-field-${name}-${reactId}`;
+  return `wovyr-ui-field-${name}-${reactId}`;
 }
 
 function TextInputNode({
@@ -114,18 +114,18 @@ function TextInputNode({
   const value = (ctx.values[node.name] as string | undefined) ?? "";
   const Field = node.multiline ? "textarea" : "input";
   return (
-    <div className="apex-ui-field">
-      <label className="apex-ui-label" htmlFor={id}>
+    <div className="wovyr-ui-field">
+      <label className="wovyr-ui-label" htmlFor={id}>
         {node.label}
         {node.required && (
-          <span className="apex-ui-required-marker" aria-hidden="true">
+          <span className="wovyr-ui-required-marker" aria-hidden="true">
             *
           </span>
         )}
       </label>
       <Field
         id={id}
-        className={node.multiline ? "apex-ui-textarea" : "apex-ui-input"}
+        className={node.multiline ? "wovyr-ui-textarea" : "wovyr-ui-input"}
         type={node.multiline ? undefined : "text"}
         rows={node.multiline ? 3 : undefined}
         value={value}
@@ -149,18 +149,18 @@ function NumberInputNode({
   const id = useFieldId(node.name);
   const value = ctx.values[node.name];
   return (
-    <div className="apex-ui-field">
-      <label className="apex-ui-label" htmlFor={id}>
+    <div className="wovyr-ui-field">
+      <label className="wovyr-ui-label" htmlFor={id}>
         {node.label}
         {node.required && (
-          <span className="apex-ui-required-marker" aria-hidden="true">
+          <span className="wovyr-ui-required-marker" aria-hidden="true">
             *
           </span>
         )}
       </label>
       <input
         id={id}
-        className="apex-ui-input"
+        className="wovyr-ui-input"
         type="number"
         min={node.min}
         max={node.max}
@@ -180,18 +180,18 @@ function SelectNode({ node, ctx }: { node: Extract<UiNode, { type: "select" }>; 
   const id = useFieldId(node.name);
   const value = (ctx.values[node.name] as string | undefined) ?? "";
   return (
-    <div className="apex-ui-field">
-      <label className="apex-ui-label" htmlFor={id}>
+    <div className="wovyr-ui-field">
+      <label className="wovyr-ui-label" htmlFor={id}>
         {node.label}
         {node.required && (
-          <span className="apex-ui-required-marker" aria-hidden="true">
+          <span className="wovyr-ui-required-marker" aria-hidden="true">
             *
           </span>
         )}
       </label>
       <select
         id={id}
-        className="apex-ui-select"
+        className="wovyr-ui-select"
         value={value}
         required={node.required}
         aria-required={node.required || undefined}
@@ -221,16 +221,16 @@ function CheckboxNode({
   const id = useFieldId(node.name);
   const checked = (ctx.values[node.name] as boolean | undefined) ?? node.checked ?? false;
   return (
-    <div className="apex-ui-checkbox-field">
+    <div className="wovyr-ui-checkbox-field">
       <input
         id={id}
-        className="apex-ui-checkbox-input"
+        className="wovyr-ui-checkbox-input"
         type="checkbox"
         checked={checked}
         disabled={ctx.disabled}
         onChange={(e) => ctx.setValue(node.name, e.target.checked)}
       />
-      <label className="apex-ui-label" htmlFor={id}>
+      <label className="wovyr-ui-label" htmlFor={id}>
         {node.label}
       </label>
     </div>
@@ -241,14 +241,14 @@ function ButtonNode({ node, ctx }: { node: Extract<UiNode, { type: "button" }>; 
   const actionClass = node.class ?? "neutral";
   const variant =
     actionClass === "destructive"
-      ? " apex-ui-button-destructive"
+      ? " wovyr-ui-button-destructive"
       : isAffirmative(actionClass)
-        ? " apex-ui-button-affirmative"
+        ? " wovyr-ui-button-affirmative"
         : "";
   return (
     <button
       type="button"
-      className={`apex-ui-button${variant}`}
+      className={`wovyr-ui-button${variant}`}
       disabled={ctx.disabled}
       onClick={() => ctx.onAction(node.action, actionClass)}
     >
@@ -261,7 +261,7 @@ function ButtonNode({ node, ctx }: { node: Extract<UiNode, { type: "button" }>; 
  * recognize (RDR-403) — never skipped, never guessed at. */
 function UnknownNode({ node }: { node: { type: string } }) {
   return (
-    <div className="apex-ui-unknown" role="note">
+    <div className="wovyr-ui-unknown" role="note">
       Unsupported element (<code>{node.type}</code>) — this frame includes a component this
       renderer version doesn't understand yet.
     </div>

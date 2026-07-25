@@ -16,7 +16,7 @@ Document ID: IMPL-004
 
 # 1. Purpose
 
-This document defines how the Apex AI Platform is versioned and released — from a
+This document defines how the Wovyr AI Platform is versioned and released — from a
 merged change to signed, deployable artifacts.
 
 ---

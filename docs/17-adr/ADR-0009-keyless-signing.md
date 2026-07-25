@@ -3,7 +3,7 @@ File: docs/17-adr/ADR-0009-keyless-signing.md
 Document ID: ADR-0009
 -->
 
-# ADR-0009: Apex-Native Keyless Signing (Sigstore-Shaped, Offline-Verifiable)
+# ADR-0009: Wovyr-Native Keyless Signing (Sigstore-Shaped, Offline-Verifiable)
 
 **Status:** Accepted
 **Date:** 2026-07-03
@@ -15,7 +15,7 @@ Document ID: ADR-0009
 # Context
 
 Plugin packages are signed with **long-lived publisher ed25519 keys** verified
-against a `TrustStore` ([`apex-plugin/src/verify.rs`](../../crates/apex-plugin/src/verify.rs)).
+against a `TrustStore` ([`wovyr-plugin/src/verify.rs`](../../crates/wovyr-plugin/src/verify.rs)).
 Long-lived keys are the supply chain's weakest link: they leak, they outlive the
 people who held them, and revocation is manual. The v0.3 security track calls for
 **keyless (identity-based) signing** in the Sigstore style: a certificate authority
@@ -33,25 +33,25 @@ constraints:
   reachable from CI or the dev environment reliably; X.509/Fulcio parsing pulls a
   heavy dependency tree.
 - The platform already has the primitives the design needs: ed25519
-  sign/verify (`ring`), a hash-chained tamper-evident audit log (`apex-audit`),
+  sign/verify (`ring`), a hash-chained tamper-evident audit log (`wovyr-audit`),
   and the capability-gated live-test pattern for real infrastructure.
 
 # Decision
 
-Implement **Apex-native keyless signing** in
-[`apex-plugin/src/keyless.rs`](../../crates/apex-plugin/src/keyless.rs): the
+Implement **Wovyr-native keyless signing** in
+[`wovyr-plugin/src/keyless.rs`](../../crates/wovyr-plugin/src/keyless.rs): the
 Sigstore *architecture* (ephemeral key → short-lived identity certificate →
-transparency-log witness → pinned-root verification) with Apex-native encodings
+transparency-log witness → pinned-root verification) with Wovyr-native encodings
 (canonical delimiter-separated byte strings signed by ed25519, JSON on the wire)
 instead of X.509/DER.
 
 1. **Ports, not services.** `CertificateAuthority` and `TransparencyLog` are
    traits. `InMemoryCa`/`InMemoryTransparencyLog` are the deterministic in-process
    implementations (tests, single-operator dev). A Rekor-backed log
-   ([`rekor.rs`](../../crates/apex-plugin/src/rekor.rs), `rekor` cargo feature)
+   ([`rekor.rs`](../../crates/wovyr-plugin/src/rekor.rs), `rekor` cargo feature)
    appends `rekord` entries to a real Rekor server; `deployment/rekor/` runs one
    locally (pinned release images, no source builds), live-tested behind
-   `APEX_REKOR_URL` (`tests/rekor_live.rs`).
+   `WOVYR_REKOR_URL` (`tests/rekor_live.rs`).
 2. **Verification is fully offline and clock-free.** A `KeylessBundle`
    (certificate + manifest signature + log entry) is self-contained; verifiers hold
    a pinned `KeylessRoot` (CA + optional log public keys). The certificate-validity
@@ -64,7 +64,7 @@ instead of X.509/DER.
    publisher — an allowed identity cannot sign for someone else's namespace. Empty
    policy admits nobody. A transparency-log entry is required unless the operator
    opts out (`require_transparency: false`, the registry-witnessed mode).
-4. **Bundles ride in the `.apexpkg` envelope** (optional `keyless` field), and
+4. **Bundles ride in the `.wovyrpkg` envelope** (optional `keyless` field), and
    `Package::verify_keyless(root, policy)` is the counterpart to the existing
    `Package::verify(trust)`. Both trust modes coexist; consumers choose per policy.
 
@@ -77,7 +77,7 @@ instead of X.509/DER.
 - **(+)** Publishers need no long-lived signing secret; compromise windows shrink
   to the certificate TTL (default 10 min).
 - **(−)** Not wire-compatible with Sigstore tooling (`cosign` cannot verify an
-  Apex bundle). Acceptable: the trust root is operator-pinned either way, and the
+  Wovyr bundle). Acceptable: the trust root is operator-pinned either way, and the
   architecture leaves room to swap encodings later.
 - **(+)** Rekor's **signed entry timestamp is verified offline**: the bundle
   carries Rekor's canonicalized entry `body`, the verifier reproduces the RFC 8785
@@ -95,16 +95,16 @@ identical no-downgrade semantics (a present bundle is verified keylessly or
 rejected — never falls back to the publisher-key path):
 
 - **Registry publish** — `Registry::with_keyless(root, policy)`
-  (`apex-marketplace`); a keyless-only package flows publish → discover →
+  (`wovyr-marketplace`); a keyless-only package flows publish → discover →
   download → install → enable with no publisher key anywhere
   (`tests/keyless_supply_chain.rs`).
-- **Engine install** — `PluginEngine::with_keyless(root, policy)` (`apex-plugin`).
+- **Engine install** — `PluginEngine::with_keyless(root, policy)` (`wovyr-plugin`).
 - **Server** — both are configured from one operator file,
-  `~/.apex/plugins/keyless.json` (`{"root": …, "policy": …}`); absent ⇒ keyless
+  `~/.wovyr/plugins/keyless.json` (`{"root": …, "policy": …}`); absent ⇒ keyless
   disabled.
 
-- **CLI tooling** — `apex plugin keyless-init` (dev CA + pinned trust config,
-  shared with the server) and `apex plugin keyless-sign` (ephemeral key never
+- **CLI tooling** — `wovyr plugin keyless-init` (dev CA + pinned trust config,
+  shared with the server) and `wovyr plugin keyless-sign` (ephemeral key never
   touches disk; `--rekor <url>` witnesses the signing, behind the CLI's
   `keyless-rekor` feature). `plugin.keyless.json` beside a manifest rides into
   packages via `pack`/`install`/`publish`, and `plugin.sig` becomes optional for

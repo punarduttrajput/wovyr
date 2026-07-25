@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a minimal ext4 rootfs carrying the Apex guest agent (init.sh) as /init,
+# Build a minimal ext4 rootfs carrying the Wovyr guest agent (init.sh) as /init,
 # for the Firecracker microVM sandbox. Uses Docker to export an Alpine filesystem and
 # `mkfs.ext4 -d` to populate the image without a loop mount or root.
 #
@@ -9,8 +9,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR="${1:-$HERE/assets}"
-IMAGE="${APEX_FC_BASE_IMAGE:-alpine:latest}"
-SIZE_MB="${APEX_FC_ROOTFS_MB:-128}"
+IMAGE="${WOVYR_FC_BASE_IMAGE:-alpine:latest}"
+SIZE_MB="${WOVYR_FC_ROOTFS_MB:-128}"
 
 mkdir -p "$OUT_DIR"
 ROOTDIR="$(mktemp -d)"

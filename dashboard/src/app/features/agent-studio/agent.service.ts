@@ -6,9 +6,9 @@ import * as YAML from 'yaml';
 import { AgentDraft, Page, StreamEvent, ToolInfo } from '../../core/api.types';
 
 /**
- * Client for the Agents API on apex-server. CRUD goes over HttpClient; the run stream
+ * Client for the Agents API on wovyr-server. CRUD goes over HttpClient; the run stream
  * uses the fetch streaming API because `agents:stream` is a POST (EventSource is GET-only).
- * Requests target `/api/v1/...` — the dev server proxies that to apex-server (see
+ * Requests target `/api/v1/...` — the dev server proxies that to wovyr-server (see
  * proxy.conf.json); in production it is same-origin behind the gateway.
  */
 @Injectable({ providedIn: 'root' })
@@ -136,7 +136,7 @@ export class AgentService {
     }
     return YAML.stringify(
       {
-        apiVersion: 'agent.apex.io/v1',
+        apiVersion: 'agent.wovyr.io/v1',
         kind: 'Agent',
         metadata: { name: d.name.trim() || 'untitled' },
         spec,

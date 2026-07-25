@@ -17,7 +17,7 @@ Document ID: PRD-006
 
 # 1. Purpose
 
-`apex-tools::mcp` (RM-AIM-P3 ECO-301, shipped 2026-07-14) already lets Apex connect
+`wovyr-tools::mcp` (RM-AIM-P3 ECO-301, shipped 2026-07-14) already lets Wovyr connect
 to an external MCP (Model Context Protocol) server, discover its tools, and proxy
 them into a `ToolRegistry` as permission-checked `Tool` impls — a real agent can
 already call a real external MCP server's tool through the normal tool-calling
@@ -28,7 +28,7 @@ instance.
 Rust code that constructs a `StdioTransport`/`HttpTransport`, calls
 `McpClient::connect`, and registers the result into a `ToolRegistry` by hand before
 `run_agent` ever runs — confirmed by direct search of this codebase: zero
-occurrences of "mcp" anywhere in `dashboard/src` or `crates/apex-server/src`.
+occurrences of "mcp" anywhere in `dashboard/src` or `crates/wovyr-server/src`.
 There is no persisted connection, no API, no agent-manifest field, and no
 dashboard surface at all.
 
@@ -43,7 +43,7 @@ this before scoping any ticket against it:**
 
 - [FUT-005](../18-roadmap/future/B5-ecosystem-interop.md) ("Ecosystem &
   Interop") is an **exploratory, non-committed** research bet covering an
-  *outbound* MCP gateway (Apex's own tools/agents reachable **over** MCP by
+  *outbound* MCP gateway (Wovyr's own tools/agents reachable **over** MCP by
   external clients), cross-org federation, and prompt/model registries. This
   PRD does none of that.
 - [PRD-005](prd-generative-ui-runtime.md)'s **EMB-702** (cut, RM-GUI-P3) was
@@ -51,7 +51,7 @@ this before scoping any ticket against it:**
   (`ui_present`/`ui_await_decision`) as MCP tools. Also an outbound direction,
   also not this PRD.
 
-This PRD is **inbound only**: Apex *consuming* external MCP servers' tools,
+This PRD is **inbound only**: Wovyr *consuming* external MCP servers' tools,
 made usable without writing code. That is the entire scope.
 
 ---
@@ -61,7 +61,7 @@ made usable without writing code. That is the entire scope.
 1. **A real, shipped capability nobody can actually use.** ECO-301's own ticket
    doc says it plainly: "Programmatic only... no agent-manifest/server/CLI
    configuration surface for MCP connections yet." A user who wants to connect
-   Apex to a real MCP server today needs to write and compile Rust code — most
+   Wovyr to a real MCP server today needs to write and compile Rust code — most
    of this platform's actual audience (an agent author using the dashboard,
    or an operator running the CLI) cannot do that at all.
 2. **No persistence.** A connection built by hand in a Rust binary lives only
@@ -77,7 +77,7 @@ made usable without writing code. That is the entire scope.
    this PRD's own scoping exercise (`npx -y
    @modelcontextprotocol/server-filesystem <dir>`, a real child process). That
    is the same blast radius as the `shell` tool, which this codebase already
-   gates behind an explicit operator opt-in (`APEX_ENABLE_SHELL_TOOL`, SEC-301)
+   gates behind an explicit operator opt-in (`WOVYR_ENABLE_SHELL_TOOL`, SEC-301)
    precisely because it should never be a tenant-self-service feature in a
    hosted deployment. Building a UI on top of the MCP client without carrying
    that same gate forward would quietly reintroduce the exact risk SEC-301
@@ -89,13 +89,13 @@ made usable without writing code. That is the entire scope.
 
 | Existing asset | Role in this PRD |
 |---|---|
-| `apex-tools::mcp` (ECO-301) — `StdioTransport`/`HttpTransport`/`McpClient`/`register_into` | The wire protocol and registry-proxy mechanics this PRD adds a management layer on top of, **unmodified** |
+| `wovyr-tools::mcp` (ECO-301) — `StdioTransport`/`HttpTransport`/`McpClient`/`register_into` | The wire protocol and registry-proxy mechanics this PRD adds a management layer on top of, **unmodified** |
 | `ToolRegistry::execute`'s fail-closed permission check (`mcp:<server>` scope) | The authorization mechanism this PRD's UI only needs to *grant*, never reinvent |
 | `http_get`'s SEC-304 SSRF guard (`resolve_and_guard` + DNS-pinned client) | The exact pattern an HTTP-transport MCP connection's egress must reuse verbatim |
-| The `shell` tool's opt-in gating (`with_shell()`, `APEX_ENABLE_SHELL_TOOL`, SEC-301) | The direct precedent for gating `Stdio`-transport (arbitrary local command) connections the same way |
-| `apex-secrets`'s `Vault` (reference-addressed, tenant-scoped secrets) | Where a connection's auth header/API key must live — a `SecretRef`, never an inline value |
+| The `shell` tool's opt-in gating (`with_shell()`, `WOVYR_ENABLE_SHELL_TOOL`, SEC-301) | The direct precedent for gating `Stdio`-transport (arbitrary local command) connections the same way |
+| `wovyr-secrets`'s `Vault` (reference-addressed, tenant-scoped secrets) | Where a connection's auth header/API key must live — a `SecretRef`, never an inline value |
 | The plugin/secrets/webhook file-backed stores (`atomic_write` + `FileLock`, DUR-401/403) | The exact persistence shape a new connection store should follow — nothing new to invent |
-| `apex-tenancy`'s generic `<domain>:read`/`<domain>:write` scope pattern, plus the `kms:write`/`kms:admin` split | The scope-naming convention (`mcp:read`/`mcp:write`) and the precedent for a materially higher-risk action needing its own `:admin` tier |
+| `wovyr-tenancy`'s generic `<domain>:read`/`<domain>:write` scope pattern, plus the `kms:write`/`kms:admin` split | The scope-naming convention (`mcp:read`/`mcp:write`) and the precedent for a materially higher-risk action needing its own `:admin` tier |
 | The agent manifest's `spec.tools` allow-list | The exact shape a new `spec.mcp_servers` allow-list mirrors |
 | The dashboard's Surfaces panel (`dashboard/src/app/features/surfaces/`) | The concrete UI pattern (compose/configure → call an API → render/manage the result) this PRD's panel should mirror |
 
@@ -126,7 +126,7 @@ made usable without writing code. That is the entire scope.
 
 ## 4.2 Non-Goals
 
-- **Apex as an MCP server (outbound).** FUT-005/EMB-702 territory. Not this PRD.
+- **Wovyr as an MCP server (outbound).** FUT-005/EMB-702 territory. Not this PRD.
 - **Sandboxing a `Stdio` connection's spawned process.** A real residual risk,
   explicitly flagged (see [ADR-0012](../17-adr/ADR-0012-mcp-connection-trust-boundary.md)),
   not solved here — v1 gates *who* may create such a connection, not *how
@@ -197,8 +197,8 @@ state must never degrade into a silently-broader grant.
   `Stdio`-transport connection** — mirroring the `kms:write`/`kms:admin` split
   for a materially higher-risk action.
 - **MCX-103** Hosted-safety gate: a `Stdio`-transport connection is refused
-  server-side unless the operator has set `APEX_ENABLE_MCP_STDIO=1` — the
-  exact `APEX_ENABLE_SHELL_TOOL` precedent, so the escape hatch is reachable
+  server-side unless the operator has set `WOVYR_ENABLE_MCP_STDIO=1` — the
+  exact `WOVYR_ENABLE_SHELL_TOOL` precedent, so the escape hatch is reachable
   only by the deployment operator's own config, never by a tenant alone.
 - **MCX-104** An `Http`-transport connection's egress reuses `http_get`'s
   existing SEC-304 `resolve_and_guard`/DNS-pinned-client logic verbatim (shared
@@ -206,14 +206,14 @@ state must never degrade into a silently-broader grant.
   every subsequent call if the resolved address is loopback/link-local/private/
   metadata.
 - **MCX-105** A connection's optional credential (bearer token/header for an
-  HTTP server) is a `SecretRef` into `apex-secrets`'s `Vault`; the connection
+  HTTP server) is a `SecretRef` into `wovyr-secrets`'s `Vault`; the connection
   store itself never holds a raw value — the tool-call path resolves it
   tenant-scoped, same as a plugin capability's secret injection today.
 - **MCX-106** A per-connection client cache (keyed by tenant + connection
   name), not a spawn-per-call: an `Http` connection reuses one client; a
   `Stdio` connection's spawned process is kept warm across calls within a
   bounded idle timeout and torn down on edit/delete/idle-expiry — bounded by a
-  per-tenant connection-count quota dimension (`apex-tenancy::QuotaLimits`,
+  per-tenant connection-count quota dimension (`wovyr-tenancy::QuotaLimits`,
   the same pattern token/cost budgets already use).
 
 ## WS2 — Agent & Tool Integration — MCX-2xx
@@ -235,7 +235,7 @@ state must never degrade into a silently-broader grant.
   "see what's new" action.
 - **MCX-204** Workflow `agent`/`tool` activities inherit MCX-201's wiring for
   free — they already run through the shared `run_agent`/`ToolRegistry` path
-  (`apex-runtime`'s `PlatformActivityExecutor`), so no separate
+  (`wovyr-runtime`'s `PlatformActivityExecutor`), so no separate
   workflow-specific implementation is needed.
 
 ## WS3 — SDK & Dashboard — MCX-3xx
@@ -247,7 +247,7 @@ state must never degrade into a silently-broader grant.
   transport choice, command+args or URL, optional secret-reference picker), a
   list of configured connections with their live discovered tool counts, and
   per-connection refresh/delete actions. The `Stdio` transport option is only
-  offered when the connected server reports `APEX_ENABLE_MCP_STDIO` is on
+  offered when the connected server reports `WOVYR_ENABLE_MCP_STDIO` is on
   (MCX-103) — never silently shown but rejected on submit.
 - **MCX-303** The Agent Studio's existing tool picker surfaces MCP-sourced
   tools (fed by MCX-202) alongside built-ins, so wiring
@@ -281,7 +281,7 @@ Detailed tickets live in the [v1.3 roadmap](../18-roadmap/v1.3-mcp-connections.m
   private/loopback/link-local/metadata address is refused, 100% — reusing
   SEC-304's own proven test vectors rather than writing new ones from scratch.
 - **No plaintext credential ever appears** in the connection store's on-disk
-  file — a direct grep-the-file test, the same shape `apex-secrets`'s own
+  file — a direct grep-the-file test, the same shape `wovyr-secrets`'s own
   encrypting-store tests use.
 
 ---
@@ -312,7 +312,7 @@ the demo second.
 | An `Http` connection becomes a new SSRF vector distinct from `http_get`'s already-solved one | MCX-104 reuses the *exact* SEC-304 mechanism rather than a parallel, possibly-weaker reimplementation |
 | A connection's credential leaks via the connection store file | MCX-105: only a `SecretRef` is ever persisted; the value lives only in the vault, sealed at rest like every other secret |
 | Warm-process caching (MCX-106) becomes a resource-exhaustion vector (many idle spawned processes) | Bounded idle timeout + a per-tenant connection-count quota dimension, the same pattern token/cost budgets already use |
-| Scope creep into "Apex as MCP server" / federation | Explicit non-goals (§4.2); every ticket reviewed against the FUT-005/EMB-702 boundary before it starts |
+| Scope creep into "Wovyr as MCP server" / federation | Explicit non-goals (§4.2); every ticket reviewed against the FUT-005/EMB-702 boundary before it starts |
 
 ---
 

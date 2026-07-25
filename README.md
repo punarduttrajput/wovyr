@@ -1,4 +1,4 @@
-# Apex — Generative UI Trust Runtime
+# Wovyr — Generative UI Trust Runtime
 
 > The infrastructure that lets AI agents render rich, interactive interfaces to
 > humans **safely, auditable, and with durable human-in-the-loop decisions** —
@@ -16,10 +16,10 @@ Everything below runs offline with a deterministic mock provider — no API key
 needed. You need Rust 1.85+ (edition 2024).
 
 ```bash
-git clone https://github.com/punarduttrajput/Apex && cd Apex
+git clone https://github.com/punarduttrajput/Wovyr && cd Wovyr
 
 # 1. Start the all-in-one local server (builds on first run).
-APEX_ALLOW_ANONYMOUS=1 cargo run -p apex-cli -- dev
+WOVYR_ALLOW_ANONYMOUS=1 cargo run -p wovyr-cli -- dev
 #    → listening on http://127.0.0.1:8080
 
 # 2. In a second terminal: is it up?
@@ -27,13 +27,13 @@ curl http://127.0.0.1:8080/healthz
 #    → {"status":"ok","version":"0.3.0"}
 
 # 3. Run your first agent (mock provider answers deterministically).
-cargo run -p apex-cli -- agents run --local \
+cargo run -p wovyr-cli -- agents run --local \
   -f examples/agents/hello.yaml --input '{"message":"Hi"}' --stream
 ```
 
 From there: set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for a real model,
 `cd dashboard && npm ci && npx ng serve` for the UI (proxies to the server),
-or `pip install apex-ai-sdk` / `sdks/typescript` to call the API from code.
+or `pip install wovyr-sdk` / `sdks/typescript` to call the API from code.
 The full picture lives in [docs/](docs/SUMMARY.md); the runnable examples in
 [examples/](examples/).
 
@@ -46,7 +46,7 @@ The full picture lives in [docs/](docs/SUMMARY.md); the runnable examples in
 interfaces are shifting from hard-coded pages to interfaces generated at runtime
 by AI. That shift breaks the web's security assumptions — a generated form can be
 a hallucinated phishing vector, prompt injection can manifest *as UI*, and nothing
-can prove what an AI actually showed a user. Apex is the missing layer:
+can prove what an AI actually showed a user. Wovyr is the missing layer:
 
 - **Trust & policy** — every agent-generated frame is validated against
   declarative policy (fail-closed), constrained to a safe component vocabulary
@@ -56,14 +56,14 @@ can prove what an AI actually showed a user. Apex is the missing layer:
   continues" runs on an event-sourced workflow engine: the decision loop survives
   crashes, restarts, and time.
 - **Embeddable runtime** — an SSE/pull frame protocol + a React renderer SDK
-  (`@apex/ui-react`; a web-component build is a later slice) + MCP surface,
+  (`@wovyr/ui-react`; a web-component build is a later slice) + MCP surface,
   adoptable as middleware by *any* agent stack; generative **enterprise
   internal tools** are the beachhead use case. Execution is phased in
   the [v1.2 roadmap](docs/18-roadmap/v1.2-generative-ui.md).
 
-**The engine**: Apex is a next-generation AI Agent Operating System designed for building, deploying, and orchestrating intelligent autonomous agents at enterprise scale.
+**The engine**: Wovyr is a next-generation AI Agent Operating System designed for building, deploying, and orchestrating intelligent autonomous agents at enterprise scale.
 
-Unlike traditional AI frameworks that focus only on LLM orchestration, Apex provides a complete runtime platform featuring:
+Unlike traditional AI frameworks that focus only on LLM orchestration, Wovyr provides a complete runtime platform featuring:
 
 - AI Agent Runtime
 - Durable Workflow Engine
@@ -76,7 +76,7 @@ Unlike traditional AI frameworks that focus only on LLM orchestration, Apex prov
 - Cloud Native Deployment
 
 > **GA ships as a single-node appliance** ([ADR-0010](docs/17-adr/ADR-0010-ga-deployment-topology.md),
-> ratified Path A): one `apex` binary, file-backed durable state by default,
+> ratified Path A): one `wovyr` binary, file-backed durable state by default,
 > with Postgres/Qdrant as optional backends for specific subsystems (below).
 > A distributed, multi-replica scheduler (shared queue/leases across
 > instances) exists as tested library code but is **not wired into the
@@ -85,7 +85,7 @@ Unlike traditional AI frameworks that focus only on LLM orchestration, Apex prov
 > [docs/18-roadmap/v1.0.md](docs/18-roadmap/v1.0.md) for what's shipped vs.
 > deferred, workstream by workstream.
 
-Apex is designed from the ground up using Rust to provide high performance, memory safety, and scalability.
+Wovyr is designed from the ground up using Rust to provide high performance, memory safety, and scalability.
 
 ---
 
@@ -152,7 +152,7 @@ The project aims to provide:
                    REST API
                       │
       ┌─────────────────────────────────┐
-      │   apex-server (one binary)      │
+      │   wovyr-server (one binary)      │
       ├─────────────────────────────────┤
       │ Agent Runtime (planner/executor/│
       │   tool-calling/memory loop)     │
@@ -161,7 +161,7 @@ The project aims to provide:
       └─────────────────────────────────┘
                       │
 ─────────────────────────────────────────────
- ~/.apex (local files) — the default, always-available durable store
+ ~/.wovyr (local files) — the default, always-available durable store
  PostgreSQL — optional: marketplace registry (shipped); memory (CLI-only);
               workflow store exists as library code, not wired into the server
  Qdrant     — optional: memory vector index (CLI-only)
@@ -174,30 +174,30 @@ The actual Cargo workspace layout ([ADR-0001](docs/17-adr/ADR-0001-project-struc
 shared logic lives in `crates/`, thin binaries in `apps/`.
 
 ```
-apex/
+wovyr/
   apps/
-    apex-cli/            # the `apex` binary: login, dev server, agents/workflows/
+    wovyr-cli/            # the `wovyr` binary: login, dev server, agents/workflows/
                           # memory/kms/plugin/admin commands
   crates/
-    apex-common/         # Error/Result, Usage, atomic_write/FileLock
-    apex-provider/       # LLM gateway: chat/streaming/embeddings, resilience
-    apex-agent/          # agent manifest + the model/tool run loop
-    apex-tools/          # Tool trait, ToolRegistry, sandbox backends
-    apex-workflow/       # durable, event-sourced workflow engine
-    apex-memory/         # hybrid vector+keyword memory engine
-    apex-telemetry/      # metrics + tracing/logging
-    apex-tenancy/        # organizations/projects/RBAC/quota
-    apex-events/         # domain events + outbound webhooks
-    apex-secrets/        # the secret vault
-    apex-audit/          # tamper-evident, hash-chained audit log
-    apex-kms/            # envelope-encryption key management
-    apex-plugin/         # plugin lifecycle (install/enable/upgrade/rollback)
-    apex-marketplace/    # plugin marketplace registry
-    apex-ui/             # the generative-UI frame protocol (PRD-005 UIP-1xx)
-    apex-ui-guard/       # the UI trust layer: UiPolicy evaluation (GRD-2xx)
-    apex-server/         # the Axum single-node server
-    apex-eval/           # a deterministic AI-eval harness (prototype spike)
-  dashboard/              # Angular SPA (direct to apex-server)
+    wovyr-common/         # Error/Result, Usage, atomic_write/FileLock
+    wovyr-provider/       # LLM gateway: chat/streaming/embeddings, resilience
+    wovyr-agent/          # agent manifest + the model/tool run loop
+    wovyr-tools/          # Tool trait, ToolRegistry, sandbox backends
+    wovyr-workflow/       # durable, event-sourced workflow engine
+    wovyr-memory/         # hybrid vector+keyword memory engine
+    wovyr-telemetry/      # metrics + tracing/logging
+    wovyr-tenancy/        # organizations/projects/RBAC/quota
+    wovyr-events/         # domain events + outbound webhooks
+    wovyr-secrets/        # the secret vault
+    wovyr-audit/          # tamper-evident, hash-chained audit log
+    wovyr-kms/            # envelope-encryption key management
+    wovyr-plugin/         # plugin lifecycle (install/enable/upgrade/rollback)
+    wovyr-marketplace/    # plugin marketplace registry
+    wovyr-ui/             # the generative-UI frame protocol (PRD-005 UIP-1xx)
+    wovyr-ui-guard/       # the UI trust layer: UiPolicy evaluation (GRD-2xx)
+    wovyr-server/         # the Axum single-node server
+    wovyr-eval/           # a deterministic AI-eval harness (prototype spike)
+  dashboard/              # Angular SPA (direct to wovyr-server)
   deployment/             # systemd/Docker/Compose/Helm artifacts for what's actually built
   docs/                   # spec-driven documentation (source of truth)
   examples/               # runnable agent/workflow YAML manifests + examples/ui/ (the killer demo)
@@ -220,12 +220,12 @@ are the platform substrate it runs on and are safe to ignore on day one.
   [`examples/ui/checkout-demo`](examples/ui/) — present a frame → trust layer
   judges it → a human decides → the run resumes.
 - **Want to understand the core idea?** Read, in order:
-  [`apex-ui`](crates/apex-ui/) (the safe frame protocol) →
-  [`apex-ui-guard`](crates/apex-ui-guard/) (the fail-closed policy layer) →
-  `crates/apex-server/src/ui.rs` (where a frame is judged, audited, and
+  [`wovyr-ui`](crates/wovyr-ui/) (the safe frame protocol) →
+  [`wovyr-ui-guard`](crates/wovyr-ui-guard/) (the fail-closed policy layer) →
+  `crates/wovyr-server/src/ui.rs` (where a frame is judged, audited, and
   rendered) → [`sdks/ui-react`](sdks/ui-react/) (the renderer). That's the whole
-  loop; everything else (`apex-workflow`, `apex-memory`, `apex-kms`,
-  `apex-marketplace`, …) is infrastructure you can treat as a black box until
+  loop; everything else (`wovyr-workflow`, `wovyr-memory`, `wovyr-kms`,
+  `wovyr-marketplace`, …) is infrastructure you can treat as a black box until
   you need it.
 - **Want to contribute?** Start with a doc/test/small-surface change in one of
   those four flagship crates before venturing into the platform internals, and
@@ -249,14 +249,14 @@ Frontend
 
 Durable state (default)
 
-- Local files under `~/.apex`, crash-safe via atomic writes + fsync'd
-  append-only logs — no database required to run `apex dev`
+- Local files under `~/.wovyr`, crash-safe via atomic writes + fsync'd
+  append-only logs — no database required to run `wovyr dev`
 
 Optional backends (env-var-selected; the default file-backed stores work
 without any of these)
 
 - **PostgreSQL** — marketplace registry (shipped, wired into both server and
-  CLI); a `TieredStore` for the memory engine (CLI-only today, `apex memory`
+  CLI); a `TieredStore` for the memory engine (CLI-only today, `wovyr memory`
   commands); a workflow-engine `PostgresStore` exists as tested library code
   but is **not wired into the server** (v1.1 "Scale-Out" milestone)
 - **Qdrant** — vector ANN backend for the memory engine's `TieredStore`
@@ -282,7 +282,7 @@ Deployment
   [docs/12-deployment/systemd.md](docs/12-deployment/systemd.md))
 - Docker, Docker Compose (real, working — [`deployment/docker-compose.yml`](deployment/docker-compose.yml))
 - Kubernetes/Helm (a real single-replica chart exists at
-  [`deployment/helm/apex/`](deployment/helm/apex/README.md); a multi-service,
+  [`deployment/helm/wovyr/`](deployment/helm/wovyr/README.md); a multi-service,
   multi-replica topology is documented as aspirational, v1.1+)
 
 ---
@@ -342,7 +342,7 @@ Supports
 
 Supports
 
-- JWT (HS256/RS256) and API-key auth (`APEX_AUTH_MODE=jwt|apikey`) — no
+- JWT (HS256/RS256) and API-key auth (`WOVYR_AUTH_MODE=jwt|apikey`) — no
   OAuth2 authorization flow is implemented
 - RBAC (organization/project roles, default-deny)
 - Secrets Management (a reference-addressed vault, tenant-scoped)
@@ -433,17 +433,17 @@ burn-rate rules, upgrade runbook + Helm TLS). Phase 3 was **re-scoped
 through [PRD-005](docs/01-product/prd-generative-ui-runtime.md)** —
 **[v1.2 "Generative UI Trust Runtime"](docs/18-roadmap/v1.2-generative-ui.md)**
 ([ADR-0011](docs/17-adr/ADR-0011-generative-ui-repositioning.md)) is **done,
-all three phases (2026-07-15)**: the UI frame protocol (`apex-ui`), the
-trust/policy engine (`apex-ui-guard`), the durable render→decide→resume
-workflow interaction loop, the `@apex/ui-react` renderer SDK (cross-language
+all three phases (2026-07-15)**: the UI frame protocol (`wovyr-ui`), the
+trust/policy engine (`wovyr-ui-guard`), the durable render→decide→resume
+workflow interaction loop, the `@wovyr/ui-react` renderer SDK (cross-language
 hash-verified against the real server) plus a framework-agnostic
-`<apex-ui-frame>` web component, a killer-demo app you can run and click
+`<wovyr-ui-frame>` web component, a killer-demo app you can run and click
 through in a real browser (`examples/ui/checkout-demo`), a scoped
 non-durable path for bare agent runs (`ui_present` tool +
-`apex agents run --local --interactive-ui`), standalone middleware mode
+`wovyr agents run --local --interactive-ui`), standalone middleware mode
 (`POST /api/v1/ui/present` — present/decide/retrieve a governed frame with
 **zero workflow or agent adoption**), a public conformance suite any
-deployer can gate their own policy on (`apex_ui_guard::conformance`), a real
+deployer can gate their own policy on (`wovyr_ui_guard::conformance`), a real
 dashboard Surfaces panel dogfooding the whole loop under an operator's own
 session, and a [design-partner onboarding
 guide](docs/01-product/design-partner-onboarding.md) with its quickstart run
@@ -460,7 +460,7 @@ library code), a **memory engine** (hybrid vector+keyword retrieval,
 encryption, ABAC), a **secret vault**, **envelope-encryption KMS**,
 **tamper-evident audit logging**, a **plugin engine + marketplace**,
 **multi-tenancy** (RBAC + quota), a single-node Axum server, an Angular
-dashboard, TypeScript/Python SDKs, and the `apex` CLI. The per-crate doc
+dashboard, TypeScript/Python SDKs, and the `wovyr` CLI. The per-crate doc
 comments and each `docs/` section's status header are the kept-current
 description of what each crate actually does.
 
@@ -479,25 +479,25 @@ cargo build --workspace
 cargo test --workspace
 
 # Run the hello agent locally. With no API key it uses a deterministic mock
-# provider; set OPENAI_API_KEY (and optionally APEX_OPENAI_BASE_URL) for a real model.
-cargo run -p apex-cli -- agents run --local \
+# provider; set OPENAI_API_KEY (and optionally WOVYR_OPENAI_BASE_URL) for a real model.
+cargo run -p wovyr-cli -- agents run --local \
   -f examples/agents/hello.yaml \
   --input '{"message":"Hi, who are you?"}' --stream
 
 # Or run against a single-node server:
-cargo run -p apex-cli -- dev &                       # start the server
-cargo run -p apex-cli -- agents run --server http://127.0.0.1:8080 \
+cargo run -p wovyr-cli -- dev &                       # start the server
+cargo run -p wovyr-cli -- agents run --server http://127.0.0.1:8080 \
   -f examples/agents/hello.yaml --input '{"message":"Hi"}'
 
 # Run a durable workflow (event-sourced DAG with checkpoints + retry):
-cargo run -p apex-cli -- workflows run --local -f examples/workflows/greet-and-fetch.yaml
+cargo run -p wovyr-cli -- workflows run --local -f examples/workflows/greet-and-fetch.yaml
 
 # Saga rollback: a failing step triggers reverse-order compensation:
-cargo run -p apex-cli -- workflows run --local -f examples/workflows/saga-order.yaml
+cargo run -p wovyr-cli -- workflows run --local -f examples/workflows/saga-order.yaml
 
-# Store and query memory (hybrid retrieval, persisted under ~/.apex/memory):
-cargo run -p apex-cli -- memory put --namespace kb --content "Refund window is 30 days." --importance 0.9
-cargo run -p apex-cli -- memory query "refund policy" --namespace kb
+# Store and query memory (hybrid retrieval, persisted under ~/.wovyr/memory):
+cargo run -p wovyr-cli -- memory put --namespace kb --content "Refund window is 30 days." --importance 0.9
+cargo run -p wovyr-cli -- memory query "refund policy" --namespace kb
 ```
 
 See [`docs/16-examples/hello-agent.md`](docs/16-examples/hello-agent.md) and
@@ -536,4 +536,4 @@ Apache License 2.0
 
 # Acknowledgements
 
-Apex is inspired by advances in distributed systems, workflow orchestration, cloud-native platforms, and modern AI agent architectures while being designed as an original, modular implementation focused on enterprise software engineering.
+Wovyr is inspired by advances in distributed systems, workflow orchestration, cloud-native platforms, and modern AI agent architectures while being designed as an original, modular implementation focused on enterprise software engineering.

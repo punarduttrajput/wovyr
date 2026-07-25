@@ -12,14 +12,14 @@ export default defineConfig({
   site: 'https://punarduttrajput.github.io',
   integrations: [
     starlight({
-      title: 'Apex',
+      title: 'Wovyr',
       description:
-        'Apex — Generative UI Trust Runtime, built on an enterprise AI Agent Operating System written in Rust.',
+        'Wovyr — Generative UI Trust Runtime, built on an enterprise AI Agent Operating System written in Rust.',
       social: [
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/punarduttrajput/Apex',
+          href: 'https://github.com/punarduttrajput/Wovyr',
         },
       ],
       sidebar: [

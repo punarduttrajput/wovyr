@@ -1,11 +1,11 @@
-import { ApexTimeoutError } from "./errors.js";
+import { WovyrTimeoutError } from "./errors.js";
 import { HttpClient } from "./http.js";
 import { parseSse } from "./sse.js";
 import { SDK_VERSION, versionSkew } from "./version.js";
 import type {
   AgentStreamEvent,
   AgentSummary,
-  ApexClientOptions,
+  WovyrClientOptions,
   Attestation,
   AuditEntry,
   AuditPage,
@@ -38,7 +38,7 @@ import type {
   WorkflowValidation,
 } from "./types.js";
 
-/** Statuses after which an execution can never change again (apex-workflow
+/** Statuses after which an execution can never change again (wovyr-workflow
  * `WorkflowState::is_terminal`). */
 const TERMINAL_WORKFLOW_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
@@ -60,13 +60,13 @@ interface IdempotentOpts {
   idempotencyKey?: string;
 }
 
-/** A client for one Apex `apex-server` instance, scoped to one tenant/principal
+/** A client for one Wovyr `wovyr-server` instance, scoped to one tenant/principal
  * (construct a new client per tenant to act as a different one). Mirrors the
  * server's actual routes (see `docs/09-api/openapi.yaml`) — not the aspirational
  * conventions in `overview.md` (no opaque `agt_...` ids, no OAuth2; resources
- * are addressed by their natural key and auth is the `X-Apex-Tenant`/
- * `X-Apex-Principal` headers). */
-export class ApexClient {
+ * are addressed by their natural key and auth is the `X-Wovyr-Tenant`/
+ * `X-Wovyr-Principal` headers). */
+export class WovyrClient {
   private readonly http: HttpClient;
 
   readonly agents: AgentsResource;
@@ -83,7 +83,7 @@ export class ApexClient {
   readonly ui: UiResource;
   readonly mcp: McpResource;
 
-  constructor(options: ApexClientOptions) {
+  constructor(options: WovyrClientOptions) {
     this.http = new HttpClient(options);
     this.agents = new AgentsResource(this.http);
     this.workflows = new WorkflowsResource(this.http);
@@ -132,7 +132,7 @@ class AgentsResource {
   /** `POST /api/v1/agents:run` — run an inline manifest, no persistence. */
   async run(req: RunRequest, opts?: IdempotentOpts & { project?: string }): Promise<RunResult> {
     const headers: Record<string, string> = { ...idemHeaders(opts) };
-    if (opts?.project) headers["X-Apex-Project"] = opts.project;
+    if (opts?.project) headers["X-Wovyr-Project"] = opts.project;
     return this.http.request("POST", "/api/v1/agents:run", req, { headers });
   }
 
@@ -142,7 +142,7 @@ class AgentsResource {
    * a value the server can buffer and replay. */
   async *stream(req: RunRequest, opts?: { project?: string }): AsyncGenerator<AgentStreamEvent> {
     const headers: Record<string, string> = {};
-    if (opts?.project) headers["X-Apex-Project"] = opts.project;
+    if (opts?.project) headers["X-Wovyr-Project"] = opts.project;
     const response = await this.http.raw("POST", "/api/v1/agents:stream", req, { headers });
     if (!response.ok || !response.body) {
       const text = await response.text();
@@ -188,7 +188,7 @@ class AgentsResource {
     opts?: IdempotentOpts & { project?: string },
   ): Promise<RunResult> {
     const headers: Record<string, string> = { ...idemHeaders(opts) };
-    if (opts?.project) headers["X-Apex-Project"] = opts.project;
+    if (opts?.project) headers["X-Wovyr-Project"] = opts.project;
     return this.http.request("POST", `/api/v1/agents/${encodeURIComponent(id)}/run`, req ?? {}, { headers });
   }
 }
@@ -225,7 +225,7 @@ class WorkflowsResource {
    * (`completed`/`failed`/`cancelled` — compared case-insensitively) and
    * return the final snapshot (DX-301). The submit routes return immediately
    * by design; this is the "just wait for it" helper every caller was
-   * hand-rolling. Throws {@link ApexTimeoutError} once `timeoutMs` (default
+   * hand-rolling. Throws {@link WovyrTimeoutError} once `timeoutMs` (default
    * 60s) elapses; polls every `intervalMs` (default 500ms). */
   async waitForCompletion(
     id: string,
@@ -239,7 +239,7 @@ class WorkflowsResource {
       const status = String(snapshot.execution["status"] ?? "").toLowerCase();
       if (TERMINAL_WORKFLOW_STATUSES.has(status)) return snapshot;
       if (Date.now() + intervalMs > deadline) {
-        throw new ApexTimeoutError(
+        throw new WovyrTimeoutError(
           `workflow execution ${id} still \`${status}\` after ${timeoutMs}ms`,
         );
       }
@@ -312,12 +312,12 @@ class PluginsResource {
     return this.http.request("GET", "/api/v1/plugins", undefined, { query: params });
   }
 
-  /** `POST /api/v1/plugins:install` — `apexpkg` is the raw `.apexpkg` bytes. */
-  async install(apexpkg: Uint8Array, grants: string[] = [], opts?: IdempotentOpts): Promise<unknown> {
+  /** `POST /api/v1/plugins:install` — `wovyrpkg` is the raw `.wovyrpkg` bytes. */
+  async install(wovyrpkg: Uint8Array, grants: string[] = [], opts?: IdempotentOpts): Promise<unknown> {
     return this.http.request(
       "POST",
       "/api/v1/plugins:install",
-      { apexpkg: base64Encode(apexpkg), grants },
+      { wovyrpkg: base64Encode(wovyrpkg), grants },
       { headers: idemHeaders(opts) },
     );
   }
@@ -333,11 +333,11 @@ class PluginsResource {
   }
 
   /** `POST /api/v1/plugins:upgrade`. */
-  async upgrade(apexpkg: Uint8Array, grants: string[] = [], opts?: IdempotentOpts): Promise<unknown> {
+  async upgrade(wovyrpkg: Uint8Array, grants: string[] = [], opts?: IdempotentOpts): Promise<unknown> {
     return this.http.request(
       "POST",
       "/api/v1/plugins:upgrade",
-      { apexpkg: base64Encode(apexpkg), grants },
+      { wovyrpkg: base64Encode(wovyrpkg), grants },
       { headers: idemHeaders(opts) },
     );
   }
@@ -375,14 +375,14 @@ class MarketplaceResource {
 
   /** `POST /api/v1/marketplace:publish`. */
   async publish(
-    apexpkg: Uint8Array,
+    wovyrpkg: Uint8Array,
     opts?: IdempotentOpts & { categories?: string[]; channel?: string },
   ): Promise<PublishResult> {
     return this.http.request(
       "POST",
       "/api/v1/marketplace:publish",
       {
-        apexpkg: base64Encode(apexpkg),
+        wovyrpkg: base64Encode(wovyrpkg),
         categories: opts?.categories ?? [],
         channel: opts?.channel,
       },
@@ -396,15 +396,15 @@ class MarketplaceResource {
   }
 
   /** `GET /api/v1/marketplace/listings/{id}/download` — returns the raw
-   * `.apexpkg` bytes (already base64-decoded). */
+   * `.wovyrpkg` bytes (already base64-decoded). */
   async download(id: string, version?: string): Promise<Uint8Array> {
-    const res = await this.http.request<{ id: string; apexpkg: string }>(
+    const res = await this.http.request<{ id: string; wovyrpkg: string }>(
       "GET",
       `/api/v1/marketplace/listings/${encodeURIComponent(id)}/download`,
       undefined,
       { query: { version } },
     );
-    return base64Decode(res.apexpkg);
+    return base64Decode(res.wovyrpkg);
   }
 
   /** `GET /api/v1/marketplace/listings/{id}/attestation`. */
@@ -584,7 +584,7 @@ class ProjectsResource {
 
   /** `PATCH /api/v1/projects/{id}`. `ifMatch` (from a prior {@link get}/
    * {@link create}'s `etag`) guards against a lost concurrent update — a stale
-   * value throws {@link ApexApiError} with `status === 409`. */
+   * value throws {@link WovyrApiError} with `status === 409`. */
   async update(
     id: string,
     patch: { settings?: Record<string, unknown>; status?: string },
@@ -702,14 +702,14 @@ class ToolsResource {
   /** `GET /api/v1/tools` — built-ins + enabled plugin tools (unauthenticated),
    * plus (MCX-202) the caller's tenant's configured MCP connections'
    * currently-discovered `mcp__<server>__<tool>` tools, if the client's
-   * `X-Apex-Principal`/tenant can be authorized for `mcp:read`. */
+   * `X-Wovyr-Principal`/tenant can be authorized for `mcp:read`. */
   async list(params?: PageParams): Promise<Page<ToolSummary>> {
     return this.http.request("GET", "/api/v1/tools", undefined, { query: params });
   }
 }
 
 /** Generative UI (PRD-005 RM-GUI-P1/P3): pending validated frames and typed
- * human decisions. `@apex/ui-react` builds on these same routes — reach for
+ * human decisions. `@wovyr/ui-react` builds on these same routes — reach for
  * it instead of hand-rolling a renderer against this resource directly. */
 class UiResource {
   constructor(private readonly http: HttpClient) {}
@@ -717,7 +717,7 @@ class UiResource {
   /** `POST /api/v1/ui/present` (RM-GUI-P3 EMB-701) — present a frame with
    * **no workflow or agent adoption required at all**: the standalone
    * middleware entry point. Runs the identical trust layer the workflow `ui`
-   * activity uses; a policy block throws {@link ApexApiError} with
+   * activity uses; a policy block throws {@link WovyrApiError} with
    * `status === 403`. Decide it and retrieve the outcome the same way as any
    * other frame — `decide`/`getDecision` below don't care how it was presented. */
   async present(frame: UiFrame, opts?: IdempotentOpts): Promise<PendingUiFrame> {
@@ -737,7 +737,7 @@ class UiResource {
   /** `POST /api/v1/ui/decisions/{frame_id}` (HIL-302/303) — validated
    * fail-closed against the frame it answers before anything reaches the
    * workflow; an undeclared action or a constraint violation is a `400`
-   * ({@link ApexApiError}), not a silently-accepted decision. */
+   * ({@link WovyrApiError}), not a silently-accepted decision. */
   async decide(
     frameId: string,
     req: UiDecisionRequest,
@@ -754,7 +754,7 @@ class UiResource {
   /** `GET /api/v1/ui/decisions/{frame_id}` (RM-GUI-P3 EMB-701) — retrieve a
    * **standalone** frame's recorded decision after the pending record is
    * gone; a workflow-backed frame's outcome lives in the workflow's own
-   * state/output instead (`workflows.get`). Throws {@link ApexApiError} with
+   * state/output instead (`workflows.get`). Throws {@link WovyrApiError} with
    * `status === 404` if nothing was ever recorded (unknown, still pending,
    * workflow-backed, or a different tenant). */
   async getDecision(frameId: string): Promise<UiDecisionOutcome> {
@@ -764,14 +764,14 @@ class UiResource {
 
 /** MCP connection management (PRD-006, RM-MCX-P1-102): persisted, tenant-scoped
  * external MCP server connections. A `stdio`-transport connection is gated
- * behind `mcp:admin` + the operator's `APEX_ENABLE_MCP_STDIO=1` opt-in
+ * behind `mcp:admin` + the operator's `WOVYR_ENABLE_MCP_STDIO=1` opt-in
  * (ADR-0012); `http`-transport only needs `mcp:write`/`mcp:read`. */
 class McpResource {
   constructor(private readonly http: HttpClient) {}
 
   /** `GET /api/v1/mcp/connections` — the caller's tenant's configured
    * connections, plus `stdio_enabled` (whether the operator has set
-   * `APEX_ENABLE_MCP_STDIO=1`, MCX-302). */
+   * `WOVYR_ENABLE_MCP_STDIO=1`, MCX-302). */
   async list(params?: PageParams): Promise<McpConnectionsPage> {
     return this.http.request("GET", "/api/v1/mcp/connections", undefined, { query: params });
   }
@@ -779,9 +779,9 @@ class McpResource {
   /** `POST /api/v1/mcp/connections` — verifies the connection actually dials
    * (and resolves any `secret_ref`) before persisting; a connection that
    * can't be reached is never saved half-configured. Throws
-   * {@link ApexApiError} with `status === 403` if `transport.kind === "stdio"`
+   * {@link WovyrApiError} with `status === 403` if `transport.kind === "stdio"`
    * and either `mcp:admin` is missing or the operator hasn't set
-   * `APEX_ENABLE_MCP_STDIO=1`. */
+   * `WOVYR_ENABLE_MCP_STDIO=1`. */
   async create(req: McpConnectionRequest, opts?: IdempotentOpts): Promise<McpConnectionWithTools> {
     return this.http.request("POST", "/api/v1/mcp/connections", req, { headers: idemHeaders(opts) });
   }

@@ -105,7 +105,7 @@ Projects and organizations carry quotas enforced across subsystems:
 }
 ```
 
-All three are enforced at the agent-run admission boundary (`X-Apex-Project`):
+All three are enforced at the agent-run admission boundary (`X-Wovyr-Project`):
 concurrent runs, the rolling day's USD spend, and — RM-AIM-P2 SRV-202 — the
 rolling day's token usage (`llm_tokens_per_day`, the vendor-bill-independent
 twin of the cost budget: a local model costs $0/token but still burns
@@ -129,7 +129,7 @@ believe was protecting them. Tool executions happen inside the agent loop where
 no per-project window tracker exists (request-level abuse is the
 [rate limiter](../18-roadmap/v1.0/phase1-security-floor-tickets.md)'s job, which
 since SRV-202 also has an opt-in **per-tenant tier**,
-`APEX_RATE_LIMIT_TENANT_PER_MIN`), and memory records are *tenant*-namespaced
+`WOVYR_RATE_LIMIT_TENANT_PER_MIN`), and memory records are *tenant*-namespaced
 while quotas are *project*-scoped, so "a project's record count" was never
 well-defined. A stored quota still carrying the old fields deserializes fine —
 they are simply ignored.

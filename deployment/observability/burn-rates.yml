@@ -1,4 +1,4 @@
-# Multi-window burn-rate rules for the Apex API availability SLO (RM-AIM-P3
+# Multi-window burn-rate rules for the Wovyr API availability SLO (RM-AIM-P3
 # OBS-302). Complements `alerts.yml` (single-window symptom alerts, RM-GA-P4
 # OBS-803) with the SRE-workbook multi-window, multi-burn-rate pattern: each
 # alert requires the error-budget burn to be visible in BOTH a long window
@@ -13,71 +13,71 @@
 # Validate with `promtool check rules burn-rates.yml`. The recording rules also
 # feed the "SLO burn" panel in `dashboard.json`.
 groups:
-  - name: apex.slo.recordings
+  - name: wovyr.slo.recordings
     rules:
       # Error ratio (5xx / all) at each window the burn-rate pairs below need.
       # Recorded once so every alert and dashboard panel evaluates the same
       # series instead of re-deriving it.
-      - record: apex:api_error_ratio:rate5m
+      - record: wovyr:api_error_ratio:rate5m
         expr: >
-          sum(rate(apex_api_requests_total{status=~"5.."}[5m]))
+          sum(rate(wovyr_api_requests_total{status=~"5.."}[5m]))
             /
-          sum(rate(apex_api_requests_total[5m]))
-      - record: apex:api_error_ratio:rate30m
+          sum(rate(wovyr_api_requests_total[5m]))
+      - record: wovyr:api_error_ratio:rate30m
         expr: >
-          sum(rate(apex_api_requests_total{status=~"5.."}[30m]))
+          sum(rate(wovyr_api_requests_total{status=~"5.."}[30m]))
             /
-          sum(rate(apex_api_requests_total[30m]))
-      - record: apex:api_error_ratio:rate1h
+          sum(rate(wovyr_api_requests_total[30m]))
+      - record: wovyr:api_error_ratio:rate1h
         expr: >
-          sum(rate(apex_api_requests_total{status=~"5.."}[1h]))
+          sum(rate(wovyr_api_requests_total{status=~"5.."}[1h]))
             /
-          sum(rate(apex_api_requests_total[1h]))
-      - record: apex:api_error_ratio:rate6h
+          sum(rate(wovyr_api_requests_total[1h]))
+      - record: wovyr:api_error_ratio:rate6h
         expr: >
-          sum(rate(apex_api_requests_total{status=~"5.."}[6h]))
+          sum(rate(wovyr_api_requests_total{status=~"5.."}[6h]))
             /
-          sum(rate(apex_api_requests_total[6h]))
-      - record: apex:api_error_ratio:rate3d
+          sum(rate(wovyr_api_requests_total[6h]))
+      - record: wovyr:api_error_ratio:rate3d
         expr: >
-          sum(rate(apex_api_requests_total{status=~"5.."}[3d]))
+          sum(rate(wovyr_api_requests_total{status=~"5.."}[3d]))
             /
-          sum(rate(apex_api_requests_total[3d]))
+          sum(rate(wovyr_api_requests_total[3d]))
 
-  - name: apex.slo.burn
+  - name: wovyr.slo.burn
     rules:
       # Fast burn (page): 14.4× budget burn — exhausts 2% of the 30-day error
       # budget within one hour. Long window 1h, short window 5m.
       # 14.4 × (1 - 0.995) = 0.072.
-      - alert: ApexErrorBudgetFastBurn
+      - alert: WovyrErrorBudgetFastBurn
         expr: >
-          apex:api_error_ratio:rate1h > 0.072
+          wovyr:api_error_ratio:rate1h > 0.072
             and
-          apex:api_error_ratio:rate5m > 0.072
+          wovyr:api_error_ratio:rate5m > 0.072
         for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "Apex is burning its API error budget at ≥14.4× (fast burn)"
+          summary: "Wovyr is burning its API error budget at ≥14.4× (fast burn)"
           description: >
             The 5xx ratio is above 7.2% over both the last hour and the last
             5 minutes — at this rate 2% of the 30-day error budget for the
             99.5% availability SLO is gone within the hour. Page-worthy:
-            investigate now via `apex_api_requests_total` by `route`/`status`
+            investigate now via `wovyr_api_requests_total` by `route`/`status`
             and the failing requests' `X-Request-Id` in logs/audit.
 
       # Slow burn (page): 6× budget burn — exhausts 5% of the budget in 6h.
       # Long window 6h, short window 30m. 6 × (1 - 0.995) = 0.03.
-      - alert: ApexErrorBudgetSlowBurn
+      - alert: WovyrErrorBudgetSlowBurn
         expr: >
-          apex:api_error_ratio:rate6h > 0.03
+          wovyr:api_error_ratio:rate6h > 0.03
             and
-          apex:api_error_ratio:rate30m > 0.03
+          wovyr:api_error_ratio:rate30m > 0.03
         for: 15m
         labels:
           severity: critical
         annotations:
-          summary: "Apex is burning its API error budget at ≥6× (slow burn)"
+          summary: "Wovyr is burning its API error budget at ≥6× (slow burn)"
           description: >
             The 5xx ratio has exceeded 3% over both the last 6 hours and the
             last 30 minutes — a sustained elevated error rate that consumes
@@ -86,45 +86,45 @@ groups:
       # Trickle burn (ticket): 1× budget burn — on pace to exactly exhaust the
       # budget by the end of the 30-day window. Long window 3d, short window
       # 6h. 1 × (1 - 0.995) = 0.005. Not page-worthy; file and fix.
-      - alert: ApexErrorBudgetTrickleBurn
+      - alert: WovyrErrorBudgetTrickleBurn
         expr: >
-          apex:api_error_ratio:rate3d > 0.005
+          wovyr:api_error_ratio:rate3d > 0.005
             and
-          apex:api_error_ratio:rate6h > 0.005
+          wovyr:api_error_ratio:rate6h > 0.005
         for: 1h
         labels:
           severity: warning
         annotations:
-          summary: "Apex API error rate is on pace to exhaust its 30-day budget"
+          summary: "Wovyr API error rate is on pace to exhaust its 30-day budget"
           description: >
             The 5xx ratio has exceeded the 0.5% SLO threshold over both the
             last 3 days and the last 6 hours — no incident-grade spike, but
             left alone the 30-day error budget runs out on schedule.
 
-  - name: apex.operability
+  - name: wovyr.operability
     rules:
       # Backpressure alerts over the OBS-301 gauges (recomputed at every scrape
       # from the durable stores, so they survive restarts and never drift).
-      - alert: ApexWebhookDLQGrowing
-        expr: delta(apex_webhook_dlq_size[1h]) > 0
+      - alert: WovyrWebhookDLQGrowing
+        expr: delta(wovyr_webhook_dlq_size[1h]) > 0
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "Apex webhook dead-letter queue is growing"
+          summary: "Wovyr webhook dead-letter queue is growing"
           description: >
             {{ $value | humanize }} deliveries were dead-lettered in the last
             hour (retry budget exhausted). Inspect them via
             `GET /api/v1/webhooks/dead-letters` and check the subscriber
             endpoints — dead letters are never retried automatically.
 
-      - alert: ApexWebhookOutboxBacklog
-        expr: apex_webhook_outbox_pending > 100
+      - alert: WovyrWebhookOutboxBacklog
+        expr: wovyr_webhook_outbox_pending > 100
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "Apex webhook outbox has a sustained backlog"
+          summary: "Wovyr webhook outbox has a sustained backlog"
           description: >
             {{ $value | humanize }} webhook deliveries have been pending for
             15+ minutes — deliveries are being enqueued faster than they

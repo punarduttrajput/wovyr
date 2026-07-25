@@ -16,7 +16,7 @@ Document ID: IMPL-003
 
 # 1. Purpose
 
-This document defines the coding standards for the Apex AI Platform — consistent
+This document defines the coding standards for the Wovyr AI Platform — consistent
 style, error handling, logging, and testing practices so the codebase stays
 readable and safe as it grows.
 

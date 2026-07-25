@@ -3,13 +3,13 @@
 # it, and the workflow completes — durably: the execution suspends on the
 # `confirm` activity until a decision arrives at
 # POST /api/v1/ui/decisions/{frame_id}, surviving a server restart in between
-# (see crates/apex-server/src/ui.rs's `uc1_frame_survives_restart_...` test
+# (see crates/wovyr-server/src/ui.rs's `uc1_frame_survives_restart_...` test
 # for the same flow proven at the Rust layer).
 #
 # Requires a UI policy (examples/policies/default-ui-policy.yaml) — without
 # one, the hosted floor (GRD-207) denies this frame too, since it's
 # interactive. See examples/ui/checkout-demo/README.md for the full walkthrough.
-apiVersion: workflow.apex.io/v1
+apiVersion: workflow.wovyr.io/v1
 kind: Workflow
 metadata:
   name: ui-checkout-approve

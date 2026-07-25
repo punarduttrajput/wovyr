@@ -10,17 +10,17 @@ import {
 import { JsonPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
-import type { ApexUiFrameDecideDetail } from '@apex/ui-react/web-component';
-// Side-effecting: registers the `<apex-ui-frame>` custom element (RDR-402).
-import '@apex/ui-react/web-component';
+import type { WovyrUiFrameDecideDetail } from '@wovyr/ui-react/web-component';
+// Side-effecting: registers the `<wovyr-ui-frame>` custom element (RDR-402).
+import '@wovyr/ui-react/web-component';
 import { errText } from '../../core/http-error';
 import { PendingUiFrame, SurfacesService, UiDecisionOutcome } from './surfaces.service';
 
-/** The runtime shape of an `<apex-ui-frame>` DOM node (its `frame`/
+/** The runtime shape of an `<wovyr-ui-frame>` DOM node (its `frame`/
  * `expectedHash` are JS properties, not HTML attributes — see
  * `sdks/ui-react/src/webComponent.tsx`'s doc comment — so they're set
  * imperatively here rather than via template binding). */
-interface ApexUiFrameElement extends HTMLElement {
+interface WovyrUiFrameElement extends HTMLElement {
   frame: unknown;
   expectedHash: string | undefined;
   disabled: boolean;
@@ -28,9 +28,9 @@ interface ApexUiFrameElement extends HTMLElement {
 
 /**
  * Dashboard Surfaces panel (ITS-601/602): real dogfooding of the generative-UI
- * trust runtime on Apex's own ops surface. Composes a real `UiFrame`,
+ * trust runtime on Wovyr's own ops surface. Composes a real `UiFrame`,
  * presents it via `POST /api/v1/ui/present` (standalone mode, no workflow
- * involved), renders it with `<apex-ui-frame>`, and records the operator's
+ * involved), renders it with `<wovyr-ui-frame>`, and records the operator's
  * own decision back through the same RBAC-scoped routes (`ui:read`/
  * `ui:write`) a design partner's integration would use.
  */
@@ -45,8 +45,8 @@ export class Surfaces {
   private svc = inject(SurfacesService);
   private cdr = inject(ChangeDetectorRef);
 
-  private frameElRef?: ElementRef<ApexUiFrameElement>;
-  @ViewChild('frameEl') set frameElSetter(ref: ElementRef<ApexUiFrameElement> | undefined) {
+  private frameElRef?: ElementRef<WovyrUiFrameElement>;
+  @ViewChild('frameEl') set frameElSetter(ref: ElementRef<WovyrUiFrameElement> | undefined) {
     this.frameElRef = ref;
     this.applyFrameToElement();
   }
@@ -95,16 +95,16 @@ export class Surfaces {
       });
   }
 
-  /** Handles the `decide` CustomEvent `<apex-ui-frame>` dispatches (RDR-402).
+  /** Handles the `decide` CustomEvent `<wovyr-ui-frame>` dispatches (RDR-402).
    * Typed as a plain `Event` because Angular's template type-checker doesn't
-   * know `<apex-ui-frame>`'s event map under `CUSTOM_ELEMENTS_SCHEMA` — cast
+   * know `<wovyr-ui-frame>`'s event map under `CUSTOM_ELEMENTS_SCHEMA` — cast
    * once here rather than `$any()` in the template. Attaches the actual API
    * call's promise to `event.detail.result` so the element re-enables for
    * retry if it rejects, matching `UiFrameView`'s `onDecide` contract exactly. */
   onDecide(event: Event): void {
     const frameId = this.pending()?.frame_id;
     if (!frameId) return;
-    const { detail } = event as CustomEvent<ApexUiFrameDecideDetail>;
+    const { detail } = event as CustomEvent<WovyrUiFrameDecideDetail>;
     const { decision } = detail;
     detail.result = firstValueFrom(
       this.svc.decide(frameId, decision.action, decision.values ?? {}),

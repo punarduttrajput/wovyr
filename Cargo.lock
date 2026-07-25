@@ -169,384 +169,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
-name = "apex-agent"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "apex-provider",
- "apex-tools",
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "apex-audit"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "hmac 0.12.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tracing",
-]
-
-[[package]]
-name = "apex-cli"
-version = "0.3.0"
-dependencies = [
- "apex-agent",
- "apex-common",
- "apex-config",
- "apex-kms",
- "apex-marketplace",
- "apex-memory",
- "apex-plugin",
- "apex-provider",
- "apex-runtime",
- "apex-secrets",
- "apex-server",
- "apex-telemetry",
- "apex-tools",
- "apex-ui",
- "apex-workflow",
- "async-trait",
- "clap",
- "hex",
- "hmac 0.12.1",
- "reqwest 0.12.28",
- "ring",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "tokio",
-]
-
-[[package]]
-name = "apex-common"
-version = "0.3.0"
-dependencies = [
- "fs2",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "apex-config"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "apex-kms",
- "apex-secrets",
- "tracing",
-]
-
-[[package]]
-name = "apex-eval"
-version = "0.3.0"
-dependencies = [
- "apex-agent",
- "apex-common",
- "apex-memory",
- "apex-provider",
- "apex-runtime",
- "apex-tools",
- "apex-workflow",
- "async-trait",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
-]
-
-[[package]]
-name = "apex-events"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "apex-kms",
- "hmac 0.12.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "apex-kms"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "hex",
- "ring",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "apex-marketplace"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "apex-plugin",
- "apex-tools",
- "postgres",
- "refinery",
- "ring",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "apex-memory"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "apex-kms",
- "apex-provider",
- "async-trait",
- "refinery",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-postgres",
- "tracing",
-]
-
-[[package]]
-name = "apex-plugin"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "apex-secrets",
- "apex-tools",
- "async-trait",
- "proptest",
- "reqwest 0.12.28",
- "ring",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "tokio",
- "tracing",
- "wat",
-]
-
-[[package]]
-name = "apex-plugin-sdk"
-version = "0.3.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "apex-provider"
-version = "0.3.0"
-dependencies = [
- "apex-agent",
- "apex-common",
- "apex-tools",
- "async-stream",
- "async-trait",
- "criterion",
- "futures",
- "mistralrs",
- "rand 0.8.6",
- "redis",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "apex-runtime"
-version = "0.3.0"
-dependencies = [
- "apex-agent",
- "apex-common",
- "apex-provider",
- "apex-tools",
- "apex-workflow",
- "async-trait",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "apex-secrets"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "apex-kms",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "apex-server"
-version = "0.3.0"
-dependencies = [
- "apex-agent",
- "apex-audit",
- "apex-common",
- "apex-config",
- "apex-events",
- "apex-kms",
- "apex-marketplace",
- "apex-memory",
- "apex-plugin",
- "apex-provider",
- "apex-runtime",
- "apex-secrets",
- "apex-telemetry",
- "apex-tenancy",
- "apex-tools",
- "apex-ui",
- "apex-ui-guard",
- "apex-workflow",
- "async-trait",
- "axum 0.8.9",
- "axum-server",
- "base64 0.22.1",
- "futures",
- "hex",
- "jsonwebtoken",
- "rand 0.8.6",
- "rcgen",
- "redis",
- "reqwest 0.12.28",
- "rustls",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tower 0.5.3",
- "tower-http",
- "tracing",
- "utoipa",
-]
-
-[[package]]
-name = "apex-telemetry"
-version = "0.3.0"
-dependencies = [
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "apex-tenancy"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "apex-tool-macros"
-version = "0.3.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
-name = "apex-tools"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "apex-provider",
- "apex-secrets",
- "apex-tool-macros",
- "apex-ui",
- "apex-ui-guard",
- "async-trait",
- "libc",
- "reqwest 0.12.28",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "wasi-common",
- "wasmtime",
- "wasmtime-wasi",
- "wat",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "apex-ui"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "schemars 1.2.1",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "apex-ui-guard"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "apex-ui",
- "serde",
- "serde_json",
- "serde_yaml",
-]
-
-[[package]]
-name = "apex-workflow"
-version = "0.3.0"
-dependencies = [
- "apex-common",
- "async-trait",
- "proptest",
- "refinery",
- "rustls",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "tokio-postgres",
- "tokio-postgres-rustls",
- "tracing",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
 name = "apodize"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9256,6 +8878,384 @@ dependencies = [
  "log",
  "thiserror 1.0.69",
  "wast 35.0.2",
+]
+
+[[package]]
+name = "wovyr-agent"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "wovyr-common",
+ "wovyr-provider",
+ "wovyr-tools",
+]
+
+[[package]]
+name = "wovyr-audit"
+version = "0.3.0"
+dependencies = [
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "wovyr-common",
+]
+
+[[package]]
+name = "wovyr-cli"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "hex",
+ "hmac 0.12.1",
+ "reqwest 0.12.28",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tokio",
+ "wovyr-agent",
+ "wovyr-common",
+ "wovyr-config",
+ "wovyr-kms",
+ "wovyr-marketplace",
+ "wovyr-memory",
+ "wovyr-plugin",
+ "wovyr-provider",
+ "wovyr-runtime",
+ "wovyr-secrets",
+ "wovyr-server",
+ "wovyr-telemetry",
+ "wovyr-tools",
+ "wovyr-ui",
+ "wovyr-workflow",
+]
+
+[[package]]
+name = "wovyr-common"
+version = "0.3.0"
+dependencies = [
+ "fs2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "wovyr-config"
+version = "0.3.0"
+dependencies = [
+ "tracing",
+ "wovyr-common",
+ "wovyr-kms",
+ "wovyr-secrets",
+]
+
+[[package]]
+name = "wovyr-eval"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "wovyr-agent",
+ "wovyr-common",
+ "wovyr-memory",
+ "wovyr-provider",
+ "wovyr-runtime",
+ "wovyr-tools",
+ "wovyr-workflow",
+]
+
+[[package]]
+name = "wovyr-events"
+version = "0.3.0"
+dependencies = [
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "wovyr-common",
+ "wovyr-kms",
+]
+
+[[package]]
+name = "wovyr-kms"
+version = "0.3.0"
+dependencies = [
+ "hex",
+ "ring",
+ "serde",
+ "serde_json",
+ "tracing",
+ "wovyr-common",
+]
+
+[[package]]
+name = "wovyr-marketplace"
+version = "0.3.0"
+dependencies = [
+ "postgres",
+ "refinery",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "wovyr-common",
+ "wovyr-plugin",
+ "wovyr-tools",
+]
+
+[[package]]
+name = "wovyr-memory"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "refinery",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "wovyr-common",
+ "wovyr-kms",
+ "wovyr-provider",
+]
+
+[[package]]
+name = "wovyr-plugin"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "proptest",
+ "reqwest 0.12.28",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "wat",
+ "wovyr-common",
+ "wovyr-secrets",
+ "wovyr-tools",
+]
+
+[[package]]
+name = "wovyr-plugin-sdk"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "wovyr-provider"
+version = "0.3.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "criterion",
+ "futures",
+ "mistralrs",
+ "rand 0.8.6",
+ "redis",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wovyr-agent",
+ "wovyr-common",
+ "wovyr-tools",
+]
+
+[[package]]
+name = "wovyr-runtime"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wovyr-agent",
+ "wovyr-common",
+ "wovyr-provider",
+ "wovyr-tools",
+ "wovyr-workflow",
+]
+
+[[package]]
+name = "wovyr-secrets"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "wovyr-common",
+ "wovyr-kms",
+]
+
+[[package]]
+name = "wovyr-server"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "axum-server",
+ "base64 0.22.1",
+ "futures",
+ "hex",
+ "jsonwebtoken",
+ "rand 0.8.6",
+ "rcgen",
+ "redis",
+ "reqwest 0.12.28",
+ "rustls",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+ "utoipa",
+ "wovyr-agent",
+ "wovyr-audit",
+ "wovyr-common",
+ "wovyr-config",
+ "wovyr-events",
+ "wovyr-kms",
+ "wovyr-marketplace",
+ "wovyr-memory",
+ "wovyr-plugin",
+ "wovyr-provider",
+ "wovyr-runtime",
+ "wovyr-secrets",
+ "wovyr-telemetry",
+ "wovyr-tenancy",
+ "wovyr-tools",
+ "wovyr-ui",
+ "wovyr-ui-guard",
+ "wovyr-workflow",
+]
+
+[[package]]
+name = "wovyr-telemetry"
+version = "0.3.0"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "wovyr-tenancy"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wovyr-common",
+]
+
+[[package]]
+name = "wovyr-tool-macros"
+version = "0.3.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
+name = "wovyr-tools"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "reqwest 0.12.28",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wasi-common",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wat",
+ "windows-sys 0.61.2",
+ "wovyr-common",
+ "wovyr-provider",
+ "wovyr-secrets",
+ "wovyr-tool-macros",
+ "wovyr-ui",
+ "wovyr-ui-guard",
+]
+
+[[package]]
+name = "wovyr-ui"
+version = "0.3.0"
+dependencies = [
+ "schemars 1.2.1",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "wovyr-common",
+]
+
+[[package]]
+name = "wovyr-ui-guard"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "wovyr-common",
+ "wovyr-ui",
+]
+
+[[package]]
+name = "wovyr-workflow"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "proptest",
+ "refinery",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tracing",
+ "webpki-roots 0.26.11",
+ "wovyr-common",
 ]
 
 [[package]]

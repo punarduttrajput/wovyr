@@ -1,4 +1,4 @@
-# Apex documentation website
+# Wovyr documentation website
 
 An [Astro Starlight](https://starlight.astro.build) site rendering the canonical
 `../docs` tree. **`../docs` stays the source of truth** — nothing in

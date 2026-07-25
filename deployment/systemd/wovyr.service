@@ -1,0 +1,70 @@
+# systemd unit for the Wovyr AI Platform single-node appliance (RM-AIM-P3
+# DEP-301, ADR-0010 Path A). Installed by ../install.sh, which also creates the
+# `wovyr` system user/group and /etc/wovyr/wovyr.env this unit requires.
+#
+# `wovyr dev --addr <addr>` is the single production entrypoint (there is no
+# separate `wovyr serve` command) — see crates/wovyr-server/src/lib.rs's
+# `serve()`. It already handles graceful shutdown on SIGTERM/SIGINT (draining
+# in-flight requests within WOVYR_SHUTDOWN_GRACE_SECS) and refuses to bind a
+# non-loopback address without TLS configured or WOVYR_TLS_TERMINATED_UPSTREAM=1
+# (SEC-202) — this unit does not need to duplicate either behavior.
+#
+# Manual install/management (see ../../docs/12-deployment/systemd.md for the
+# full walkthrough):
+#   sudo ./deployment/install.sh
+#   sudo systemctl enable --now wovyr
+#   sudo systemctl status wovyr
+#   journalctl -u wovyr -f
+
+[Unit]
+Description=Wovyr AI Platform server (single-node appliance)
+Documentation=https://github.com/punarduttrajput/Wovyr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=wovyr
+Group=wovyr
+
+# `wovyr-config` resolves all durable state under `$HOME/.wovyr` — set
+# explicitly rather than relying on systemd's User=-derived HOME, so this unit
+# behaves identically regardless of how /etc/passwd's home field is set.
+Environment=HOME=/var/lib/wovyr
+
+# Required, not optional (no `-` prefix): WOVYR_BIND_ADDR below is substituted
+# straight into ExecStart, so a missing file would start the binary with no
+# --addr value at all. install.sh always creates this file on first install.
+EnvironmentFile=/etc/wovyr/wovyr.env
+
+ExecStart=/usr/local/bin/wovyr dev --addr ${WOVYR_BIND_ADDR}
+
+Restart=on-failure
+RestartSec=5s
+# Longer than the default WOVYR_SHUTDOWN_GRACE_SECS (30s, see
+# crates/wovyr-server/src/lib.rs) so systemd's own SIGKILL escalation never
+# preempts the application's own graceful drain.
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+
+# --- Sandboxing (a reasonable default, not a one-size-fits-all guarantee) ---
+# `wovyr-tools`' `shell`/`code_execute` builtins (opt-in only, see
+# with_privileged_builtins()/WOVYR_ENABLE_SHELL_TOOL) spawn native child
+# processes when no container/gVisor sandbox backend is available on the
+# node — an operator enabling either against this unit's default confinement
+# should relax ReadWritePaths (and possibly ProtectSystem) to whatever
+# scratch space those tools actually need; the appliance's own state lives
+# entirely under /var/lib/wovyr regardless.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/wovyr
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+
+[Install]
+WantedBy=multi-user.target

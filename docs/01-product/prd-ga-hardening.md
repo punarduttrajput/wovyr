@@ -27,7 +27,7 @@ Tier-A GA-completion validation work that gates the v1.0 tag itself
 [PRD-001](prd.md) defines the product through GA; [PRD-002](prd-future.md) scopes
 what comes after. This PRD sits between them: it turns the findings of the
 2026-07-06 solution-architecture review into committed, testable requirements
-that must close **before** Apex can defensibly call itself GA.
+that must close **before** Wovyr can defensibly call itself GA.
 
 The review examined four dimensions — architecture/coupling, security &
 multi-tenancy, state/persistence/scale, and server/API/operability — and surfaced
@@ -45,7 +45,7 @@ they change a boundary contract, through an [ADR](../17-adr/index.md).
 
 The review's one-sentence verdict:
 
-> **Apex is a well-designed single-node appliance wearing the marketing of a
+> **Wovyr is a well-designed single-node appliance wearing the marketing of a
 > distributed multi-tenant platform.**
 
 The primitives are strong and cleanly abstracted — KMS envelope encryption,
@@ -59,11 +59,11 @@ undefensible as GA:
    not wired as the *enforced default* on the runtime path.
 2. **"Distributed" is aspirational.** The Postgres/queue/lease/partition machinery
    exists as tested library code that **no shipping binary reaches**. As deployed,
-   Apex is single-process by construction: two server replicas cannot coexist, and
+   Wovyr is single-process by construction: two server replicas cannot coexist, and
    the server never drives workflows forward in the background.
 3. **Durability is weaker than advertised.** No `fsync` anywhere, in-place rewrites
    of security-critical files (including the KMS root key), no cross-process
-   locking despite the CLI and server sharing `~/.apex` by design, restart amnesia
+   locking despite the CLI and server sharing `~/.wovyr` by design, restart amnesia
    on in-memory stores, and no backup/restore tooling.
 
 The danger is compounded by momentum: the Python SDK is already published to PyPI,
@@ -168,12 +168,12 @@ all. (Closes **PP-01, PP-02, PP-03**.)
 
 - **R-1.1 (P0)** — Every request's principal and tenant MUST be derived from a
   *verified* credential (signed JWT/OIDC, mTLS client cert, or an API key hashed in
-  a store), never from an unauthenticated `X-Apex-Principal`/`X-Apex-Tenant` header.
+  a store), never from an unauthenticated `X-Wovyr-Principal`/`X-Wovyr-Tenant` header.
   Header-asserted identity is rejected unless it carries a valid signature/token.
 - **R-1.2 (P0)** — The anonymous-default-tenant bypass in `tenant_authorize`
-  (`crates/apex-server/src/tenancy.rs:542-553`) MUST be removed from all mutating,
+  (`crates/wovyr-server/src/tenancy.rs:542-553`) MUST be removed from all mutating,
   secret, KMS, and audit routes. If retained for local dev, it MUST be behind an
-  explicit `APEX_ALLOW_ANONYMOUS` flag that binds only to loopback and is refused on
+  explicit `WOVYR_ALLOW_ANONYMOUS` flag that binds only to loopback and is refused on
   any non-loopback listener.
 - **R-1.3 (P0)** — Plugin lifecycle routes (`install/enable/upgrade/trust/
   uninstall`) and marketplace moderation routes MUST call `tenant_authorize` with
@@ -184,7 +184,7 @@ all. (Closes **PP-01, PP-02, PP-03**.)
   this suite runs in CI.
 
 **Exit criteria.** No route mutates state, reveals a secret, or performs a KMS
-operation for an unauthenticated caller. `APEX_PLATFORM_ADMINS` membership is
+operation for an unauthenticated caller. `WOVYR_PLATFORM_ADMINS` membership is
 meaningful only against a verified principal.
 
 ## WS-2: Web-Facing Transport & Resource Hardening
@@ -197,7 +197,7 @@ request timeout, or concurrency cap; unbounded idempotency cache. (Closes
 
 - **R-2.1 (P0)** — The server MUST support TLS termination (rustls) OR MUST refuse
   to bind a non-loopback address without a documented fronting-proxy declaration
-  (`APEX_TLS_TERMINATED_UPSTREAM`).
+  (`WOVYR_TLS_TERMINATED_UPSTREAM`).
 - **R-2.2 (P0)** — Add `tower_http` layers for request timeout, `DefaultBodyLimit`,
   and a global concurrency limit, configurable via env/config.
 - **R-2.3 (P1)** — Add a rate-limit layer (per-principal and per-IP) to blunt the
@@ -205,9 +205,9 @@ request timeout, or concurrency cap; unbounded idempotency cache. (Closes
 - **R-2.4 (P1)** — Add a CORS layer with a configurable allow-list (default: same
   origin only) — see also WS-8/R-8.5 for the dashboard.
 - **R-2.5 (P1)** — The idempotency store MUST be bounded with TTL-based eviction
-  (`crates/apex-server/src/hardening.rs:88-94`), and persisted per WS-4/R-4.4.
+  (`crates/wovyr-server/src/hardening.rs:88-94`), and persisted per WS-4/R-4.4.
 
-**Exit criteria.** A default `apex` server exposed to a network enforces TLS,
+**Exit criteria.** A default `wovyr` server exposed to a network enforces TLS,
 bounded request size/time/concurrency, and rate limits; memory cannot be grown
 without bound by fresh idempotency keys.
 
@@ -223,11 +223,11 @@ protection; TrustClass floors are never enforced on the run path. (Closes
 - **R-3.1 (P0)** — In a server/hosted context, `with_builtins()` MUST NOT register
   `shell` by default; enabling it requires explicit operator opt-in.
 - **R-3.2 (P0)** — `fs_read` MUST be confined to an allow-listed workspace root; the
-  KMS root key, secrets file, and other `~/.apex` state MUST be unreachable via any
+  KMS root key, secrets file, and other `~/.wovyr` state MUST be unreachable via any
   builtin tool.
 - **R-3.3 (P0)** — Permission grants MUST default to **deny** (empty grant set),
   requiring explicit per-tool opt-in in the agent manifest
-  (`crates/apex-agent/src/runtime.rs:288`); `None` MUST no longer mean unrestricted
+  (`crates/wovyr-agent/src/runtime.rs:288`); `None` MUST no longer mean unrestricted
   in a hosted context.
 - **R-3.4 (P1)** — `http_get` MUST enforce a per-tenant egress allow-list and block
   link-local/loopback/private ranges (incl. `169.254.169.254`) directly in the
@@ -247,7 +247,7 @@ code on the native sandbox.
 ## WS-4: Durable State & Crash-Safety (P0/P1)
 
 **Problem.** No `fsync`; in-place file rewrites risk torn writes (incl. KMS root);
-no cross-process locking though CLI+server share `~/.apex`; restart amnesia on
+no cross-process locking though CLI+server share `~/.wovyr`; restart amnesia on
 agents, workflow-owner index, idempotency keys, and quota windows. (Closes **PP-09,
 PP-10, PP-11**, and the state portion of **PP-07**.)
 
@@ -271,7 +271,7 @@ PP-10, PP-11**, and the state portion of **PP-07**.)
   YAML; the pinned definition persists with the execution and is resolved by id.
 
 **Exit criteria.** A power loss or crash mid-write never corrupts a store or loses
-an acknowledged event; the CLI and server can safely operate on shared `~/.apex`;
+an acknowledged event; the CLI and server can safely operate on shared `~/.wovyr`;
 no durable-adjacent state evaporates on restart.
 
 ## WS-5: Distributed Backend Promotion (P1 — **Path A ratified: only R-5.3 + R-5.5 are GA scope; the rest is v1.1**)
@@ -284,12 +284,12 @@ PP-08**, and the migration/scale items **PP-13, PP-14** where they touch Postgre
 **Requirements.**
 
 - **R-5.1 (P1, Path B)** — The server MUST select a Postgres-backed workflow store
-  via env (mirroring `APEX_MARKETPLACE_POSTGRES_URL`), and route server-submitted
+  via env (mirroring `WOVYR_MARKETPLACE_POSTGRES_URL`), and route server-submitted
   workflows through the queue/worker/lease path for exactly-once, crash-recoverable
   execution.
 - **R-5.2 (P1, Path B)** — Control-plane catalogs (tenancy, secrets, KMS, plugins,
   webhooks, audit) MUST support a shared backend so ≥2 replicas share one source of
-  truth; the KMS root key MUST be injection-only (`APEX_KMS_ROOT_KEY`) in
+  truth; the KMS root key MUST be injection-only (`WOVYR_KMS_ROOT_KEY`) in
   multi-replica mode (no per-pod generated key).
 - **R-5.3 (P1)** — All Postgres backends MUST adopt a versioned migration framework
   (e.g. `refinery`/`sqlx migrate`) with a `schema_version` table; DDL is a separate
@@ -357,7 +357,7 @@ enforcement. (Closes **PP-16, PP-18**.)
   wart and the mixed `Debug`/hand-written-string idioms.
 - **R-7.3 (P1)** — `Idempotency-Key` MUST be honored on all mutating routes, not
   just `agents:run`.
-- **R-7.4 (P1)** — CI MUST boot `apex dev` and run the TypeScript + Python SDK
+- **R-7.4 (P1)** — CI MUST boot `wovyr dev` and run the TypeScript + Python SDK
   integration suites and `redocly lint` as a contract gate on every PR.
 - **R-7.5 (P2)** — The 90-day deprecation policy MUST be mechanically enforceable:
   `Deprecation`/`Sunset` headers emitted from a route-metadata table.
@@ -399,7 +399,7 @@ mutation is in the tamper-evident log.
 
 **Problem.** CI tests one point in a ~2⁹ feature matrix (feature-gated code never
 linted, integration tests silently skip, a latent CLI panic hides); three
-diverging `ActivityExecutor` impls; god modules; duplicated `~/.apex` bootstrap;
+diverging `ActivityExecutor` impls; god modules; duplicated `~/.wovyr` bootstrap;
 dependency hygiene; a vendor-coupling boundary leak. (Closes **PP-17, PP-16-exec,
 PP-20, PP-21**, and the architecture-review hygiene items.)
 
@@ -415,9 +415,9 @@ PP-20, PP-21**, and the architecture-review hygiene items.)
   trait, eliminating the retryable-vs-permanent and model-resolution divergences that
   make identical YAML behave differently locally vs. on the server.
 - **R-9.3 (P1)** — Fix the latent CLI marketplace `spawn_blocking` panic
-  (`apps/apex-cli/src/plugin.rs:654`) — the same bug the server already fixed —
+  (`apps/wovyr-cli/src/plugin.rs:654`) — the same bug the server already fixed —
   before shipping the `postgres` feature.
-- **R-9.4 (P2)** — Extract an `apex-host`/`apex-config` crate owning `~/.apex`
+- **R-9.4 (P2)** — Extract an `wovyr-host`/`wovyr-config` crate owning `~/.wovyr`
   layout, env-var reading, and backend selection; both binaries consume it (removes
   the "agree by prose" risk).
 - **R-9.5 (P2)** — Route model-invoking builtins (`image_generate`) through the
@@ -433,13 +433,13 @@ shared-state bootstrap is code, not convention.
 ## WS-10: Backup, Restore & Disaster Recovery (P1)
 
 **Problem.** No backup/restore tooling exists anywhere; a consistent snapshot of
-`~/.apex` isn't even possible today (unlocked writers + in-place rewrites); losing
-`~/.apex/kms` = permanent loss of all sealed data. (Closes **PP-12**.)
+`~/.wovyr` isn't even possible today (unlocked writers + in-place rewrites); losing
+`~/.wovyr/kms` = permanent loss of all sealed data. (Closes **PP-12**.)
 
 **Requirements.**
 
-- **R-10.1 (P1)** — An `apex admin backup` command MUST quiesce writers (via the
-  WS-4 locks), snapshot `~/.apex` atomically, and document `pg_dump` for the Postgres
+- **R-10.1 (P1)** — An `wovyr admin backup` command MUST quiesce writers (via the
+  WS-4 locks), snapshot `~/.wovyr` atomically, and document `pg_dump` for the Postgres
   backends.
 - **R-10.2 (P1)** — KMS root-key escrow MUST be a documented, mandatory install step;
   restore MUST be tested (backup → wipe → restore → decrypt a previously-sealed
@@ -530,7 +530,7 @@ GA is defensible when:
 | PP-08 | Two replicas cannot coexist | 2 | R-5.2 |
 | PP-09 | File stores not crash-safe (no temp+rename); KMS torn-write | 3 | R-4.1 |
 | PP-10 | Zero fsync anywhere | 3 | R-4.2 |
-| PP-11 | No cross-process locking; CLI+server share `~/.apex` | 3 | R-4.3 |
+| PP-11 | No cross-process locking; CLI+server share `~/.wovyr` | 3 | R-4.3 |
 | PP-12 | No backup/restore or DR tooling | 3 | R-10.1..R-10.3 |
 | PP-13 | No Postgres migration story | 3 | R-5.3 |
 | PP-14 | O(N)/O(N²) scale ceilings (memory scan, checkpoint growth, listing docs) | 3 | R-5.3 (schema); PRD-002 (real-scale) |
@@ -539,7 +539,7 @@ GA is defensible when:
 | PP-17 | CI tests one point in ~2⁹ feature matrix; latent CLI panic | 4 | R-9.1, R-9.3 |
 | PP-18 | Hand-synced OpenAPI, no CI contract test, prose-only deprecation | 4 | R-7.4, R-7.5 |
 | PP-19 | RED metrics on 2/50 routes; no alerts/dashboards; no request-id correlation | 4 | R-8.1..R-8.3 |
-| PP-20 | God modules; duplicated `~/.apex` bootstrap; dep hygiene | 4 | R-9.4, R-9.5 |
+| PP-20 | God modules; duplicated `~/.wovyr` bootstrap; dep hygiene | 4 | R-9.4, R-9.5 |
 | PP-21 | Boundary leak: builtin calls OpenAI directly | 4 | R-9.5 |
 | PP-audit | Audit coverage limited to secrets + KMS | 1/4 | R-8.4 |
 

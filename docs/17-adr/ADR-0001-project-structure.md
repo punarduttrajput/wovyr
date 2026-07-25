@@ -14,7 +14,7 @@ Document ID: ADR-0001
 
 # Context
 
-Apex comprises many components — services (API Gateway, Agent Runtime, Workflow
+Wovyr comprises many components — services (API Gateway, Agent Runtime, Workflow
 Engine, LLM Gateway, Memory Engine, Tool Runtime, Plugin Engine, Dashboard) and
 shared libraries (provider SDK, tool SDK, common types). We must decide how to
 organize the source: one repository or many, and how code is shared and built.

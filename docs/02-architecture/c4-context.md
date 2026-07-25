@@ -6,7 +6,7 @@
 project inception. **Corrected 2026-07-07:** the "Databases"/"Messaging
 Systems" lists below are illustrative *categories* of external system this
 architecture could integrate with, not a description of what's wired today.
-The shipping single-node binary (`apex-server`, [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)
+The shipping single-node binary (`wovyr-server`, [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)
 Path A) uses file-based storage by default; PostgreSQL/Redis/Qdrant are real
 but optional, feature-gated backends; there is no messaging system of any
 kind (NATS/Kafka/RabbitMQ) — see
@@ -19,11 +19,11 @@ for where the NATS gap is now tracked.
 
 # 1. Purpose
 
-This document describes the highest level of the Apex AI Platform architecture using the C4 Model.
+This document describes the highest level of the Wovyr AI Platform architecture using the C4 Model.
 
 The System Context view answers the following questions:
 
-* What is the Apex AI Platform?
+* What is the Wovyr AI Platform?
 * Who uses it?
 * Which external systems interact with it?
 * What are the platform boundaries?
@@ -51,7 +51,7 @@ It intentionally omits internal implementation details, which are covered in the
 
 # 3. System Context
 
-The Apex AI Platform is an enterprise-grade platform for building, deploying, orchestrating, and operating intelligent AI systems.
+The Wovyr AI Platform is an enterprise-grade platform for building, deploying, orchestrating, and operating intelligent AI systems.
 
 It provides reusable infrastructure for:
 
@@ -71,7 +71,7 @@ The platform exposes these capabilities through APIs, SDKs, a web dashboard, and
 
 # 4. System Boundary
 
-The following capabilities are considered part of the Apex AI Platform:
+The following capabilities are considered part of the Wovyr AI Platform:
 
 * API Gateway
 * Agent Runtime
@@ -286,7 +286,7 @@ Responsibilities:
                                        |
                                        v
 +--------------------------------------------------------------------------+
-|                         Apex AI Platform                                 |
+|                         Wovyr AI Platform                                 |
 |--------------------------------------------------------------------------|
 | API Gateway                                                              |
 | Agent Runtime                                                            |

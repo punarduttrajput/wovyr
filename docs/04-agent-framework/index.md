@@ -16,7 +16,7 @@ Document ID: AGENT-INDEX-001
 
 # 1. Purpose
 
-This document serves as the **central navigation and architecture index** for the entire Agent Framework in the Apex AI Platform.
+This document serves as the **central navigation and architecture index** for the entire Agent Framework in the Wovyr AI Platform.
 
 It defines:
 

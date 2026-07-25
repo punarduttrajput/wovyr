@@ -1,8 +1,8 @@
 /**
- * Shapes mirroring the Apex platform API (apex-server).
+ * Shapes mirroring the Wovyr platform API (wovyr-server).
  *
  * UI-302: every wire shape is re-exported from the TypeScript SDK's `types.ts`
- * (via the `@apex-ai/sdk-types` tsconfig path alias) — one source of truth, so
+ * (via the `@wovyr/sdk-types` tsconfig path alias) — one source of truth, so
  * the dashboard cannot drift from the published client. Only UI-local shapes
  * (drafts, normalized stream events, parsed metric samples) are defined here.
  */
@@ -28,7 +28,7 @@ export type {
   ScanFinding,
   Webhook,
   WorkflowSummary,
-} from '@apex-ai/sdk-types';
+} from '@wovyr/sdk-types';
 
 import type {
   Attestation,
@@ -37,7 +37,7 @@ import type {
   PluginSummary,
   ScanFinding,
   ToolSummary,
-} from '@apex-ai/sdk-types';
+} from '@wovyr/sdk-types';
 
 /** SDK names differ from this app's originals in a few places — keep the local
  * names as aliases so feature code reads naturally. */

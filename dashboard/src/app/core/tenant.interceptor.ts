@@ -8,19 +8,19 @@ import { Session } from './session';
  * the server can authorize them (default-deny RBAC). Scoped to `/api/v1` requests;
  * `/metrics` and `/healthz` are unauthenticated and left untouched.
  *
- * `X-Apex-Tenant`/`X-Apex-Principal` are always sent — the server's default
+ * `X-Wovyr-Tenant`/`X-Wovyr-Principal` are always sent — the server's default
  * `disabled-loopback` auth mode trusts them verbatim, and even in `apikey`/`jwt`
- * mode `X-Apex-Tenant` is still how the tenant is asserted. When [`Session`] holds
+ * mode `X-Wovyr-Tenant` is still how the tenant is asserted. When [`Session`] holds
  * an API key/JWT, `Authorization: Bearer <value>` rides along too; the server's
- * `authenticate` middleware then verifies it and overwrites `X-Apex-Principal` with
+ * `authenticate` middleware then verifies it and overwrites `X-Wovyr-Principal` with
  * the verified identity, so a stale/spoofed principal header can't win.
  */
 export const tenantInterceptor: HttpInterceptorFn = (req, next) => {
   if (!req.url.startsWith('/api/')) return next(req);
   const session = inject(Session);
   const headers: Record<string, string> = {
-    'X-Apex-Tenant': session.tenant(),
-    'X-Apex-Principal': session.principal(),
+    'X-Wovyr-Tenant': session.tenant(),
+    'X-Wovyr-Principal': session.principal(),
   };
   if (session.hasCredential()) {
     headers['Authorization'] = `Bearer ${session.apiKey()}`;

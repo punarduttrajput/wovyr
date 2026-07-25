@@ -1,14 +1,14 @@
 **Document ID:** EXEC-003
 **Version:** 1.0.0
 **Status:** Draft
-**Owner:** Apex AI Platform Team
+**Owner:** Wovyr AI Platform Team
 **Last Updated:** 2026-06-26
 
 ---
 
 # Purpose
 
-This document defines the business goals of the Apex AI Platform.
+This document defines the business goals of the Wovyr AI Platform.
 
 These goals guide strategic planning, roadmap prioritization, investment decisions, partnership opportunities, and community initiatives. They provide measurable objectives that connect the platform's technical direction with long-term organizational success.
 
@@ -18,9 +18,9 @@ These goals guide strategic planning, roadmap prioritization, investment decisio
 
 The AI ecosystem is rapidly evolving, but many organizations still face fragmented tooling, inconsistent deployment practices, and high operational complexity.
 
-Apex AI Platform aims to become a trusted, open, modular platform that simplifies the development, deployment, and operation of enterprise AI systems.
+Wovyr AI Platform aims to become a trusted, open, modular platform that simplifies the development, deployment, and operation of enterprise AI systems.
 
-The primary business objective is to establish Apex as a widely adopted infrastructure platform that supports developers, enterprises, research organizations, and technology partners.
+The primary business objective is to establish Wovyr as a widely adopted infrastructure platform that supports developers, enterprises, research organizations, and technology partners.
 
 ---
 
@@ -34,7 +34,7 @@ Create an ecosystem where organizations can build production-grade AI systems us
 
 ## Objective 1 — Build a Trusted Open Platform
 
-Establish Apex as a reliable open-source foundation for AI application development.
+Establish Wovyr as a reliable open-source foundation for AI application development.
 
 Success Indicators:
 
@@ -208,7 +208,7 @@ Needs:
 
 # Value Proposition
 
-Apex provides:
+Wovyr provides:
 
 * One platform
 * Multiple AI providers
@@ -380,7 +380,7 @@ Mitigation strategies should be documented in the Risk Register and reviewed per
 The business goals are considered successful when:
 
 * Developers can build production AI systems with minimal infrastructure effort.
-* Organizations adopt Apex for critical workloads.
+* Organizations adopt Wovyr for critical workloads.
 * A sustainable plugin ecosystem emerges.
 * The platform maintains stable public interfaces.
 * Documentation remains comprehensive and current.

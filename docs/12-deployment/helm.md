@@ -10,7 +10,7 @@ Document ID: DEP-004
 **Version:** 1.1.0  
 **Status:** Draft — describes the **long-term, aspirational** multi-chart/
 multi-service packaging. **Not built.** A real, working chart exists today at
-[`deployment/helm/apex/`](../../deployment/helm/apex/README.md) — one chart
+[`deployment/helm/wovyr/`](../../deployment/helm/wovyr/README.md) — one chart
 for the actual single-binary + Postgres + Qdrant topology (mirrors
 `deployment/docker-compose.yml`), not the per-service chart split this doc
 describes. See that chart's `README.md` for what it does and doesn't prove
@@ -23,14 +23,14 @@ applied to a live cluster).
 
 # 1. Purpose
 
-This document describes the Apex AI Platform **Helm chart** — the packaged, configurable way to install and upgrade the platform on [Kubernetes](kubernetes.md).
+This document describes the Wovyr AI Platform **Helm chart** — the packaged, configurable way to install and upgrade the platform on [Kubernetes](kubernetes.md).
 
 ---
 
 # 2. Chart Layout
 
 ```text
-apex/
+wovyr/
 ├── Chart.yaml
 ├── values.yaml
 ├── templates/
@@ -56,8 +56,8 @@ services (production, via [Terraform](terraform.md)).
 # 3. Install
 
 ```bash
-helm repo add apex https://charts.apex.example.com
-helm install apex apex/apex -n apex --create-namespace -f my-values.yaml
+helm repo add wovyr https://charts.wovyr.example.com
+helm install wovyr wovyr/wovyr -n wovyr --create-namespace -f my-values.yaml
 ```
 
 ---
@@ -66,13 +66,13 @@ helm install apex apex/apex -n apex --create-namespace -f my-values.yaml
 
 ```yaml
 global:
-  image: { registry: ghcr.io/apex-ai, tag: "1.0.0" }
-  domain: apex.example.com
+  image: { registry: ghcr.io/wovyr-ai, tag: "1.0.0" }
+  domain: wovyr.example.com
   mtls: true
 
 backends:
-  postgres: { managed: true, url: "secret://apex/pg-url" }
-  redis:    { managed: true, url: "secret://apex/redis-url" }
+  postgres: { managed: true, url: "secret://wovyr/pg-url" }
+  redis:    { managed: true, url: "secret://wovyr/redis-url" }
   qdrant:   { managed: true, url: "http://qdrant:6333" }
   nats:     { managed: true, url: "nats://nats:4222" }
 
@@ -102,8 +102,8 @@ The chart consumes secret references, not literals:
 secrets:
   backend: external          # external | k8s
   refs:
-    databaseUrl: secret://apex/pg-url
-    providerKeys: secret://apex/llm-keys
+    databaseUrl: secret://wovyr/pg-url
+    providerKeys: secret://wovyr/llm-keys
 ```
 
 With `external`, the chart wires the CSI secrets driver / vault; with `k8s`, it
@@ -114,9 +114,9 @@ expects pre-created Secrets.
 # 6. Upgrades
 
 ```bash
-helm upgrade apex apex/apex -n apex -f my-values.yaml
-helm history apex -n apex
-helm rollback apex <revision> -n apex
+helm upgrade wovyr wovyr/wovyr -n wovyr -f my-values.yaml
+helm history wovyr -n wovyr
+helm rollback wovyr <revision> -n wovyr
 ```
 
 - Pre-upgrade hook runs DB [migrations](docker-compose.md#5-initialization).
@@ -136,7 +136,7 @@ use a GitOps tool (Argo CD/Flux) to apply the chart declaratively.
 # 8. Uninstall
 
 ```bash
-helm uninstall apex -n apex      # leaves PVCs by default
+helm uninstall wovyr -n wovyr      # leaves PVCs by default
 ```
 
 Persistent data (PostgreSQL/Qdrant PVCs, object storage) is retained unless
@@ -156,5 +156,5 @@ explicitly removed.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.1.0 | 2026-07-05 | Added a status note pointing to `deployment/helm/apex/` — a real, single-chart Helm chart for the actual single-binary topology, distinct from this doc's aspirational multi-chart split |
+| 1.1.0 | 2026-07-05 | Added a status note pointing to `deployment/helm/wovyr/` — a real, single-chart Helm chart for the actual single-binary topology, distinct from this doc's aspirational multi-chart split |
 | 1.0.0 | 2026-06-27 | Initial Helm deployment guide |

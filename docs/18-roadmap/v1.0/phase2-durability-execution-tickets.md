@@ -45,7 +45,7 @@ DUR-405 (definition pinning)  ─ independent
 
 EXE-601 (dispatcher loops)    ─┐
 EXE-602 (startup reclaim)      ├─ land together (both in serve())
-EXE-603 (Engine::cancel)       ─ independent (apex-workflow change)
+EXE-603 (Engine::cancel)       ─ independent (wovyr-workflow change)
 EXE-604 (async run resource)   ─ independent
 
 DR-1002 (KMS escrow + restore test) ── depends on DUR-401 (atomic KMS write)
@@ -66,16 +66,16 @@ DR-1001. WS-6 parallelizes entirely against WS-4.
 
 **Problem.** Most single-document stores rewrite the live file in place with
 `std::fs::write` — no temp+rename — so a crash mid-write truncates it. Confirmed
-across `apex-tenancy/src/store.rs`, `apex-secrets/src/store.rs` +
-`encrypted_store.rs`, `apex-kms/src/store.rs` + `root.rs`, `apex-events/src/store.rs`,
-`apex-marketplace/src/store.rs`, `apex-server/src/plugins.rs`, and the CLI's
-`plugin.rs`/`config.rs`. The worst case is `apex-kms/src/store.rs` / `root.rs`: a torn
+across `wovyr-tenancy/src/store.rs`, `wovyr-secrets/src/store.rs` +
+`encrypted_store.rs`, `wovyr-kms/src/store.rs` + `root.rs`, `wovyr-events/src/store.rs`,
+`wovyr-marketplace/src/store.rs`, `wovyr-server/src/plugins.rs`, and the CLI's
+`plugin.rs`/`config.rs`. The worst case is `wovyr-kms/src/store.rs` / `root.rs`: a torn
 write there is **accidental crypto-shredding of every tenant's sealed data**. (Only
-the workflow checkpoint/timer/schedule saves and apex-memory's `delete` already use
+the workflow checkpoint/timer/schedule saves and wovyr-memory's `delete` already use
 temp+rename.) (PRD-003 R-4.1; closes PP-09.)
 
 **Change.**
-- Add one shared helper — `apex_common::fs::atomic_write(path, bytes)` — that writes
+- Add one shared helper — `wovyr_common::fs::atomic_write(path, bytes)` — that writes
   to a temp file in the same directory, `fsync`s it, renames over the target, and
   (on Unix) `fsync`s the parent directory. Idempotent, `Send`-safe.
 - Replace every direct `std::fs::write`/`tokio::fs::write` of a whole-document store
@@ -84,10 +84,10 @@ temp+rename.) (PRD-003 R-4.1; closes PP-09.)
 **Acceptance criteria.**
 - A fault-injection test (write interrupted before rename) leaves the previous file
   intact and parseable.
-- `apex-kms` round-trips a sealed record after a simulated interrupted rotation.
+- `wovyr-kms` round-trips a sealed record after a simulated interrupted rotation.
 - Grep shows no remaining direct whole-file `fs::write` in the 10 stores.
 
-**Files.** `crates/apex-common/src/` (new `fs.rs`); all 10 file-store crates listed
+**Files.** `crates/wovyr-common/src/` (new `fs.rs`); all 10 file-store crates listed
 above. **Size.** M. **Depends on:** none. **Blocks:** DUR-403, DUR-404, DR-1002.
 
 ---
@@ -96,8 +96,8 @@ above. **Size.** M. **Depends on:** none. **Blocks:** DUR-403, DUR-404, DR-1002.
 
 **Problem.** No `sync_data`/`sync_all` anywhere in the workspace — "durable" means
 page-cache-durable. The workflow event log appends and `flush()`es but never syncs
-(`crates/apex-workflow/src/store.rs:188-189`); the checkpoint temp+rename never syncs
-(`store.rs:214-216`); the audit log append doesn't sync (`crates/apex-audit/src/log.rs`).
+(`crates/wovyr-workflow/src/store.rs:188-189`); the checkpoint temp+rename never syncs
+(`store.rs:214-216`); the audit log append doesn't sync (`crates/wovyr-audit/src/log.rs`).
 A power loss can lose acknowledged workflow events (breaking resume) and silently drop
 the tail of the tamper-evident audit chain. **Also:** the event append recomputes its
 sequence by re-reading the entire file (`store.rs:191-193`
@@ -117,18 +117,18 @@ R-4.2; closes PP-10, and PP-14's event-log growth.)
 - Event append latency is constant w.r.t. execution length (a micro-benchmark or
   assertion-style perf test, matching the existing perf-test convention).
 
-**Files.** `crates/apex-workflow/src/store.rs`, `crates/apex-audit/src/log.rs`.
+**Files.** `crates/wovyr-workflow/src/store.rs`, `crates/wovyr-audit/src/log.rs`.
 **Size.** M. **Depends on:** none (pairs with DUR-401).
 
 ---
 
-## DUR-403 `[P1]` — Cross-process advisory locking for shared `~/.apex` stores
+## DUR-403 `[P1]` — Cross-process advisory locking for shared `~/.wovyr` stores
 
-**Problem.** The CLI and server share every `~/.apex` directory by design, but locks
+**Problem.** The CLI and server share every `~/.wovyr` directory by design, but locks
 are process-local mutexes (e.g. `FileTenancyStore`'s `Mutex<()>`,
-`apex-tenancy/src/store.rs`). Two writers (a CLI `memory put` racing a server request)
+`wovyr-tenancy/src/store.rs`). Two writers (a CLI `memory put` racing a server request)
 interleave file rewrites and lose data or collide on derived ids; the audit hash-chain
-tip lives in a process-local `Mutex<ChainState>` (`apex-audit/src/log.rs`), so a second
+tip lives in a process-local `Mutex<ChainState>` (`wovyr-audit/src/log.rs`), so a second
 writer forks the chain and `verify()` falsely reports tampering. (PRD-003 R-4.3; closes
 PP-11.)
 
@@ -145,7 +145,7 @@ PP-11.)
   concurrent writes shows no lost update and no corrupt file.
 - Concurrent audit appends from two handles produce one chain that `verify()` accepts.
 
-**Files.** the 10 file-store crates (lock wrapper), `crates/apex-audit/src/log.rs`.
+**Files.** the 10 file-store crates (lock wrapper), `crates/wovyr-audit/src/log.rs`.
 New dep: `fs2` (or `fd-lock`). **Size.** L. **Depends on:** DUR-401. **Blocks:**
 DR-1001.
 
@@ -155,7 +155,7 @@ DR-1001.
 
 **Problem.** Several stores are process-memory only while the data that references
 them is durable: `AgentStore` is a `RwLock<BTreeMap>` ("durability … is a later slice",
-`crates/apex-server/src/lib.rs:64-68`); `workflow_owners` is in-memory
+`crates/wovyr-server/src/lib.rs:64-68`); `workflow_owners` is in-memory
 (`lib.rs:131-135`) so after a restart every durable execution loses its tenant binding
 — the owning tenant gets 404s while the anonymous `default` space can see them all (a
 tenant-isolation **regression**, per `workflow_visible`); the idempotency store is an
@@ -166,7 +166,7 @@ inversion.)
 
 **Change.**
 - Persist the `AgentStore` and the `workflow_owners` index beside the workflow store
-  (`~/.apex/workflows`), using DUR-401's atomic write. On startup, load both.
+  (`~/.wovyr/workflows`), using DUR-401's atomic write. On startup, load both.
 - Persist idempotency keys and quota accumulators with TTLs (file-backed for Path A;
   the Path B milestone moves them to Postgres/Redis).
 - After restart, a tenant MUST see (only) its own durable executions.
@@ -177,9 +177,9 @@ inversion.)
   does not.
 - A daily-quota accumulator survives restart within the same UTC day.
 
-**Files.** `crates/apex-server/src/lib.rs` (AgentStore, workflow_owners persistence),
-`crates/apex-server/src/tenancy.rs` (QuotaTracker persistence),
-`crates/apex-server/src/hardening.rs` (idempotency persistence). **Size.** L.
+**Files.** `crates/wovyr-server/src/lib.rs` (AgentStore, workflow_owners persistence),
+`crates/wovyr-server/src/tenancy.rs` (QuotaTracker persistence),
+`crates/wovyr-server/src/hardening.rs` (idempotency persistence). **Size.** L.
 **Depends on:** DUR-401.
 
 ---
@@ -187,7 +187,7 @@ inversion.)
 ## DUR-405 `[P2]` — Resolve pinned definition by id on signal/approve (no manifest re-upload)
 
 **Problem.** `signal_handler` and `approve_handler`
-(`crates/apex-server/src/workflow_runner.rs:314-320,357-365`) require the client to
+(`crates/wovyr-server/src/workflow_runner.rs:314-320,357-365`) require the client to
 re-upload the **entire workflow definition YAML** on every call, because the server
 never persists the definition by name. The engine already content-hashes and pins the
 definition at `start` (G7); the server just doesn't resolve it back. (PRD-003 R-4.5;
@@ -202,7 +202,7 @@ closes PP-07 ergonomics.)
 - `POST /workflows/{id}/signal` and `/approve` succeed with only the id + event/decision
   payload; a mismatched re-uploaded manifest is rejected (definition-drift guard, G7).
 
-**Files.** `crates/apex-server/src/workflow_runner.rs`; possibly a small
+**Files.** `crates/wovyr-server/src/workflow_runner.rs`; possibly a small
 `Engine`/store accessor for the pinned definition. **Size.** M. **Depends on:**
 DUR-404 (execution-adjacent persistence) — soft.
 
@@ -213,18 +213,18 @@ DUR-404 (execution-adjacent persistence) — soft.
 ## EXE-601 `[P0]` — Background timer & schedule dispatcher loops in `serve()`
 
 **Problem.** Grep for `TimerDispatcher`/`ScheduleDispatcher`/`fire_timer`/`tick` in
-`crates/apex-server/src`: **zero matches**. The engine's G1 durable timers and G2
+`crates/wovyr-server/src`: **zero matches**. The engine's G1 durable timers and G2
 schedules only fire when an operator runs the CLI's `workflows tick` on the same host
-against the same `~/.apex/workflows` dir. A `wait: {timer: {after: "30d"}}` workflow
+against the same `~/.wovyr/workflows` dir. A `wait: {timer: {after: "30d"}}` workflow
 submitted over HTTP will *never* resume. The primitives exist —
-`TimerDispatcher::poll` (`crates/apex-workflow/src/timer.rs:257`) and
+`TimerDispatcher::poll` (`crates/wovyr-workflow/src/timer.rs:257`) and
 `ScheduleDispatcher::poll` (`schedule.rs:304`). (PRD-003 R-6.1; closes PP-07 execution
 driver.)
 
 **Change.**
-- In `serve()` (`crates/apex-server/src/lib.rs:635`), spawn two background tasks that
+- In `serve()` (`crates/wovyr-server/src/lib.rs:635`), spawn two background tasks that
   poll the timer and schedule dispatchers on a configurable interval
-  (`APEX_DISPATCH_INTERVAL_SECS`, default e.g. 5s), driving due timers/schedules via
+  (`WOVYR_DISPATCH_INTERVAL_SECS`, default e.g. 5s), driving due timers/schedules via
   the engine. Clock is read only at the dispatcher boundary (existing convention).
 - Ensure graceful shutdown cancels the loops.
 
@@ -233,7 +233,7 @@ driver.)
   and observes it resume and complete with **no** CLI invocation.
 - A schedule fires on cadence via the server alone.
 
-**Files.** `crates/apex-server/src/lib.rs` (serve + a `dispatch.rs` helper).
+**Files.** `crates/wovyr-server/src/lib.rs` (serve + a `dispatch.rs` helper).
 **Size.** M. **Depends on:** none (pairs with EXE-602).
 
 ---
@@ -241,7 +241,7 @@ driver.)
 ## EXE-602 `[P0]` — Resume in-flight executions on startup
 
 **Problem.** Workflows progress via fire-and-forget `tokio::spawn(engine.resume(...))`
-(`crates/apex-server/src/workflow_runner.rs:300-302`). A server restart mid-run strands
+(`crates/wovyr-server/src/workflow_runner.rs:300-302`). A server restart mid-run strands
 the execution in `Running` forever — nothing rescans the store at startup. (PRD-003
 R-6.2; closes PP-07/PP-15 recovery.)
 
@@ -256,7 +256,7 @@ R-6.2; closes PP-07/PP-15 recovery.)
   confirm it resumes from the last checkpoint and completes (no duplicated activity
   effects — relies on DUR-402 durability).
 
-**Files.** `crates/apex-server/src/lib.rs` (serve startup), `workflow_runner.rs`.
+**Files.** `crates/wovyr-server/src/lib.rs` (serve startup), `workflow_runner.rs`.
 **Size.** M. **Depends on:** none (benefits from DUR-402, DUR-404).
 
 ---
@@ -270,7 +270,7 @@ admits "A production implementation would add Engine::cancel". The SDKs and dash
 present this as if it worked. (PRD-003 R-6.3; closes PP-15.)
 
 **Change.**
-- Add `Engine::cancel(execution_id)` to `apex-workflow`: write a `WorkflowCancelled`
+- Add `Engine::cancel(execution_id)` to `wovyr-workflow`: write a `WorkflowCancelled`
   event, transition the execution to `Cancelled`, skip pending/waiting activities
   (in-flight activities complete; document that boundary), persist the checkpoint.
 - Wire the handler to call it and return `200`/`202` only on real success. If the
@@ -282,8 +282,8 @@ present this as if it worked. (PRD-003 R-6.3; closes PP-15.)
   event is in the history; pending activities are `Skipped`.
 - No code path returns `202` without a state transition.
 
-**Files.** `crates/apex-workflow/src/engine.rs` (new `cancel`),
-`crates/apex-server/src/workflow_runner.rs` (handler). **Size.** M. **Depends on:**
+**Files.** `crates/wovyr-workflow/src/engine.rs` (new `cancel`),
+`crates/wovyr-server/src/workflow_runner.rs` (handler). **Size.** M. **Depends on:**
 none.
 
 ---
@@ -308,59 +308,59 @@ is unimplemented. (PRD-003 R-6.4; closes PP-04-adjacent run UX / PP-07.)
   `running` then `completed` with the result.
 - The synchronous path still works for short runs (back-compat).
 
-**Files.** `crates/apex-server/src/lib.rs` (agents run handlers, run store).
+**Files.** `crates/wovyr-server/src/lib.rs` (agents run handlers, run store).
 **Size.** M. **Depends on:** DUR-404 (run persistence) — soft.
 
 ---
 
 # WS-10 — Backup, Restore & Disaster Recovery
 
-## DR-1001 `[P1]` — `apex admin backup` / `restore`
+## DR-1001 `[P1]` — `wovyr admin backup` / `restore`
 
 **Problem.** No backup/restore tooling exists anywhere — no CLI command, no pg_dump
-hook, no `~/.apex` snapshot. A consistent snapshot isn't even *possible* today because
+hook, no `~/.wovyr` snapshot. A consistent snapshot isn't even *possible* today because
 writers hold no lock and half the stores rewrite in place, so a naive `tar` of a live
-directory captures torn JSON. Losing `~/.apex/kms` with no backup = permanent loss of
+directory captures torn JSON. Losing `~/.wovyr/kms` with no backup = permanent loss of
 all sealed data. (PRD-003 R-10.1; closes PP-12.)
 
 **Change.**
-- Add `apex admin backup <dest>`: quiesce writers via the DUR-403 locks, snapshot
-  `~/.apex` atomically (copy under the held locks, or use a consistent copy), and emit
+- Add `wovyr admin backup <dest>`: quiesce writers via the DUR-403 locks, snapshot
+  `~/.wovyr` atomically (copy under the held locks, or use a consistent copy), and emit
   a manifest (versions, checksums). Document `pg_dump` for the Postgres-backed
   marketplace registry.
-- Add `apex admin restore <src>`: validate the manifest, restore into a target
-  `~/.apex`.
+- Add `wovyr admin restore <src>`: validate the manifest, restore into a target
+  `~/.wovyr`.
 
 **Acceptance criteria.**
-- backup → wipe `~/.apex` → restore → the server reads back all agents, secrets,
+- backup → wipe `~/.wovyr` → restore → the server reads back all agents, secrets,
   memory, workflows, and tenancy unchanged.
 - A backup taken during concurrent writes is internally consistent (no torn files).
 
-**Files.** `apps/apex-cli/src/` (new `admin.rs`). **Size.** M. **Depends on:**
+**Files.** `apps/wovyr-cli/src/` (new `admin.rs`). **Size.** M. **Depends on:**
 DUR-403 (quiesce via locks).
 
 ---
 
 ## DR-1002 `[P1]` — KMS root-key escrow (mandatory install step) + tested restore
 
-**Problem.** The KMS root key at `~/.apex/kms/root.key` is generated-once and
+**Problem.** The KMS root key at `~/.wovyr/kms/root.key` is generated-once and
 `0600`-permissioned; if the host is lost and the key isn't escrowed, every sealed
 secret and memory is permanently unrecoverable. There is no documented escrow step and
 no restore test. (PRD-003 R-10.2; closes PP-12 for the crypto-critical path.)
 
 **Change.**
-- Make root-key escrow a documented, mandatory install step: `APEX_KMS_ROOT_KEY`
+- Make root-key escrow a documented, mandatory install step: `WOVYR_KMS_ROOT_KEY`
   (hex) injection is the supported production mode; the generated file is dev-only and
   logs a loud warning telling the operator to escrow it.
 - Add a restore test: seal a record, back up + escrow, wipe, restore the key + data,
   decrypt.
 
 **Acceptance criteria.**
-- A CLI/server started with `APEX_KMS_ROOT_KEY` decrypts data sealed by another
+- A CLI/server started with `WOVYR_KMS_ROOT_KEY` decrypts data sealed by another
   instance with the same key.
 - Docs (`docs/13-security/encryption.md`, deployment) state escrow as mandatory.
 
-**Files.** `crates/apex-kms/src/root.rs` (warning), docs, a restore integration test.
+**Files.** `crates/wovyr-kms/src/root.rs` (warning), docs, a restore integration test.
 **Size.** S. **Depends on:** DUR-401 (atomic KMS write).
 
 ---
@@ -402,8 +402,8 @@ of Phase 2. (PRD-003 R-9.1; closes PP-17.)
 - Add a `cargo hack check --each-feature --workspace` job (installs `cargo-hack`) so
   every feature-gated code path is compiled and linted.
 - Add one integration job with Postgres + Qdrant + Redis service containers that runs
-  the capability-gated tests (`apex-workflow`/`apex-marketplace`/`apex-memory`
-  Postgres, `apex-provider` Redis/Qdrant) with the env vars they gate on set.
+  the capability-gated tests (`wovyr-workflow`/`wovyr-marketplace`/`wovyr-memory`
+  Postgres, `wovyr-provider` Redis/Qdrant) with the env vars they gate on set.
 
 **Acceptance criteria.**
 - CI fails on a clippy warning in any feature-gated module.
@@ -428,7 +428,7 @@ first.)*
 | EXE-602 | Resume in-flight runs on startup | M | P0 | — |
 | EXE-603 | `Engine::cancel` + honest DELETE | M | P0 | — |
 | EXE-604 | Async submit→poll for agents:run | M | P1 | DUR-404 (soft) |
-| DR-1001 | `apex admin backup`/`restore` | M | P1 | DUR-403 |
+| DR-1001 | `wovyr admin backup`/`restore` | M | P1 | DUR-403 |
 | DR-1002 | KMS root-key escrow + restore test | S | P1 | DUR-401 |
 | DR-1003 | RPO/RTO targets + drill | S | P2 | DR-1001, DR-1002 |
 
@@ -458,5 +458,5 @@ Postgres/Redis and lease-based reclaim respectively — additive, not throwaway.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.1.0 | 2026-07-07 | All tickets shipped. Marked Done in the header; see `CLAUDE.md`'s per-crate bullets (apex-common, apex-workflow, apex-kms, apex-audit, apex-server, apps/apex-cli) and [backup-and-restore.md](../../12-deployment/backup-and-restore.md) for what each ticket actually produced |
+| 1.1.0 | 2026-07-07 | All tickets shipped. Marked Done in the header; see `CLAUDE.md`'s per-crate bullets (wovyr-common, wovyr-workflow, wovyr-kms, wovyr-audit, wovyr-server, apps/wovyr-cli) and [backup-and-restore.md](../../12-deployment/backup-and-restore.md) for what each ticket actually produced |
 | 1.0.0 | 2026-07-06 | Initial Phase-2 (durability & execution) ticket breakdown: 13 tickets across WS-4/6/9/10 with dependencies, acceptance criteria, file targets, and sizing |

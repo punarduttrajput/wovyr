@@ -16,7 +16,7 @@ Document ID: API-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and architecture index** for the Apex AI Platform API — the external REST/gRPC surface through which clients, SDKs, and the dashboard manage agents, workflows, memory, tools, plugins, projects, and users.
+This document is the **central navigation and architecture index** for the Wovyr AI Platform API — the external REST/gRPC surface through which clients, SDKs, and the dashboard manage agents, workflows, memory, tools, plugins, projects, and users.
 
 The API is fronted by the **API Gateway** (c4-container §4.1) and is the single, governed front door to the platform.
 

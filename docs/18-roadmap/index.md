@@ -16,7 +16,7 @@ Document ID: RM-INDEX-001
 
 # 1. Purpose
 
-This section describes the planned evolution of the Apex AI Platform — milestone releases and their themes. It complements the high-level phases in the [README roadmap](../../README.md) with per-release detail.
+This section describes the planned evolution of the Wovyr AI Platform — milestone releases and their themes. It complements the high-level phases in the [README roadmap](../../README.md) with per-release detail.
 
 Current position (2026-07-19): **v0.3.0 is tagged**; the v1.0 GA-hardening
 engineering scope ([PRD-003](../01-product/prd-ga-hardening.md), all four phases)

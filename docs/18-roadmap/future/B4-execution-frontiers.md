@@ -31,7 +31,7 @@ Exploratory — graduates only via an [ADR](../../17-adr/index.md).
 
 The tool runtime has a mature isolation spectrum
 (native → wasm → container → gVisor → microVM), warm pooling, and egress
-lockdown ([`apex-tools`](../../../crates/apex-tools/src/lib.rs)). The frontiers
+lockdown ([`wovyr-tools`](../../../crates/wovyr-tools/src/lib.rs)). The frontiers
 are about **speed, hardware, locality, and portability** without giving up
 isolation:
 
@@ -54,7 +54,7 @@ isolation:
 - **microVM + WASI backends** — `FirecrackerSandbox` (one-shot block-device
   protocol) and the `wasi`-gated `WasiSandbox` (Wasmtime, fuel/epoch/memory
   limits) already exist; the WASM component model extends the latter and the
-  `WasiCapabilityRuntime` in `apex-plugin`.
+  `WasiCapabilityRuntime` in `wovyr-plugin`.
 - **Fair scheduling** — the `FairScheduler` (smooth weighted round-robin) is
   where GPU-aware scheduling must integrate.
 

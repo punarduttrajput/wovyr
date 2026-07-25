@@ -81,7 +81,7 @@ side-effecting and never cached ([caching](worker-pool.md#11-caching)).
 # 7. Example
 
 ```bash
-apex tools invoke fs.read --input '{"path":"/workspace/README.md"}'
+wovyr tools invoke fs.read --input '{"path":"/workspace/README.md"}'
 ```
 
 Commonly used by the [Code Agent](../16-examples/code-agent.md).

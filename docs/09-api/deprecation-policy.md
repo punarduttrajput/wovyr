@@ -9,7 +9,7 @@ Document ID: API-002
 **File Path:** `docs/09-api/deprecation-policy.md`
 **Version:** 1.1.0
 **Status:** Active policy, **now mechanically enforceable** (RM-GA-P4
-API-705): `crates/apex-server/src/hardening.rs`'s `DEPRECATIONS` table +
+API-705): `crates/wovyr-server/src/hardening.rs`'s `DEPRECATIONS` table +
 `deprecation_headers` middleware emit the `Deprecation`/`Sunset` headers §4
 describes for any route added to the table. Still nothing in `/api/v1` has
 been deprecated, so the table is empty and no endpoint carries the headers
@@ -34,10 +34,10 @@ duration or mechanism.
 
 Applies to the REST surface documented in [`openapi.yaml`](openapi.yaml): every
 `/api/v1/*` route, its request/response schema, and the semantics of its
-headers (`X-Apex-Tenant`, `Idempotency-Key`, `If-Match`, …). It does **not**
+headers (`X-Wovyr-Tenant`, `Idempotency-Key`, `If-Match`, …). It does **not**
 cover:
 
-- Internal crate APIs (`apex-*` Rust crates) — those follow normal semver via
+- Internal crate APIs (`wovyr-*` Rust crates) — those follow normal semver via
   `Cargo.toml`, not this policy.
 - Undocumented behavior — if it's not in `openapi.yaml`, relying on it is at
   the caller's own risk (e.g. incidental error-message wording).
@@ -98,11 +98,11 @@ deprecations (e.g. a new auth model). Per [overview.md §3](overview.md#3-base-u
 
 # 6. Plugin API
 
-The plugin-facing surface ([`apex-plugin`](../08-plugin-sdk/overview.md)'s
+The plugin-facing surface ([`wovyr-plugin`](../08-plugin-sdk/overview.md)'s
 `PlatformApi` compatibility range a manifest declares) follows the same
 window, with one addition: `PluginEngine::upgrade` already refuses an upgrade
 that would break an installed **dependent's** version requirement (see
-`crates/apex-plugin`), so a plugin author changing their own capability
+`crates/wovyr-plugin`), so a plugin author changing their own capability
 surface inherits this policy for their consumers the same way the platform
 does for API clients.
 

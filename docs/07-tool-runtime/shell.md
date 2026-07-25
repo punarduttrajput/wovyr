@@ -74,7 +74,7 @@ commands and inputs; avoid network-dependent commands.
 # 7. Example
 
 ```bash
-apex tools invoke shell.run --input '{"command":"cargo build","cwd":"/workspace"}'
+wovyr tools invoke shell.run --input '{"command":"cargo build","cwd":"/workspace"}'
 ```
 
 Used by the [Code Agent](../16-examples/code-agent.md) to build and test.

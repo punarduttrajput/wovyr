@@ -29,11 +29,11 @@ and future-facing guides.
 
 - **A hand-authored OpenAPI 3.0 contract** ([openapi.yaml](../../09-api/openapi.yaml))
   covers every route the server actually implements.
-- **TypeScript SDK** (`sdks/typescript`, `@apex-ai/sdk`) — full resource
+- **TypeScript SDK** (`sdks/typescript`, `@wovyr/sdk`) — full resource
   coverage, SSE parsing, `GET`-only retry/backoff, `paginateAll()`, a
   `redocly lint` contract check wired into `npm test`. **Built, packed, and
   verified importable from a real tarball — but not published to npm.**
-- **Python SDK** (`sdks/python`, `apex-ai-sdk`) — stdlib-only, mirrors the TS
+- **Python SDK** (`sdks/python`, `wovyr-sdk`) — stdlib-only, mirrors the TS
   resource shape 1:1, `unittest`-tested against a live server, and **published to
   PyPI + verified installable.**
 - **A deprecation-window policy** ([deprecation-policy.md](../../09-api/deprecation-policy.md))
@@ -57,7 +57,7 @@ and future-facing guides.
 # 4. Scope & Requirements
 
 ## 4.1 Functional / deliverables
-- **Publish `@apex-ai/sdk` to npm** (operator-supplied OTP). The package already
+- **Publish `@wovyr/sdk` to npm** (operator-supplied OTP). The package already
   builds/packs/imports correctly from a real tarball.
 - **Evaluate additional language clients** (Go/Java) generated/hand-written
   against the same [openapi.yaml](../../09-api/openapi.yaml) contract.
@@ -73,7 +73,7 @@ and future-facing guides.
 
 # 5. Exit Criteria
 
-> `npm i @apex-ai/sdk` installs a working client; SDK parity holds across shipped
+> `npm i @wovyr/sdk` installs a working client; SDK parity holds across shipped
 > languages; and the deprecation-policy headers are enforced in code **once there
 > is something to deprecate** (with a migration guide authored at that time).
 

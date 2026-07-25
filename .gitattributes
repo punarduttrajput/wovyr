@@ -1,7 +1,7 @@
 # Shell scripts and systemd units must always have LF line endings, regardless
 # of a contributor's global core.autocrlf setting — a CRLF shebang line breaks
 # a script outright on Linux ("bad interpreter: No such file or directory"),
-# and deployment/install.sh + deployment/systemd/apex.service (RM-AIM-P3
+# and deployment/install.sh + deployment/systemd/wovyr.service (RM-AIM-P3
 # DEP-301) are Linux-only artifacts that could otherwise be silently corrupted
 # by a checkout on Windows.
 *.sh text eol=lf

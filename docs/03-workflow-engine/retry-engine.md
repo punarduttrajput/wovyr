@@ -10,7 +10,7 @@
 
 # 1. Purpose
 
-This document defines the Retry Engine used by the Apex Workflow Engine.
+This document defines the Retry Engine used by the Wovyr Workflow Engine.
 
 The Retry Engine is responsible for recovering from transient failures while maintaining deterministic workflow execution.
 

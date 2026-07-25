@@ -16,7 +16,7 @@ Document ID: TRT-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and architecture index** for the Tool Runtime in the Apex AI Platform.
+This document is the **central navigation and architecture index** for the Tool Runtime in the Wovyr AI Platform.
 
 The Tool Runtime is the deployable service that **executes tools** — safely, with isolation, resource limits, and governance — on behalf of agents and workflows. It operationalizes the model defined by the [Tool Framework](../04-agent-framework/tool-framework.md): the framework specifies *what a tool is and how to build one*; the Runtime is *where tools actually run* at scale.
 

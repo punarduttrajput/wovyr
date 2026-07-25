@@ -42,7 +42,7 @@ a [human task](../03-workflow-engine/workflow-dsl.md#15-human-task), and
 `workflows/support.yaml`:
 
 ```yaml
-apiVersion: workflow.apex.io/v1
+apiVersion: workflow.wovyr.io/v1
 kind: Workflow
 metadata: { name: support-triage, version: 1.0.0 }
 spec:
@@ -84,13 +84,13 @@ can roll back the refund (saga).
 # 4. Deploy & Run
 
 ```bash
-apex workflows validate -f workflows/support.yaml
-apex workflows create -f workflows/support.yaml
-WF=$(apex workflows list -o json | jq -r '.data[]|select(.name=="support-triage").id')
-apex workflows publish "$WF"
+wovyr workflows validate -f workflows/support.yaml
+wovyr workflows create -f workflows/support.yaml
+WF=$(wovyr workflows list -o json | jq -r '.data[]|select(.name=="support-triage").id')
+wovyr workflows publish "$WF"
 
-EXE=$(apex workflows run "$WF" --input @ticket.json -o json | jq -r '.execution_id')
-apex workflows executions get "$EXE" --watch
+EXE=$(wovyr workflows run "$WF" --input @ticket.json -o json | jq -r '.execution_id')
+wovyr workflows executions get "$EXE" --watch
 ```
 
 ---
@@ -101,8 +101,8 @@ When a refund exceeds $100, the execution **suspends** on the human task. The
 support lead approves in the dashboard or via CLI:
 
 ```bash
-TASK=$(apex workflows executions get "$EXE" -o json | jq -r '.pending_task_id')
-apex workflows tasks complete "$TASK" --decision approved
+TASK=$(wovyr workflows executions get "$EXE" -o json | jq -r '.pending_task_id')
+wovyr workflows tasks complete "$TASK" --decision approved
 ```
 
 The execution resumes and issues the refund

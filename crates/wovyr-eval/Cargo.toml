@@ -1,0 +1,34 @@
+[package]
+name = "wovyr-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Deterministic, fixture-based AI evaluation harness with LLM-judge scoring, a quantified CI regression gate, and retrieval metrics (FUT-006 prototype spike)."
+
+[features]
+# A real, local, non-deterministic model (mistral.rs) as the comparison
+# harness's provider, instead of a scripted deterministic one. Off by default —
+# forwards to wovyr-provider's own off-by-default mistralrs feature.
+mistralrs = ["wovyr-provider/mistralrs"]
+
+[dependencies]
+wovyr-common.workspace = true
+wovyr-agent.workspace = true
+wovyr-provider.workspace = true
+wovyr-tools.workspace = true
+wovyr-workflow.workspace = true
+wovyr-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+# The retrieval-metrics harness (EVL-203) is memory-agnostic behind the
+# RankedRetriever/ContextRetriever traits; the integration tests drive it
+# against the real memory engine, so the dep is dev-only and the library
+# spine stays memory-free (same stance as the CLI owning the engine adapter).
+wovyr-memory.workspace = true

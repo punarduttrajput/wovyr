@@ -1,0 +1,73 @@
+[package]
+name = "wovyr-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Tool framework: the Tool trait, registry, and built-in tools for the Wovyr AI Platform."
+
+[features]
+# The WASI/WASM sandbox backend. Off by default: it pulls Wasmtime, a heavy
+# dependency, so only builds/tests that exercise the backend pay the compile cost.
+wasi = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasi-common"]
+# Gates `tests/sandbox_backends.rs` (RM-AR-P1 QA-401) — a test-only marker feature
+# with no dependency of its own. That file's tests are runtime-capability-gated
+# (they skip cleanly when Docker/gVisor/Firecracker is absent), but a *present*
+# Docker daemon on a plain `cargo test --workspace` run (the ordinary `rust` CI
+# job, any contributor's machine) still exercises real container networking/
+# cgroups/iptables behavior this workspace never controls or verifies there —
+# discovered when 3 of its tests failed for real in that job on a stock
+# ubuntu-latest runner, unrelated to any change in this crate. Without this gate
+# that failure silently blocks the *whole* `rust` job's signal (fmt/clippy/build
+# all pass; only these environment-sensitive tests don't). The dedicated
+# `sandbox-integration` CI job (which installs gVisor and is the properly
+# capability-aware place for this suite) builds with `--features
+# sandbox-integration-tests` explicitly; plain `cargo test --workspace` no longer
+# compiles this file at all.
+sandbox-integration-tests = []
+
+[dependencies]
+wovyr-common.workspace = true
+wovyr-provider.workspace = true
+wovyr-secrets.workspace = true
+wovyr-ui.workspace = true
+wovyr-ui-guard.workspace = true
+# `#[derive(Tool)]` (SBX-303) + the `schemars::JsonSchema` derive its generated
+# `input_schema()` calls into — a tool author's params struct derives the schema
+# instead of hand-writing a `json!({...})` literal.
+wovyr-tool-macros.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+# `net`/`io-util` for the egress proxy and DNS-pinned HTTP client; `fs` for sandbox
+# workspace files; `process` for spawning sandboxed commands; `sync` for the sandbox
+# pool's semaphore; `rt`/`time` for spawning the egress proxy task and command
+# timeouts (RM-GA-P4 HLTH-904).
+tokio = { workspace = true, features = ["net", "io-util", "fs", "process", "sync", "rt", "time"] }
+tracing.workspace = true
+# Pinned to 14.x to reuse the warm offline cache (wasmtime 14.0.4 is already vendored).
+wasmtime = { version = "14", optional = true }
+wasmtime-wasi = { version = "14", optional = true }
+wasi-common = { version = "14", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows Job Object resource enforcement for the native sandbox (SBX-102), the
+# non-Unix analog of the Unix `setrlimit` path. Pinned to 0.61 to reuse the version
+# already in the tree (ring links it), so no new duplicate version / offline fetch.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
+# Assembles tiny WASI test modules from WAT in-process, so the WASI tests need no
+# external wasm toolchain (cached: wat 1.252).
+wat = "1"

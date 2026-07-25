@@ -3,14 +3,14 @@
 **Status:** Draft — Day-1 target-state architecture, unrevised since project
 inception; not reconciled with [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)
 (Path A, 2026-07-06: GA ships as a single-node appliance). **Corrected
-2026-07-07** — what actually ships today: one Rust binary (`apex-server`)
+2026-07-07** — what actually ships today: one Rust binary (`wovyr-server`)
 containing every domain in §6 (Agent Runtime, Workflow Engine, Memory Engine,
 LLM Gateway, Tool Runtime, Plugin Framework, Platform Services) as in-process
 crates, not independently deployable/scalable services; a REST/JSON + SSE
 API (no gRPC, no WebSocket transport); an Angular SPA talking to it directly
 (no NestJS Gateway/BFF layer — [dashboard overview](../10-dashboard/overview.md));
-no message broker (no NATS — `apex-events` is a custom in-process event
-system); and file-based storage under `~/.apex` by default, with PostgreSQL/
+no message broker (no NATS — `wovyr-events` is a custom in-process event
+system); and file-based storage under `~/.wovyr` by default, with PostgreSQL/
 Redis/Qdrant as optional, feature-gated backends rather than the "primary
 storage" §10 implies. See the [README](../../README.md)'s architecture
 section for the kept-current architecture. Technologies named below with no implementation
@@ -20,7 +20,7 @@ and no tracked future work are now tracked — see
 [ADR-0011](../17-adr/ADR-0011-generative-ui-repositioning.md)'s repositioning
 (the product is now the Generative UI Trust Runtime,
 [PRD-005](prd-generative-ui-runtime.md), with the platform as its engine) and
-the since-shipped generative-UI runtime (`apex-ui`/`apex-ui-guard`, the server's
+the since-shipped generative-UI runtime (`wovyr-ui`/`wovyr-ui-guard`, the server's
 `ui` activity + frame routes) and MCP connection layer
 ([PRD-006](prd-mcp-connections.md)), which don't appear in its domain map.
 **Owner:** Architecture Team
@@ -30,7 +30,7 @@ the since-shipped generative-UI runtime (`apex-ui`/`apex-ui-guard`, the server's
 
 # 1. Purpose
 
-This document provides a high-level overview of the Apex AI Platform architecture.
+This document provides a high-level overview of the Wovyr AI Platform architecture.
 
 It defines the major architectural domains, runtime layers, system boundaries, deployment model, and interactions between the platform's core components.
 
@@ -56,7 +56,7 @@ Detailed design specifications are maintained in companion architecture document
 
 # 3. Architectural Vision
 
-The Apex AI Platform is designed as a modular, cloud-native, AI-first platform that enables developers to build intelligent autonomous systems using reusable infrastructure components.
+The Wovyr AI Platform is designed as a modular, cloud-native, AI-first platform that enables developers to build intelligent autonomous systems using reusable infrastructure components.
 
 The architecture emphasizes:
 

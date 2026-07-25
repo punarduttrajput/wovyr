@@ -31,9 +31,9 @@ intent** — scoped, near-term, GA-blocking work, not an exploratory bet.
 
 - **Perf tests exist but are deliberately toy-scale.** Assertion-style p95 gates
   run under ordinary `cargo test`:
-  [`crates/apex-provider/tests/perf.rs`](../../../crates/apex-provider/tests/perf.rs)
+  [`crates/wovyr-provider/tests/perf.rs`](../../../crates/wovyr-provider/tests/perf.rs)
   (gateway overhead) and
-  [`crates/apex-memory/tests/perf.rs`](../../../crates/apex-memory/tests/perf.rs)
+  [`crates/wovyr-memory/tests/perf.rs`](../../../crates/wovyr-memory/tests/perf.rs)
   (warm retrieval), on the order of hundreds of records against the in-process
   mock provider. Large headroom keeps them stable in CI — they prove *no
   regression*, not *scale*.

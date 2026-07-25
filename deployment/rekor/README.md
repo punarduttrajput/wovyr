@@ -18,13 +18,13 @@ curl -s http://localhost:3000/api/v1/log | jq .   # log info ⇒ healthy
 The API listens on `localhost:3000`, Prometheus metrics on `localhost:2112`. MySQL,
 Redis, and Trillian are internal to the compose network.
 
-## Wiring into Apex
+## Wiring into Wovyr
 
-Capability-gated integration tests (the same pattern as `APEX_MEMORY_POSTGRES_URL` /
-`APEX_FC_KERNEL`) should read the log's URL from:
+Capability-gated integration tests (the same pattern as `WOVYR_MEMORY_POSTGRES_URL` /
+`WOVYR_FC_KERNEL`) should read the log's URL from:
 
 ```bash
-export APEX_REKOR_URL=http://localhost:3000
+export WOVYR_REKOR_URL=http://localhost:3000
 ```
 
 and skip cleanly when it is unset.

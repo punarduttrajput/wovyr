@@ -16,7 +16,7 @@ export interface QueryRequest {
   grants?: string[];
 }
 
-/** Client for the memory-explorer routes on apex-server. */
+/** Client for the memory-explorer routes on wovyr-server. */
 @Injectable({ providedIn: 'root' })
 export class MemoryService {
   private http = inject(HttpClient);

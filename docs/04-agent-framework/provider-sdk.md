@@ -16,7 +16,7 @@ Document ID: AGENT-006
 
 # 1. Purpose
 
-The Provider SDK abstracts AI model providers behind a common interface, allowing the Apex AI Platform to switch between LLM providers without changing business logic.
+The Provider SDK abstracts AI model providers behind a common interface, allowing the Wovyr AI Platform to switch between LLM providers without changing business logic.
 
 The SDK eliminates vendor lock-in by providing a unified API for:
 
@@ -108,7 +108,7 @@ Initial provider implementations include:
 `OpenAiProvider` speaks the OpenAI-compatible `/chat/completions` shape, which is
 what makes the Azure OpenAI / Ollama / llama.cpp / HuggingFace (TGI) / OpenRouter /
 Gemini-compat rows above work — one adapter, many endpoints, selected via
-`APEX_OPENAI_BASE_URL`. `AnthropicProvider` (RM-AIM-P2 PRV-201) speaks Anthropic's
+`WOVYR_OPENAI_BASE_URL`. `AnthropicProvider` (RM-AIM-P2 PRV-201) speaks Anthropic's
 **native Messages API** — first-class `tool_use`/`tool_result` translation,
 top-level `system` blocks, prompt caching (`cache_control`, on by default), and
 real SSE streaming — selected via `ANTHROPIC_API_KEY` (`Gateway::from_env()` tries

@@ -1,15 +1,15 @@
 {
-  "name": "apex-ui-checkout-demo",
+  "name": "wovyr-ui-checkout-demo",
   "private": true,
   "version": "0.0.0",
-  "description": "The Generative UI Trust Runtime killer demo (PRD-005 §9, RM-GUI-P2-209): submit a safe or poisoned checkout workflow against a real apex-server and watch the trust layer render, block, and resume.",
+  "description": "The Generative UI Trust Runtime killer demo (PRD-005 §9, RM-GUI-P2-209): submit a safe or poisoned checkout workflow against a real wovyr-server and watch the trust layer render, block, and resume.",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.json && vite build"
   },
   "dependencies": {
-    "@apex/ui-react": "file:../../../sdks/ui-react",
+    "@wovyr/ui-react": "file:../../../sdks/ui-react",
     "react": "^18.3.0",
     "react-dom": "^18.3.0"
   },

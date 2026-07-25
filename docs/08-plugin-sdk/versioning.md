@@ -50,7 +50,7 @@ compatibility:
 The Plugin Engine refuses to install/enable a plugin whose range excludes the
 running platform API version. This decouples plugin releases from platform
 releases while preventing silent incompatibility. The Plugin API itself is
-versioned (`plugin.apex.io/v1`, see [Plugin API §9](plugin-api.md#9-versioning-the-api)).
+versioned (`plugin.wovyr.io/v1`, see [Plugin API §9](plugin-api.md#9-versioning-the-api)).
 
 ---
 

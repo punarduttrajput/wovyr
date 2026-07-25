@@ -18,7 +18,7 @@
   @if (!reachable()) {
     <div class="card empty">
       <b>Can't reach the platform server.</b>
-      <span>Start it with <code>cargo run -p apex-cli -- dev</code> (binds 127.0.0.1:8080).
+      <span>Start it with <code>cargo run -p wovyr-cli -- dev</code> (binds 127.0.0.1:8080).
         The dev server proxies <code>/metrics</code>, <code>/healthz</code> and <code>/api</code>.</span>
     </div>
   }
@@ -86,7 +86,7 @@
       <div class="svc">
         <span class="pill" [class.ok]="!!health()" [class.crit]="!health()"><span class="pd"></span>{{ health() ? 'UP' : 'DOWN' }}</span>
         <span class="nm">API server</span>
-        <span class="meta">apex-server {{ health()?.version || '—' }}</span>
+        <span class="meta">wovyr-server {{ health()?.version || '—' }}</span>
       </div>
       <div class="svc">
         <span class="pill" [class.ok]="reachable()" [class.mut]="!reachable()"><span class="pd"></span>{{ reachable() ? 'UP' : '—' }}</span>
@@ -147,7 +147,7 @@
       </table></div>
     } @else {
       <div class="muted pad">No workflow executions yet. Start one with
-        <code>apex workflows run</code> and it will appear here live.</div>
+        <code>wovyr workflows run</code> and it will appear here live.</div>
     }
   </div>
 </section>

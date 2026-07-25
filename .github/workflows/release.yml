@@ -1,15 +1,15 @@
-# Release pipeline for the Apex AI Platform (RM-AIM-P1 DX-102).
+# Release pipeline for the Wovyr AI Platform (RM-AIM-P1 DX-102).
 #
 # Before this existed, "releasing" meant a git tag and nothing else: no binaries, no
-# published container image (CI built `apex:ci` and threw it away), no SDK artifacts,
+# published container image (CI built `wovyr:ci` and threw it away), no SDK artifacts,
 # no release notes. This workflow makes a tag push produce all of them:
 #
-#   - cross-platform `apex` binaries (Linux x86_64, Windows x86_64, macOS arm64)
+#   - cross-platform `wovyr` binaries (Linux x86_64, Windows x86_64, macOS arm64)
 #     with sha256 checksums,
-#   - a container image pushed to GHCR (`ghcr.io/<owner>/apex`) tagged with both the
+#   - a container image pushed to GHCR (`ghcr.io/<owner>/wovyr`) tagged with both the
 #     version and `latest` — the repo the Helm chart now defaults to,
-#   - packed SDK artifacts: an npm tarball for `@apex-ai/sdk` and a wheel+sdist for
-#     `apex-ai-sdk`, attached to the release so a consumer can install a pinned
+#   - packed SDK artifacts: an npm tarball for `@wovyr/sdk` and a wheel+sdist for
+#     `wovyr-sdk`, attached to the release so a consumer can install a pinned
 #     artifact even before/without a registry publish,
 #   - a GitHub Release whose body is this version's section of CHANGELOG.md.
 #
@@ -73,14 +73,14 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release -p apex-cli --target ${{ matrix.target }}
+        run: cargo build --release -p wovyr-cli --target ${{ matrix.target }}
 
       - name: Package (tar.gz + sha256)
         if: matrix.archive == 'tar'
         shell: bash
         run: |
-          BIN=target/${{ matrix.target }}/release/apex
-          OUT=apex-${{ matrix.name }}.tar.gz
+          BIN=target/${{ matrix.target }}/release/wovyr
+          OUT=wovyr-${{ matrix.name }}.tar.gz
           tar -czf "$OUT" -C "$(dirname "$BIN")" "$(basename "$BIN")"
           shasum -a 256 "$OUT" > "$OUT.sha256"
 
@@ -88,17 +88,17 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $bin = "target/${{ matrix.target }}/release/apex.exe"
-          $out = "apex-${{ matrix.name }}.zip"
+          $bin = "target/${{ matrix.target }}/release/wovyr.exe"
+          $out = "wovyr-${{ matrix.name }}.zip"
           Compress-Archive -Path $bin -DestinationPath $out
           (Get-FileHash $out -Algorithm SHA256).Hash.ToLower() + "  $out" | Out-File -Encoding ascii "$out.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apex-${{ matrix.name }}
+          name: wovyr-${{ matrix.name }}
           path: |
-            apex-${{ matrix.name }}.*
+            wovyr-${{ matrix.name }}.*
           if-no-files-found: error
 
   image:
@@ -113,7 +113,7 @@ jobs:
         run: |
           # GHCR requires a lowercase repository path.
           OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          echo "image=ghcr.io/${OWNER}/apex" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${OWNER}/wovyr" >> "$GITHUB_OUTPUT"
           if [[ "$IS_RELEASE" == "true" ]]; then
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           else
@@ -153,19 +153,19 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - name: Pack @apex-ai/sdk
+      - name: Pack @wovyr/sdk
         working-directory: sdks/typescript
         run: |
           npm ci
           npm run build
           npm pack --pack-destination ..
-        # Produces sdks/apex-ai-sdk-<version>.tgz
+        # Produces sdks/wovyr-sdk-<version>.tgz
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Build apex-ai-sdk (wheel + sdist)
+      - name: Build wovyr-sdk (wheel + sdist)
         working-directory: sdks/python
         run: |
           python -m pip install --upgrade build

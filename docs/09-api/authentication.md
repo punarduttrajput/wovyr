@@ -10,22 +10,22 @@ Document ID: API-002
 **Version:** 1.1.0  
 **Status:** Draft — this document describes the **target-state** design (full
 OAuth2/OIDC flows, refresh tokens, per-key IP allowlists, mTLS, org-custom
-roles). **What `apex-server` actually implements today** (RM-GA-P1 SEC-101,
+roles). **What `wovyr-server` actually implements today** (RM-GA-P1 SEC-101,
 added 2026-07-07): a bearer credential verified by an `auth::authenticate`
-middleware before any handler runs, selected via `APEX_AUTH_MODE` —
-`jwt` (HS256 via `APEX_JWT_HS_SECRET` or RS256 via `APEX_JWT_RS_PUBLIC_KEY`,
+middleware before any handler runs, selected via `WOVYR_AUTH_MODE` —
+`jwt` (HS256 via `WOVYR_JWT_HS_SECRET` or RS256 via `WOVYR_JWT_RS_PUBLIC_KEY`,
 with optional issuer/audience checks; the verified `sub` claim becomes the
 principal) or `apikey` (a bearer token SHA-256-hashed and looked up in a
-file-backed store, minted via `apex auth create-key`). **API keys now have a
+file-backed store, minted via `wovyr auth create-key`). **API keys now have a
 full lifecycle** (RM-AIM-P1 SRV-104, 2026-07-14): create-with-TTL, list,
-**revoke**, and rotate-with-grace (`apex auth create-key --ttl-days |
+**revoke**, and rotate-with-grace (`wovyr auth create-key --ttl-days |
 list-keys | revoke <id> | rotate <id> --grace-hours`), with revocation and
 expiry enforced on every lookup and `last_used` tracking. Still not
 implemented: OAuth2 authorization flows, refresh tokens, mTLS, per-key IP
 allowlists, and any revocation mechanism for **JWTs** (a JWT stays valid to
 expiry) — a verified credential simply overwrites the request's
-`X-Apex-Principal` header before RBAC runs. See
-`crates/apex-server/src/auth.rs` and
+`X-Wovyr-Principal` header before RBAC runs. See
+`crates/wovyr-server/src/auth.rs` and
 [`phase1-security-floor-tickets.md`](../18-roadmap/v1.0/phase1-security-floor-tickets.md).  
 **Owner:** AI Platform Team  
 **Last Updated:** 2026-07-15
@@ -46,7 +46,7 @@ Authentication establishes *who*; authorization decides *what they may do*; the
 | Credential | Use | Carried as |
 |------------|-----|-----------|
 | OAuth2 / OIDC access token (JWT) | Interactive users, SSO | `Authorization: Bearer <jwt>` |
-| API key | Services, CI, CLI | `Authorization: Bearer <key>` or `Apex-Api-Key` |
+| API key | Services, CI, CLI | `Authorization: Bearer <key>` or `Wovyr-Api-Key` |
 | Service token (short-lived JWT) | Internal service-to-service | `Authorization: Bearer <jwt>` |
 | mTLS client cert | Internal, zero-trust networks | TLS handshake |
 
@@ -81,8 +81,8 @@ SSO via OIDC lets enterprises bring their own IdP.
   "roles": ["workflow.editor", "agent.operator"],
   "scopes": ["agents:read", "agents:run", "workflows:write"],
   "exp": 1750003600,
-  "iss": "https://auth.apex.example.com",
-  "aud": "apex-api"
+  "iss": "https://auth.wovyr.example.com",
+  "aud": "wovyr-api"
 }
 ```
 

@@ -16,7 +16,7 @@ Document ID: PRD-004
 
 # 1. Purpose
 
-This document enumerates the **functional requirements (FRs)** for the Apex AI
+This document enumerates the **functional requirements (FRs)** for the Wovyr AI
 Platform — what the system must *do*. FRs are derived from the [PRD](prd.md#12-functional-overview)
 and [user stories](user-stories.md), and each points to the spec that realizes it.
 

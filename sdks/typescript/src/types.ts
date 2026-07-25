@@ -1,10 +1,10 @@
-/** Options accepted by every {@link ApexClient} constructor call. */
-export interface ApexClientOptions {
-  /** Base URL of a running `apex-server` (e.g. `http://127.0.0.1:8080`). */
+/** Options accepted by every {@link WovyrClient} constructor call. */
+export interface WovyrClientOptions {
+  /** Base URL of a running `wovyr-server` (e.g. `http://127.0.0.1:8080`). */
   baseUrl: string;
-  /** Sent as `X-Apex-Tenant` on every request. Defaults to `"default"`. */
+  /** Sent as `X-Wovyr-Tenant` on every request. Defaults to `"default"`. */
   tenant?: string;
-  /** Sent as `X-Apex-Principal` on every request, if set. */
+  /** Sent as `X-Wovyr-Principal` on every request, if set. */
   principal?: string;
   /** `fetch` override, mainly for tests. Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
@@ -84,7 +84,7 @@ export type AgentStreamEvent =
   /** A validated generative-UI frame presented mid-run (PRD-005 UIP-104) —
    * only trust-layer-checked frames are ever emitted. `frame` is left
    * `unknown` here (a generic API client shouldn't parse the vocabulary);
-   * `@apex/ui-react` owns the typed `UiFrame` shape and rendering. */
+   * `@wovyr/ui-react` owns the typed `UiFrame` shape and rendering. */
   | { type: "ui_frame"; frame_id: string; frame: unknown }
   | { type: "done"; usage: Usage }
   | ({ type: "result" } & RunResult)
@@ -101,7 +101,7 @@ export interface Health {
   version: string;
 }
 
-/** A workflow execution summary (apex-workflow `ExecutionSummary`) — the row
+/** A workflow execution summary (wovyr-workflow `ExecutionSummary`) — the row
  * shape `GET /api/v1/workflows` pages and `GET /api/v1/workflows/{id}` returns
  * under `execution`. */
 export interface WorkflowSummary {
@@ -218,7 +218,7 @@ export interface MarketplaceSearchParams {
 /** Permission-risk classification of a listing's latest version. */
 export type PermissionRisk = "low" | "medium" | "high";
 
-/** A marketplace listing projection (apex-marketplace `Listing`) — the row
+/** A marketplace listing projection (wovyr-marketplace `Listing`) — the row
  * shape `GET /api/v1/marketplace/listings` pages. `capabilities` are the
  * latest version's capability kinds (snake_case strings, e.g. `tool`). */
 export interface MarketplaceListing {
@@ -250,14 +250,14 @@ export interface PublishResult {
   scan: ScanReport;
 }
 
-/** One SBOM component a package bundles (apex-plugin `SbomComponent`). */
+/** One SBOM component a package bundles (wovyr-plugin `SbomComponent`). */
 export interface SbomComponent {
   name: string;
   version: string;
   license?: string;
 }
 
-/** Build provenance for a package (apex-plugin `Provenance`). */
+/** Build provenance for a package (wovyr-plugin `Provenance`). */
 export interface Provenance {
   builder: string;
   source: string;
@@ -287,7 +287,7 @@ export interface SecretMetadata {
 
 export type Role = "viewer" | "editor" | "project_admin" | "org_admin" | "platform_admin";
 
-// ---- tenancy (apex-tenancy; organizations/projects routes) ----
+// ---- tenancy (wovyr-tenancy; organizations/projects routes) ----
 
 export interface Organization {
   id: string;
@@ -329,7 +329,7 @@ export interface Webhook {
   active?: boolean;
 }
 
-/** A single audited action (apex-audit `AuditEvent`) — who did what, when,
+/** A single audited action (wovyr-audit `AuditEvent`) — who did what, when,
  * with what outcome. `reason` is set for denials/errors (e.g. the missing
  * scope). */
 export interface AuditEvent {
@@ -344,7 +344,7 @@ export interface AuditEvent {
   request_id?: string;
 }
 
-/** A persisted audit record (apex-audit `AuditEntry`): the event plus its
+/** A persisted audit record (wovyr-audit `AuditEntry`): the event plus its
  * position and hash-chain links — the row shape `GET /api/v1/audit` pages.
  * (This type used to mirror the event fields flat, which is not what the
  * server sends — the event nests under `event`.) */
@@ -367,7 +367,7 @@ export interface ToolSummary {
 
 /** How to reach an external MCP server (PRD-006 MCX-101) — `stdio` spawns an
  * arbitrary local command (materially higher privilege; gated behind
- * `mcp:admin` + the operator's `APEX_ENABLE_MCP_STDIO=1` opt-in, ADR-0012),
+ * `mcp:admin` + the operator's `WOVYR_ENABLE_MCP_STDIO=1` opt-in, ADR-0012),
  * `http` POSTs JSON-RPC to a URL (SSRF-guarded the same way `http_get` is). */
 export type McpTransport =
   | { kind: "stdio"; command: string; args: string[] }
@@ -415,7 +415,7 @@ export interface McpRefreshResult {
 
 /** `GET /api/v1/mcp/connections`'s response: the standard {@link Page}
  * envelope plus `stdio_enabled` (RM-MCX-P3-302) — whether the operator has
- * set `APEX_ENABLE_MCP_STDIO=1`, so a caller (the dashboard) knows to hide
+ * set `WOVYR_ENABLE_MCP_STDIO=1`, so a caller (the dashboard) knows to hide
  * the `stdio` transport option before the operator fills out a form, not
  * after a rejected submit. */
 export interface McpConnectionsPage extends Page<McpConnection> {
@@ -424,8 +424,8 @@ export interface McpConnectionsPage extends Page<McpConnection> {
 
 /** A minimal shape for a UiFrame document — `root` is left `unknown` (a
  * generic API client shouldn't need to parse the component vocabulary);
- * `@apex/ui-react` owns the typed, full `UiFrame` shape and rendering. Enough
- * to *submit* a frame (`ui.present`); reach for `@apex/ui-react` to *build*
+ * `@wovyr/ui-react` owns the typed, full `UiFrame` shape and rendering. Enough
+ * to *submit* a frame (`ui.present`); reach for `@wovyr/ui-react` to *build*
  * or *render* one. */
 export interface UiFrame {
   schema_version: string;
@@ -435,7 +435,7 @@ export interface UiFrame {
 
 /** A pending, already-validated generative-UI frame awaiting a human decision
  * (PRD-005 RM-GUI-P1/P3). `frame` is left `unknown` for the same reason as
- * {@link UiFrame} — `@apex/ui-react` owns rendering, and can consume this
+ * {@link UiFrame} — `@wovyr/ui-react` owns rendering, and can consume this
  * envelope directly (its `frame`/`frame_hash` fields are exactly what
  * `verifyFrame`/`UiFrameView` expect). `execution_id`/`activity_id` are
  * `null` for a **standalone** frame (RM-GUI-P3 EMB-701, `ui.present`) — one

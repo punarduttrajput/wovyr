@@ -4,7 +4,7 @@ import { Observable } from 'rxjs';
 
 /** A validated generative-UI frame document (PRD-005 UIP-101). `root` is left
  * `unknown` here — this service only needs to pass it through to `POST
- * /api/v1/ui/present`; `<apex-ui-frame>` (`@apex/ui-react/web-component`) owns
+ * /api/v1/ui/present`; `<wovyr-ui-frame>` (`@wovyr/ui-react/web-component`) owns
  * the typed vocabulary and rendering. */
 export interface UiFrame {
   schema_version: string;
@@ -47,7 +47,7 @@ export interface UiDecisionOutcome {
  * RM-GUI-P3 EMB-701) — present, decide, and retrieve a trust-layer-governed
  * frame with no workflow or agent adoption at all. Every call goes through
  * the dashboard's `tenantInterceptor` like any other `/api/*` request, so the
- * operator's own session (`X-Apex-Tenant`/`X-Apex-Principal`/bearer
+ * operator's own session (`X-Wovyr-Tenant`/`X-Wovyr-Principal`/bearer
  * credential) is what actually gets RBAC-checked server-side — this panel
  * exercises the exact same `ui:read`/`ui:write` scopes a partner's own
  * integration would need. */
@@ -56,7 +56,7 @@ export class SurfacesService {
   private http = inject(HttpClient);
 
   /** `POST /api/v1/ui/present` — a `403` means the trust layer blocked the
-   * frame (`crates/apex-server/src/ui.rs`'s `present_handler`); the error
+   * frame (`crates/wovyr-server/src/ui.rs`'s `present_handler`); the error
    * body's `error.message` names which rule fired — surface it, don't treat
    * it as a transport failure. */
   present(frame: UiFrame): Observable<PendingUiFrame> {

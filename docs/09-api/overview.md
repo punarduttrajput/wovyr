@@ -9,11 +9,11 @@ Document ID: API-001
 **File Path:** `docs/09-api/overview.md`  
 **Version:** 1.4.0  
 **Status:** Draft — this document describes the **target-state** convention;
-the machine-readable, ground-truth contract for what `apex-server` actually
+the machine-readable, ground-truth contract for what `wovyr-server` actually
 implements today is served live at `GET /openapi.json` (RM-AIM-P3 SRV-303) —
 generated at compile time from `#[utoipa::path(...)]` annotations on the
 handlers themselves plus `#[derive(ToSchema)]` request/error types (see
-`crates/apex-server/src/openapi.rs`), so it cannot silently drift from the
+`crates/wovyr-server/src/openapi.rs`), so it cannot silently drift from the
 code the way a hand-maintained file can; the CI contract-gate job lints this
 live document, not a checked-in copy. [`openapi.yaml`](openapi.yaml) (hand-
 authored from the Axum routes, v1.0 "Stability" deliverable) remains as a
@@ -26,14 +26,14 @@ key — agent name, workflow `execution_id`, `publisher/name`, …), no OAuth2
 authorization-code flow and no mTLS, and no generic `/operations/{id}`
 polling resource. **Authentication is real, not a placeholder** (corrected
 2026-07-07 — this line previously said "no OAuth2/JWT," which stopped being
-true once RM-GA-P1 SEC-101 landed): `APEX_AUTH_MODE=jwt` (HS256/RS256 bearer)
+true once RM-GA-P1 SEC-101 landed): `WOVYR_AUTH_MODE=jwt` (HS256/RS256 bearer)
 or `apikey` (a hashed bearer token) verify the caller before any handler
-runs, overwriting whatever `X-Apex-Principal` the client sent; the
-`disabled-loopback` default (plain, unverified `X-Apex-Tenant`/
-`X-Apex-Principal` headers) is a local-dev fallback, not the production
+runs, overwriting whatever `X-Wovyr-Principal` the client sent; the
+`disabled-loopback` default (plain, unverified `X-Wovyr-Tenant`/
+`X-Wovyr-Principal` headers) is a local-dev fallback, not the production
 posture, and its anonymous escape hatch refuses to bind non-loopback. See
 [`13-security/authentication.md`](../13-security/authentication.md) and
-`crates/apex-server/src/auth.rs`. Pagination, the `Idempotency-Key` header
+`crates/wovyr-server/src/auth.rs`. Pagination, the `Idempotency-Key` header
 (now on every mutating route, not just `agents:run` — RM-GA-P4 API-703),
 `If-Match`/`ETag` concurrency, and the error envelope below *are* implemented
 as documented. A TypeScript client generated against `openapi.yaml` lives
@@ -48,7 +48,7 @@ this section's `/v2` sentence promises is spelled out concretely in
 
 # 1. Purpose
 
-This document defines the **conventions** shared by every Apex AI Platform API endpoint: protocols, versioning, resource naming, pagination, filtering, errors, idempotency, rate limiting, and observability. Resource-specific documents (agents, workflows, …) inherit these rules.
+This document defines the **conventions** shared by every Wovyr AI Platform API endpoint: protocols, versioning, resource naming, pagination, filtering, errors, idempotency, rate limiting, and observability. Resource-specific documents (agents, workflows, …) inherit these rules.
 
 ---
 
@@ -76,7 +76,7 @@ https://{host}/api/v1/...
 - Breaking changes introduce `/api/v2`, run in parallel, and follow a published
   deprecation window — see [deprecation-policy.md](deprecation-policy.md) for
   the concrete window (90 days minimum) and required headers.
-- Responses include an `Apex-Api-Version` header.
+- Responses include an `Wovyr-Api-Version` header.
 
 ---
 
@@ -275,7 +275,7 @@ signed, retried with backoff, and mirror Event Bus topics.
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.4.0 | 2026-07-14 | RM-AIM-P3 SRV-303: `GET /openapi.json` is now the generated, drift-proof ground-truth contract (derived from `#[utoipa::path]`/`ToSchema` on the handlers), and the CI contract gate lints that live document instead of the checked-in `openapi.yaml`, which remains only as a browsable snapshot |
-| 1.3.0 | 2026-07-07 | Corrected the top divergence note: it said "no OAuth2/JWT" for the real API, which stopped being true once RM-GA-P1 SEC-101 shipped real JWT/API-key bearer verification (`APEX_AUTH_MODE`). Also noted `Idempotency-Key`'s RM-GA-P4 API-703 broadening to every mutating route. No API behavior changed — this was a stale-documentation fix found during a project-wide status review |
+| 1.3.0 | 2026-07-07 | Corrected the top divergence note: it said "no OAuth2/JWT" for the real API, which stopped being true once RM-GA-P1 SEC-101 shipped real JWT/API-key bearer verification (`WOVYR_AUTH_MODE`). Also noted `Idempotency-Key`'s RM-GA-P4 API-703 broadening to every mutating route. No API behavior changed — this was a stale-documentation fix found during a project-wide status review |
 | 1.2.0 | 2026-07-04 | Linked the new [deprecation-policy.md](deprecation-policy.md) from §3; noted the TypeScript SDK's new retry/backoff and `paginateAll()` helper |
-| 1.1.0 | 2026-07-03 | Added `openapi.yaml` as the hand-authored, ground-truth machine-readable contract (v1.0 "Stability" workstream), noting where this convention doc describes target-state behavior the real API doesn't implement (opaque ids, OAuth2/JWT, `/operations/{id}`). First TypeScript client (`sdks/typescript`) landed against the spec, integration-tested against a live `apex dev` server |
+| 1.1.0 | 2026-07-03 | Added `openapi.yaml` as the hand-authored, ground-truth machine-readable contract (v1.0 "Stability" workstream), noting where this convention doc describes target-state behavior the real API doesn't implement (opaque ids, OAuth2/JWT, `/operations/{id}`). First TypeScript client (`sdks/typescript`) landed against the spec, integration-tested against a live `wovyr dev` server |
 | 1.0.0 | 2026-06-27 | Initial Platform API Overview & Conventions |

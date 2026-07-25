@@ -16,11 +16,11 @@ Document ID: ADR-0003
 
 This decision is real but was never universal. [ADR-0010](ADR-0010-ga-deployment-topology.md)
 (2026-07-06) found that every control-plane catalog (tenancy, secrets, KMS,
-plugins, webhooks, audit, agents) is **file-only under `~/.apex` by
+plugins, webhooks, audit, agents) is **file-only under `~/.wovyr` by
 default** — PostgreSQL is not the system of record for any of them today.
 The only Postgres backend genuinely wired into a shipping binary is the
 marketplace registry (`PostgresRegistryStore`, selected via
-`APEX_MARKETPLACE_POSTGRES_URL`); the workflow store and tiered memory can
+`WOVYR_MARKETPLACE_POSTGRES_URL`); the workflow store and tiered memory can
 also opt into Postgres/Qdrant behind cargo features
 (`postgres`/`tiered-memory`), but the GA default (Path A, single-node
 appliance) is file-based. Promoting the remaining control-plane catalogs to

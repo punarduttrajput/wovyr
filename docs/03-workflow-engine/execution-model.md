@@ -10,7 +10,7 @@
 
 # 1. Purpose
 
-This document defines the execution semantics of the Apex Workflow Engine.
+This document defines the execution semantics of the Wovyr Workflow Engine.
 
 It specifies:
 

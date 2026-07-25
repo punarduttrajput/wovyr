@@ -2,7 +2,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { UiFrameView } from "./UiFrameView.js";
 import type { UiDecision, UiFrame } from "./types.js";
 
-/** `detail` of the `decide` event {@link ApexUiFrameElement} dispatches. The
+/** `detail` of the `decide` event {@link WovyrUiFrameElement} dispatches. The
  * element has no opinion on how a decision reaches the server — a listener
  * attaches the async outcome to `result`; if that promise rejects, the
  * element re-enables for retry exactly like {@link UiFrameView}'s `onDecide`
@@ -10,17 +10,17 @@ import type { UiDecision, UiFrame } from "./types.js";
  *
  * ```js
  * el.addEventListener("decide", (e) => {
- *   e.detail.result = apexClient.ui.decide(frameId, e.detail.decision);
+ *   e.detail.result = wovyrClient.ui.decide(frameId, e.detail.decision);
  * });
  * ```
  *
  * Leaving `result` unset is treated as an immediate success. */
-export interface ApexUiFrameDecideDetail {
+export interface WovyrUiFrameDecideDetail {
   decision: UiDecision;
   result?: Promise<void>;
 }
 
-/** `<apex-ui-frame>` (RDR-402) — a framework-agnostic wrapper around
+/** `<wovyr-ui-frame>` (RDR-402) — a framework-agnostic wrapper around
  * {@link UiFrameView} for hosts that aren't React themselves (the dashboard's
  * Angular shell, a plain HTML page, a CMS-embedded widget). Internally still
  * React, mounted into the element via `react-dom/client`'s `createRoot` — the
@@ -29,16 +29,16 @@ export interface ApexUiFrameDecideDetail {
  * `frame`/`expectedHash`/`disabled` are set as **JS properties**, not HTML
  * attributes (a `UiFrame` doesn't serialize sensibly into an attribute
  * string) — `disabled` also mirrors the boolean `disabled` *attribute* for
- * hosts that prefer declarative markup (`<apex-ui-frame disabled>`).
+ * hosts that prefer declarative markup (`<wovyr-ui-frame disabled>`).
  *
  * Registers itself under `customElements` on import — see
- * `registerApexUiFrameElement` if a host wants to defer that (e.g. to pick a
+ * `registerWovyrUiFrameElement` if a host wants to defer that (e.g. to pick a
  * different tag name via a subclass) or needs the idempotency guard exposed
  * directly. Rendering requires the caller to also load this package's
  * `styles.css` (unchanged from the plain-React usage — this wrapper renders
  * into light DOM, not a shadow root, so host-level styling still applies). */
-export class ApexUiFrameElement extends HTMLElement {
-  static readonly tagName = "apex-ui-frame";
+export class WovyrUiFrameElement extends HTMLElement {
+  static readonly tagName = "wovyr-ui-frame";
   static readonly observedAttributes = ["disabled", "theme"];
 
   #root: Root | null = null;
@@ -72,7 +72,7 @@ export class ApexUiFrameElement extends HTMLElement {
   }
 
   /** Mirrors {@link UiFrameView}'s `theme` prop — a `theme="dark"`/`"light"`
-   * attribute (or the matching JS property) forces `.apex-ui`'s tokens
+   * attribute (or the matching JS property) forces `.wovyr-ui`'s tokens
    * instead of following the browser's `prefers-color-scheme`. Useful for a
    * host page with its own fixed (not OS-linked) light/dark mode. */
   get theme(): "light" | "dark" | undefined {
@@ -120,9 +120,9 @@ export class ApexUiFrameElement extends HTMLElement {
   }
 
   async #emitDecide(decision: UiDecision): Promise<void> {
-    const detail: ApexUiFrameDecideDetail = { decision };
+    const detail: WovyrUiFrameDecideDetail = { decision };
     this.dispatchEvent(
-      new CustomEvent<ApexUiFrameDecideDetail>("decide", {
+      new CustomEvent<WovyrUiFrameDecideDetail>("decide", {
         detail,
         bubbles: true,
         composed: true,
@@ -134,21 +134,21 @@ export class ApexUiFrameElement extends HTMLElement {
   }
 }
 
-/** Registers `<apex-ui-frame>` under `customElements`, idempotently (safe to
+/** Registers `<wovyr-ui-frame>` under `customElements`, idempotently (safe to
  * call more than once — a second `define` for the same tag throws). Imported
  * modules already call this once at load time; exported separately so a host
  * can call it explicitly (e.g. after a subclass swaps in a different tag
  * name) without re-importing. */
-export function registerApexUiFrameElement(): void {
-  if (!customElements.get(ApexUiFrameElement.tagName)) {
-    customElements.define(ApexUiFrameElement.tagName, ApexUiFrameElement);
+export function registerWovyrUiFrameElement(): void {
+  if (!customElements.get(WovyrUiFrameElement.tagName)) {
+    customElements.define(WovyrUiFrameElement.tagName, WovyrUiFrameElement);
   }
 }
 
-registerApexUiFrameElement();
+registerWovyrUiFrameElement();
 
 declare global {
   interface HTMLElementTagNameMap {
-    "apex-ui-frame": ApexUiFrameElement;
+    "wovyr-ui-frame": WovyrUiFrameElement;
   }
 }

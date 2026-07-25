@@ -1,145 +1,145 @@
-/* Design tokens (RDR-401) for @apex/ui-react. Every visual value a host might
- * want to re-theme is a CSS custom property under `.apex-ui`, with light
+/* Design tokens (RDR-401) for @wovyr/ui-react. Every visual value a host might
+ * want to re-theme is a CSS custom property under `.wovyr-ui`, with light
  * defaults and a dark override via both `prefers-color-scheme` and an
  * explicit `[data-theme="dark"]` (whichever a host's own theme toggle sets
  * wins). Contrast ratios below are chosen to clear WCAG AA at these sizes
  * (RDR-405) — don't lower them without re-checking. */
 
-.apex-ui {
-  --apex-ui-font: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --apex-ui-fg: #1a1a1a;
-  --apex-ui-fg-muted: #595959;
-  --apex-ui-bg: #ffffff;
-  --apex-ui-bg-subtle: #f5f5f7;
-  --apex-ui-border: #d0d0d5;
-  --apex-ui-accent: #2955c6;
-  --apex-ui-accent-fg: #ffffff;
-  --apex-ui-danger: #b3271e;
-  --apex-ui-danger-fg: #ffffff;
-  --apex-ui-success: #147d3f;
-  --apex-ui-warning: #8a5a00;
-  --apex-ui-focus-ring: #2955c6;
-  --apex-ui-radius: 8px;
-  --apex-ui-gap: 12px;
-  --apex-ui-unknown-bg: #fff6e5;
-  --apex-ui-unknown-border: #c98a12;
+.wovyr-ui {
+  --wovyr-ui-font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --wovyr-ui-fg: #1a1a1a;
+  --wovyr-ui-fg-muted: #595959;
+  --wovyr-ui-bg: #ffffff;
+  --wovyr-ui-bg-subtle: #f5f5f7;
+  --wovyr-ui-border: #d0d0d5;
+  --wovyr-ui-accent: #2955c6;
+  --wovyr-ui-accent-fg: #ffffff;
+  --wovyr-ui-danger: #b3271e;
+  --wovyr-ui-danger-fg: #ffffff;
+  --wovyr-ui-success: #147d3f;
+  --wovyr-ui-warning: #8a5a00;
+  --wovyr-ui-focus-ring: #2955c6;
+  --wovyr-ui-radius: 8px;
+  --wovyr-ui-gap: 12px;
+  --wovyr-ui-unknown-bg: #fff6e5;
+  --wovyr-ui-unknown-border: #c98a12;
 
-  font-family: var(--apex-ui-font);
-  color: var(--apex-ui-fg);
-  background: var(--apex-ui-bg);
+  font-family: var(--wovyr-ui-font);
+  color: var(--wovyr-ui-fg);
+  background: var(--wovyr-ui-bg);
 }
 
 @media (prefers-color-scheme: dark) {
-  .apex-ui {
-    --apex-ui-fg: #f0f0f2;
-    --apex-ui-fg-muted: #b0b0b8;
-    --apex-ui-bg: #1c1c1f;
-    --apex-ui-bg-subtle: #28282c;
-    --apex-ui-border: #3d3d42;
-    --apex-ui-accent: #7ea6ff;
-    --apex-ui-accent-fg: #101014;
-    --apex-ui-danger: #ff6b60;
-    --apex-ui-danger-fg: #1a0000;
-    --apex-ui-success: #4ad182;
-    --apex-ui-warning: #e0a940;
-    --apex-ui-focus-ring: #7ea6ff;
-    --apex-ui-unknown-bg: #332a10;
-    --apex-ui-unknown-border: #e0a940;
+  .wovyr-ui {
+    --wovyr-ui-fg: #f0f0f2;
+    --wovyr-ui-fg-muted: #b0b0b8;
+    --wovyr-ui-bg: #1c1c1f;
+    --wovyr-ui-bg-subtle: #28282c;
+    --wovyr-ui-border: #3d3d42;
+    --wovyr-ui-accent: #7ea6ff;
+    --wovyr-ui-accent-fg: #101014;
+    --wovyr-ui-danger: #ff6b60;
+    --wovyr-ui-danger-fg: #1a0000;
+    --wovyr-ui-success: #4ad182;
+    --wovyr-ui-warning: #e0a940;
+    --wovyr-ui-focus-ring: #7ea6ff;
+    --wovyr-ui-unknown-bg: #332a10;
+    --wovyr-ui-unknown-border: #e0a940;
   }
 }
 
-.apex-ui[data-theme="dark"] {
-  --apex-ui-fg: #f0f0f2;
-  --apex-ui-fg-muted: #b0b0b8;
-  --apex-ui-bg: #1c1c1f;
-  --apex-ui-bg-subtle: #28282c;
-  --apex-ui-border: #3d3d42;
-  --apex-ui-accent: #7ea6ff;
-  --apex-ui-accent-fg: #101014;
-  --apex-ui-danger: #ff6b60;
-  --apex-ui-danger-fg: #1a0000;
-  --apex-ui-success: #4ad182;
-  --apex-ui-warning: #e0a940;
-  --apex-ui-focus-ring: #7ea6ff;
-  --apex-ui-unknown-bg: #332a10;
-  --apex-ui-unknown-border: #e0a940;
+.wovyr-ui[data-theme="dark"] {
+  --wovyr-ui-fg: #f0f0f2;
+  --wovyr-ui-fg-muted: #b0b0b8;
+  --wovyr-ui-bg: #1c1c1f;
+  --wovyr-ui-bg-subtle: #28282c;
+  --wovyr-ui-border: #3d3d42;
+  --wovyr-ui-accent: #7ea6ff;
+  --wovyr-ui-accent-fg: #101014;
+  --wovyr-ui-danger: #ff6b60;
+  --wovyr-ui-danger-fg: #1a0000;
+  --wovyr-ui-success: #4ad182;
+  --wovyr-ui-warning: #e0a940;
+  --wovyr-ui-focus-ring: #7ea6ff;
+  --wovyr-ui-unknown-bg: #332a10;
+  --wovyr-ui-unknown-border: #e0a940;
 }
 
-.apex-ui[data-theme="light"] {
-  --apex-ui-fg: #1a1a1a;
-  --apex-ui-fg-muted: #595959;
-  --apex-ui-bg: #ffffff;
-  --apex-ui-bg-subtle: #f5f5f7;
-  --apex-ui-border: #d0d0d5;
-  --apex-ui-accent: #2955c6;
-  --apex-ui-accent-fg: #ffffff;
-  --apex-ui-danger: #b3271e;
-  --apex-ui-danger-fg: #ffffff;
-  --apex-ui-success: #147d3f;
-  --apex-ui-warning: #8a5a00;
-  --apex-ui-focus-ring: #2955c6;
-  --apex-ui-unknown-bg: #fff6e5;
-  --apex-ui-unknown-border: #c98a12;
+.wovyr-ui[data-theme="light"] {
+  --wovyr-ui-fg: #1a1a1a;
+  --wovyr-ui-fg-muted: #595959;
+  --wovyr-ui-bg: #ffffff;
+  --wovyr-ui-bg-subtle: #f5f5f7;
+  --wovyr-ui-border: #d0d0d5;
+  --wovyr-ui-accent: #2955c6;
+  --wovyr-ui-accent-fg: #ffffff;
+  --wovyr-ui-danger: #b3271e;
+  --wovyr-ui-danger-fg: #ffffff;
+  --wovyr-ui-success: #147d3f;
+  --wovyr-ui-warning: #8a5a00;
+  --wovyr-ui-focus-ring: #2955c6;
+  --wovyr-ui-unknown-bg: #fff6e5;
+  --wovyr-ui-unknown-border: #c98a12;
 }
 
-.apex-ui *,
-.apex-ui *::before,
-.apex-ui *::after {
+.wovyr-ui *,
+.wovyr-ui *::before,
+.wovyr-ui *::after {
   box-sizing: border-box;
 }
 
-.apex-ui-column {
+.wovyr-ui-column {
   display: flex;
   flex-direction: column;
-  gap: var(--apex-ui-gap);
+  gap: var(--wovyr-ui-gap);
 }
 
-.apex-ui-row {
+.wovyr-ui-row {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  gap: var(--apex-ui-gap);
+  gap: var(--wovyr-ui-gap);
   align-items: center;
 }
 
-.apex-ui-card {
-  border: 1px solid var(--apex-ui-border);
-  border-radius: var(--apex-ui-radius);
-  padding: var(--apex-ui-gap);
-  background: var(--apex-ui-bg-subtle);
+.wovyr-ui-card {
+  border: 1px solid var(--wovyr-ui-border);
+  border-radius: var(--wovyr-ui-radius);
+  padding: var(--wovyr-ui-gap);
+  background: var(--wovyr-ui-bg-subtle);
   display: flex;
   flex-direction: column;
-  gap: var(--apex-ui-gap);
+  gap: var(--wovyr-ui-gap);
 }
 
-.apex-ui-card-title {
+.wovyr-ui-card-title {
   font-weight: 600;
   font-size: 1rem;
   margin: 0;
 }
 
-.apex-ui-divider {
+.wovyr-ui-divider {
   border: none;
-  border-top: 1px solid var(--apex-ui-border);
+  border-top: 1px solid var(--wovyr-ui-border);
   margin: 0;
 }
 
-.apex-ui-text {
+.wovyr-ui-text {
   margin: 0;
   line-height: 1.5;
 }
 
-.apex-ui-text-heading {
+.wovyr-ui-text-heading {
   font-weight: 600;
   font-size: 1.1rem;
 }
 
-.apex-ui-text-caption {
+.wovyr-ui-text-caption {
   font-size: 0.85rem;
-  color: var(--apex-ui-fg-muted);
+  color: var(--wovyr-ui-fg-muted);
 }
 
-.apex-ui-badge {
+.wovyr-ui-badge {
   display: inline-flex;
   align-items: center;
   border-radius: 999px;
@@ -147,128 +147,128 @@
   font-size: 0.8rem;
   font-weight: 600;
   width: fit-content;
-  background: var(--apex-ui-bg-subtle);
-  color: var(--apex-ui-fg);
-  border: 1px solid var(--apex-ui-border);
+  background: var(--wovyr-ui-bg-subtle);
+  color: var(--wovyr-ui-fg);
+  border: 1px solid var(--wovyr-ui-border);
 }
-.apex-ui-badge-success {
-  color: var(--apex-ui-success);
-  border-color: var(--apex-ui-success);
+.wovyr-ui-badge-success {
+  color: var(--wovyr-ui-success);
+  border-color: var(--wovyr-ui-success);
 }
-.apex-ui-badge-warning {
-  color: var(--apex-ui-warning);
-  border-color: var(--apex-ui-warning);
+.wovyr-ui-badge-warning {
+  color: var(--wovyr-ui-warning);
+  border-color: var(--wovyr-ui-warning);
 }
-.apex-ui-badge-danger {
-  color: var(--apex-ui-danger);
-  border-color: var(--apex-ui-danger);
+.wovyr-ui-badge-danger {
+  color: var(--wovyr-ui-danger);
+  border-color: var(--wovyr-ui-danger);
 }
-.apex-ui-badge-info {
-  color: var(--apex-ui-accent);
-  border-color: var(--apex-ui-accent);
+.wovyr-ui-badge-info {
+  color: var(--wovyr-ui-accent);
+  border-color: var(--wovyr-ui-accent);
 }
 
-.apex-ui-keyvalue {
+.wovyr-ui-keyvalue {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 4px var(--apex-ui-gap);
+  gap: 4px var(--wovyr-ui-gap);
   margin: 0;
 }
-.apex-ui-keyvalue dt {
-  color: var(--apex-ui-fg-muted);
+.wovyr-ui-keyvalue dt {
+  color: var(--wovyr-ui-fg-muted);
   font-size: 0.9rem;
 }
-.apex-ui-keyvalue dd {
+.wovyr-ui-keyvalue dd {
   margin: 0;
   font-weight: 500;
 }
 
-.apex-ui-image {
+.wovyr-ui-image {
   max-width: 100%;
-  border-radius: var(--apex-ui-radius);
+  border-radius: var(--wovyr-ui-radius);
 }
 
-.apex-ui-field {
+.wovyr-ui-field {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.apex-ui-label {
+.wovyr-ui-label {
   font-size: 0.9rem;
   font-weight: 500;
 }
 
-.apex-ui-required-marker {
-  color: var(--apex-ui-danger);
+.wovyr-ui-required-marker {
+  color: var(--wovyr-ui-danger);
   margin-left: 2px;
 }
 
-.apex-ui-input,
-.apex-ui-textarea,
-.apex-ui-select {
+.wovyr-ui-input,
+.wovyr-ui-textarea,
+.wovyr-ui-select {
   font: inherit;
-  color: var(--apex-ui-fg);
-  background: var(--apex-ui-bg);
-  border: 1px solid var(--apex-ui-border);
+  color: var(--wovyr-ui-fg);
+  background: var(--wovyr-ui-bg);
+  border: 1px solid var(--wovyr-ui-border);
   border-radius: 6px;
   padding: 8px 10px;
 }
 
-.apex-ui-input:focus-visible,
-.apex-ui-textarea:focus-visible,
-.apex-ui-select:focus-visible,
-.apex-ui-checkbox-input:focus-visible,
-.apex-ui-button:focus-visible {
-  outline: 2px solid var(--apex-ui-focus-ring);
+.wovyr-ui-input:focus-visible,
+.wovyr-ui-textarea:focus-visible,
+.wovyr-ui-select:focus-visible,
+.wovyr-ui-checkbox-input:focus-visible,
+.wovyr-ui-button:focus-visible {
+  outline: 2px solid var(--wovyr-ui-focus-ring);
   outline-offset: 2px;
 }
 
-.apex-ui-checkbox-field {
+.wovyr-ui-checkbox-field {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.apex-ui-button {
+.wovyr-ui-button {
   font: inherit;
   font-weight: 600;
   padding: 8px 16px;
   border-radius: 6px;
-  border: 1px solid var(--apex-ui-border);
-  background: var(--apex-ui-bg-subtle);
-  color: var(--apex-ui-fg);
+  border: 1px solid var(--wovyr-ui-border);
+  background: var(--wovyr-ui-bg-subtle);
+  color: var(--wovyr-ui-fg);
   cursor: pointer;
 }
-.apex-ui-button:disabled {
+.wovyr-ui-button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }
-.apex-ui-button-affirmative {
-  background: var(--apex-ui-accent);
-  border-color: var(--apex-ui-accent);
-  color: var(--apex-ui-accent-fg);
+.wovyr-ui-button-affirmative {
+  background: var(--wovyr-ui-accent);
+  border-color: var(--wovyr-ui-accent);
+  color: var(--wovyr-ui-accent-fg);
 }
-.apex-ui-button-destructive {
-  background: var(--apex-ui-danger);
-  border-color: var(--apex-ui-danger);
-  color: var(--apex-ui-danger-fg);
+.wovyr-ui-button-destructive {
+  background: var(--wovyr-ui-danger);
+  border-color: var(--wovyr-ui-danger);
+  color: var(--wovyr-ui-danger-fg);
 }
 
-.apex-ui-unknown {
-  border: 2px dashed var(--apex-ui-unknown-border);
-  background: var(--apex-ui-unknown-bg);
-  border-radius: var(--apex-ui-radius);
-  padding: var(--apex-ui-gap);
+.wovyr-ui-unknown {
+  border: 2px dashed var(--wovyr-ui-unknown-border);
+  background: var(--wovyr-ui-unknown-bg);
+  border-radius: var(--wovyr-ui-radius);
+  padding: var(--wovyr-ui-gap);
   font-size: 0.9rem;
-  color: var(--apex-ui-fg);
+  color: var(--wovyr-ui-fg);
 }
 
-.apex-ui-integrity-warning {
-  border: 2px solid var(--apex-ui-danger);
-  background: var(--apex-ui-bg-subtle);
-  color: var(--apex-ui-danger);
-  border-radius: var(--apex-ui-radius);
-  padding: var(--apex-ui-gap);
+.wovyr-ui-integrity-warning {
+  border: 2px solid var(--wovyr-ui-danger);
+  background: var(--wovyr-ui-bg-subtle);
+  color: var(--wovyr-ui-danger);
+  border-radius: var(--wovyr-ui-radius);
+  padding: var(--wovyr-ui-gap);
   font-weight: 600;
 }

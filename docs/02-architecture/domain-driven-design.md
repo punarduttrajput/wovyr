@@ -4,7 +4,7 @@
 **Version:** 1.0.1
 **Status:** Draft — the bounded-context model genuinely matches the real
 crate boundaries (workflow/runtime/memory/tenancy/plugins map cleanly onto
-`apex-workflow`/`apex-agent`/`apex-memory`/`apex-tenancy`/`apex-plugin`).
+`wovyr-workflow`/`wovyr-agent`/`wovyr-memory`/`wovyr-tenancy`/`wovyr-plugin`).
 **Corrected 2026-07-07:** its one `NATS Adapter` example does not exist — no
 message broker is wired anywhere (consistent with
 [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)'s Path A decision;
@@ -16,7 +16,7 @@ see [ADR-0005](../17-adr/ADR-0005-nats.md)'s current-status note).
 
 # 1. Purpose
 
-This document defines the Domain-Driven Design (DDD) model for the Apex AI Platform.
+This document defines the Domain-Driven Design (DDD) model for the Wovyr AI Platform.
 
 It identifies the platform's bounded contexts, aggregates, entities, value objects, domain events, repositories, and context relationships.
 
@@ -53,7 +53,7 @@ The platform is divided into the following strategic domains.
 
 ## Core Domain
 
-These domains provide the unique competitive value of Apex.
+These domains provide the unique competitive value of Wovyr.
 
 * Agent Runtime
 * Workflow Engine

@@ -16,7 +16,7 @@ Document ID: SEC-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and architecture index** for security across the Apex AI Platform. It consolidates the security mechanisms specified throughout the platform and defines the cross-cutting model: identity, authorization, encryption, secrets, and audit.
+This document is the **central navigation and architecture index** for security across the Wovyr AI Platform. It consolidates the security mechanisms specified throughout the platform and defines the cross-cutting model: identity, authorization, encryption, secrets, and audit.
 
 Security is a [core principle](../00-executive/vision.md) — **Secure by Default**.
 This section is the canonical reference; subsystem docs implement it.

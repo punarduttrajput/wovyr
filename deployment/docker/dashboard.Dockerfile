@@ -1,14 +1,14 @@
-# Static-image Docker build for the Apex dashboard SPA (RM-GA-P4 OBS-805).
+# Static-image Docker build for the Wovyr dashboard SPA (RM-GA-P4 OBS-805).
 #
-# A separate image from `deployment/docker/Dockerfile` (the Rust `apex` binary) —
-# the dashboard is a static build served cross-origin against `apex-server` (see
+# A separate image from `deployment/docker/Dockerfile` (the Rust `wovyr` binary) —
+# the dashboard is a static build served cross-origin against `wovyr-server` (see
 # `dashboard/README.md`'s "Cross-origin deployment" section for the matching
-# `APEX_CORS_ALLOWED_ORIGINS` server-side config), not compiled into that image.
+# `WOVYR_CORS_ALLOWED_ORIGINS` server-side config), not compiled into that image.
 #
 # Build from the repo root:
-#   docker build -f deployment/docker/dashboard.Dockerfile -t apex-dashboard:dev .
+#   docker build -f deployment/docker/dashboard.Dockerfile -t wovyr-dashboard:dev .
 # Run it:
-#   docker run --rm -p 8081:80 apex-dashboard:dev
+#   docker run --rm -p 8081:80 wovyr-dashboard:dev
 #   curl http://localhost:8081/
 #
 # **Never run in a live container in this dev environment** (no Docker daemon here,

@@ -1,13 +1,13 @@
 # The killer demo's "take 1" (PRD-005 §9, RM-GUI-P2-209): a poisoned source
 # (a compromised vendor page, a prompt-injected tool result) steers the model
 # into composing a checkout frame that also asks for a card number. The trust
-# layer (apex-ui-guard's sensitive-input-name rule, GRD-201) blocks it before
+# layer (wovyr-ui-guard's sensitive-input-name rule, GRD-201) blocks it before
 # it ever reaches a renderer or a human — the block is recorded in the
 # tamper-evident audit chain (`ui.frame.block`) and the frame never appears on
-# GET /api/v1/ui/frames. See crates/apex-server/src/ui.rs's
+# GET /api/v1/ui/frames. See crates/wovyr-server/src/ui.rs's
 # `uc4_credential_frame_is_blocked_never_visible_and_audited` test for the
 # same flow proven at the Rust layer.
-apiVersion: workflow.apex.io/v1
+apiVersion: workflow.wovyr.io/v1
 kind: Workflow
 metadata:
   name: ui-checkout-block

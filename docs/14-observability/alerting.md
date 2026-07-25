@@ -21,7 +21,7 @@ cover.
 
 # 1. Purpose
 
-This document defines the **alerting** strategy for the Apex AI Platform — SLOs, alert rules, routing, and on-call response — so problems are caught and escalated before users feel them.
+This document defines the **alerting** strategy for the Wovyr AI Platform — SLOs, alert rules, routing, and on-call response — so problems are caught and escalated before users feel them.
 
 ---
 

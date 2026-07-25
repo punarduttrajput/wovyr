@@ -10,10 +10,10 @@ Document ID: FUT-001
 **Version:** 1.5.0
 **Status:** Exploratory — research bet, not committed. A prototype slice for
 direction (b) now exists in code (`examples/workflows/research-team.yaml`,
-runnable via either `apex-server` or the CLI's local runner, §8) — it proves the
+runnable via either `wovyr-server` or the CLI's local runner, §8) — it proves the
 fan-out/join shape and closes the aggregate-budget invariant. Both a scripted-
 provider and a real-model (`mistralrs`) comparison against a single agent now
-exist (`apex-eval`'s `compare` module, §8) — 4 out of 4 real runs tied
+exist (`wovyr-eval`'s `compare` module, §8) — 4 out of 4 real runs tied
 identically (the workflow closer but not ahead), correcting an assumption
 that the provider was non-deterministic. Not yet the quantified "measurably
 outperforms" evidence the graduation gate needs. Still pre-ADR.
@@ -39,7 +39,7 @@ This is exploratory. Nothing here becomes real until it graduates through an
 
 Today an agent run is a single loop: `system+user message → gateway.chat_stream
 → tool calls → repeat → final answer`, bounded by `RunOptions::max_steps`
-([`apex-agent`](../../../crates/apex-agent/src/runtime.rs)). One agent, one
+([`wovyr-agent`](../../../crates/wovyr-agent/src/runtime.rs)). One agent, one
 budget, one context.
 
 Many real tasks are decomposable — research, multi-step planning, parallel
@@ -59,12 +59,12 @@ unboundedly and becomes impossible to debug or budget.
 
 - **The single-agent loop** — `run_agent` / `run_agent_with_memory` and the
   `RunEventSink` progress contract already exist and are deterministic.
-- **Tenant-fair scheduling** — `apex-tools`' `FairScheduler` (smooth weighted
+- **Tenant-fair scheduling** — `wovyr-tools`' `FairScheduler` (smooth weighted
   round-robin over a sandbox pool) already prevents one tenant from starving
   capacity; agent groups would schedule through it, not around it.
 - **Cost metering** — the `Gateway`'s `CostObserver` already emits per-call cost
   events; a group's aggregate spend is observable with the existing hook.
-- **Quotas** — `apex-tenancy`'s `QuotaLimits` / the server's `QuotaTracker`
+- **Quotas** — `wovyr-tenancy`'s `QuotaLimits` / the server's `QuotaTracker`
   already cap `concurrent_agent_runs` and daily LLM cost per project.
 
 The missing piece is **composition + supervision**, not the primitives.
@@ -136,10 +136,10 @@ Absent that evidence, it stays exploratory.
 Direction (b) — workflow-orchestrated agents — was picked over (a)
 coordinator-as-agent because it reuses the durable engine's existing fan-out/join
 instead of a new dynamic delegation mechanism. Investigation found the shape was
-**already mostly buildable**: `apex-server`'s `ServerExecutor` already ran a single
+**already mostly buildable**: `wovyr-server`'s `ServerExecutor` already ran a single
 `agent`-typed workflow activity end to end through the real `run_agent` loop, and
 the engine already runs any batch of simultaneously-ready activities concurrently
-regardless of type ([`apex-workflow/tests/engine.rs::parallel_branches_run_concurrently`](../../../crates/apex-workflow/tests/engine.rs))
+regardless of type ([`wovyr-workflow/tests/engine.rs::parallel_branches_run_concurrently`](../../../crates/wovyr-workflow/tests/engine.rs))
 — so a static DAG with N parallel `agent` activities needed no new engine code.
 
 **What this slice built:**
@@ -155,7 +155,7 @@ regardless of type ([`apex-workflow/tests/engine.rs::parallel_branches_run_concu
   the CLI's `PlatformExecutor` implemented it. This meant the pre-existing
   `agent-review.yaml` example's `${draft.message}` reference never actually
   worked when run through the live server — only via `workflows run --local`.
-  Extracted the resolution logic to `apex_workflow::resolve_template` (a shared
+  Extracted the resolution logic to `wovyr_workflow::resolve_template` (a shared
   helper both executors now call) and wired it into `ServerExecutor`, closing the
   gap for every activity type, not just `agent`.
 - **Closed the "single enforced aggregate budget" invariant**
@@ -164,13 +164,13 @@ regardless of type ([`apex-workflow/tests/engine.rs::parallel_branches_run_concu
   `agents:run` endpoints), so a fan-out to N sub-agents had N independent,
   unmetered budgets. `ServerExecutor`'s `agent` branch now runs every sub-agent
   through the same `tenancy::admit_run`/`record_run_cost` gate a direct run uses,
-  keyed by an `__project` marker `submit_handler` stamps from `X-Apex-Project` —
+  keyed by an `__project` marker `submit_handler` stamps from `X-Wovyr-Project` —
   so a group's concurrent sub-agents draw from one shared
   `concurrent_agent_runs`/`llm_cost_per_day_usd` ceiling. A quota rejection is
   `ActivityError::Retryable` (the slot frees once a sibling's run ends), not a
   permanent failure.
 
-**What it proves** (`crates/apex-server/src/workflow_runner.rs`'s test module):
+**What it proves** (`crates/wovyr-server/src/workflow_runner.rs`'s test module):
 1. `research_team_fans_out_and_joins_two_agents` — both sub-agents produce
    output and the `synthesize` activity's resolved input contains both (no
    unresolved `${` placeholder survives) — "collect results from N sub-agents"
@@ -178,31 +178,31 @@ regardless of type ([`apex-workflow/tests/engine.rs::parallel_branches_run_concu
 2. `agent_activity_respects_project_quota` — with `concurrent_agent_runs: 0` on
    the submitting project, an `agent` activity fails on quota grounds instead of
    running unmetered — proving the budget wiring is live, not just plumbed
-   (a deterministic-reject test, mirroring `apex-server/src/tenancy.rs`'s own
+   (a deterministic-reject test, mirroring `wovyr-server/src/tenancy.rs`'s own
    quota tests, rather than a timing-based concurrency race against near-instant
    mock LLM calls).
 
 **CLI-local support added (2026-07-05, same day, follow-up).** The CLI's
-`PlatformExecutor` (`apps/apex-cli/src/workflow.rs`) now also handles `agent`
+`PlatformExecutor` (`apps/wovyr-cli/src/workflow.rs`) now also handles `agent`
 activities — `workflows run --local` gained an `--agents-dir` flag (default
 `.`); an `agent` activity's `name` resolves to `<agents-dir>/<name>.yaml` on
 disk instead of a stored-agent id (the CLI has no server-side agent store to
 look up). `examples/agents/pro-researcher.yaml`/`con-researcher.yaml`/
 `synthesizer.yaml` were added so `research-team.yaml` runs identically via
-`apex workflows run --local -f examples/workflows/research-team.yaml
+`wovyr workflows run --local -f examples/workflows/research-team.yaml
 --agents-dir examples/agents --input '{"topic": "..."}'` with no server needed.
-Three new `apps/apex-cli` tests
+Three new `apps/wovyr-cli` tests
 (`agent_activity_runs_from_agents_dir`/`agent_activity_fails_for_missing_file`/
 `research_team_runs_locally_and_joins_two_agents`) prove the same fan-out/join/
 templating story holds through the local executor, driving the real `Engine`
 (not just calling `PlatformExecutor::execute` in isolation).
 
 **Eval harness pointed at this workflow (2026-07-05, same day, follow-up).**
-[FUT-006](B6-trust-evaluation.md)'s `apex-eval` gained a `compare` module
+[FUT-006](B6-trust-evaluation.md)'s `wovyr-eval` gained a `compare` module
 (`run_comparison`, [B6-trust-evaluation.md §8.1](B6-trust-evaluation.md#81-pointed-at-fut-001-2026-07-05))
 that runs the same task both as a single agent and as this real
 `research-team.yaml` workflow, scoring both the same way. Two new
-`crates/apex-eval` tests
+`crates/wovyr-eval` tests
 (`workflow_covers_both_perspectives_the_single_agent_misses`/
 `comparison_is_reproducible`) show the workflow path passing a task requiring
 two opposing perspectives that the single-agent path misses, reproducibly. **This
@@ -279,7 +279,7 @@ study across different inputs or a more capable model.
 |---------|------|-------------|
 | 1.5.0 | 2026-07-05 | §8: repeated the real-model run 3 more times — all 4 tied identically, correcting the assumption the provider is non-deterministic. Updated the "not proven" list to reflect this is still one prompt/one model, not a broader benchmark |
 | 1.4.0 | 2026-07-05 | §8: recorded the real-model (`mistralrs`) comparison run — a tie on n=1, workflow covered one of two required perspectives vs. the single agent's zero. Updated the "not proven" list: no longer "no real-model benchmark," now "no quantified benchmark yet" |
-| 1.3.0 | 2026-07-05 | §8: FUT-006's `apex-eval` gained a `compare` module pointed at `research-team.yaml` — a reproducible single-agent-vs-workflow comparison on a scripted-provider fixture. Explicitly not yet the real-model benchmark §7's gate needs |
-| 1.2.0 | 2026-07-05 | §8: added CLI-local support for `agent` activities (`--agents-dir` on `workflows run --local`), so `research-team.yaml` runs identically without a server. Three new `apps/apex-cli` tests. Updated the "not proven" list accordingly |
+| 1.3.0 | 2026-07-05 | §8: FUT-006's `wovyr-eval` gained a `compare` module pointed at `research-team.yaml` — a reproducible single-agent-vs-workflow comparison on a scripted-provider fixture. Explicitly not yet the real-model benchmark §7's gate needs |
+| 1.2.0 | 2026-07-05 | §8: added CLI-local support for `agent` activities (`--agents-dir` on `workflows run --local`), so `research-team.yaml` runs identically without a server. Three new `apps/wovyr-cli` tests. Updated the "not proven" list accordingly |
 | 1.1.0 | 2026-07-05 | Added §8 Prototype Slice: a coordinator-pattern example workflow (fan-out to two `agent` activities, joined), a fix for `ServerExecutor`'s previously-missing `${...}` template resolution, and aggregate project-quota enforcement across a group's sub-agents. Still pre-ADR — gathers evidence for §7's gate, doesn't satisfy it |
 | 1.0.0 | 2026-07-05 | Initial exploration doc for the multi-agent research bet |

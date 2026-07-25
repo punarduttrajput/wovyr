@@ -17,7 +17,7 @@ Document ID: PRD-005
 # 1. Purpose
 
 This document defines the **non-functional requirements (NFRs)** — the quality
-attributes the Apex AI Platform must meet. It elaborates [PRD §13](prd.md#13-non-functional-requirements)
+attributes the Wovyr AI Platform must meet. It elaborates [PRD §13](prd.md#13-non-functional-requirements)
 and aggregates the per-service targets specified throughout the docs.
 
 ---

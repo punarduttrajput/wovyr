@@ -16,7 +16,7 @@ Document ID: ADR-INDEX-001
 
 # 1. Purpose
 
-This section records the **significant architectural decisions** for the Apex AI Platform — the *why* behind major choices — so future contributors understand the reasoning and the trade-offs that were accepted.
+This section records the **significant architectural decisions** for the Wovyr AI Platform — the *why* behind major choices — so future contributors understand the reasoning and the trade-offs that were accepted.
 
 ---
 
@@ -50,7 +50,7 @@ Status is one of: `Proposed`, `Accepted`, `Superseded by ADR-XXXX`, `Deprecated`
 | [ADR-0006](ADR-0006-clean-architecture.md) | Clean Architecture + DDD | Accepted |
 | [ADR-0007](ADR-0007-plugin-system.md) | Plugin-first extensibility | Accepted |
 | [ADR-0008](ADR-0008-subworkflows.md) | Child workflows as activities (not inline expansion) | Accepted |
-| [ADR-0009](ADR-0009-keyless-signing.md) | Apex-native keyless signing (Sigstore-shaped, offline-verifiable) | Accepted |
+| [ADR-0009](ADR-0009-keyless-signing.md) | Wovyr-native keyless signing (Sigstore-shaped, offline-verifiable) | Accepted |
 | [ADR-0010](ADR-0010-ga-deployment-topology.md) | GA as single-node appliance (Path A); distributed platform (Path B) as v1.1 follow-on | Accepted |
 | [ADR-0011](ADR-0011-generative-ui-repositioning.md) | Reposition the product as the Generative UI Trust Runtime (platform becomes the engine; open UI shapes adopted, not invented; constrained component vocabulary; no browser) | Accepted |
 | [ADR-0012](ADR-0012-mcp-connection-trust-boundary.md) | Trust boundary for user-managed MCP connections: `Stdio` transport gated like the `shell` tool (operator opt-in + `mcp:admin`); `Http` transport reuses the existing SSRF guard; credentials are vault references; no sandboxing of `Stdio` in v1 (stated residual risk) | Accepted |

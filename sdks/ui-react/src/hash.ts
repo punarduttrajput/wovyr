@@ -1,6 +1,6 @@
 /** Client-side frame integrity verification (RDR-403).
  *
- * `apex_ui::UiFrame::content_hash()` hashes the frame's **canonical**
+ * `wovyr_ui::UiFrame::content_hash()` hashes the frame's **canonical**
  * (alphabetical-key) JSON form — the same shape every consumer sees via
  * `serde_json::Value` (whose map has no `preserve_order`), not the struct's
  * declaration-order `Serialize` output. To reproduce that hash here, object
@@ -42,7 +42,7 @@ function canonicalize(value: unknown): unknown {
 }
 
 /** SHA-256 of `text`, lowercase hex — the same encoding
- * `apex_ui::UiFrame::content_hash()` produces. */
+ * `wovyr_ui::UiFrame::content_hash()` produces. */
 export async function sha256Hex(text: string): Promise<string> {
   const bytes = new TextEncoder().encode(text);
   const digest = await crypto.subtle.digest("SHA-256", bytes);

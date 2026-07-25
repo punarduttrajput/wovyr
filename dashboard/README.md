@@ -1,9 +1,9 @@
-# Apex Dashboard
+# Wovyr Dashboard
 
-The Apex platform web UI — an Angular SPA that consumes the platform API served by
-`apex-server`. See [`docs/10-dashboard`](../docs/10-dashboard) for the full spec and
+The Wovyr platform web UI — an Angular SPA that consumes the platform API served by
+`wovyr-server`. See [`docs/10-dashboard`](../docs/10-dashboard) for the full spec and
 [`overview.md`](../docs/10-dashboard/overview.md) for the architecture (note: the
-NestJS BFF is deferred; the SPA currently talks to `apex-server` directly).
+NestJS BFF is deferred; the SPA currently talks to `wovyr-server` directly).
 
 ## Surfaces
 
@@ -28,38 +28,38 @@ A ⌘K command palette (top-bar or `Ctrl/⌘+K`) jumps between surfaces.
 
 ## Authentication
 
-There is no username/password login endpoint anywhere in the platform (`apex-server`
+There is no username/password login endpoint anywhere in the platform (`wovyr-server`
 only *verifies* a pre-existing JWT/API key — see
-[`auth.rs`](../crates/apex-server/src/auth.rs) — it never mints one from a password).
+[`auth.rs`](../crates/wovyr-server/src/auth.rs) — it never mints one from a password).
 The **Sign in** page (`/login`) reflects that: it collects a tenant, a principal, and
 optionally an already-minted credential, persisted in `localStorage` via
 [`core/session.ts`](src/app/core/session.ts) — no more hardcoded, rebuild-to-change
 `TENANT`/`PRINCIPAL` constants. [`tenant.interceptor.ts`](src/app/core/tenant.interceptor.ts)
-always sends `X-Apex-Tenant`/`X-Apex-Principal`, and additionally sends
+always sends `X-Wovyr-Tenant`/`X-Wovyr-Principal`, and additionally sends
 `Authorization: Bearer <value>` once a credential is set.
 
-Which of the server's three `APEX_AUTH_MODE`s you run against changes what's required:
+Which of the server's three `WOVYR_AUTH_MODE`s you run against changes what's required:
 
 - **`disabled-loopback` (the default)** — the server trusts the two headers verbatim,
-  but *still* refuses every request unless `APEX_ALLOW_ANONYMOUS=1` is set (SEC-101) —
-  a real, easy-to-hit gotcha: `cargo run -p apex-cli -- dev` with no env vars 401s
+  but *still* refuses every request unless `WOVYR_ALLOW_ANONYMOUS=1` is set (SEC-101) —
+  a real, easy-to-hit gotcha: `cargo run -p wovyr-cli -- dev` with no env vars 401s
   every dashboard call. Run it as:
 
   ```bash
-  APEX_ALLOW_ANONYMOUS=1 APEX_PLATFORM_ADMINS=admin@apex.local \
-    cargo run -p apex-cli -- dev        # binds 127.0.0.1:8080
+  WOVYR_ALLOW_ANONYMOUS=1 WOVYR_PLATFORM_ADMINS=admin@wovyr.local \
+    cargo run -p wovyr-cli -- dev        # binds 127.0.0.1:8080
   ```
 
-  (`APEX_PLATFORM_ADMINS` authorizes the Settings surface's tenancy/webhook calls;
-  `APEX_ALLOW_ANONYMOUS=1` is the dev-only opt-in `refuse_anonymous_on_non_loopback`
+  (`WOVYR_PLATFORM_ADMINS` authorizes the Settings surface's tenancy/webhook calls;
+  `WOVYR_ALLOW_ANONYMOUS=1` is the dev-only opt-in `refuse_anonymous_on_non_loopback`
   enforces can never reach a non-loopback bind.) Leave the Sign-in page's API key
   field empty in this mode.
 - **`apikey`** — real verification. Mint a key once:
 
   ```bash
-  cargo run -p apex-cli -- auth create-key admin@apex.local
+  cargo run -p wovyr-cli -- auth create-key admin@wovyr.local
   # minted a new API key ... : <the-raw-key>
-  APEX_AUTH_MODE=apikey cargo run -p apex-cli -- dev
+  WOVYR_AUTH_MODE=apikey cargo run -p wovyr-cli -- dev
   ```
 
   then paste `<the-raw-key>` into the Sign-in page. **Verified live**: `authenticate`
@@ -72,8 +72,8 @@ Which of the server's three `APEX_AUTH_MODE`s you run against changes what's req
 ## Run it locally
 
 1. Start the platform server (mock provider when no `OPENAI_API_KEY`) — see
-   [Authentication](#authentication) above for the env vars a given `APEX_AUTH_MODE`
-   needs; the simplest local loop is `disabled-loopback` + `APEX_ALLOW_ANONYMOUS=1`.
+   [Authentication](#authentication) above for the env vars a given `WOVYR_AUTH_MODE`
+   needs; the simplest local loop is `disabled-loopback` + `WOVYR_ALLOW_ANONYMOUS=1`.
 
 2. Start the dashboard dev server (proxies `/api` → `127.0.0.1:8080` via
    `proxy.conf.json`):
@@ -89,19 +89,19 @@ Which of the server's three `APEX_AUTH_MODE`s you run against changes what's req
 
 ## Cross-origin deployment (RM-GA-P4 OBS-805)
 
-When the dashboard is served from a different origin than `apex-server` (e.g. the
+When the dashboard is served from a different origin than `wovyr-server` (e.g. the
 static build below, hosted separately), the server's CORS layer (Phase-1 SEC-204,
-already fully implemented — `crates/apex-server/src/config.rs`'s `cors_layer`) needs
+already fully implemented — `crates/wovyr-server/src/config.rs`'s `cors_layer`) needs
 the dashboard's real origin in its allow-list:
 
 ```bash
-APEX_CORS_ALLOWED_ORIGINS=https://dashboard.example.com cargo run -p apex-cli -- dev
+WOVYR_CORS_ALLOWED_ORIGINS=https://dashboard.example.com cargo run -p wovyr-cli -- dev
 ```
 
 No server-side code changes are needed — `cors_layer` already allows the
-`X-Apex-Tenant`/`X-Apex-Principal`/`Authorization`/`Idempotency-Key`/`If-Match`
+`X-Wovyr-Tenant`/`X-Wovyr-Principal`/`Authorization`/`Idempotency-Key`/`If-Match`
 headers this dashboard sends and exposes `X-Request-Id`/`ETag`; an unconfigured
-`APEX_CORS_ALLOWED_ORIGINS` means no CORS headers at all (same-origin only), never a
+`WOVYR_CORS_ALLOWED_ORIGINS` means no CORS headers at all (same-origin only), never a
 wildcard.
 
 ## Build
@@ -115,11 +115,11 @@ A Docker build stage producing a static image of this output is at
 (nginx serving the SPA, with client-side routing fallback to `index.html`):
 
 ```bash
-docker build -f deployment/docker/dashboard.Dockerfile -t apex-dashboard:dev .
-docker run --rm -p 8081:80 apex-dashboard:dev
+docker build -f deployment/docker/dashboard.Dockerfile -t wovyr-dashboard:dev .
+docker run --rm -p 8081:80 wovyr-dashboard:dev
 ```
 
-It is a separate image from `deployment/docker/Dockerfile` (the Rust `apex` binary)
+It is a separate image from `deployment/docker/Dockerfile` (the Rust `wovyr` binary)
 and is **not** wired into `deployment/docker-compose.yml` as a running service yet —
 see that Dockerfile's own header comment for what's proven vs. not.
 

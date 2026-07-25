@@ -8,14 +8,14 @@ Document ID: PLG-007
 **Document ID:** PLG-007  
 **File Path:** `docs/08-plugin-sdk/marketplace.md`  
 **Version:** 1.6.1  
-**Status:** Core implemented — the `apex-marketplace` registry crate provides the listing
+**Status:** Core implemented — the `wovyr-marketplace` registry crate provides the listing
 model, governance policy, ratings, and the publish → discover → download → install flow
 (durable `File`/`InMemory` stores, plus a capability-gated `PostgresRegistryStore` behind
 the `postgres` cargo feature for a shared multi-node catalog — see §3). **The Postgres
-backend is wired**: both `apex-server` and the CLI select it at runtime (via a
+backend is wired**: both `wovyr-server` and the CLI select it at runtime (via a
 `RegistryStore for Box<dyn RegistryStore>` blanket impl) when built with `--features
-postgres` and `APEX_MARKETPLACE_POSTGRES_URL` is set, else the single-node file store —
-surfaced over the server's `/api/v1/marketplace*` routes and the `apex plugin
+postgres` and `WOVYR_MARKETPLACE_POSTGRES_URL` is set, else the single-node file store —
+surfaced over the server's `/api/v1/marketplace*` routes and the `wovyr plugin
 publish|search|get` CLI either way. **Automated security scanning (§6) implemented**: a
 deterministic static scan at publish (`scan.rs` — artifact integrity, permission sanity,
 sandbox posture, SBOM deny-list/licensing, provenance presence) produces a coded
@@ -86,12 +86,12 @@ see what they are granting before install (ties to
 `InMemoryRegistryStore` (tests), `FileRegistryStore` (one `registry.json`, single
 node), and a capability-gated `PostgresRegistryStore` (`postgres` cargo feature):
 one JSON-document row per listing, reusing the same pure upsert/review/verify/
-install logic as the file store, so a fleet of `apex-server` nodes or CLI
+install logic as the file store, so a fleet of `wovyr-server` nodes or CLI
 invocations can share a durable catalog instead of each holding its own file.
 **Wired at runtime**: a `RegistryStore for Box<dyn RegistryStore>` blanket impl
 lets a binary pick its backend without becoming generic over it; both
-`apex-server` and the CLI select `PostgresRegistryStore` when built with
-`--features postgres` and `APEX_MARKETPLACE_POSTGRES_URL` is set, else the file
+`wovyr-server` and the CLI select `PostgresRegistryStore` when built with
+`--features postgres` and `WOVYR_MARKETPLACE_POSTGRES_URL` is set, else the file
 store.
 
 ---
@@ -106,7 +106,7 @@ store.
 | Curated collections | Editor/operator picks |
 | Recommendations | Based on installed plugins and usage |
 
-Discovery is available in the dashboard and via the CLI (`apex plugin search`).
+Discovery is available in the dashboard and via the CLI (`wovyr plugin search`).
 
 ---
 
@@ -144,14 +144,14 @@ a publisher requests human review of their published listing; a reviewer approve
 publisher may address the feedback and request review again.
 
 **Implemented:** `Registry::request_review`/`approve_review`/`reject_review`
-(`apex-marketplace`) drive a `ReviewStatus` (`Unreviewed` → `Pending` →
+(`wovyr-marketplace`) drive a `ReviewStatus` (`Unreviewed` → `Pending` →
 `Approved`/`Rejected { reason }`) on the listing; approval sets `verified = true`,
 rejection clears it, and a rejected listing may request review again. A separate
 `set_verified` remains as a direct operator override outside the workflow (e.g. an
 immediate takedown). Server routes: `POST
 /api/v1/marketplace/listings/{id}/request-review`, `.../approve`, `.../reject`
 (body: `{ "reason": "..." }`), alongside the pre-existing `.../verify`. The
-reviewer identity is the `X-Apex-Principal` header if present, else a `reviewer`
+reviewer identity is the `X-Wovyr-Principal` header if present, else a `reviewer`
 field in the request body, else `"operator"`.
 
 ---
@@ -163,7 +163,7 @@ Operators control what their deployment exposes:
 ```yaml
 marketplace_policy:
   sources: [public, private-acme]
-  allow_publishers: [acme, apex-official]
+  allow_publishers: [acme, wovyr-official]
   require_verified: true
   max_permission_risk: medium       # blocks broad/wildcard-permission plugins
   blocklist: [some/abandoned-plugin]
@@ -203,10 +203,10 @@ A moderator reviews open reports (`Registry::abuse_reports` /
 Both fail closed on an absent listing/report or a report that was already decided.
 Server routes: `POST .../listings/{id}/reports/{report_id}/resolve` (body:
 `{moderator?, delist}`) and `.../dismiss` (body: `{moderator?, reason}`); the
-resolving/dismissing/reporting identity is `X-Apex-Principal` if present, else a
+resolving/dismissing/reporting identity is `X-Wovyr-Principal` if present, else a
 body field, else an anonymous default. Resolving with `delist: true` emits
 `plugin.delisted`; filing a report emits `plugin.abuse_reported`. The CLI mirrors
-this over the local registry: `apex plugin report <id> <reason> [--reporter]`,
+this over the local registry: `wovyr plugin report <id> <reason> [--reporter]`,
 `plugin reports <id>`, `plugin resolve-abuse <id> <report-id> [--delist]
 [--moderator]`, and `plugin dismiss-abuse <id> <report-id> <reason> [--moderator]`.
 
@@ -274,10 +274,10 @@ This is roadmap, not v1.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.6.1 | 2026-07-05 | Abuse-report workflow gains a CLI surface: `apex plugin report <id> <reason> [--reporter]`, `plugin reports <id>`, `plugin resolve-abuse <id> <report-id> [--delist] [--moderator]`, `plugin dismiss-abuse <id> <report-id> <reason> [--moderator]` — over the same local registry `plugin publish/search/get` already use, verified live end to end (file → report → resolve with delisting → confirmed hidden from `search` → fail-closed re-resolve) |
+| 1.6.1 | 2026-07-05 | Abuse-report workflow gains a CLI surface: `wovyr plugin report <id> <reason> [--reporter]`, `plugin reports <id>`, `plugin resolve-abuse <id> <report-id> [--delist] [--moderator]`, `plugin dismiss-abuse <id> <report-id> <reason> [--moderator]` — over the same local registry `plugin publish/search/get` already use, verified live end to end (file → report → resolve with delisting → confirmed hidden from `search` → fail-closed re-resolve) |
 | 1.6.0 | 2026-07-05 | Abuse-report workflow landed (§8.1): `AbuseReport`/`AbuseReportStatus` (`Open`/`Resolved { moderator, delisted }`/`Dismissed { moderator, reason }`) on `ListingRecord`, plus a `delisted` flag. `Registry::report_abuse` files a report (sequential per-listing id); `resolve_abuse_report`/`dismiss_abuse_report` close it, with `resolve` optionally delisting — `search`/`get`/`download` now exclude delisted listings exactly like a policy blocklist entry. Implemented across all three `RegistryStore` backends plus the `Box<dyn RegistryStore>` blanket impl. New server routes `.../report`, `.../reports`, `.../reports/{report_id}/resolve\|dismiss`, emitting `plugin.abuse_reported`/`plugin.delisted`. Not yet built: using report volume as a ranking signal, or auto-triggering re-review |
-| 1.5.0 | 2026-07-03 | Full human-review workflow landed (§6): `ReviewStatus` (`Unreviewed`/`Pending`/`Approved`/`Rejected { reason }`) on `ListingRecord`, with `Registry::request_review`/`approve_review`/`reject_review` (a publisher requests review of the current latest version; a reviewer approves — setting the verified badge — or rejects with actionable feedback, clearing it; a rejected listing may request review again). Implemented across all three `RegistryStore` backends (in-memory/file/Postgres) plus the `Box<dyn RegistryStore>` blanket impl. New server routes `.../request-review`, `.../approve`, `.../reject` alongside the pre-existing `.../verify` operator override; reviewer identity from `X-Apex-Principal`, else the request body, else `"operator"`. This was the last item deferred from v0.3 |
-| 1.4.0 | 2026-07-03 | Postgres backend wired into runtime store selection (§3): a `RegistryStore for Box<dyn RegistryStore>` blanket impl in `apex-marketplace` lets a binary pick its backend without becoming generic over it; `apex-server`'s `registry()` and the CLI's `marketplace_registry()` both select `PostgresRegistryStore` when built with `--features postgres` and `APEX_MARKETPLACE_POSTGRES_URL` is set (else the file store); the CLI's `postgres` feature also forwards to `apex-server/postgres` so `apex dev` picks it up |
+| 1.5.0 | 2026-07-03 | Full human-review workflow landed (§6): `ReviewStatus` (`Unreviewed`/`Pending`/`Approved`/`Rejected { reason }`) on `ListingRecord`, with `Registry::request_review`/`approve_review`/`reject_review` (a publisher requests review of the current latest version; a reviewer approves — setting the verified badge — or rejects with actionable feedback, clearing it; a rejected listing may request review again). Implemented across all three `RegistryStore` backends (in-memory/file/Postgres) plus the `Box<dyn RegistryStore>` blanket impl. New server routes `.../request-review`, `.../approve`, `.../reject` alongside the pre-existing `.../verify` operator override; reviewer identity from `X-Wovyr-Principal`, else the request body, else `"operator"`. This was the last item deferred from v0.3 |
+| 1.4.0 | 2026-07-03 | Postgres backend wired into runtime store selection (§3): a `RegistryStore for Box<dyn RegistryStore>` blanket impl in `wovyr-marketplace` lets a binary pick its backend without becoming generic over it; `wovyr-server`'s `registry()` and the CLI's `marketplace_registry()` both select `PostgresRegistryStore` when built with `--features postgres` and `WOVYR_MARKETPLACE_POSTGRES_URL` is set (else the file store); the CLI's `postgres` feature also forwards to `wovyr-server/postgres` so `wovyr dev` picks it up |
 | 1.3.0 | 2026-07-03 | Postgres-backed `RegistryStore` landed (§3): `PostgresRegistryStore` (`postgres` cargo feature) stores one JSON-document row per listing, reusing `RegistryState`'s pure mutation logic — a fleet of nodes can share a durable catalog instead of each holding its own `registry.json`. Capability-gated live tests prove independent connections see each other's writes. Not yet wired into server/CLI runtime store selection |
 | 1.0.0 | 2026-06-27 | Initial Plugin Marketplace specification |
-| 1.1.0 | 2026-06-30 | Core implemented: `apex-marketplace` crate (listing model, `RegistryPolicy` governance, ratings, signature-verified publish, discovery, download, install bridge; `File`/`InMemory` stores) + server `/api/v1/marketplace*` routes (publish/search/get/download/review/verify/install, emits `plugin.published`) + CLI `plugin publish|search|get` |
+| 1.1.0 | 2026-06-30 | Core implemented: `wovyr-marketplace` crate (listing model, `RegistryPolicy` governance, ratings, signature-verified publish, discovery, download, install bridge; `File`/`InMemory` stores) + server `/api/v1/marketplace*` routes (publish/search/get/download/review/verify/install, emits `plugin.published`) + CLI `plugin publish|search|get` |

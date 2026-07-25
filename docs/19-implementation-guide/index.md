@@ -24,7 +24,7 @@ architecture and specs into day-to-day engineering practice.
 
 # 2. Audience
 
-New and existing contributors to the Apex AI Platform monorepo
+New and existing contributors to the Wovyr AI Platform monorepo
 ([ADR-0001](../17-adr/ADR-0001-project-structure.md)).
 
 ---
@@ -44,7 +44,7 @@ New and existing contributors to the Apex AI Platform monorepo
 # 4. Quick Start
 
 ```bash
-git clone <repo> && cd apex
+git clone <repo> && cd wovyr
 make setup          # toolchain + hooks
 make dev            # run the all-in-one platform locally
 make test           # unit + integration

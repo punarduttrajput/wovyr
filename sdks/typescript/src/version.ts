@@ -1,7 +1,7 @@
 /** DX-303: SDK ↔ server version awareness.
  *
  * The SDK's version tracks the platform release it was written against
- * (`0.3.0` ↔ apex-server 0.3.0) — same major.minor means same API surface.
+ * (`0.3.0` ↔ wovyr-server 0.3.0) — same major.minor means same API surface.
  * `SDK_VERSION` is kept in lockstep with `package.json` by the release
  * process, and the unit suite asserts the two match so drift can't ship. */
 export const SDK_VERSION = "0.3.0";
@@ -16,7 +16,7 @@ export function versionSkew(sdkVersion: string, serverVersion: string): string |
   if (!sdk || !server) return null;
   if (sdk.major === server.major && sdk.minor === server.minor) return null;
   return (
-    `@apex-ai/sdk ${sdkVersion} was written against apex-server ${sdk.major}.${sdk.minor}.x, ` +
+    `@wovyr/sdk ${sdkVersion} was written against wovyr-server ${sdk.major}.${sdk.minor}.x, ` +
     `but the server reports ${serverVersion} — routes and shapes may differ. ` +
     `Upgrade the ${sdk.major * 1000 + sdk.minor < server.major * 1000 + server.minor ? "SDK" : "server"} ` +
     `to matching major.minor.`

@@ -1,8 +1,8 @@
-/** A TypeScript mirror of `apex_ui`'s Rust frame protocol (PRD-005 UIP-101),
+/** A TypeScript mirror of `wovyr_ui`'s Rust frame protocol (PRD-005 UIP-101),
  * kept intentionally narrow and hand-written — there is no automatic schema
  * generation pipeline for this crate yet (its OpenAPI surface types the
  * `frame` field as opaque `unknown`). Field shapes here must track
- * `crates/apex-ui/src/frame.rs` by hand; if a variant's fields drift, expect
+ * `crates/wovyr-ui/src/frame.rs` by hand; if a variant's fields drift, expect
  * `renderNode`'s exhaustiveness check in `components/index.tsx` to catch it
  * at compile time. */
 

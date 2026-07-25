@@ -16,7 +16,7 @@ Document ID: AGENT-009
 
 # 1. Purpose
 
-The Agent Runtime Protocol defines the canonical execution contract between all core subsystems of the Apex AI Platform:
+The Agent Runtime Protocol defines the canonical execution contract between all core subsystems of the Wovyr AI Platform:
 
 - Workflow Engine
 - Agent Runtime

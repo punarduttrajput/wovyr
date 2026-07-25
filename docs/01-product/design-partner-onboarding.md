@@ -10,7 +10,7 @@ Document ID: GDE-001
 **Version:** 1.0.0
 **Status:** Ready — describes what's actually shipped (RM-GUI-P1–P3), not a
 target-state design. Every command below has been run against a real
-`apex-server`; where something is aspirational or cut, it's called out
+`wovyr-server`; where something is aspirational or cut, it's called out
 explicitly rather than glossed over.
 **Owner:** Product / Founder
 **Last Updated:** 2026-07-15
@@ -36,7 +36,7 @@ running it fresh.
 execution model.** RM-GUI-P3's "standalone middleware mode" (EMB-701) is
 built for exactly this: three HTTP calls (`present`, `decide`,
 `getDecision`), no workflow/agent adoption required at all. If you *are*
-already running Apex workflows, the same trust layer is also wired into the
+already running Wovyr workflows, the same trust layer is also wired into the
 `ui` workflow activity — see
 [`prd-generative-ui-runtime.md`](prd-generative-ui-runtime.md) §5 (UIP/HIL
 workstreams) for that path instead.
@@ -49,7 +49,7 @@ workstreams) for that path instead.
 your agent  →  UiFrame (JSON, constrained vocabulary)
                   │
                   ▼
-         apex-ui-guard trust layer   (deny-by-default: no raw HTML, no
+         wovyr-ui-guard trust layer   (deny-by-default: no raw HTML, no
                   │                   credential inputs, destructive actions
                   │                   blocked, media origins allow-listed)
         ┌─────────┴─────────┐
@@ -58,7 +58,7 @@ your agent  →  UiFrame (JSON, constrained vocabulary)
         ▼                    ▼
   rendered to a human   never reaches the human;
   (web component or      recorded in the audit chain
-  @apex/ui-react)
+  @wovyr/ui-react)
         │
         ▼
   human decision  →  POST /api/v1/ui/decisions/{frame_id}
@@ -69,7 +69,7 @@ your agent  →  UiFrame (JSON, constrained vocabulary)
 
 The vocabulary (`UiNode`: column/row/card/text/badge/key-value/image/button/
 text-input/number-input/select/checkbox) deliberately has **no raw-HTML or
-script node and no credential-input component** — `apex-ui-guard` polices
+script node and no credential-input component** — `wovyr-ui-guard` polices
 what remains expressible (sensitive-input names, destructive actions,
 deceptive labels, unapproved media origins). See ADR-0011 §2.4 for why this
 is a floor the vocabulary enforces structurally, not a policy someone could
@@ -82,9 +82,9 @@ misconfigure away.
 ### 3.1 Run a server (≈5 min)
 
 ```bash
-git clone https://github.com/punarduttrajput/Apex.git
-cd Apex
-cargo build -p apex-cli
+git clone https://github.com/punarduttrajput/Wovyr.git
+cd Wovyr
+cargo build -p wovyr-cli
 ```
 
 Start it with a UI policy configured — **without one, the hosted floor
@@ -92,17 +92,17 @@ Start it with a UI policy configured — **without one, the hosted floor
 failure mode but not what you want for a first try:
 
 ```bash
-APEX_UI_POLICY=examples/policies/default-ui-policy.yaml \
-APEX_PLATFORM_ADMINS=design-partner \
-APEX_ALLOW_ANONYMOUS=1 \
-  cargo run -p apex-cli -- dev --addr 127.0.0.1:8080
+WOVYR_UI_POLICY=examples/policies/default-ui-policy.yaml \
+WOVYR_PLATFORM_ADMINS=design-partner \
+WOVYR_ALLOW_ANONYMOUS=1 \
+  cargo run -p wovyr-cli -- dev --addr 127.0.0.1:8080
 ```
 
 `examples/policies/default-ui-policy.yaml` is the minimal real policy —
 every `rules` field is optional and defaults to the strict/safe setting
 (`PolicyRules::default()`); this file's only job is to *exist* so the hosted
-floor steps aside. `APEX_PLATFORM_ADMINS=design-partner` +
-`APEX_ALLOW_ANONYMOUS=1` is a **development convenience**, not how you'd run
+floor steps aside. `WOVYR_PLATFORM_ADMINS=design-partner` +
+`WOVYR_ALLOW_ANONYMOUS=1` is a **development convenience**, not how you'd run
 this in production — see §7 before you ship.
 
 ### 3.2 Present a frame — no workflow, no agent (≈5 min)
@@ -110,8 +110,8 @@ this in production — see §7 before you ship.
 ```bash
 curl -s -X POST http://127.0.0.1:8080/api/v1/ui/present \
   -H 'Content-Type: application/json' \
-  -H 'X-Apex-Tenant: default' \
-  -H 'X-Apex-Principal: design-partner' \
+  -H 'X-Wovyr-Tenant: default' \
+  -H 'X-Wovyr-Principal: design-partner' \
   -d '{
     "frame": {
       "schema_version": "1.0.0",
@@ -137,37 +137,37 @@ audit chain (`GET /api/v1/audit`), never reaching this far silently.
 
 ### 3.3 Render it (≈10 min — pick one)
 
-**Option A — you're a React app.** Add `@apex/ui-react` (currently consumed
+**Option A — you're a React app.** Add `@wovyr/ui-react` (currently consumed
 via git checkout + a `file:` dependency — see the known gap in §8) and use
 `<UiFrameView>` directly:
 
 ```tsx
-import { UiFrameView } from "@apex/ui-react";
-import "@apex/ui-react/styles.css";
+import { UiFrameView } from "@wovyr/ui-react";
+import "@wovyr/ui-react/styles.css";
 
 <UiFrameView
   frame={pending.frame}
   expectedHash={pending.frame_hash}
-  onDecide={(decision) => apexClient.ui.decide(pending.frame_id, decision)}
+  onDecide={(decision) => wovyrClient.ui.decide(pending.frame_id, decision)}
 />;
 ```
 
 **Option B — you're not a React app** (Angular, Vue, plain HTML, a CMS-embedded
-widget). Use the `<apex-ui-frame>` web component instead (RDR-402) — it's
+widget). Use the `<wovyr-ui-frame>` web component instead (RDR-402) — it's
 still React under the hood, but your host never needs to know:
 
 ```html
 <script type="module">
-  import "@apex/ui-react/web-component";
-  import "@apex/ui-react/styles.css";
+  import "@wovyr/ui-react/web-component";
+  import "@wovyr/ui-react/styles.css";
 </script>
-<apex-ui-frame id="frame"></apex-ui-frame>
+<wovyr-ui-frame id="frame"></wovyr-ui-frame>
 <script type="module">
   const el = document.getElementById("frame");
   el.frame = pending.frame; // set as a JS property, not an HTML attribute
   el.expectedHash = pending.frame_hash;
   el.addEventListener("decide", (e) => {
-    e.detail.result = apexClient.ui.decide(pending.frame_id, e.detail.decision);
+    e.detail.result = wovyrClient.ui.decide(pending.frame_id, e.detail.decision);
   });
 </script>
 ```
@@ -188,12 +188,12 @@ FRAME_ID=$(node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/pend
 
 curl -s -X POST "http://127.0.0.1:8080/api/v1/ui/decisions/$FRAME_ID" \
   -H 'Content-Type: application/json' \
-  -H 'X-Apex-Tenant: default' \
-  -H 'X-Apex-Principal: design-partner' \
+  -H 'X-Wovyr-Tenant: default' \
+  -H 'X-Wovyr-Principal: design-partner' \
   -d '{ "action": "approve", "values": {} }'
 
 curl -s "http://127.0.0.1:8080/api/v1/ui/decisions/$FRAME_ID" \
-  -H 'X-Apex-Tenant: default' -H 'X-Apex-Principal: design-partner'
+  -H 'X-Wovyr-Tenant: default' -H 'X-Wovyr-Principal: design-partner'
 ```
 
 The second call works **even after the pending record is gone** — standalone
@@ -227,18 +227,18 @@ rules.
 
 ## 5. Verify your policy before you ship (EMB-704)
 
-`apex-ui-guard::conformance` is a public, reusable set of must-allow /
+`wovyr-ui-guard::conformance` is a public, reusable set of must-allow /
 must-block / must-redact vectors — the same claims this repo's own CI gates
 on, exposed so *you* can gate on them too:
 
 ```rust
-use apex_ui_guard::conformance::conformance_report;
+use wovyr_ui_guard::conformance::conformance_report;
 
 let report = conformance_report(&my_policy);
 assert!(report.all_passed(), "{report}");
 ```
 
-Today this means depending on the `apex-ui-guard` crate from a checkout of
+Today this means depending on the `wovyr-ui-guard` crate from a checkout of
 this repo (it isn't published to crates.io yet — see the gap list below);
 wire the assertion above into your own CI so a policy change that silently
 stops blocking sensitive inputs fails your build, not your first incident.
@@ -247,15 +247,15 @@ stops blocking sensitive inputs fails your build, not your first incident.
 
 ## 6. Production readiness checklist
 
-- [ ] Move off `APEX_ALLOW_ANONYMOUS` + `APEX_PLATFORM_ADMINS` — configure
-      `APEX_AUTH_MODE=jwt` or `apikey` (`crates/apex-server/src/auth.rs`;
+- [ ] Move off `WOVYR_ALLOW_ANONYMOUS` + `WOVYR_PLATFORM_ADMINS` — configure
+      `WOVYR_AUTH_MODE=jwt` or `apikey` (`crates/wovyr-server/src/auth.rs`;
       [`09-api/authentication.md`](../09-api/authentication.md) has the
       up-to-date detail on what's actually implemented vs. target-state).
 - [ ] Grant the presenting/deciding principal a role with `ui:read`/
       `ui:write` — any built-in role at `Editor` or above already has both
       (RBAC scopes follow a generic `<domain>:read`/`:write` pattern, so no
       code change is needed for a new resource like `ui`).
-- [ ] Set `APEX_CORS_ALLOWED_ORIGINS` to your actual frontend origin(s), not
+- [ ] Set `WOVYR_CORS_ALLOWED_ORIGINS` to your actual frontend origin(s), not
       `*`.
 - [ ] Run the conformance suite (§5) against your **actual** configured
       policy in CI, not just the shipped defaults.
@@ -274,10 +274,10 @@ stops blocking sensitive inputs fails your build, not your first incident.
 Matching this project's own house rule of documenting cut lines rather than
 letting them surface as a surprise later:
 
-- **No public package registry yet.** `@apex/ui-react`, `@apex-ai/sdk`, and
-  `apex-ui-guard` are consumed via a git checkout (`file:` path deps, or a
+- **No public package registry yet.** `@wovyr/ui-react`, `@wovyr/sdk`, and
+  `wovyr-ui-guard` are consumed via a git checkout (`file:` path deps, or a
   Rust path/git dependency) — not published to npm or crates.io. Budget for
-  vendoring a checkout, not `npm install @apex/ui-react`.
+  vendoring a checkout, not `npm install @wovyr/ui-react`.
 - **No MCP server subsystem.** If you were expecting a Model Context
   Protocol server exposing these routes as MCP tools (an earlier roadmap
   item, EMB-702), it does not exist in this codebase at all yet.
@@ -289,7 +289,7 @@ letting them surface as a surprise later:
   is no library of named, versioned UI templates yet (ITS-604 in the
   roadmap, not built).
 - **The judge-style semantic policy checks (GRD-203's LLM variant)** are not
-  wired in — only the structural, deterministic rules (`apex-ui-guard`'s
+  wired in — only the structural, deterministic rules (`wovyr-ui-guard`'s
   `evaluate`/`hosted_floor`) run today. Nothing here calls a model.
 
 ---
@@ -297,7 +297,7 @@ letting them surface as a surprise later:
 ## 8. Getting help
 
 File issues against
-[github.com/punarduttrajput/Apex](https://github.com/punarduttrajput/Apex) —
+[github.com/punarduttrajput/Wovyr](https://github.com/punarduttrajput/Wovyr) —
 include the `policy_ref` and `frame_id` from the relevant `PendingUiFrame` or
 `DecidedOutcome`, and (if it's a block you didn't expect) the audit entry
 from `GET /api/v1/audit` naming the rule that fired.

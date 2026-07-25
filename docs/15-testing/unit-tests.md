@@ -17,7 +17,7 @@ implementation; other sections remain directional
 
 # 1. Purpose
 
-This document defines **unit testing** practice for the Apex AI Platform — fast, isolated tests of individual functions and modules that form the base of the [test pyramid](index.md#2-test-pyramid).
+This document defines **unit testing** practice for the Wovyr AI Platform — fast, isolated tests of individual functions and modules that form the base of the [test pyramid](index.md#2-test-pyramid).
 
 ---
 
@@ -93,10 +93,10 @@ feasible.
 **Implemented:** `proptest`-based fuzz targets for the parsers most exposed to
 untrusted input — a plugin package can be downloaded and parsed before its
 signature is ever checked, so these are the first code a malicious payload
-reaches. `apex-plugin/tests/fuzz_targets.rs`: `PluginManifest::from_yaml` (raw
-text + structurally-plausible manifests) and `Package::from_apexpkg` (raw bytes
+reaches. `wovyr-plugin/tests/fuzz_targets.rs`: `PluginManifest::from_yaml` (raw
+text + structurally-plausible manifests) and `Package::from_wovyrpkg` (raw bytes
 + plausible JSON envelopes) — arbitrary input must only ever return `Ok`/`Err`,
-never panic. `apex-workflow/tests/fuzz_targets.rs`: `Definition::from_yaml` (the
+never panic. `wovyr-workflow/tests/fuzz_targets.rs`: `Definition::from_yaml` (the
 workflow DSL) and `Cron::parse`/`Cron::next_after` (including `after_ms` values
 near `u64::MAX`, where naive minute-granularity arithmetic could in principle
 overflow — verified it doesn't). These are property tests run under ordinary
@@ -132,5 +132,5 @@ out-of-band execution) is a heavier follow-on, not yet set up.
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.1.0 | 2026-07-03 | §7 Property & Fuzz Testing landed: `proptest` fuzz targets for `apex-plugin` (`PluginManifest::from_yaml`, `Package::from_apexpkg` — the parsers an untrusted download hits before signature verification) and `apex-workflow` (`Definition::from_yaml`, `Cron::parse`/`next_after`). All assert arbitrary input never panics; `cron_next_after_never_panics` specifically probed `after_ms` near `u64::MAX` for arithmetic overflow and found none. True coverage-guided fuzzing (`cargo-fuzz`) remains a heavier follow-on |
+| 1.1.0 | 2026-07-03 | §7 Property & Fuzz Testing landed: `proptest` fuzz targets for `wovyr-plugin` (`PluginManifest::from_yaml`, `Package::from_wovyrpkg` — the parsers an untrusted download hits before signature verification) and `wovyr-workflow` (`Definition::from_yaml`, `Cron::parse`/`next_after`). All assert arbitrary input never panics; `cron_next_after_never_panics` specifically probed `after_ms` near `u64::MAX` for arithmetic overflow and found none. True coverage-guided fuzzing (`cargo-fuzz`) remains a heavier follow-on |
 | 1.0.0 | 2026-06-27 | Initial Unit Testing specification |

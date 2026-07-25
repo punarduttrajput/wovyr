@@ -10,7 +10,7 @@
 
 # 1. Purpose
 
-This document defines the Apex Workflow Domain Specific Language (DSL).
+This document defines the Wovyr Workflow Domain Specific Language (DSL).
 
 The DSL is the canonical format for describing workflows independent of programming language or execution environment.
 
@@ -62,7 +62,7 @@ All formats compile into the **Workflow Intermediate Representation (WIR)** befo
 # 4. High-Level Structure
 
 ```yaml
-apiVersion: workflow.apex.io/v1
+apiVersion: workflow.wovyr.io/v1
 kind: Workflow
 
 metadata:
@@ -285,7 +285,7 @@ Optional fields:
 **Implemented shape (RM-AIM-P2 RUN-201).** The activity schema that actually ships
 carries everything under `inputs` (the `ActivityDef` struct has no top-level
 `model`/`temperature` fields), and the shared executor
-(`apex_runtime::PlatformActivityExecutor`) reads:
+(`wovyr_runtime::PlatformActivityExecutor`) reads:
 
 ```yaml
 - id: summarize

@@ -40,7 +40,7 @@ mostly independent; group by team and land in any order after Phases 1–2.
 ## ECO-301 `[P1]` — MCP (Model Context Protocol) client tool-source — **DONE (2026-07-14)**
 
 **Problem.** No MCP or external tool-server client exists; the `RemoteWorker` sandbox
-backend is an unimplemented enum variant (`crates/apex-tools/src/sandbox/types.rs:19`);
+backend is an unimplemented enum variant (`crates/wovyr-tools/src/sandbox/types.rs:19`);
 MCP appears only under `docs/`. There is no way to connect external tools. (PRD-004
 R-F.1; audit High.)
 
@@ -51,9 +51,9 @@ permission model.
 **Acceptance criteria.** A test connects to a mock MCP server, lists its tools, and
 invokes one through `ToolRegistry`; permissions are enforced.
 
-**Files.** `crates/apex-tools/src/` (new `mcp.rs`). **Size.** L. **Depends on:** none.
+**Files.** `crates/wovyr-tools/src/` (new `mcp.rs`). **Size.** L. **Depends on:** none.
 
-**Implementation notes (2026-07-14).** New `crates/apex-tools/src/mcp.rs`, zero
+**Implementation notes (2026-07-14).** New `crates/wovyr-tools/src/mcp.rs`, zero
 new dependencies (reqwest/tokio/serde were already in the crate). An
 `McpTransport` trait (JSON-RPC 2.0 `request`/`notify`) with two impls:
 **`StdioTransport`** — spawns a child process (`kill_on_drop`), speaks
@@ -90,7 +90,7 @@ by the existing `ToolRegistry::execute` fail-closed path, no new enforcement
 code. Proven by 9 unit tests (duplex-scripted stdio server: handshake +
 paginated list + call round-trip, noise-skipping, error mapping, `isError`
 mapping, name validation, pagination guard, id sanitization) and the
-acceptance integration test `crates/apex-tools/tests/mcp_tools.rs` — a
+acceptance integration test `crates/wovyr-tools/tests/mcp_tools.rs` — a
 hand-rolled HTTP/1.1 mock MCP server over a real `TcpListener` (the S3-signer
 stance: no test-framework dependency) that *rejects any post-initialize
 request missing the session id*, against which the client discovers, lists,
@@ -101,26 +101,26 @@ stance as SAF-201/202): no agent-manifest/server/CLI configuration surface
 for MCP connections yet, and the `RemoteWorker` sandbox variant is untouched
 — follow-ons.
 
-## ECO-302 `[P1]` — Plugin authoring SDK + `apex plugin new` scaffold — **DONE (2026-07-14)**
+## ECO-302 `[P1]` — Plugin authoring SDK + `wovyr plugin new` scaffold — **DONE (2026-07-14)**
 
 **Problem.** No authoring SDK/scaffold — only format docs; authors hand-write
 `plugin.yaml`, compile `wasm32-wasi`, and hand-embed `sha256:` digests
-(`apps/apex-cli/src/plugin.rs`; sample is hand-authored `.wat`). (PRD-004 R-F.2; audit
+(`apps/wovyr-cli/src/plugin.rs`; sample is hand-authored `.wat`). (PRD-004 R-F.2; audit
 High.)
 
-**Change.** Ship an `apex-plugin-sdk` crate (typed capability entry points) + an
-`apex plugin new` scaffold generating a manifest, a buildable wasm project, and a
+**Change.** Ship an `wovyr-plugin-sdk` crate (typed capability entry points) + an
+`wovyr plugin new` scaffold generating a manifest, a buildable wasm project, and a
 build step that computes digests.
 
-**Acceptance criteria.** `apex plugin new foo` → `cargo build` → `apex plugin install`
+**Acceptance criteria.** `wovyr plugin new foo` → `cargo build` → `wovyr plugin install`
 round-trips with no hand-edited digests.
 
-**Files.** new `crates/apex-plugin-sdk`, `apps/apex-cli/src/plugin.rs`. **Size.** L.
+**Files.** new `crates/wovyr-plugin-sdk`, `apps/wovyr-cli/src/plugin.rs`. **Size.** L.
 **Depends on:** none.
 
-**Implementation notes (2026-07-14).** Two halves. **`crates/apex-plugin-sdk`**
+**Implementation notes (2026-07-14).** Two halves. **`crates/wovyr-plugin-sdk`**
 (new workspace crate, deliberately tiny — serde + serde_json only, no
-apex-common, so a plugin author's dependency tree stays clean and everything
+wovyr-common, so a plugin author's dependency tree stays clean and everything
 compiles to `wasm32-wasip1`): `run_tool(handler)` is the typed entry point
 wrapping the platform's capability ABI (request JSON on stdin → typed
 handler → response JSON on stdout; a handler error prints to stderr and
@@ -128,9 +128,9 @@ exits non-zero, which the WASI loader surfaces as the tool failure's
 detail), built on a pure `respond(input, handler)` core so handlers
 unit-test on the host with no wasm build or stdin pipe; `secret(name)` /
 `secret_env_var(name)` read platform-injected secrets with the exact
-`APEX_SECRET_<UPPER_SNAKE>` mangling `apex-plugin`'s `resolve_secret_env`
+`WOVYR_SECRET_<UPPER_SNAKE>` mangling `wovyr-plugin`'s `resolve_secret_env`
 uses (mirrored in a test). **The scaffold + build step**
-(`apps/apex-cli/src/scaffold.rs`, wired as `apex plugin new` / `apex plugin
+(`apps/wovyr-cli/src/scaffold.rs`, wired as `wovyr plugin new` / `wovyr plugin
 build`): `new` generates a buildable project — `Cargo.toml` (SDK dependency;
 `--sdk-path` emits a local `path` dep, needed until the SDK is published to
 crates.io), a typed greeter `src/main.rs`, a valid `plugin.yaml` whose
@@ -153,15 +153,15 @@ with_no_hand_edited_digests`): scaffold → real nested `cargo build` to wasm
 (the real CLI signing commands) → `read_package_dir` + `PluginEngine::
 install` (the same verify-signature → verify-digest → stage → register core
 `install_cmd` runs), against scratch directories so the test never touches
-the real `~/.apex`; the staged digest is asserted equal to a recomputed
+the real `~/.wovyr`; the staged digest is asserted equal to a recomputed
 digest of the staged module. Under `--features plugin-wasi` the same test
 additionally enables the plugin and executes it through `ToolRegistry`,
 proving the scaffolded, SDK-built module really answers (`{"greeting":
-"Hello, Apex!"}` through a real Wasmtime run — verified locally, 24 s).
+"Hello, Wovyr!"}` through a real Wasmtime run — verified locally, 24 s).
 Skips cleanly when the wasm target/cargo are unavailable (the established
 capability-gated pattern); CI's rust job now installs `wasm32-wasip1` via
 the toolchain action so the round trip runs on every PR (the Windows leg
-skips — no double-build cost). Not done here (later slices): `apex plugin
+skips — no double-build cost). Not done here (later slices): `wovyr plugin
 publish` one-shotting sign+digest+trust output (ECO-304, which depends on
 this), SBOM/provenance auto-fill in `build`, and publishing the SDK crate
 to crates.io.
@@ -169,26 +169,26 @@ to crates.io.
 ## ECO-303 `[P2]` — Container capability loader — **DONE (2026-07-16)**
 
 **Problem.** Only `WasiCapabilityRuntime` exists; without the `wasi` feature the
-default `NotLoadedRuntime` errors on call (`crates/apex-plugin/src/{lib.rs:31-34,
+default `NotLoadedRuntime` errors on call (`crates/wovyr-plugin/src/{lib.rs:31-34,
 runtime.rs:20-33}`). (PRD-004 R-F.3; audit Med.)
 
 **Change.** Add a container capability loader reusing `ContainerSandbox` (SBX-101).
 
 **Acceptance criteria.** A gated test runs a container-backed capability end to end.
 
-**Files.** `crates/apex-plugin/src/runtime.rs`. **Size.** M. **Depends on:** SBX-101.
+**Files.** `crates/wovyr-plugin/src/runtime.rs`. **Size.** M. **Depends on:** SBX-101.
 
 **Resolution.** `ContainerCapabilityRuntime` (`runtime.rs`, now compiled
 unconditionally — the WASM loader stays behind `wasi`): Docker/Podman/gVisor
 constructors over `ContainerSandbox`, speaking the exact WASM-loader ABI (request
-JSON → stdin, response JSON ← stdout, `with_secrets` → `APEX_SECRET_*` env,
+JSON → stdin, response JSON ← stdout, `with_secrets` → `WOVYR_SECRET_*` env,
 `with_limits`/`with_network` pass-through; shared `staged_entry` +
 `capability_response` helpers so the two loaders can't drift). The staged artifact
 dir is bind-mounted at `/workspace` and the entry runs inside the image (exec bit
 stamped at invoke — staging preserves no mode bits). Routing is fail-closed both
 ways: the container loader only accepts manifest `sandbox: container|gvisor`, the
 WASM loader only `wasm|wasi|` — and a `gvisor` capability on a plain-Docker runtime
-is refused, never silently demoted. Enabler in apex-tools:
+is refused, never silently demoted. Enabler in wovyr-tools:
 `ContainerSandbox::execute_with_stdin` (a `-i` interactive run feeding piped stdin,
 unified with `execute` incl. the egress-lockdown `docker exec` path), which also
 makes the backend honor `SandboxCommand.env` — variable *names* on the argv
@@ -201,21 +201,21 @@ that asserts the secret value is absent from the argv. Not done here (later
 slices): a microVM loader, and wiring a container runtime choice into the CLI's
 `plugin run` (WASI-only today via `--features plugin-wasi`).
 
-## ECO-304 `[P2]` — One-shot `apex plugin publish` — **DONE (2026-07-14)**
+## ECO-304 `[P2]` — One-shot `wovyr plugin publish` — **DONE (2026-07-14)**
 
 **Problem.** Publishing is multi-step and manual: `keygen` → `sign` → operator
-`trust`, with manual digest embedding (`apps/apex-cli/src/plugin.rs:163-208`). (PRD-004
+`trust`, with manual digest embedding (`apps/wovyr-cli/src/plugin.rs:163-208`). (PRD-004
 R-F.4; audit Med.)
 
-**Change.** A one-shot `apex plugin publish` that signs, fills digests, and emits the
+**Change.** A one-shot `wovyr plugin publish` that signs, fills digests, and emits the
 trust snippet.
 
 **Acceptance criteria.** One command produces a signed, digest-complete package + the
 trust line an operator pastes.
 
-**Files.** `apps/apex-cli/src/plugin.rs`. **Size.** M. **Depends on:** ECO-302.
+**Files.** `apps/wovyr-cli/src/plugin.rs`. **Size.** M. **Depends on:** ECO-302.
 
-**Implementation notes (2026-07-14).** Extended the existing `apex plugin
+**Implementation notes (2026-07-14).** Extended the existing `wovyr plugin
 publish <source>` (registry upload) with an optional `--key <pkcs8-file>`
 flag rather than adding a new verb — non-breaking, since without `--key`
 publish behaves exactly as before (source must already be signed). With
@@ -232,11 +232,11 @@ makes the printed trust line self-contained — the public key is derived from
 the private key and written to `<dir>/<publisher>.pub` *inside the package
 directory*, so it travels with the package to whoever receives it rather
 than depending on `keygen`'s separate `.pub` file still being around.
-Prints `apex plugin trust <publisher> --key <path>` referencing that exact
+Prints `wovyr plugin trust <publisher> --key <path>` referencing that exact
 file. Deliberately fails closed before writing anything if any declared
 artifact is missing (loop reads all artifacts before either file is
 touched), so a partial run never leaves a `plugin.sig` that doesn't match
-`plugin.yaml`. Proven by 4 unit tests in `apps/apex-cli/src/plugin.rs`
+`plugin.yaml`. Proven by 4 unit tests in `apps/wovyr-cli/src/plugin.rs`
 (`prepare_and_sign_*`): the happy path — a hand-authored placeholder digest
 is discarded, the real one is computed, and the produced package/`.pub` file
 install cleanly through the real `PluginEngine` (the full acceptance bar,
@@ -248,7 +248,7 @@ arbitrary bytes, not specifically a compiled module).
 ## ECO-305 `[P3]` — Marketplace OSV/CVE feed — **DONE (2026-07-19)**
 
 **Problem.** The scanner is static-only (manifest/digest/SBOM-deny-list/wildcard-perm),
-with a manually-maintained deny-list (`crates/apex-marketplace/src/scan.rs:14,79-172`).
+with a manually-maintained deny-list (`crates/wovyr-marketplace/src/scan.rs:14,79-172`).
 (PRD-004 R-F.5; audit Med.)
 
 **Change.** Integrate an OSV/CVE feed keyed on SBOM `name@version`; optionally add
@@ -256,9 +256,9 @@ wasm import-analysis for undeclared syscalls.
 
 **Acceptance criteria.** A test flags a known-vulnerable SBOM component via the feed.
 
-**Files.** `crates/apex-marketplace/src/scan.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-marketplace/src/scan.rs`. **Size.** M. **Depends on:** none.
 
-**Resolution.** New `apex-marketplace/src/vuln.rs`: `VulnFeed`, an immutable
+**Resolution.** New `wovyr-marketplace/src/vuln.rs`: `VulnFeed`, an immutable
 per-package-indexed advisory set parsed from **OSV-format JSON data** the
 operator supplies (a bulk export, an osv.dev query-API response body, or a
 curated subset) — the feed is *data, not a network dependency*, so the scan
@@ -276,7 +276,7 @@ findings (advisory id + CVE aliases + summary in the message) that
 `block_scan_severity` gates like any other; the deny-list stays as the
 emergency-block complement. Wired end to end: `Registry::with_vuln_feed`
 (publish + the attestation route's live re-scan), loaded from
-`~/.apex/marketplace/osv.json` by **both** the server and the CLI's local
+`~/.wovyr/marketplace/osv.json` by **both** the server and the CLI's local
 publish (same `policy.json` convention — absent ⇒ empty feed, corrupt ⇒
 fail-closed). 8 new tests including the acceptance case (range hit with
 alias-bearing message; the fixed version scans clean). The ticket's optional
@@ -290,7 +290,7 @@ wasm import-analysis remains open — it needs real artifact static analysis
 ## SBX-301 `[P2]` — Confined `fs_write` builtin — **DONE (2026-07-14)**
 
 **Problem.** No write tool; write access explicitly deferred
-(`crates/apex-tools/src/builtin.rs:5-8`). (PRD-004 R-E.3; audit Med.)
+(`crates/wovyr-tools/src/builtin.rs:5-8`). (PRD-004 R-E.3; audit Med.)
 
 **Change.** Add an `fs_write` builtin confined via the existing `confine_path`
 (the same canonicalize-and-prefix guard `fs_read` uses), opt-in like `shell`.
@@ -298,7 +298,7 @@ wasm import-analysis remains open — it needs real artifact static analysis
 **Acceptance criteria.** A test writes inside the workspace root and is denied outside
 it (symlink-escape included).
 
-**Files.** `crates/apex-tools/src/builtin.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-tools/src/builtin.rs`. **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-14).** `FsWriteTool` (`fs_write`) writes (or, with
 `append: true`, appends) UTF-8 `content` to `path`, confined to `ctx.workdir` —
@@ -327,7 +327,7 @@ runtime configurable, resource-limited and egress-controlled.
 **Acceptance criteria.** A gated test runs a snippet in the sandbox and captures
 stdout/exit; resource limits apply.
 
-**Files.** `crates/apex-tools/src/builtin.rs` + sandbox wiring. **Size.** L.
+**Files.** `crates/wovyr-tools/src/builtin.rs` + sandbox wiring. **Size.** L.
 **Depends on:** SBX-101.
 
 **Implementation notes (2026-07-14).** `CodeExecuteTool` (`code_execute`) runs a
@@ -346,7 +346,7 @@ folded into `with_privileged_builtins()`), since it's arbitrary code execution j
 in a language runtime rather than a shell. The interpreter must actually exist in
 the execution environment — the default sandbox image (`alpine:3.20`, same default
 as `ShellTool`) has neither Python nor Node installed; override via `with_image`/
-`APEX_SANDBOX_IMAGE` for a container/gVisor run. Proven by 9 tests, each gated on
+`WOVYR_SANDBOX_IMAGE` for a container/gVisor run. Proven by 9 tests, each gated on
 the real interpreter actually being present (skip cleanly otherwise, the same
 "skip, don't fail" pattern this workspace uses for Postgres/Docker/wasm-toolchain
 tests) — including a real trap found live on this dev box: Windows' `python`/
@@ -368,7 +368,7 @@ primitives `ShellTool`'s own container tests already prove correct.
 ## SBX-303 `[P2]` — `#[derive(Tool)]` / schemars ergonomics — **DONE (2026-07-14)**
 
 **Problem.** Authors hand-write JSON Schema as `json!` literals and parse params with
-`.get().and_then()` (`crates/apex-tools/src/tool.rs:177-190`; e.g.
+`.get().and_then()` (`crates/wovyr-tools/src/tool.rs:177-190`; e.g.
 `builtin.rs:120-124`). (PRD-004 R-E.5; audit Med.)
 
 **Change.** A proc-macro / `schemars`-based derive generating schema + typed param
@@ -377,10 +377,10 @@ deserialization from a struct.
 **Acceptance criteria.** A tool defined via the derive round-trips schema + typed args
 with no hand-written JSON.
 
-**Files.** new derive crate + `crates/apex-tools/src/tool.rs`. **Size.** M.
+**Files.** new derive crate + `crates/wovyr-tools/src/tool.rs`. **Size.** M.
 **Depends on:** none.
 
-**Implementation notes (2026-07-14).** New proc-macro crate `apex-tool-macros`
+**Implementation notes (2026-07-14).** New proc-macro crate `wovyr-tool-macros`
 (`#[derive(Tool)]`, `#[tool(id, version, category, description, params, permissions)]`)
 generates the *declarative* boilerplate a `Tool` impl needs — `ToolMetadata`
 construction and a JSON Schema via `schemars::schema_for!` over a separately-declared
@@ -394,7 +394,7 @@ the params type by the compiler now, not by hand) and the `.get().and_then()`
 parameter-extraction chain, replaced by one `Self::__tool_parse_params(&request)?`
 call yielding a typed struct. `schemars` (workspace dep, `1.x`) was already
 resolvable from the offline cargo cache — no network needed. Proven end to end by
-`crates/apex-tools/tests/derive_tool.rs`: a `GreetTool`/`GreetParams` pair defined
+`crates/wovyr-tools/tests/derive_tool.rs`: a `GreetTool`/`GreetParams` pair defined
 purely via the derive, asserting the generated metadata matches the `#[tool(...)]`
 attributes, the generated schema is a real object schema with correct
 `properties`/`required` (derived from `#[serde(default = ...)]` presence, not
@@ -405,7 +405,7 @@ parameters (missing/wrong-typed) come back as `ToolError::Validation`, never a p
 ## SBX-304 `[P2]` — Egress platform matrix + fail-closed — **DONE (2026-07-14)**
 
 **Problem.** `egress_lockdown` is Linux/Docker-only; on Windows/macOS the L3 egress
-protection silently doesn't exist (`crates/apex-tools/src/lib.rs:14-18`,
+protection silently doesn't exist (`crates/wovyr-tools/src/lib.rs:14-18`,
 `sandbox/types.rs:243-259`). (PRD-004 R-E.6; audit Med.)
 
 **Change.** Document the platform matrix; **fail closed** (refuse a non-empty
@@ -414,7 +414,7 @@ protection silently doesn't exist (`crates/apex-tools/src/lib.rs:14-18`,
 **Acceptance criteria.** A test asserts a network-policy run on a non-lockdown platform
 is refused, not silently unrestricted.
 
-**Files.** `crates/apex-tools/src/{lib.rs,sandbox/*}`. **Size.** S. **Depends on:** none.
+**Files.** `crates/wovyr-tools/src/{lib.rs,sandbox/*}`. **Size.** S. **Depends on:** none.
 
 **Implementation notes (2026-07-14).** Investigation first: the lockdown path
 (`nsenter`+`iptables`, spawned from the host) was *already* fail-closed in effect on
@@ -446,7 +446,7 @@ the new gate.
 ## WFL-301 `[P1]` — Loop / for-each activity — **DONE (2026-07-14)**
 
 **Problem.** The DAG is strictly acyclic with a static activity list
-(`crates/apex-workflow/src/definition.rs:62,236`); no map-over-collection. (PRD-004
+(`crates/wovyr-workflow/src/definition.rs:62,236`); no map-over-collection. (PRD-004
 R-H.5; audit High.)
 
 **Change.** A `map`/`for_each` activity that expands over a runtime collection into a
@@ -455,7 +455,7 @@ bounded sub-DAG (concurrency-capped), results collected in order.
 **Acceptance criteria.** A workflow maps an activity over an N-element input and joins
 N results deterministically.
 
-**Files.** `crates/apex-workflow/src/{definition.rs,engine.rs}`. **Size.** L.
+**Files.** `crates/wovyr-workflow/src/{definition.rs,engine.rs}`. **Size.** L.
 **Depends on:** none.
 
 ## WFL-302 `[P1]` — Dynamic (data-driven) fan-out — **DONE (2026-07-14)**
@@ -468,7 +468,7 @@ N results deterministically.
 
 **Acceptance criteria.** A workflow fans out to a data-determined K and joins.
 
-**Files.** `crates/apex-workflow/src/engine.rs`. **Size.** L. **Depends on:** WFL-301.
+**Files.** `crates/wovyr-workflow/src/engine.rs`. **Size.** L. **Depends on:** WFL-301.
 
 **Implementation notes (2026-07-14).** `is_for_each`/`ForEachSpec` in
 `definition.rs` recognize `for_each` (with `map` as an alias) as a third
@@ -496,7 +496,7 @@ durably commits the *other* items launched in the same phase rather than
 discarding their completed work; an item that interrupts resets just that
 instance to `Ready` and keeps the parent `for_each` itself `Ready` too, so a
 resume re-enters and only relaunches the pending instance(s). Proven by 9
-integration tests in `crates/apex-workflow/tests/engine.rs` (referenced vs.
+integration tests in `crates/wovyr-workflow/tests/engine.rs` (referenced vs.
 literal-array `items`; empty-collection short-circuit with zero instances
 spawned; `max_items` fail-closed before any instance is created; a
 non-array-resolving `items` fail-closed; the `max_concurrent` cap actually
@@ -522,7 +522,7 @@ large activity outputs out-of-line (blob ref).
 **Acceptance criteria.** A test asserts an over-cap output is rejected or externalized,
 not silently bloating every checkpoint.
 
-**Files.** `crates/apex-workflow/src/{engine.rs,postgres.rs,store.rs}`. **Size.** M.
+**Files.** `crates/wovyr-workflow/src/{engine.rs,postgres.rs,store.rs}`. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-14).** Took the fail-closed-cap half of the "and/or":
@@ -552,7 +552,7 @@ whose individually-fine items join into an oversized array fails closed at the j
 **Acceptance criteria.** A test asserts `history` pages and that recovery doesn't read
 the full log for a long execution.
 
-**Files.** `crates/apex-workflow/src/{store.rs,postgres.rs}`. **Size.** M.
+**Files.** `crates/wovyr-workflow/src/{store.rs,postgres.rs}`. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-14).** `EventLog` gained two default-implemented
@@ -592,7 +592,7 @@ pagination into SQL.
 **Acceptance criteria.** A test asserts filtered `list()` doesn't load non-matching
 rows; a migration adds the columns/indexes.
 
-**Files.** `crates/apex-workflow/src/postgres.rs` + migration. **Size.** M.
+**Files.** `crates/wovyr-workflow/src/postgres.rs` + migration. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-14).** New migration `V3__checkpoint_index_columns.sql`
@@ -620,7 +620,7 @@ corrupt and not just absent for an unrelated reason.
 
 **Problem.** Dispatch accuracy is bounded by the poll interval (default 5s) and each
 poll is O(N) — `due()`/schedule `poll` load all pending timers/schedules
-(`crates/apex-workflow/src/{timer.rs:207-222,schedule.rs:307}`; interval
+(`crates/wovyr-workflow/src/{timer.rs:207-222,schedule.rs:307}`; interval
 `lib.rs:313`). (PRD-004 R-H.7; audit Med.)
 
 **Change.** Index timers by `fire_at`; sleep until the next deadline instead of a
@@ -629,7 +629,7 @@ fixed interval.
 **Acceptance criteria.** A test asserts due-timer lookup is bounded (not full-scan) and
 a near-deadline timer fires promptly.
 
-**Files.** `crates/apex-workflow/src/{timer.rs,schedule.rs,lib.rs}`. **Size.** M.
+**Files.** `crates/wovyr-workflow/src/{timer.rs,schedule.rs,lib.rs}`. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-14).** `InMemoryTimerStore` now maintains a secondary
@@ -645,10 +645,10 @@ sleep exactly until the next known deadline — **capped** at `max_interval` so 
 still wakes up periodically to notice a timer/schedule registered by another process in
 the meantime (the same guarantee a fixed interval gave), while a near-deadline timer
 fires promptly instead of waiting out a stale interval. The file scope's `lib.rs`
-reference turned out stale (no dispatch loop lives in `apex-workflow/src/lib.rs`, a
-64-line module-wiring file; the actual background poll loop is in `apex-server`) —
+reference turned out stale (no dispatch loop lives in `wovyr-workflow/src/lib.rs`, a
+64-line module-wiring file; the actual background poll loop is in `wovyr-server`) —
 `run_adaptive` is the engine-crate-side capability; wiring the server's own background
-loop to use it instead of its fixed `APEX_DISPATCH_INTERVAL_SECS` is a documented
+loop to use it instead of its fixed `WOVYR_DISPATCH_INTERVAL_SECS` is a documented
 follow-on, not in this ticket's stated file scope. Proven by: `next_deadline` tracking
 the true minimum across schedule/cancel/replace (incl. a paused-schedule exclusion
 test); a 20,000-far-future-timer test asserting `due`/`next_deadline` stay fast (a
@@ -663,7 +663,7 @@ completes well under a 5s `max_interval` cap.
 ## WFL-307 `[P3]` — Activity progress events — **DONE (2026-07-14)**
 
 **Problem.** `ActivityExecutor::execute` returns a single `Value`; no progress channel
-(`crates/apex-workflow/src/executor.rs:69-72`; `event.rs:27-83`). (PRD-004 R-H.8; audit
+(`crates/wovyr-workflow/src/executor.rs:69-72`; `event.rs:27-83`). (PRD-004 R-H.8; audit
 Low.)
 
 **Change.** Add an optional progress sink to `ActivityContext` + an `ActivityProgress`
@@ -671,7 +671,7 @@ event.
 
 **Acceptance criteria.** A test asserts a long activity emits progress events.
 
-**Files.** `crates/apex-workflow/src/{executor.rs,event.rs}`. **Size.** M.
+**Files.** `crates/wovyr-workflow/src/{executor.rs,event.rs}`. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-14).** `ActivityContext` gained `progress: Option<
@@ -702,14 +702,14 @@ completion in one poll) gets each one recorded in order, all preceding the termi
 ## WFL-308 `[P3]` — Event-enum schema versioning — **DONE (2026-07-14)**
 
 **Problem.** The event enum wire format has no version tag; a rename breaks the on-disk
-log (`crates/apex-workflow/src/event.rs:18-24`). (PRD-004 R-H.8; audit Low.)
+log (`crates/wovyr-workflow/src/event.rs:18-24`). (PRD-004 R-H.8; audit Low.)
 
 **Change.** Add a schema-version tag + a migration path before any future rename.
 
 **Acceptance criteria.** A test round-trips a versioned event and rejects an unknown
 future version cleanly.
 
-**Files.** `crates/apex-workflow/src/event.rs`. **Size.** S. **Depends on:** none.
+**Files.** `crates/wovyr-workflow/src/event.rs`. **Size.** S. **Depends on:** none.
 
 **Implementation notes (2026-07-14).** `EVENT_SCHEMA_VERSION` (currently `1`) plus a
 `VersionedEvent { v: u32, #[serde(flatten)] event: WorkflowEvent }` wrapper — `flatten`
@@ -731,7 +731,7 @@ since there's only one version to translate from; the doc comment on
 future variant rename ships. Proven by 3 unit tests in `event.rs`: a round trip through
 `encode_event`/`decode_event` preserves the event and confirms the flat wire shape; a
 `v: 99` line is rejected with a message naming both the found and understood versions;
-a line missing `v` entirely is rejected. The full `apex-workflow` suite (incl.
+a line missing `v` entirely is rejected. The full `wovyr-workflow` suite (incl.
 `FileStore`/`PostgresStore`-backed durable-resume tests) stayed green through this
 change, confirming the swap didn't alter any other store's on-disk behavior.
 
@@ -742,7 +742,7 @@ change, confirming the swap didn't alter any other store's on-disk behavior.
 ## SRV-302 `[P2]` — Cache `FileApiKeyStore` in memory — **DONE (2026-07-14)**
 
 **Problem.** `principal_for` calls `self.load()` per authenticated request — disk I/O +
-full deserialize on the hot auth path (`crates/apex-server/src/auth.rs:315-318,291-296`).
+full deserialize on the hot auth path (`crates/wovyr-server/src/auth.rs:315-318,291-296`).
 (PRD-004 R-G.8; audit Med.)
 
 **Change.** Cache the key map in memory with file-watch/invalidation; O(1) lookup.
@@ -750,7 +750,7 @@ full deserialize on the hot auth path (`crates/apex-server/src/auth.rs:315-318,2
 **Acceptance criteria.** A test asserts no per-request file read after warm-up and that
 an external key change is picked up.
 
-**Files.** `crates/apex-server/src/auth.rs`. **Size.** S. **Depends on:** SRV-104.
+**Files.** `crates/wovyr-server/src/auth.rs`. **Size.** S. **Depends on:** SRV-104.
 
 **Resolution.** `FileApiKeyStore` gained an mtime-stamped in-memory cache
 (`CachedKeys`): `principal_for` now calls `load_cached()`, which `stat()`s the file
@@ -780,20 +780,20 @@ next lookup without being reconstructed).
 **Acceptance criteria.** The served spec matches the handlers; the contract gate runs
 against it.
 
-**Files.** `crates/apex-server/src/*` + `docs/09-api/openapi.yaml` pipeline.
+**Files.** `crates/wovyr-server/src/*` + `docs/09-api/openapi.yaml` pipeline.
 **Size.** L. **Depends on:** none.
 
-**Resolution.** New `crates/apex-server/src/openapi.rs`: every one of the ~65 routes
+**Resolution.** New `crates/wovyr-server/src/openapi.rs`: every one of the ~65 routes
 `router()` mounts (agents, workflows, tenancy, webhooks, memory, plugins,
 marketplace, audit, tools, secrets, kms, health/metrics/this-doc) carries a real
 `#[utoipa::path(...)]` attribute on its handler function, and every request-body/
 error type used on the wire derives `utoipa::ToSchema` (foreign types from other
-crates — `apex_tenancy::QuotaLimits`/`Role`/`ProjectStatus` — are documented via
+crates — `wovyr_tenancy::QuotaLimits`/`Role`/`ProjectStatus` — are documented via
 `#[schema(value_type = ...)]` overrides or left untyped with a prose note, rather
 than pulling `utoipa` into crates that shouldn't need to know about it). A
 `SecurityAddon` (`utoipa::Modify`) registers the two real auth schemes
-(`tenantHeader`/`bearerAuth`, matching `crates/apex-server/src/auth.rs`'s actual
-`APEX_AUTH_MODE` contract) since utoipa's macro syntax only expresses security
+(`tenantHeader`/`bearerAuth`, matching `crates/wovyr-server/src/auth.rs`'s actual
+`WOVYR_AUTH_MODE` contract) since utoipa's macro syntax only expresses security
 *requirements*, not the schemes themselves; `/healthz`/`/metrics`/`/openapi.json`
 carry an explicit `security(())` override matching their real unauthenticated
 status. `ApiDoc` (a `#[derive(OpenApi)]` struct) aggregates it all and is served as
@@ -802,31 +802,31 @@ tenant's data) alongside health/metrics. A same-crate test,
 `served_spec_covers_every_mounted_route`, asserts every mounted path+method has a
 generated entry — a handler added to `router()` but never annotated (or vice versa)
 is a compile/test failure, not just a convention. Verified live end to end: started
-a real `apex dev` server, fetched the actual `/openapi.json` it serves, and ran
+a real `wovyr dev` server, fetched the actual `/openapi.json` it serves, and ran
 `redocly lint` against it — 0 errors (29 stylistic warnings, comparable to the old
 hand-written file's 112). `docs/09-api/openapi.yaml` remains as a browsable,
 checked-in snapshot, but `docs/09-api/overview.md` now states plainly that
 `/openapi.json` is the generated, drift-proof ground truth and the CI contract gate
 (`sdks/typescript`'s `npm run lint:openapi`) now lints the **live served document**
-(`http://127.0.0.1:8080/openapi.json`, the address the contract-gate job's `apex dev`
+(`http://127.0.0.1:8080/openapi.json`, the address the contract-gate job's `wovyr dev`
 already binds) instead of the static file.
 
 ## SRV-304 `[P2]` — Extract the inline `lib.rs` test suite — **DONE (2026-07-14)**
 
 **Problem.** `lib.rs` is ~86% inline test code (~2,260 of 2,618 lines,
-`crates/apex-server/src/lib.rs:356`→EOF). (PRD-004 R-G.8; audit Med.)
+`crates/wovyr-server/src/lib.rs:356`→EOF). (PRD-004 R-G.8; audit Med.)
 
 **Change.** Move the suite to `tests/` or a `tests.rs` submodule (widening the few
 `pub(crate)` fields the tests reach only as needed).
 
 **Acceptance criteria.** `lib.rs` production module is navigable; the suite still runs.
 
-**Files.** `crates/apex-server/src/lib.rs` (+ new test module). **Size.** M.
+**Files.** `crates/wovyr-server/src/lib.rs` (+ new test module). **Size.** M.
 **Depends on:** none.
 
 **Resolution.** Took the `tests.rs` **submodule** branch of the "or", not the external
 `tests/` directory branch: `lib.rs`'s `#[cfg(test)] mod tests { ... }` (2,410 lines)
-moved verbatim into a new file-backed `crates/apex-server/src/tests.rs`
+moved verbatim into a new file-backed `crates/wovyr-server/src/tests.rs`
 (`#[cfg(test)] mod tests;` in `lib.rs`), keeping the exact same crate-internal
 visibility the tests already relied on — several reach into `AppState`'s `pub(crate)`
 fields directly (seeding a workflow engine/tenancy store before driving a request
@@ -848,23 +848,23 @@ changes, then redone with `[System.IO.File]::ReadAllLines(path,
 ## SRV-305 `[P2]` — Idempotency store write-amplification — **DONE (2026-07-14)**
 
 **Problem.** `put` does a full-file `atomic_write` of the whole map per mutating
-request (`crates/apex-server/src/hardening.rs:230-266`). (PRD-004 R-G.8; audit Med.)
+request (`crates/wovyr-server/src/hardening.rs:230-266`). (PRD-004 R-G.8; audit Med.)
 
 **Change.** Use an append/segmented store or debounce persistence.
 
 **Acceptance criteria.** A test asserts a mutating request doesn't rewrite the entire
 cache file each time.
 
-**Files.** `crates/apex-server/src/hardening.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-server/src/hardening.rs`. **Size.** M. **Depends on:** none.
 
 **Resolution.** Took the append-only-log branch, not debounce: debouncing would
 reintroduce the exact "a crash-loop loses a recently-cached idempotent response" bug
 RM-GA-P2 DUR-404 exists to prevent, since a response would sit unpersisted in memory
 for some window before the next flush. `IdempotencyStore::put` now appends exactly
 one JSON-encoded line per call (`fsync` the file, then `fsync` the parent directory
-via `apex_common::fs::sync_parent_dir` — the same durability an `atomic_write`
+via `wovyr_common::fs::sync_parent_dir` — the same durability an `atomic_write`
 whole-file rewrite gives, without paying for one; the identical primitive
-`apex-workflow`'s event log and `apex-audit`'s hash chain already use for this exact
+`wovyr-workflow`'s event log and `wovyr-audit`'s hash chain already use for this exact
 reason). The on-disk log can accumulate more lines than live entries (an expired/
 evicted key's old line is never retroactively deleted), so `put` compacts — one full
 `atomic_write` rewrite collapsing back to exactly the current live entries — once the
@@ -893,7 +893,7 @@ live paths (e.g. `agents.rs:218,220`; `webhooks.rs:56`). (PRD-004 R-G.8; audit L
 **Acceptance criteria.** Live-path unwraps are eliminated or justified; a clippy
 lint/CI check guards new ones on handler paths.
 
-**Files.** `crates/apex-server/src/{agents.rs,webhooks.rs,...}`. **Size.** M.
+**Files.** `crates/wovyr-server/src/{agents.rs,webhooks.rs,...}`. **Size.** M.
 **Depends on:** none.
 
 **Resolution.** The audit (all 30 production-code — i.e. outside `#[cfg(test)]` —
@@ -924,20 +924,20 @@ test module. The 4 pre-existing legitimate call sites this actually affected
 (`agents.rs`'s json-literal/enum-shape pair, `tenancy.rs`'s two `quota.usage.lock()`
 mutex-poison `.expect()`s) each carry a scoped `#[allow(...)]` with a one-line
 justification. Verified the guard is real, not a no-op, by temporarily deleting one
-`#[allow]` and confirming `cargo clippy -p apex-server -- -D warnings` fails with
+`#[allow]` and confirming `cargo clippy -p wovyr-server -- -D warnings` fails with
 exactly the expected `unwrap_used`/`unreachable` diagnostics, then restoring it.
 
 ## SRV-307 `[P3]` — Shared concurrency slots — **DONE (2026-07-14)**
 
 **Problem.** `QuotaTracker.concurrent` is in-process/per-node
-(`crates/apex-server/src/state.rs`; `tenancy.rs:432,516-527`); N nodes multiply the
+(`crates/wovyr-server/src/state.rs`; `tenancy.rs:432,516-527`); N nodes multiply the
 effective limit. (PRD-004 R-G.6; audit Low.)
 
 **Change.** Track concurrency in a shared store for multi-node correctness.
 
 **Acceptance criteria.** A gated test asserts two nodes share one concurrency budget.
 
-**Files.** `crates/apex-server/src/tenancy.rs`. **Size.** M. **Depends on:** SRV-201.
+**Files.** `crates/wovyr-server/src/tenancy.rs`. **Size.** M. **Depends on:** SRV-201.
 
 **Resolution.** Mirrors SRV-201's `RateLimiter`/`redis_shared` design closely (same
 `with_redis`/`from_env` shape, same lazily-dialed-and-redialed connection, same 1s
@@ -948,8 +948,8 @@ under the limit" Lua script lets a fleet of nodes serialize on one Redis counter
 `(prefix, project)` instead of each independently reading-then-incrementing (which
 could race two nodes both past the limit). `QuotaTracker::from_env` (wired into
 `state.rs` in place of the old bare `QuotaTracker::new`) enables it when
-`APEX_QUOTA_REDIS_URL` is set on a `redis`-feature build (a dedicated var, so CI's
-`APEX_REDIS_URL` for the live capability-gated tests doesn't silently flip
+`WOVYR_QUOTA_REDIS_URL` is set on a `redis`-feature build (a dedicated var, so CI's
+`WOVYR_REDIS_URL` for the live capability-gated tests doesn't silently flip
 production config). `admit_run` became `async fn` (the shared path is a network
 call) — every call site (`agents.rs` ×3, `workflow_runner.rs`'s `StoredAgentResolver
 ::admit`, plus the test suite) now `.await`s it. The harder half: `RunPermit`
@@ -968,7 +968,7 @@ concurrency dimension is fleet-shared; cost/token budgets stay per-node
 (disk-persisted, RM-GA-P2 DUR-404) exactly as before — widening those the same way is
 a documented follow-on, not silently assumed to already work. Proven by three new
 capability-gated tests in `tenancy::redis_tests` (skip cleanly, logging a `skipping:`
-line, when `APEX_REDIS_URL` is unset/unreachable — identical convention to
+line, when `WOVYR_REDIS_URL` is unset/unreachable — identical convention to
 `rate_limit::redis_tests`): `two_nodes_share_one_concurrency_budget` is the ticket's
 literal acceptance criterion (two independently-constructed `QuotaTracker`s over one
 Redis prefix admit exactly `concurrent_agent_runs` permits combined, not 2×, and a
@@ -993,7 +993,7 @@ integration tests already carry.
 
 **Problem.** `query()` loads the entire log via `sink.all()` then filters in memory;
 `AuditFilter` has only tenant/principal/action/limit — no from/to, no cursor; the JSONL
-sink re-reads the whole file per op (`crates/apex-audit/src/log.rs:116-140,220-238`).
+sink re-reads the whole file per op (`crates/wovyr-audit/src/log.rs:116-140,220-238`).
 (PRD-004 R-I.4; audit Med.)
 
 **Change.** Add time-range + cursor pagination and an indexed/DB-backed sink option.
@@ -1001,7 +1001,7 @@ sink re-reads the whole file per op (`crates/apex-audit/src/log.rs:116-140,220-2
 **Acceptance criteria.** A test asserts a time-ranged, paged query doesn't scan the
 whole log.
 
-**Files.** `crates/apex-audit/src/log.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-audit/src/log.rs`. **Size.** M. **Depends on:** none.
 
 **Done.** `AuditFilter` gained inclusive `after_ms`/`before_ms` bounds (shared by
 `query()` and the new paged path via `AuditFilter::matches`, so the two can't drift);
@@ -1032,12 +1032,12 @@ actual bytes-read count), plus `reverse_scan_reassembles_lines_split_across_chun
 `default_query_page_and_file_override_agree` (page-by-page parity between the
 trait default and the file override, filtered), `time_range_bounds_are_inclusive`,
 and the route-level
-`audit_route_time_range_and_cursor_page_through_the_window` in `apex-server`.
+`audit_route_time_range_and_cursor_page_through_the_window` in `wovyr-server`.
 
 ## SEC-302 `[P3]` — Request-scoped secret channel — **DONE (2026-07-19)**
 
-**Problem.** Secrets are injected into sandboxes as `APEX_SECRET_*` env vars
-(`crates/apex-plugin/src/runtime.rs:55-59,102-110`); a verbose/compromised plugin can
+**Problem.** Secrets are injected into sandboxes as `WOVYR_SECRET_*` env vars
+(`crates/wovyr-plugin/src/runtime.rs:55-59,102-110`); a verbose/compromised plugin can
 echo its environment. (`SecretValue` is correctly masked in Debug/Display, so tracing
 leakage is guarded — this is the child-process surface.) (PRD-004 R-I.5; audit Low.)
 
@@ -1047,20 +1047,20 @@ higher-isolation backends.
 **Acceptance criteria.** A test asserts secrets reach the guest without appearing in
 its environment for the vsock/stdin path.
 
-**Files.** `crates/apex-plugin/src/runtime.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-plugin/src/runtime.rs`. **Size.** M. **Depends on:** none.
 
 **Resolution.** A `SecretChannel` on both capability loaders, **`Stdin` by
 default** — "prefer the request-scoped channel" made the default posture, not
 an opt-in: resolved secrets ride inside a versioned stdin envelope
-(`{"__apex_abi": 1, "params": …, "secrets": {"APEX_SECRET_<NAME>": …}}`) and
+(`{"__wovyr_abi": 1, "params": …, "secrets": {"WOVYR_SECRET_<NAME>": …}}`) and
 the guest's environment stays empty of them; `SecretChannel::Env` is the
 explicit legacy opt-out for native container entries (shell scripts,
 off-the-shelf binaries) that can't parse JSON. With no resolved secrets, stdin
 always carries bare params — zero-secret plugins never see the envelope. The
 channel logic is one pure `secret_delivery` helper (unit-tested without any
-sandbox). `apex-plugin-sdk` reads **both shapes transparently**:
+sandbox). `wovyr-plugin-sdk` reads **both shapes transparently**:
 `unwrap_envelope` (pure, exported) splits envelope→params+secrets, fails
-closed on a newer `__apex_abi` than it understands (never misread as
+closed on a newer `__wovyr_abi` than it understands (never misread as
 parameters), and `secret()` checks the envelope stash before falling back to
 the env var — an SDK-built tool needs no code change on either channel.
 Acceptance proven **from inside real guests, on both isolation paths**:
@@ -1086,7 +1086,7 @@ embedding-model id (from RAG-203) driving detection.
 **Acceptance criteria.** A test migrates a namespace's embeddings to a new model and
 verifies uniform dimensionality after.
 
-**Files.** `crates/apex-memory/src/engine.rs`. **Size.** M. **Depends on:** RAG-203.
+**Files.** `crates/wovyr-memory/src/engine.rs`. **Size.** M. **Depends on:** RAG-203.
 
 **Resolution.** `MemoryRecord` now carries `embedding_model`, stamped at every
 ingestion path (plain remembers, document chunks; parents stay empty — they're
@@ -1106,7 +1106,7 @@ as `delete`), `EncryptingMemoryStore` (re-seals sensitive content before the
 rewrite reaches disk), `PostgresStore` (guarded `UPDATE … WHERE id`), and
 `TieredStore` (Postgres first, then a Qdrant upsert that replaces the existing
 point). Migration `V4__embedding_model.sql` adds the column (`'' = legacy`),
-applied only via `apex admin migrate --target memory` as ever. The acceptance
+applied only via `wovyr admin migrate --target memory` as ever. The acceptance
 test ingests memories + a chunked document under the 16-dim mock model, swaps
 to a 4-dim alternate provider over the same store, migrates, and asserts:
 uniform new dimensionality + model id on every embedded record, parents still
@@ -1173,7 +1173,7 @@ failed poll surfaces (not silently swallowed).
 
 **Resolution.** **Types:** the dashboard's wire shapes now re-export from
 `sdks/typescript/src/types.ts` via a type-only tsconfig path alias
-(`@apex-ai/sdk-types`) — erased at compile time, so no SDK dist build, no
+(`@wovyr/sdk-types`) — erased at compile time, so no SDK dist build, no
 `file:`-install ordering, and no CI change; the SDK's `types.ts` gained the
 precise shapes the dashboard had hand-written (`Health`, `WorkflowSummary`,
 `MarketplaceListing`/`PermissionRisk`, `SbomComponent`/`Provenance` — also
@@ -1222,9 +1222,9 @@ server-side: a 403 renders as a "your role lacks `audit:read`" explanation —
 deliberately not an error toast (the audit query opts out of UI-302's global
 interceptor since all its failures have dedicated in-page UI). Types
 (`AuditEntry`/`AuditPage`) come from the SDK per UI-302 — and live verification
-against a real `apex dev` server caught the SDK's hand-written `AuditEntry`
+against a real `wovyr dev` server caught the SDK's hand-written `AuditEntry`
 type being **flat and wrong**: the server nests the event under `event` with
-`id`/`seq`/`hash`/`prev_hash` at the row level (apex-audit `AuditEntry`), and
+`id`/`seq`/`hash`/`prev_hash` at the row level (wovyr-audit `AuditEntry`), and
 `outcome` is the `allowed|denied|error` enum, not free text. The SDK type was
 corrected to the real envelope (a client-annotation fix, not a wire change;
 the Python SDK is untyped) and the viewer verified rendering genuine seeded
@@ -1322,7 +1322,7 @@ deleted.
 
 ## DX-301 `[P2]` — SDK parity: async Python, mutation retry, poll helper, TS paginateAll — **DONE (2026-07-17)**
 
-**Problem.** Python is sync-only urllib (`sdks/python/apex_sdk/http.py`); TS has no
+**Problem.** Python is sync-only urllib (`sdks/python/wovyr_sdk/http.py`); TS has no
 retry at all and Python retries GET-only; neither has a `wait_for_completion` poll
 helper (`client.ts:174-181`, `client.py:181-184`); TS lacks `paginateAll`. (PRD-004
 R-J.4; audit Med/Low.)
@@ -1345,9 +1345,9 @@ retry, and unit tests pin that the same key rides every attempt.
 **(2) `waitForCompletion`/`wait_for_completion`, both SDKs** — polls
 `GET /workflows/{id}` to a terminal status (case-insensitive
 `completed|failed|cancelled`) with interval/timeout knobs and a new
-`ApexTimeoutError`; both integration suites' submit-then-poll tests now run
+`WovyrTimeoutError`; both integration suites' submit-then-poll tests now run
 through it (the acceptance path). **(3) asyncio Python client** —
-`apex_sdk.aio.AsyncApexClient`: the full resource surface awaitable via
+`wovyr_sdk.aio.AsyncWovyrClient`: the full resource surface awaitable via
 worker-thread delegation (zero-dependency stays true; a hand-rolled asyncio
 HTTP client would re-implement chunked/TLS plumbing for no API gain — the
 trade-off is documented in the module), with `agents.stream` bridging SSE
@@ -1373,7 +1373,7 @@ status fell through to the neutral pill; now case-insensitive with a spec.
 workspace, lcov + human summary uploaded as an artifact and totals surfaced in
 the run summary; separate job so the instrumented rebuild doesn't slow the
 main leg) and **benchmarks** (the workspace's first criterion benches —
-`apex-provider/benches/tokenizer.rs`, the budgeting hot path that runs over
+`wovyr-provider/benches/tokenizer.rs`, the budgeting hot path that runs over
 the whole history before every model call: 1 KiB/64 KiB prose + a 40-message
 history; `--output-format bencher` into `github-action-benchmark` against a
 cache-persisted baseline, `fail-on-alert` at a 150% threshold that tolerates
@@ -1407,7 +1407,7 @@ what was missing: **per-SDK CHANGELOG.md** (both, with the versioning policy
 stated: the SDK tracks the platform release it targets; same major.minor =
 same API surface), and the **skew warning**: `health()` is now the version
 handshake — a major.minor mismatch emits `console.warn` (TS) /
-`ApexVersionSkewWarning` (Python, filterable category) once per client, never
+`WovyrVersionSkewWarning` (Python, filterable category) once per client, never
 thrown, and stays silent for unparseable dev versions. The compat constants
 can't drift: a TS unit test asserts `SDK_VERSION === package.json.version`
 and a Python one asserts the source-tree fallback equals `pyproject.toml`
@@ -1447,7 +1447,7 @@ at lines 148-150); README front-loads vision, not getting-started. (PRD-004 R-J.
 audit Low.)
 
 **Change.** Add per-doc `Status: shipped|aspirational` front-matter; add a top-of-README
-5-minute quickstart (`apex dev` → `/healthz` → first agent run).
+5-minute quickstart (`wovyr dev` → `/healthz` → first agent run).
 
 **Acceptance criteria.** Each spec doc declares its status; the README opens with a
 runnable quickstart.
@@ -1461,7 +1461,7 @@ artifacts") — what remained was the *convention*: `docs/SUMMARY.md` now
 defines the `Status:` vocabulary (Shipped / In delivery / Active / Draft /
 Exploratory) and what a reader may assume from each — in particular that
 **Draft never implies the feature exists in code**. The README now opens with
-a real 5-minute quickstart (clone → `APEX_ALLOW_ANONYMOUS=1 apex dev` →
+a real 5-minute quickstart (clone → `WOVYR_ALLOW_ANONYMOUS=1 wovyr dev` →
 `/healthz` → first agent run on the offline mock provider, then pointers to
 real keys/dashboard/SDKs) — every command verified against this working
 tree.
@@ -1500,32 +1500,32 @@ SDK).
 `install.sh`, or distro package under `deployment/`; only container/K8s paths exist.
 (PRD-004 R-L.4; audit High.)
 
-**Change.** Add a systemd unit + an install script (user, dirs, `~/.apex` perms, env
+**Change.** Add a systemd unit + an install script (user, dirs, `~/.wovyr` perms, env
 file) for the bare-metal appliance install.
 
-**Acceptance criteria.** The unit starts/stops `apex dev`/`serve`; the script produces a
+**Acceptance criteria.** The unit starts/stops `wovyr dev`/`serve`; the script produces a
 working install on a clean host (documented, ideally smoke-tested in CI on Linux).
 
 **Files.** `deployment/systemd/*`, `deployment/install.sh`. **Size.** M.
 **Depends on:** none.
 
-**Resolution.** `deployment/systemd/apex.service` runs the one real production
-entrypoint (`apex dev --addr $APEX_BIND_ADDR` — there is no separate `apex
-serve` command; `serve()` in `crates/apex-server/src/lib.rs` already handles
+**Resolution.** `deployment/systemd/wovyr.service` runs the one real production
+entrypoint (`wovyr dev --addr $WOVYR_BIND_ADDR` — there is no separate `wovyr
+serve` command; `serve()` in `crates/wovyr-server/src/lib.rs` already handles
 graceful SIGTERM shutdown and refuses a non-loopback bind without TLS per
-SEC-202, so the unit doesn't duplicate either) as a dedicated `apex` system
+SEC-202, so the unit doesn't duplicate either) as a dedicated `wovyr` system
 user, with a real (not decorative) systemd sandbox —
-`ProtectSystem=strict`/`ReadWritePaths=/var/lib/apex`/`NoNewPrivileges`/
+`ProtectSystem=strict`/`ReadWritePaths=/var/lib/wovyr`/`NoNewPrivileges`/
 `PrivateTmp`/`ProtectHome`/etc. — documented as a moderate default an
 operator enabling the (off-by-default) `shell`/`code_execute` tool builtins
 without a container/gVisor backend may need to relax.
 `deployment/install.sh` is idempotent (safe to re-run after building a new
-binary): creates the system user/group (home `/var/lib/apex`, no login
-shell), `/var/lib/apex/.apex` (`0700`), installs the binary + unit +
-`deployment/systemd/apex.env.example` → `/etc/apex/apex.env` (**only** if
+binary): creates the system user/group (home `/var/lib/wovyr`, no login
+shell), `/var/lib/wovyr/.wovyr` (`0700`), installs the binary + unit +
+`deployment/systemd/wovyr.env.example` → `/etc/wovyr/wovyr.env` (**only** if
 that file doesn't already exist, so operator edits survive a re-run/upgrade),
 and runs `systemctl daemon-reload` — deliberately without enabling/starting
-the service, so `/etc/apex/apex.env` (shipped default: loopback-only,
+the service, so `/etc/wovyr/wovyr.env` (shipped default: loopback-only,
 `disabled-loopback` auth) gets a review first. New doc
 `docs/12-deployment/systemd.md` covers install/config/sandboxing/backup/
 upgrade/uninstall, linked from `docs/12-deployment/index.md`'s topology table
@@ -1539,14 +1539,14 @@ of the acceptance criterion is real, not aspirational**: a new
 `systemd-install` CI job (`.github/workflows/ci.yml`) runs on a genuine
 `ubuntu-latest` VM (systemd actually works there, unlike inside a Docker
 container) — builds the release binary, runs `install.sh`, `systemctl enable
---now apex`, polls `/healthz` until healthy (or dumps `journalctl`/`systemctl
+--now wovyr`, polls `/healthz` until healthy (or dumps `journalctl`/`systemctl
 status` and fails), **then re-runs `install.sh` and asserts
-`/etc/apex/apex.env`'s checksum is unchanged** — the idempotency/never-clobber
+`/etc/wovyr/wovyr.env`'s checksum is unchanged** — the idempotency/never-clobber
 claim, checked mechanically rather than left as an unverified comment.
 
 ## DEP-302 `[P2]` — Operator upgrade/migration runbook + Helm/Terraform — **DONE (2026-07-18)**
 
-**Problem.** No upgrade-path/migration runbook tying version bumps to `apex admin
+**Problem.** No upgrade-path/migration runbook tying version bumps to `wovyr admin
 migrate`; Helm is single-replica with no in-chart TLS; no Terraform. (PRD-004 R-L.4/R-L.5;
 audit Med/Low.)
 
@@ -1564,30 +1564,30 @@ TLS; the Terraform decision is recorded.
 `docs/12-deployment/upgrade-and-migration.md` (DEP-UPG-001, linked from
 `index.md`'s doc map) — the five-step end-to-end procedure (backup while the
 server runs, FileLock-quiesced → SIGTERM drain → binary/image swap →
-`apex admin migrate` per opted-into schema → verify via
+`wovyr admin migrate` per opted-into schema → verify via
 `/healthz`-version/`/metrics`-gauges/a smoke run), with per-shape command
 variants for systemd (`install.sh --binary`, env-file survival),
 compose (`stop`/tag-bump/`run --rm … admin migrate`), and Helm
-(`helm upgrade --set apex.image.tag`); a rollback section that pairs the old
+(`helm upgrade --set wovyr.image.tag`); a rollback section that pairs the old
 binary with *restored* old state (never old binary alone — every versioned
 surface rejects newer-than-understood data) and names snapshot-restore, not a
 nonexistent `migrate --down`, as the schema rollback path; and a version-skew
 rules summary. Commands were verified against the real
 sources (`install.sh`'s actual `--binary` flag, `healthz`'s actual
 `{status, version}` body) rather than written from memory. **Helm TLS**:
-`apex.tls.{enabled, secretName}` templates optional **in-process** TLS — an
-existing `kubernetes.io/tls` Secret mounted read-only at `/etc/apex/tls`,
-`APEX_TLS_CERT`/`APEX_TLS_KEY` set in the ConfigMap, both probes switched to
+`wovyr.tls.{enabled, secretName}` templates optional **in-process** TLS — an
+existing `kubernetes.io/tls` Secret mounted read-only at `/etc/wovyr/tls`,
+`WOVYR_TLS_CERT`/`WOVYR_TLS_KEY` set in the ConfigMap, both probes switched to
 `scheme: HTTPS` (kubelet skips cert verification, so self-signed works), and
-`APEX_TLS_TERMINATED_UPSTREAM` deliberately **not** emitted when enabled (two
+`WOVYR_TLS_TERMINATED_UPSTREAM` deliberately **not** emitted when enabled (two
 distinct trust models; emitting both would mask a broken mount behind the
-proxy claim). `apex.tls.enabled` without a `secretName` fails at template time
+proxy claim). `wovyr.tls.enabled` without a `secretName` fails at template time
 (`fail`), and the combination was validated with a freshly-downloaded portable
 `helm` v3.16.4: `helm lint` clean, default + TLS renders both parse as YAML,
 the fail-closed message confirmed. **Terraform**: recorded as a deliberate
 scope-out in `docs/12-deployment/terraform.md` (→1.2.0) — generic modules +
 Helm/compose/systemd cover the single-node topology, and a first-party module
-would wrap them with no Apex-specific logic; revisit at the multi-service
+would wrap them with no Wovyr-specific logic; revisit at the multi-service
 split.
 
 ## OBS-301 `[P2]` — Queue-depth / in-flight / DLQ gauges — **DONE (2026-07-18)**
@@ -1600,7 +1600,7 @@ webhook DLQ — only counters/histograms exist. (PRD-004 R-L.2; audit Med.)
 **Acceptance criteria.** `/metrics` exposes the gauges; a test asserts they move with
 load.
 
-**Files.** `crates/apex-server/src/*`, `crates/apex-telemetry/*`. **Size.** M.
+**Files.** `crates/wovyr-server/src/*`, `crates/wovyr-telemetry/*`. **Size.** M.
 **Depends on:** SRV-103.
 
 **Resolution.** The `Metrics` registry gained a third instrument family:
@@ -1611,20 +1611,20 @@ Prometheus and OpenMetrics outputs, dual-written to OTLP via a new
 `/metrics` handler (`refresh_operability_gauges`) from the durable
 source-of-truth stores rather than maintained by inc/dec bookkeeping — the
 design choice that makes them restart-proof and drift-immune by construction:
-`apex_async_runs_in_flight` (RunStore `Running` count),
-`apex_quota_runs_in_flight` (QuotaTracker permit-ledger sum; poisoned-lock
+`wovyr_async_runs_in_flight` (RunStore `Running` count),
+`wovyr_quota_runs_in_flight` (QuotaTracker permit-ledger sum; poisoned-lock
 reads degrade to 0 rather than panicking the scrape — the handler modules deny
-`expect_used`), `apex_workflow_executions_active` (checkpoint list filtered
-non-terminal), `apex_workflow_timers_pending` (`timers.due(u64::MAX)`),
-`apex_webhook_outbox_pending` + `apex_webhook_dlq_size` (a new
+`expect_used`), `wovyr_workflow_executions_active` (checkpoint list filtered
+non-terminal), `wovyr_workflow_timers_pending` (`timers.due(u64::MAX)`),
+`wovyr_webhook_outbox_pending` + `wovyr_webhook_dlq_size` (a new
 `WebhookOutbox::depths()`). A store error logs a warning and skips that gauge
 (stale > fabricated). The acceptance test
 (`operability_gauges_move_with_load`) scrapes the real router, seeds an async
 run + outbox entry + timer, asserts each gauge moved **by delta from its
-recorded baseline** (the store is `~/.apex`-shared by design, so absolute
+recorded baseline** (the store is `~/.wovyr`-shared by design, so absolute
 zeros would be flaky), then drains and asserts the return, with the drained
 delivery landing as `+1` on the DLQ gauge. Found and cleaned along the way: 20
-stale pre-API-702 PascalCase checkpoints in `~/.apex/workflows` that made
+stale pre-API-702 PascalCase checkpoints in `~/.wovyr/workflows` that made
 `workflows.list()` error (moved aside to `workflows-stale-preapi702-backup/`).
 
 ## OBS-302 `[P3]` — Traces on store/queue/dispatch + SLO burn signals — **DONE (2026-07-18)**
@@ -1640,7 +1640,7 @@ alert-rule file + Grafana dashboard JSON + multi-window burn-rate metrics under
 **Acceptance criteria.** An end-to-end trace spans handler→store→queue; alert rules
 lint and load.
 
-**Files.** `crates/apex-workflow/src/*`, `deployment/observability/*`. **Size.** M.
+**Files.** `crates/wovyr-workflow/src/*`, `deployment/observability/*`. **Size.** M.
 **Depends on:** none.
 
 **Resolution.** **Spans** (matching the existing `workflow.activity`
@@ -1654,7 +1654,7 @@ in-memory store stays uninstrumented — test-only); the Postgres
 `workflow.worker.step` (records the leased execution id into the span after
 lease); and `workflow.timer.poll` (records the fired count). The end-to-end
 acceptance criterion is **pinned by a test**, not asserted by hand:
-`apex-workflow/tests/tracing_spans.rs` installs a minimal hand-rolled
+`wovyr-workflow/tests/tracing_spans.rs` installs a minimal hand-rolled
 `tracing::Subscriber` (no new dev-deps) that tracks contextual parentage via
 an enter/exit stack on a current-thread runtime, drives a real
 submit→enqueue→worker-lease→resume run over `FileStore`, and asserts both
@@ -1665,7 +1665,7 @@ own `workflow.start` ⊃ store writes. **SLO burn assets**:
 `deployment/observability/burn-rates.yml` extends the existing OBS-803
 starter with the SRE-workbook multi-window multi-burn-rate pattern against a
 99.5%/30-day availability SLO — recording rules
-`apex:api_error_ratio:rate{5m,30m,1h,6h,3d}`, paired long+short-window alerts
+`wovyr:api_error_ratio:rate{5m,30m,1h,6h,3d}`, paired long+short-window alerts
 (fast 14.4× on 1h+5m, slow 6× on 6h+30m as pages; trickle 1× on 3d+6h as a
 ticket; header documents the threshold rescale for other SLO targets), and
 backpressure alerts over the OBS-301 gauges (DLQ `delta()` growth, sustained
@@ -1711,17 +1711,17 @@ chunking/reranker/re-embedding).
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.13.0 | 2026-07-19 | ECO-305 + SEC-302 + RAG-301 implemented and marked DONE with implementation notes — **Phase 3 complete, all seven exit criteria met**: ECO-305 (deterministic OSV/CVE `VulnFeed` in the publish scanner, Critical `component.vulnerable` findings gated by the existing scan-severity ceiling, loaded from `~/.apex/marketplace/osv.json` by server and CLI alike; acceptance test flags a known-vulnerable SBOM component by semver range and clears the fixed version); SEC-302 (request-scoped `SecretChannel::Stdin` made the **default** on both capability loaders — secrets ride a versioned stdin envelope and never enter the guest environment, `Env` the explicit legacy opt-out, SDK reads both shapes transparently and fails closed on a newer ABI; proven from inside real guests on both the container path (docker-gated) and the WASI path (an `environ_sizes_get`-counting WAT module: 0 env entries on stdin channel, 1 on env channel)); RAG-301 (`embedding_model` stamped on every record + `MemoryEngine::migrate_embeddings` — incremental re-embed of only-stale records, written via a new in-place `MemoryStore::update` on all five stores incl. Postgres/Tiered with migration `V4__embedding_model.sql`; acceptance test proves uniform dimensionality/model id with ids/seqs/links preserved and an incremental no-op re-run). Status header → Complete; exit-criteria section annotated with the met-as-of date and the deliberate leftovers |
-| 1.12.0 | 2026-07-18 | OBS-301/302 + DEP-302 implemented and marked DONE with implementation notes, closing out WS-L (operability) entirely: OBS-301 (gauge instrument family in `apex-telemetry` + six operability gauges recomputed at scrape time from the durable stores — restart-proof/drift-immune by construction — with a delta-based moves-with-load acceptance test against the real router); OBS-302 (tracing spans across the workflow engine's entry points, both durable store backends, the Postgres queue, worker step, and timer poll — end-to-end nesting pinned by a hand-rolled-subscriber test — plus promtool-validated multi-window burn-rate recording/alert rules at 99.5%/30d, OBS-301-gauge backpressure alerts, and SLO-burn/operability dashboard panels); DEP-302 (end-to-end operator upgrade/migration runbook `upgrade-and-migration.md` with per-shape variants and a restore-based rollback doctrine, optional in-process Helm TLS templated fail-closed and helm-lint/template-validated, Terraform first-party artifacts explicitly scoped out in `terraform.md` v1.2.0). WS-L done; remaining Phase-3 tickets: ECO-305, SEC-302, RAG-301 |
+| 1.13.0 | 2026-07-19 | ECO-305 + SEC-302 + RAG-301 implemented and marked DONE with implementation notes — **Phase 3 complete, all seven exit criteria met**: ECO-305 (deterministic OSV/CVE `VulnFeed` in the publish scanner, Critical `component.vulnerable` findings gated by the existing scan-severity ceiling, loaded from `~/.wovyr/marketplace/osv.json` by server and CLI alike; acceptance test flags a known-vulnerable SBOM component by semver range and clears the fixed version); SEC-302 (request-scoped `SecretChannel::Stdin` made the **default** on both capability loaders — secrets ride a versioned stdin envelope and never enter the guest environment, `Env` the explicit legacy opt-out, SDK reads both shapes transparently and fails closed on a newer ABI; proven from inside real guests on both the container path (docker-gated) and the WASI path (an `environ_sizes_get`-counting WAT module: 0 env entries on stdin channel, 1 on env channel)); RAG-301 (`embedding_model` stamped on every record + `MemoryEngine::migrate_embeddings` — incremental re-embed of only-stale records, written via a new in-place `MemoryStore::update` on all five stores incl. Postgres/Tiered with migration `V4__embedding_model.sql`; acceptance test proves uniform dimensionality/model id with ids/seqs/links preserved and an incremental no-op re-run). Status header → Complete; exit-criteria section annotated with the met-as-of date and the deliberate leftovers |
+| 1.12.0 | 2026-07-18 | OBS-301/302 + DEP-302 implemented and marked DONE with implementation notes, closing out WS-L (operability) entirely: OBS-301 (gauge instrument family in `wovyr-telemetry` + six operability gauges recomputed at scrape time from the durable stores — restart-proof/drift-immune by construction — with a delta-based moves-with-load acceptance test against the real router); OBS-302 (tracing spans across the workflow engine's entry points, both durable store backends, the Postgres queue, worker step, and timer poll — end-to-end nesting pinned by a hand-rolled-subscriber test — plus promtool-validated multi-window burn-rate recording/alert rules at 99.5%/30d, OBS-301-gauge backpressure alerts, and SLO-burn/operability dashboard panels); DEP-302 (end-to-end operator upgrade/migration runbook `upgrade-and-migration.md` with per-shape variants and a restore-based rollback doctrine, optional in-process Helm TLS templated fail-closed and helm-lint/template-validated, Terraform first-party artifacts explicitly scoped out in `terraform.md` v1.2.0). WS-L done; remaining Phase-3 tickets: ECO-305, SEC-302, RAG-301 |
 | 1.0.0 | 2026-07-09 | Initial Phase-3 tickets from PRD-004 / the 2026-07-09 engineering audit (ecosystem, scale, DX, UI, operability) |
 | 1.1.0 | 2026-07-14 | ECO-301 (MCP client tool-source: stdio + streamable-HTTP transports, handshake/paginated discovery/`tools/call` proxying into `ToolRegistry` as permissioned `Tool` impls, fail-closed error mapping + timeouts) implemented and marked DONE with implementation notes — Phase 3 started |
-| 1.2.0 | 2026-07-14 | ECO-302 (plugin authoring SDK: new `apex-plugin-sdk` crate with typed `run_tool` stdin/stdout entry point + secret helpers; `apex plugin new` scaffold + `apex plugin build` digest-computing wasm32-wasip1 build step; real scaffold→build→sign→install acceptance round trip, wasm target added to CI) implemented and marked DONE with implementation notes |
+| 1.2.0 | 2026-07-14 | ECO-302 (plugin authoring SDK: new `wovyr-plugin-sdk` crate with typed `run_tool` stdin/stdout entry point + secret helpers; `wovyr plugin new` scaffold + `wovyr plugin build` digest-computing wasm32-wasip1 build step; real scaffold→build→sign→install acceptance round trip, wasm target added to CI) implemented and marked DONE with implementation notes |
 | 1.3.0 | 2026-07-14 | WFL-301/302 (engine-native `for_each`/`map` fan-out: runtime-collection expansion into concurrency-capped, durably-resumable per-item instances joined in item order; `max_items` fail-closed bound; collection pinned into the checkpoint on first encounter, never recomputed on resume) implemented and marked DONE with implementation notes — 18 new tests (9 engine integration + 9 definition-load unit) |
-| 1.4.0 | 2026-07-14 | ECO-304 (one-shot `apex plugin publish --key`: recomputes real artifact digests from disk, rewrites `plugin.yaml`, signs it, and writes the publisher's `.pub` alongside the package so the printed trust line is directly actionable — collapsing `keygen`→hand-edit-digests→`sign`→operator-`trust` into one command) implemented and marked DONE with implementation notes — 4 new unit tests, no marketplace or wasm toolchain needed to run them |
-| 1.5.0 | 2026-07-14 | WFL-303..308 (all remaining WS-H tickets) implemented and marked DONE with implementation notes, closing out WS-H entirely: WFL-303 fail-closed activity-output size cap (permanent failure via the saga path, not a hard abort); WFL-304 event-log paging (`history_page`, real bounded `FileStore`/`PostgresStore` implementations) + explicit opt-in retention (`compact_history`), plus a proof that `resume` already never reads the log at all; WFL-305 indexed `workflow_name`/`status` Postgres columns + SQL-side filtering/pagination (migration V3), proven via a deliberately-corrupt non-matching row that would fail to decode if `list()` ever fell back to scanning; WFL-306 a `fire_at`-sorted `BTreeSet` index for `InMemoryTimerStore` + `TimerDispatcher`/`ScheduleDispatcher::run_adaptive` (sleep until the next deadline, capped at a max interval), proven with a real wall-clock near-deadline-timer test; WFL-307 an `ActivityContext.progress` channel + `ActivityProgress` event, live on the sequential activity path via `tokio::select!`; WFL-308 a versioned event wire envelope (`encode_event`/`decode_event`, fail-closed on an unknown future version) now used by every store. 30 new tests total; full `apex-workflow` suite + whole-workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
-| 1.6.0 | 2026-07-14 | SBX-301..304 (all of WS-E) implemented and marked DONE with implementation notes, closing out WS-E entirely: SBX-301 a confined `fs_write` builtin (opt-in like `shell`) with a write-specific symlink-escape guard beyond `fs_read`'s existing confinement; SBX-302 a sandboxed `code_execute` tool (Python/Node) routed through the identical SBX-101/SEC-305 backend selection `ShellTool` uses, resource-limited and egress-controlled, including a real Windows "app execution alias" false-positive found and fixed in the test gating itself; SBX-303 a new `apex-tool-macros` proc-macro crate (`#[derive(Tool)]`) generating `ToolMetadata`/JSON-Schema (via `schemars`)/typed-parse boilerplate so a tool author never hand-writes a schema literal or a `.get().and_then()` chain; SBX-304 an explicit, documented platform-matrix fail-closed check (Linux+Docker only) in `ContainerSandbox::execute`, replacing what used to be only an *accidental* fail-closed side effect of a missing `nsenter` binary, and additionally closing a real, previously-unguarded Podman gap. 27 new tests total (8 fs_write + 9 code_execute + 4 derive(Tool) + 2 registry opt-in + 4 egress-lockdown-gate); full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
-| 1.7.0 | 2026-07-14 | SRV-302..307 (all of WS-G) implemented and marked DONE with implementation notes, closing out WS-G entirely: SRV-302 an mtime-stamped in-memory cache for `FileApiKeyStore` (one `stat()` replaces a full read+parse per request in the common case); SRV-303 a real generated OpenAPI spec (`#[utoipa::path]` on all ~65 routes + `ToSchema` request/error types, served at `GET /openapi.json`, verified live end-to-end via a real `apex dev` server + `redocly lint` at 0 errors, with the CI contract gate repointed at the live document instead of the hand-written `openapi.yaml`); SRV-304 `lib.rs`'s inline test suite moved to a file-backed `tests.rs` submodule (2,842 → 444 lines, same crate-internal visibility, no `pub` widening); SRV-305 the idempotency store rewritten from a per-`put` full-file rewrite to an append-only JSON-lines log with periodic compaction (O(1) amortized instead of O(entries) per call); SRV-306 an 11-file audit finding zero attacker-triggerable unwraps in production handler code, plus a real `cfg_attr(not(test), warn(...))`-gated clippy lint (verified to actually fire) guarding regressions; SRV-307 Redis-shared concurrency slots mirroring SRV-201's `RateLimiter` design (atomic Lua increment-if-under-limit, `Drop`-triggered fire-and-forget async release, a documented 24h crash-recovery safety-net TTL), `admit_run` converted to `async fn` across all call sites. 8 new tests total (2 SRV-302 + 2 SRV-305 + 3 SRV-307 capability-gated); a pre-existing, unrelated flaky test in `rate_limit.rs` was found (and, in a same-day follow-up, fixed) on this Windows dev machine while validating SRV-307; full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout, incl. the `redis` feature build |
+| 1.4.0 | 2026-07-14 | ECO-304 (one-shot `wovyr plugin publish --key`: recomputes real artifact digests from disk, rewrites `plugin.yaml`, signs it, and writes the publisher's `.pub` alongside the package so the printed trust line is directly actionable — collapsing `keygen`→hand-edit-digests→`sign`→operator-`trust` into one command) implemented and marked DONE with implementation notes — 4 new unit tests, no marketplace or wasm toolchain needed to run them |
+| 1.5.0 | 2026-07-14 | WFL-303..308 (all remaining WS-H tickets) implemented and marked DONE with implementation notes, closing out WS-H entirely: WFL-303 fail-closed activity-output size cap (permanent failure via the saga path, not a hard abort); WFL-304 event-log paging (`history_page`, real bounded `FileStore`/`PostgresStore` implementations) + explicit opt-in retention (`compact_history`), plus a proof that `resume` already never reads the log at all; WFL-305 indexed `workflow_name`/`status` Postgres columns + SQL-side filtering/pagination (migration V3), proven via a deliberately-corrupt non-matching row that would fail to decode if `list()` ever fell back to scanning; WFL-306 a `fire_at`-sorted `BTreeSet` index for `InMemoryTimerStore` + `TimerDispatcher`/`ScheduleDispatcher::run_adaptive` (sleep until the next deadline, capped at a max interval), proven with a real wall-clock near-deadline-timer test; WFL-307 an `ActivityContext.progress` channel + `ActivityProgress` event, live on the sequential activity path via `tokio::select!`; WFL-308 a versioned event wire envelope (`encode_event`/`decode_event`, fail-closed on an unknown future version) now used by every store. 30 new tests total; full `wovyr-workflow` suite + whole-workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
+| 1.6.0 | 2026-07-14 | SBX-301..304 (all of WS-E) implemented and marked DONE with implementation notes, closing out WS-E entirely: SBX-301 a confined `fs_write` builtin (opt-in like `shell`) with a write-specific symlink-escape guard beyond `fs_read`'s existing confinement; SBX-302 a sandboxed `code_execute` tool (Python/Node) routed through the identical SBX-101/SEC-305 backend selection `ShellTool` uses, resource-limited and egress-controlled, including a real Windows "app execution alias" false-positive found and fixed in the test gating itself; SBX-303 a new `wovyr-tool-macros` proc-macro crate (`#[derive(Tool)]`) generating `ToolMetadata`/JSON-Schema (via `schemars`)/typed-parse boilerplate so a tool author never hand-writes a schema literal or a `.get().and_then()` chain; SBX-304 an explicit, documented platform-matrix fail-closed check (Linux+Docker only) in `ContainerSandbox::execute`, replacing what used to be only an *accidental* fail-closed side effect of a missing `nsenter` binary, and additionally closing a real, previously-unguarded Podman gap. 27 new tests total (8 fs_write + 9 code_execute + 4 derive(Tool) + 2 registry opt-in + 4 egress-lockdown-gate); full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout |
+| 1.7.0 | 2026-07-14 | SRV-302..307 (all of WS-G) implemented and marked DONE with implementation notes, closing out WS-G entirely: SRV-302 an mtime-stamped in-memory cache for `FileApiKeyStore` (one `stat()` replaces a full read+parse per request in the common case); SRV-303 a real generated OpenAPI spec (`#[utoipa::path]` on all ~65 routes + `ToSchema` request/error types, served at `GET /openapi.json`, verified live end-to-end via a real `wovyr dev` server + `redocly lint` at 0 errors, with the CI contract gate repointed at the live document instead of the hand-written `openapi.yaml`); SRV-304 `lib.rs`'s inline test suite moved to a file-backed `tests.rs` submodule (2,842 → 444 lines, same crate-internal visibility, no `pub` widening); SRV-305 the idempotency store rewritten from a per-`put` full-file rewrite to an append-only JSON-lines log with periodic compaction (O(1) amortized instead of O(entries) per call); SRV-306 an 11-file audit finding zero attacker-triggerable unwraps in production handler code, plus a real `cfg_attr(not(test), warn(...))`-gated clippy lint (verified to actually fire) guarding regressions; SRV-307 Redis-shared concurrency slots mirroring SRV-201's `RateLimiter` design (atomic Lua increment-if-under-limit, `Drop`-triggered fire-and-forget async release, a documented 24h crash-recovery safety-net TTL), `admit_run` converted to `async fn` across all call sites. 8 new tests total (2 SRV-302 + 2 SRV-305 + 3 SRV-307 capability-gated); a pre-existing, unrelated flaky test in `rate_limit.rs` was found (and, in a same-day follow-up, fixed) on this Windows dev machine while validating SRV-307; full workspace `cargo build`/`clippy -D warnings`/`fmt`/`test` clean throughout, incl. the `redis` feature build |
 | 1.11.0 | 2026-07-17 | DX-301..306 (all of WS-J) implemented and marked DONE with implementation notes, closing out the DX workstream entirely: DX-301 (idempotency-keyed mutation retry + waitForCompletion/wait_for_completion in both SDKs, asyncio Python client with a thread-bridged SSE stream — 15 new SDK tests; drive-by fix for the dashboard's pre-API-702 status-casing bug); DX-302 (cargo-llvm-cov coverage job + the workspace's first criterion benches with a github-action-benchmark regression gate — and the discovery that **ci.yml had been unparseable since DEP-301's 2026-07-14 commit** (a stranded Trivy line), meaning no CI ran for three days of pushes; fixed, both workflows now parse); DX-303 (per-SDK CHANGELOGs, health()-handshake skew warning with test-pinned version-lockstep constants, stale README gap sections corrected); DX-304 (`scripts/gen-cli-docs.py` regenerates the 59-command CLI reference from the clap tree, CI-diffed); DX-305 (Status-vocabulary convention in SUMMARY.md + a verified 5-minute README quickstart); DX-306 (ADR-0013: TS+Python only, OpenAPI generation for other languages, revisit trigger recorded) |
-| 1.10.0 | 2026-07-17 | UI-301..306 (all of WS-K) implemented and marked DONE with implementation notes, closing out the dashboard workstream entirely: UI-302 first (SDK-source types via a type-only tsconfig path alias, the `yaml` library replacing both hand-rolled DSL codecs — with the workflow specs repinned to parsed semantics — plus `core/http-error.ts`'s shared `errText` + global toast interceptor with 30s dedupe and a `silentErrors()` opt-out, and a found-and-fixed live envelope bug in `WorkflowService.tools()`); UI-301 (shared `StatusPill`/`Tabs`/`Modal`/`ConfirmService`+`ConfirmDialog`/`EmptyState`, tri-duplicated table CSS globalized, native `confirm()` gone); UI-303 (RBAC-gated `/audit` viewer over SEC-301's paged query — live verification against a real `apex dev` caught and fixed the SDK's flat, wrong `AuditEntry` type); UI-304 (off-canvas nav drawer ≤900px, in-card table overflow, phone-width topbar/toast handling); UI-305 (label association, aria-labels, modal focus trap/restore, roving-tabindex tabs, and an `axe-core` gate inside the Karma suite that already caught a real heading-order violation); UI-306 (Playground surface, fake nav badges removed, i18n target dropped — decision recorded, nav icons moved to a `public/icons.svg` sprite and `SafeSvgPipe` deleted). 23 new specs (51 total, all green); `ng build` clean; smoke-verified in a real browser against a live server (desktop + 390px mobile), incl. an engine-side parse check of both YAML emitters' output |
-| 1.9.0 | 2026-07-16 | ECO-303 (container capability loader) implemented and marked DONE with implementation notes: `ContainerCapabilityRuntime` in `apex-plugin` (compiled unconditionally — plugins are finally executable without the heavy `wasi` feature), Docker/Podman/gVisor over `ContainerSandbox`, same stdin/stdout JSON ABI + `APEX_SECRET_*` injection as the WASM loader via shared helpers, fail-closed loader routing (a `gvisor`-declared capability is refused by a plain-Docker runtime, never demoted); enabler in `apex-tools`: `ContainerSandbox::execute_with_stdin` + `SandboxCommand.env` support with env *names* on the argv and values via the CLI process environment (secrets never visible in host `ps`). 8 new tests (2 docker/runsc-gated e2e — both actually executed against the real runtimes on this dev box — + 4 fail-closed unit + 1 argv-shape + 1 WASI-parity via the shared-helper refactor); the pre-existing status line was also corrected to count SEC-301 (done since 2026-07-14 but never listed) |
-| 1.8.0 | 2026-07-14 | DEP-301 (systemd unit + install script for the appliance) implemented and marked DONE with implementation notes: `deployment/systemd/apex.service` (real sandboxing — `ProtectSystem=strict` etc. — not decorative) + `apex.env.example`, idempotent `deployment/install.sh` (dedicated system user, `/var/lib/apex/.apex` at `0700`, never overwrites an existing env file), new `docs/12-deployment/systemd.md`, a `.gitattributes` forcing LF on `*.sh`/`*.service` (a real corruption risk caught before it shipped, not hypothetical), and a `systemd-install` CI job that runs the actual install on a genuine systemd VM, polls `/healthz`, and re-runs `install.sh` to mechanically check the idempotency claim rather than trust a comment |
+| 1.10.0 | 2026-07-17 | UI-301..306 (all of WS-K) implemented and marked DONE with implementation notes, closing out the dashboard workstream entirely: UI-302 first (SDK-source types via a type-only tsconfig path alias, the `yaml` library replacing both hand-rolled DSL codecs — with the workflow specs repinned to parsed semantics — plus `core/http-error.ts`'s shared `errText` + global toast interceptor with 30s dedupe and a `silentErrors()` opt-out, and a found-and-fixed live envelope bug in `WorkflowService.tools()`); UI-301 (shared `StatusPill`/`Tabs`/`Modal`/`ConfirmService`+`ConfirmDialog`/`EmptyState`, tri-duplicated table CSS globalized, native `confirm()` gone); UI-303 (RBAC-gated `/audit` viewer over SEC-301's paged query — live verification against a real `wovyr dev` caught and fixed the SDK's flat, wrong `AuditEntry` type); UI-304 (off-canvas nav drawer ≤900px, in-card table overflow, phone-width topbar/toast handling); UI-305 (label association, aria-labels, modal focus trap/restore, roving-tabindex tabs, and an `axe-core` gate inside the Karma suite that already caught a real heading-order violation); UI-306 (Playground surface, fake nav badges removed, i18n target dropped — decision recorded, nav icons moved to a `public/icons.svg` sprite and `SafeSvgPipe` deleted). 23 new specs (51 total, all green); `ng build` clean; smoke-verified in a real browser against a live server (desktop + 390px mobile), incl. an engine-side parse check of both YAML emitters' output |
+| 1.9.0 | 2026-07-16 | ECO-303 (container capability loader) implemented and marked DONE with implementation notes: `ContainerCapabilityRuntime` in `wovyr-plugin` (compiled unconditionally — plugins are finally executable without the heavy `wasi` feature), Docker/Podman/gVisor over `ContainerSandbox`, same stdin/stdout JSON ABI + `WOVYR_SECRET_*` injection as the WASM loader via shared helpers, fail-closed loader routing (a `gvisor`-declared capability is refused by a plain-Docker runtime, never demoted); enabler in `wovyr-tools`: `ContainerSandbox::execute_with_stdin` + `SandboxCommand.env` support with env *names* on the argv and values via the CLI process environment (secrets never visible in host `ps`). 8 new tests (2 docker/runsc-gated e2e — both actually executed against the real runtimes on this dev box — + 4 fail-closed unit + 1 argv-shape + 1 WASI-parity via the shared-helper refactor); the pre-existing status line was also corrected to count SEC-301 (done since 2026-07-14 but never listed) |
+| 1.8.0 | 2026-07-14 | DEP-301 (systemd unit + install script for the appliance) implemented and marked DONE with implementation notes: `deployment/systemd/wovyr.service` (real sandboxing — `ProtectSystem=strict` etc. — not decorative) + `wovyr.env.example`, idempotent `deployment/install.sh` (dedicated system user, `/var/lib/wovyr/.wovyr` at `0700`, never overwrites an existing env file), new `docs/12-deployment/systemd.md`, a `.gitattributes` forcing LF on `*.sh`/`*.service` (a real corruption risk caught before it shipped, not hypothetical), and a `systemd-install` CI job that runs the actual install on a genuine systemd VM, polls `/healthz`, and re-runs `install.sh` to mechanically check the idempotency claim rather than trust a comment |

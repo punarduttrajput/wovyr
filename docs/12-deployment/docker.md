@@ -9,9 +9,9 @@ Document ID: DEP-001
 **File Path:** `docs/12-deployment/docker.md`  
 **Version:** 1.1.0  
 **Status:** Draft — describes the **long-term, aspirational** per-service
-image split (`apex/api-gateway`, `apex/agent-runtime`, …), a gRPC port, and
+image split (`wovyr/api-gateway`, `wovyr/agent-runtime`, …), a gRPC port, and
 NATS/object-storage config. **Not built** — the platform today is one binary
-(`apex`) built from one Dockerfile
+(`wovyr`) built from one Dockerfile
 ([`deployment/docker/Dockerfile`](../../deployment/docker/Dockerfile), which
 does build in CI and takes an optional `FEATURES` build arg), with no gRPC
 surface and no NATS dependency anywhere in this workspace. For what actually
@@ -24,7 +24,7 @@ builds and runs, see [`docker-compose.md`](docker-compose.md) §10 and
 
 # 1. Purpose
 
-This document describes the container images for the Apex AI Platform and how to build and run them with Docker — the foundation for all higher-level topologies.
+This document describes the container images for the Wovyr AI Platform and how to build and run them with Docker — the foundation for all higher-level topologies.
 
 ---
 
@@ -32,17 +32,17 @@ This document describes the container images for the Apex AI Platform and how to
 
 | Image | Contents |
 |-------|----------|
-| `apex/platform` | All Rust services in one binary (dev/all-in-one) |
-| `apex/api-gateway` | API Gateway |
-| `apex/agent-runtime` | Agent Runtime |
-| `apex/workflow-engine` | Workflow Engine |
-| `apex/llm-gateway` | LLM Gateway |
-| `apex/memory-engine` | Memory Engine |
-| `apex/tool-runtime` | Tool Runtime (control plane + worker) |
-| `apex/plugin-engine` | Plugin Engine |
-| `apex/dashboard` | Angular UI + NestJS BFF |
+| `wovyr/platform` | All Rust services in one binary (dev/all-in-one) |
+| `wovyr/api-gateway` | API Gateway |
+| `wovyr/agent-runtime` | Agent Runtime |
+| `wovyr/workflow-engine` | Workflow Engine |
+| `wovyr/llm-gateway` | LLM Gateway |
+| `wovyr/memory-engine` | Memory Engine |
+| `wovyr/tool-runtime` | Tool Runtime (control plane + worker) |
+| `wovyr/plugin-engine` | Plugin Engine |
+| `wovyr/dashboard` | Angular UI + NestJS BFF |
 
-The single `apex/platform` image enables the
+The single `wovyr/platform` image enables the
 [single-binary dev mode](../02-architecture/c4-container.md#7-deployment-models);
 per-service images enable independent scaling in production.
 
@@ -77,11 +77,11 @@ semver + git SHA; images are signed (see
 
 ```bash
 docker run --rm -p 8080:8080 \
-  -e APEX_DATABASE_URL=postgres://... \
-  -e APEX_REDIS_URL=redis://... \
-  -e APEX_QDRANT_URL=http://... \
-  -e APEX_NATS_URL=nats://... \
-  apex/platform:latest
+  -e WOVYR_DATABASE_URL=postgres://... \
+  -e WOVYR_REDIS_URL=redis://... \
+  -e WOVYR_QDRANT_URL=http://... \
+  -e WOVYR_NATS_URL=nats://... \
+  wovyr/platform:latest
 ```
 
 For local evaluation without external state, the all-in-one image can start with
@@ -95,13 +95,13 @@ All config is environment-driven (12-factor). Common variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `APEX_DATABASE_URL` | PostgreSQL |
-| `APEX_REDIS_URL` | Redis |
-| `APEX_QDRANT_URL` | Qdrant |
-| `APEX_NATS_URL` | NATS JetStream |
-| `APEX_OBJECT_STORE_*` | Object storage |
-| `APEX_LOG` | Log level |
-| `APEX_SECRET_BACKEND` | Secret vault reference |
+| `WOVYR_DATABASE_URL` | PostgreSQL |
+| `WOVYR_REDIS_URL` | Redis |
+| `WOVYR_QDRANT_URL` | Qdrant |
+| `WOVYR_NATS_URL` | NATS JetStream |
+| `WOVYR_OBJECT_STORE_*` | Object storage |
+| `WOVYR_LOG` | Log level |
+| `WOVYR_SECRET_BACKEND` | Secret vault reference |
 
 Secrets are passed via secret references, never baked into images.
 

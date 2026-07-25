@@ -18,14 +18,14 @@
   <!-- Install-from-file panel (applies to both tabs) -->
   @if (showInstall()) {
     <div class="card install-panel">
-      <div class="card-h"><h3>Install plugin from .apexpkg</h3></div>
+      <div class="card-h"><h3>Install plugin from .wovyrpkg</h3></div>
       <div class="install-body">
         <label class="field-label">
           Package file
           <div class="file-row">
             <label class="btn file-btn">
               Choose file
-              <input type="file" accept=".apexpkg" (change)="onFileSelected($event)" style="display:none" />
+              <input type="file" accept=".wovyrpkg" (change)="onFileSelected($event)" style="display:none" />
             </label>
             <span class="mono mini muted">{{ installFileName || 'no file selected' }}</span>
           </div>
@@ -261,8 +261,8 @@
         <div>
           <b>{{ searched() ? 'No matching listings' : 'Search the registry' }}</b>
           <span>Publish one with the CLI to see it here:</span>
-          <code class="block-code">apex plugin publish ./my-plugin --category devtools</code>
-          <span>then browse, then <code>apex plugin get &lt;publisher/name&gt;</code> or hit Install above.</span>
+          <code class="block-code">wovyr plugin publish ./my-plugin --category devtools</code>
+          <span>then browse, then <code>wovyr plugin get &lt;publisher/name&gt;</code> or hit Install above.</span>
         </div>
       </div>
     }
@@ -327,7 +327,7 @@
         <div>
           <b>No plugins installed</b>
           <span>Find one under <b>Browse</b> and click Install, or use the CLI:</span>
-          <code class="block-code">apex plugin get acme/hello --grant net:egress:api.example.com</code>
+          <code class="block-code">wovyr plugin get acme/hello --grant net:egress:api.example.com</code>
           <span>then it'll appear here to enable/disable.</span>
         </div>
       </div>

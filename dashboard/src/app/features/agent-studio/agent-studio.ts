@@ -6,7 +6,7 @@ import { errText } from '../../core/http-error';
 import { AgentDraft, StreamEvent, ToolInfo } from '../../core/api.types';
 
 /** The MCP connection name named by a tool id of the form
- * `mcp__<server>__<tool>` (the proxy id shape `apex-tools::mcp`'s
+ * `mcp__<server>__<tool>` (the proxy id shape `wovyr-tools::mcp`'s
  * `McpClient::connect` produces) — `null` for a built-in/plugin tool id. */
 function mcpServerOf(id: string): string | null {
   const m = /^mcp__([A-Za-z0-9_-]+)__/.exec(id);
@@ -29,7 +29,7 @@ export class AgentStudio implements OnInit, OnDestroy {
     capability: 'chat',
     class: 'balanced',
     instructions:
-      'You are a documentation assistant for the Apex platform. Ground every answer in ' +
+      'You are a documentation assistant for the Wovyr platform. Ground every answer in ' +
       'retrieved docs and cite the section. If unsure, say so rather than guessing.',
     tools: ['fs_read', 'http_get'],
     mcpServers: [],

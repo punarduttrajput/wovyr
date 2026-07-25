@@ -1,11 +1,11 @@
 {
-  "name": "@apex-ai/sdk",
+  "name": "@wovyr/sdk",
   "version": "0.3.0",
-  "description": "TypeScript client for the Apex AI Platform API.",
+  "description": "TypeScript client for the Wovyr AI Platform API.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/punarduttrajput/Apex.git",
+    "url": "git+https://github.com/punarduttrajput/Wovyr.git",
     "directory": "sdks/typescript"
   },
   "type": "module",

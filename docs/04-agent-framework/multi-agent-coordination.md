@@ -18,7 +18,7 @@ Document ID: AGENT-008
 
 The Multi-Agent Coordination subsystem enables multiple autonomous AI agents to collaborate toward shared objectives while maintaining isolation, governance, observability, and deterministic workflow execution.
 
-Instead of relying on a single large agent to perform every task, Apex distributes work among specialized agents capable of planning, executing, reviewing, validating, and communicating with one another.
+Instead of relying on a single large agent to perform every task, Wovyr distributes work among specialized agents capable of planning, executing, reviewing, validating, and communicating with one another.
 
 The coordination framework transforms the platform into a distributed AI operating system.
 

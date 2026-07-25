@@ -12,7 +12,7 @@ import {
   Webhook,
 } from '../../core/api.types';
 
-/** Client for the tenancy + webhooks routes on apex-server. */
+/** Client for the tenancy + webhooks routes on wovyr-server. */
 @Injectable({ providedIn: 'root' })
 export class SettingsService {
   private http = inject(HttpClient);

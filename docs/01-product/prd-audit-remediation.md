@@ -50,10 +50,10 @@ The audit produced concrete, file:line-backed findings. Grouped by lens:
    attacker URL that returns `302 → http://169.254.169.254/...` reaches the
    cloud-metadata endpoint unguarded. Applies to both `http_get` and the MCP
    `Http` transport.
-2. **Cross-tenant authorization gap.** `apex-server`'s `tenancy::context()`
+2. **Cross-tenant authorization gap.** `wovyr-server`'s `tenancy::context()`
    grants an organization-scoped role whenever the request is project-less, via
    a `... || project.is_none()` clause. Any authenticated principal holding an
-   org role in *any* tenant can set `X-Apex-Tenant: <other>` and
+   org role in *any* tenant can set `X-Wovyr-Tenant: <other>` and
    enumerate/create organizations in a tenant they have no membership in.
 3. **"Tamper-evident audit log" is overstated.** The chain is an *unkeyed*
    SHA-256 with no external anchor. An actor with write access to `audit.jsonl`
@@ -138,13 +138,13 @@ The audit produced concrete, file:line-backed findings. Grouped by lens:
 | Existing asset | Role in this PRD |
 |---|---|
 | `http_get`'s SEC-304 `resolve_and_guard` + DNS-pinned client | The guard SEC-401 must extend to redirects and SEC-406 to more ranges — fix in one shared place; MCP `Http` transport inherits it |
-| `apex-server`'s `tenancy::context()` + the `tenant_authorize` default-deny path | The single function SEC-402 corrects; the SEC-105 authz-matrix CI job is where its regression test belongs |
-| `apex-audit`'s hash chain + `fsync` durability + concurrent-append fix | The *consistency* foundation SEC-403 upgrades to *tamper-resistance* (keyed MAC + head anchor), reusing the existing `AuditSink`/`verify` shape |
-| The `apex-kms` `Kms` trait + `root::from_env`/`from_file` | SEC-405 only changes the *fallback* branch to fail-closed; the crypto is untouched |
-| `apex-provider`'s `AIProvider::embed` default + `Gateway` provider list | AIC-301 adds a distinct embedding-provider resolution or a fail-loud config check at the trait/gateway boundary |
+| `wovyr-server`'s `tenancy::context()` + the `tenant_authorize` default-deny path | The single function SEC-402 corrects; the SEC-105 authz-matrix CI job is where its regression test belongs |
+| `wovyr-audit`'s hash chain + `fsync` durability + concurrent-append fix | The *consistency* foundation SEC-403 upgrades to *tamper-resistance* (keyed MAC + head anchor), reusing the existing `AuditSink`/`verify` shape |
+| The `wovyr-kms` `Kms` trait + `root::from_env`/`from_file` | SEC-405 only changes the *fallback* branch to fail-closed; the crypto is untouched |
+| `wovyr-provider`'s `AIProvider::embed` default + `Gateway` provider list | AIC-301 adds a distinct embedding-provider resolution or a fail-loud config check at the trait/gateway boundary |
 | The gateway's exact + semantic cache stores | AIC-302 bounds them (TTL sweep / LRU / capped scan) behind the existing `SemanticCacheStore` trait — no API change |
-| `apex-provider::tokenizer`'s `TokenCounter` | AIC-304 extends `count_message` to account for `parts`, behind the same trait |
-| `apex-workflow`'s `Definition::from_yaml` validate-on-load + `resolve_template` | WFL-309 adds a load-time reference/edge cross-check to the existing validation pass |
+| `wovyr-provider::tokenizer`'s `TokenCounter` | AIC-304 extends `count_message` to account for `parts`, behind the same trait |
+| `wovyr-workflow`'s `Definition::from_yaml` validate-on-load + `resolve_template` | WFL-309 adds a load-time reference/edge cross-check to the existing validation pass |
 | CI's `services-integration` job (real Postgres/Qdrant/Redis containers, fails-on-skip) | QA-401 adds the missing gated targets to this exact job; QA-403 adds a MinIO service for the S3 path |
 | `cargo llvm-cov` in the `coverage` job | QA-402 adds a `--fail-under` threshold to what already runs |
 | The workspace `version` field + `CHANGELOG.md` (DX-101) | STR-501 reconciles the version number with the narrative in one lockstep bump |
@@ -243,7 +243,7 @@ silently-broader grant or a silent wrong answer.
   `tenancy::context()`; an org-scoped role must require membership in the target
   org for org-level operations too. Add a regression test to the SEC-105 authz
   matrix asserting a tenant-A member is 403'd on org-level routes with
-  `X-Apex-Tenant: B`.
+  `X-Wovyr-Tenant: B`.
 - **SEC-403** Upgrade audit-log tamper-evidence to tamper-*resistance*: a keyed
   MAC (HMAC via a key held outside the log file, sourced like the KMS root key)
   over each entry, plus a persisted monotonic head/high-water-mark so tail
@@ -256,7 +256,7 @@ silently-broader grant or a silent wrong answer.
   never an unqualified one. Fail-closed refusal + a clear message is acceptable
   where isolation is unavailable; a silent unsandboxed run is not.
 - **SEC-405** KMS fail-closed on missing durable key material: refuse to start
-  when neither `APEX_KMS_ROOT_KEY` nor a persistent, writable key file is
+  when neither `WOVYR_KMS_ROOT_KEY` nor a persistent, writable key file is
   available, instead of minting an ephemeral in-memory root key that loses all
   sealed data on restart.
 - **SEC-406** Extend the SSRF IP blocklist to encapsulated/CGNAT ranges (6to4
@@ -395,7 +395,7 @@ the security-review script second.
 
 | Risk | Mitigation |
 |---|---|
-| SEC-403's keyed MAC needs a key held outside the log; a badly-sourced key just moves the problem | Source it the same way as the KMS root key (`APEX_KMS_ROOT_KEY`/escrowed file), reuse the SEC-405 fail-closed-on-missing-key stance |
+| SEC-403's keyed MAC needs a key held outside the log; a badly-sourced key just moves the problem | Source it the same way as the KMS root key (`WOVYR_KMS_ROOT_KEY`/escrowed file), reuse the SEC-405 fail-closed-on-missing-key stance |
 | SEC-404's native confinement floor can't reach Linux+Docker parity on Windows/macOS | Explicitly scope the claim rather than over-promise; fail-closed refusal where isolation is unavailable is an accepted outcome, documented as a platform gap |
 | AIC-301 "fail loud at config time" could break an existing deployment that relied on the silent-error path | It is already broken (errors per-call); moving the failure to startup is strictly more honest, and is a one-release "observe then enforce" rollout like PRV-101 |
 | STR-503's "experimental" labels read as walking back shipped features | Framed as honest maturity signaling, not removal; the code stays and keeps its tests — the label sets buyer expectations correctly |

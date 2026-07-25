@@ -16,7 +16,7 @@ Document ID: MEM-001
 
 # 1. Purpose
 
-This document specifies the **Memory Engine**, the deployable service that durably stores and serves all agent memory in the Apex AI Platform.
+This document specifies the **Memory Engine**, the deployable service that durably stores and serves all agent memory in the Wovyr AI Platform.
 
 The Engine centralizes everything that should not be re-implemented per agent: durable storage, embedding/indexing, hybrid retrieval, ranking, knowledge-graph maintenance, compression, retention, and access governance. It is the operational counterpart to the [Memory System](../04-agent-framework/memory-system.md) abstraction.
 

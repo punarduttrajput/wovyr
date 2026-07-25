@@ -15,7 +15,7 @@ import path from 'node:path';
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const DOCS = path.resolve(ROOT, '../docs');
 const OUT = path.join(ROOT, 'src/content/docs');
-const GITHUB_BLOB = 'https://github.com/punarduttrajput/Apex/blob/main/';
+const GITHUB_BLOB = 'https://github.com/punarduttrajput/Wovyr/blob/main/';
 
 // Manual overrides for pages the Status heuristic misclassifies.
 // Keys are docs-relative paths, e.g. '12-deployment/docker-compose.md'.
@@ -179,7 +179,7 @@ for (const rel of files) {
 fs.writeFileSync(
   path.join(OUT, 'index.mdx'),
   `---
-title: Apex
+title: Wovyr
 description: Generative UI Trust Runtime — built on an enterprise AI Agent Operating System written in Rust.
 template: splash
 hero:
@@ -192,7 +192,7 @@ hero:
       link: /16-examples/hello-agent/
       variant: minimal
     - text: GitHub
-      link: https://github.com/punarduttrajput/Apex
+      link: https://github.com/punarduttrajput/Wovyr
       icon: external
       variant: minimal
 ---

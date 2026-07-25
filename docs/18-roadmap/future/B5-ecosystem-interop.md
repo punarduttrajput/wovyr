@@ -31,12 +31,12 @@ Exploratory — graduates only via an [ADR](../../17-adr/index.md).
 > not part of this exploratory doc. This doc covers the *interop and federation*
 > frontier only.
 >
-> **Scope note (2026-07-15).** The *inbound* half of "MCP gateway" below — Apex
+> **Scope note (2026-07-15).** The *inbound* half of "MCP gateway" below — Wovyr
 > consuming external MCP servers, made usable without writing code — is no
 > longer exploratory: it graduated to a committed, scoped milestone,
 > [PRD-006](../../01-product/prd-mcp-connections.md) /
 > [v1.3 roadmap](../v1.3-mcp-connections.md). What remains exploratory here is
-> narrower than before: the *outbound* direction (Apex's own tools/agents
+> narrower than before: the *outbound* direction (Wovyr's own tools/agents
 > reachable **over** MCP by external clients) and cross-org federation. Read
 > "MCP gateway" below as that narrower remainder, not the inbound
 > connection-management PRD-006 already covers.
@@ -50,7 +50,7 @@ the `ToolRegistry`) but does not yet **interoperate outward** with the broader
 agent/tool ecosystem, nor **federate** across organizations:
 
 - **MCP gateway / protocol interop** — speak the Model Context Protocol (and
-  peers) so external tools/agents interoperate with Apex. Also covers **gRPC**,
+  peers) so external tools/agents interoperate with Wovyr. Also covers **gRPC**,
   named as a supported protocol in the Day-1 architecture docs
   (`docs/01-product/prd.md`, `docs/02-architecture/c4-container.md`) but never
   built — the shipping API is REST/JSON + SSE only. If a client segment genuinely
@@ -66,12 +66,12 @@ agent/tool ecosystem, nor **federate** across organizations:
 - **Vendor-neutral provider abstraction** — the `AIProvider` trait (chat +
   streaming + embeddings) and the `Gateway` already decouple the platform from
   any one provider; an MCP gateway is another adapter at that boundary.
-- **Tool registry + MCP-shaped tools** — `apex-tools`' `ToolRegistry` and the
+- **Tool registry + MCP-shaped tools** — `wovyr-tools`' `ToolRegistry` and the
   plugin tool host already model external capabilities as tools.
 - **Marketplace supply chain** — signing, SBOM/provenance, trust store, and the
-  human-review workflow (`apex-plugin` / `apex-marketplace`) are the trust
+  human-review workflow (`wovyr-plugin` / `wovyr-marketplace`) are the trust
   substrate any federation must extend, not bypass.
-- **Hard tenant/org isolation** — `apex-tenancy`'s default-deny RBAC/ABAC and the
+- **Hard tenant/org isolation** — `wovyr-tenancy`'s default-deny RBAC/ABAC and the
   server's cross-tenant isolation are the boundary federation must cross
   *explicitly and revocably*.
 
@@ -79,7 +79,7 @@ agent/tool ecosystem, nor **federate** across organizations:
 
 # 4. Direction (design sketch, non-committal)
 
-- **MCP gateway:** an adapter that exposes Apex tools/agents over MCP and consumes
+- **MCP gateway:** an adapter that exposes Wovyr tools/agents over MCP and consumes
   external MCP servers as tools — built at the existing provider/tool boundary, so
   the core is unaware of the wire protocol.
 - **Registries:** prompt/model registries modeled like the plugin marketplace
@@ -93,8 +93,8 @@ agent/tool ecosystem, nor **federate** across organizations:
 # 5. Requirements
 
 ## 5.1 Functional
-- Apex tools/agents are reachable over MCP; external MCP tools are usable inside
-  Apex runs.
+- Wovyr tools/agents are reachable over MCP; external MCP tools are usable inside
+  Wovyr runs.
 - Cross-org sharing requires an explicit grant and is fully revocable.
 - Shared artifacts carry provenance across the boundary (signed, verifiable).
 
@@ -137,7 +137,7 @@ Per-slice; federation specifically becomes an ADR + roadmap slot only with:
 - Tier A marketplace economics/safety
   ([PRD-002 §5.4](../../01-product/prd-future.md#54-ecosystem-marketplace-economics--safety))
   — a healthy first-party ecosystem should precede federation.
-- The existing supply-chain trust model (`apex-plugin` / `apex-marketplace`,
+- The existing supply-chain trust model (`wovyr-plugin` / `wovyr-marketplace`,
   [ADR-0009](../../17-adr/ADR-0009-keyless-signing.md)).
 
 ---

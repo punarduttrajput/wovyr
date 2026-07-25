@@ -18,7 +18,7 @@ illustrative, not current.
 
 # 1. Purpose
 
-This document defines the Clean Architecture principles used throughout the Apex AI Platform.
+This document defines the Clean Architecture principles used throughout the Wovyr AI Platform.
 
 It establishes:
 

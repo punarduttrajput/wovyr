@@ -1,0 +1,88 @@
+[package]
+name = "wovyr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The `wovyr` command-line interface for the Wovyr AI Platform."
+
+[[bin]]
+name = "wovyr"
+path = "src/main.rs"
+
+[features]
+# Durable tiered memory backend (Postgres + Qdrant), selected at runtime via
+# WOVYR_MEMORY_POSTGRES_URL + WOVYR_MEMORY_QDRANT_URL. Off by default (heavy deps).
+tiered-memory = ["wovyr-memory/tiered"]
+# OpenTelemetry OTLP trace export (spans → OTEL_EXPORTER_OTLP_ENDPOINT).
+otlp = ["wovyr-telemetry/otlp"]
+# The WASM plugin capability loader, so enabled plugin tools actually execute on
+# `agents run --local`. Off by default (pulls Wasmtime via wovyr-plugin/wasi). Pulls
+# the secret vault so a tenant-scoped run injects the plugin's secrets into the sandbox.
+plugin-wasi = ["wovyr-plugin/wasi"]
+# Rekor client for `plugin keyless-sign --rekor <url>` (witness signings in a
+# transparency log, ADR-0009). Off by default (pulls reqwest's blocking client).
+keyless-rekor = ["wovyr-plugin/rekor"]
+# Postgres-backed marketplace registry: when WOVYR_MARKETPLACE_POSTGRES_URL is set,
+# both `wovyr plugin publish|search|get` and the embedded `wovyr dev` server share the
+# same durable catalog instead of each process reading its own `registry.json`. Off by
+# default (pulls the `postgres` crate).
+postgres = ["wovyr-marketplace/postgres", "wovyr-server/postgres", "wovyr-workflow/postgres"]
+# Real local-model inference via mistral.rs: `agents run --local --provider mistralrs`
+# for a one-off CLI run, or `WOVYR_PROVIDER=mistralrs wovyr dev` to make the embedded
+# server (and hence the dashboard) run every agent against it. Off by default (pulls
+# the heavy mistral.rs inference engine and downloads real GGUF weights on first use).
+# See wovyr-provider's mistralrs_provider module for the model/env-var configuration
+# this forwards to.
+mistralrs = ["wovyr-provider/mistralrs", "wovyr-server/mistralrs"]
+# Redis-shared rate limiting for the embedded `wovyr dev` server (RM-AIM-P2 SRV-201):
+# with WOVYR_RATE_LIMIT_REDIS_URL set, a fleet of nodes enforces one combined per-key
+# budget instead of N independent ones. Off by default (pulls the redis client).
+redis = ["wovyr-server/redis"]
+
+[dependencies]
+wovyr-common.workspace = true
+wovyr-provider.workspace = true
+wovyr-tools.workspace = true
+wovyr-ui.workspace = true
+wovyr-agent.workspace = true
+wovyr-workflow.workspace = true
+wovyr-runtime.workspace = true
+wovyr-kms.workspace = true
+wovyr-config.workspace = true
+wovyr-memory.workspace = true
+wovyr-telemetry.workspace = true
+wovyr-plugin.workspace = true
+wovyr-marketplace.workspace = true
+wovyr-server.workspace = true
+# Secret vault — used (under `plugin-wasi`) to inject a run's tenant-scoped secrets into
+# plugin tool sandboxes. Unconditional (RM-GA-P4 HLTH-903): `wovyr-config`'s shared
+# secrets-vault construction depends on it unconditionally too, and wovyr-secrets is a
+# small crate already pulled in transitively via wovyr-kms's dependents.
+wovyr-secrets.workspace = true
+# `rt-multi-thread` + `macros` for the binary's own `#[tokio::main]` (also covers
+# `plugin.rs`'s `spawn_blocking` and `workflow.rs`'s local `#[tokio::test]`s — RM-GA-P4
+# HLTH-904). `process` is for `tests/cross_process_kms.rs` (QA-403), which spawns
+# the built `wovyr` binary itself twice (CLI + server) via `tokio::process::Command`.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+# Rendering the digest-complete `plugin.yaml` that `wovyr plugin build` stages
+# (RM-AIM-P3 ECO-302) — same version the manifest parser itself uses.
+serde_yaml.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+# ed25519 keygen + signing for `wovyr plugin keygen|sign` (CLI tooling: signing lives
+# outside the determinism-constrained library core).
+ring.workspace = true
+# The running platform-API version the engine checks plugin compatibility against.
+semver.workspace = true
+# Backup-manifest content digests for `wovyr admin backup|restore` (RM-GA-P2 DR-1001) —
+# same versions already used by wovyr-plugin/wovyr-kms elsewhere in the workspace.
+sha2.workspace = true
+hex = "0.4"
+# AWS SigV4 request signing for an s3:// `wovyr admin backup|restore` destination
+# (GA-002 §4.1) — same crate/version wovyr-events already uses for webhook signing.
+hmac.workspace = true

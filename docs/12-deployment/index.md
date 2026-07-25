@@ -16,7 +16,7 @@ Document ID: DEP-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation** for deploying the Apex AI Platform. It is the practical, artifact-level guide (Docker, Compose, Kubernetes, Helm, Terraform) that operationalizes the conceptual [Deployment Architecture](../02-architecture/deployment-architecture.md).
+This document is the **central navigation** for deploying the Wovyr AI Platform. It is the practical, artifact-level guide (Docker, Compose, Kubernetes, Helm, Terraform) that operationalizes the conceptual [Deployment Architecture](../02-architecture/deployment-architecture.md).
 
 ---
 
@@ -38,7 +38,7 @@ These map to the deployment models in
 # 3. Components to Deploy
 
 > **Current (v1.0, [ADR-0010](../17-adr/ADR-0010-ga-deployment-topology.md)
-> Path A):** every service below runs inside **one `apex` binary** — there is
+> Path A):** every service below runs inside **one `wovyr` binary** — there is
 > no independent-service deployment today. The table's per-service split is
 > the **aspirational v1.1+ topology**; see §10 of
 > [docker-compose.md](docker-compose.md) for what's actually shipped.
@@ -58,7 +58,7 @@ Dashboard (UI + BFF)      NATS JetStream — not used anywhere in this workspace
 
 Each service exposes `/healthz`, `/readyz`, `/metrics`
 ([observability](../14-observability/index.md) — planned reference) once the
-service split above is actually built; today the single `apex` binary
+service split above is actually built; today the single `wovyr` binary
 exposes `/healthz` and `/metrics` directly.
 
 ---
@@ -73,8 +73,8 @@ exposes `/healthz` and `/metrics` directly.
 | [kubernetes.md](kubernetes.md) | Manifests, scaling, probes, networking |
 | [helm.md](helm.md) | Helm chart, values, upgrades |
 | [terraform.md](terraform.md) | Cloud infrastructure provisioning |
-| [backup-and-restore.md](backup-and-restore.md) | `apex admin backup`/`restore`, KMS root-key escrow, RPO/RTO targets |
-| [upgrade-and-migration.md](upgrade-and-migration.md) | Operator upgrade runbook: backup → binary swap → `apex admin migrate` → verify → rollback, per deployment shape |
+| [backup-and-restore.md](backup-and-restore.md) | `wovyr admin backup`/`restore`, KMS root-key escrow, RPO/RTO targets |
+| [upgrade-and-migration.md](upgrade-and-migration.md) | Operator upgrade runbook: backup → binary swap → `wovyr admin migrate` → verify → rollback, per deployment shape |
 
 ---
 
@@ -97,7 +97,7 @@ exposes `/healthz` and `/metrics` directly.
 
 # 7. Related Documents
 
-- [`11-cli/commands.md`](../11-cli/commands.md) — `apex deploy`
+- [`11-cli/commands.md`](../11-cli/commands.md) — `wovyr deploy`
 - [`13-security`](../SUMMARY.md) *(planned)* · [`14-observability`](../SUMMARY.md) *(planned)*
 
 ---

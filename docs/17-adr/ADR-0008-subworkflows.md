@@ -14,7 +14,7 @@ Document ID: ADR-0008
 
 # Context
 
-The workflow engine compiles a [`Definition`](../../crates/apex-workflow/src/definition.rs)
+The workflow engine compiles a [`Definition`](../../crates/wovyr-workflow/src/definition.rs)
 to a **static, acyclic DAG** and executes it as a durable, event-sourced state
 machine. There is no way to compose one workflow out of another: a workflow cannot
 invoke another workflow as a unit, run it independently, and consume its result.
@@ -97,7 +97,7 @@ two children and aggregates their results, plus child-failure propagation.
 - No depth/cycle guard yet on `workflow → workflow` chains; a recursive workflow
   reference could recurse unbounded. A static depth/cycle check is a follow-up.
 - No CLI surface in the prototype (engine + tests only); wiring a multi-definition
-  resolver into `apex-cli` is a follow-up.
+  resolver into `wovyr-cli` is a follow-up.
 
 ---
 

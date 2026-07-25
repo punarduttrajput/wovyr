@@ -15,32 +15,32 @@ Document ID: ADR-0010
 # Context
 
 The 2026-07-06 solution-architecture review ([PRD-003](../01-product/prd-ga-hardening.md))
-found that Apex's deployed behavior and its marketed behavior diverge. Its
+found that Wovyr's deployed behavior and its marketed behavior diverge. Its
 one-line verdict:
 
-> Apex is a well-designed single-node appliance wearing the marketing of a
+> Wovyr is a well-designed single-node appliance wearing the marketing of a
 > distributed multi-tenant platform.
 
 The relevant facts, verified in code:
 
 - The distributed-execution machinery — the workflow `PostgresStore`, `WorkQueue`,
-  `Worker`, time-bounded leases, and sharded partitions (`crates/apex-workflow/`) —
+  `Worker`, time-bounded leases, and sharded partitions (`crates/wovyr-workflow/`) —
   is **tested library code that no shipping binary wires**. The server hard-wires a
-  `FileStore` at `~/.apex/workflows` (`crates/apex-server/src/lib.rs`, `default_workflows_engine`).
+  `FileStore` at `~/.wovyr/workflows` (`crates/wovyr-server/src/lib.rs`, `default_workflows_engine`).
 - Gateway fleet resilience is the same story: `with_redis_breakers`,
   `QdrantSemanticCache`, and `with_qdrant_semantic_cache` have zero references in
-  `apex-server` or `apps/`.
+  `wovyr-server` or `apps/`.
 - Every control-plane catalog (tenancy, secrets, KMS, plugins, webhooks, audit,
-  the agent store) is file-only under `~/.apex`. Two server replicas cannot coexist:
+  the agent store) is file-only under `~/.wovyr`. Two server replicas cannot coexist:
   with per-pod volumes, replica 2 generates its own KMS root key and cannot decrypt
   replica 1's sealed data; with a shared volume, unlocked in-place file rewrites
   race and corrupt.
 - The Helm chart is honest about this — it pins `replicas: 1`
-  (`deployment/helm/apex/templates/apex-statefulset.yaml`) — but the roadmap and
+  (`deployment/helm/wovyr/templates/wovyr-statefulset.yaml`) — but the roadmap and
   docs position sharding, HA, and horizontal scaling as platform capabilities.
 
 Only the marketplace registry has a runtime-selected shared backend
-(`PostgresRegistryStore` via `APEX_MARKETPLACE_POSTGRES_URL`), which proves the
+(`PostgresRegistryStore` via `WOVYR_MARKETPLACE_POSTGRES_URL`), which proves the
 trait-port pattern for backend promotion already works.
 
 The review confirmed the dependency spine is **acyclic and one-directional** and
@@ -88,7 +88,7 @@ major milestone.**
 
 Concretely:
 
-1. **GA ships as a single-node appliance.** The supported topology is one `apex`
+1. **GA ships as a single-node appliance.** The supported topology is one `wovyr`
    binary (optionally backed by Postgres/Qdrant for the backends already wired —
    marketplace registry, and CLI-side tiered memory), deployed as the Helm chart's
    single-replica `StatefulSet`. `replicas: 1` becomes a **product statement**, not a

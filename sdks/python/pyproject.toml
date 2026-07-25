@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "apex-ai-sdk"
+name = "wovyr-sdk"
 version = "0.3.0"
-description = "Python client for the Apex AI Platform API."
+description = "Python client for the Wovyr AI Platform API."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/punarduttrajput/Apex"
+Repository = "https://github.com/punarduttrajput/Wovyr"
 
 [tool.hatch.build.targets.wheel]
-packages = ["apex_sdk"]
+packages = ["wovyr_sdk"]

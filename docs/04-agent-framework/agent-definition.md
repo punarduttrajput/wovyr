@@ -16,7 +16,7 @@ Document ID: AGENT-010
 
 # 1. Purpose
 
-The Agent Definition specification describes how an AI agent is declared, configured, versioned, and executed within the Apex AI Platform.
+The Agent Definition specification describes how an AI agent is declared, configured, versioned, and executed within the Wovyr AI Platform.
 
 An agent is a self-contained execution unit composed of:
 

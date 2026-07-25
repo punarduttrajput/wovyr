@@ -75,8 +75,8 @@ introduce/evolve Postgres schema).
 
 **Problem.** All three Postgres backends run inline `CREATE TABLE IF NOT EXISTS` +
 ad-hoc `ALTER TABLE ADD COLUMN IF NOT EXISTS` at connect time —
-`crates/apex-workflow/src/postgres.rs:63-79`, `crates/apex-memory/src/backends.rs:78-93`,
-`crates/apex-marketplace/src/postgres.rs:44`. No migration framework, no
+`crates/wovyr-workflow/src/postgres.rs:63-79`, `crates/wovyr-memory/src/backends.rs:78-93`,
+`crates/wovyr-marketplace/src/postgres.rs:44`. No migration framework, no
 `schema_version` table, no down-path, and every binary runs DDL on startup (requiring
 DDL privileges in prod). Additive columns work; any rename/type change/index rebuild or
 old-binary-vs-new-schema rollback is undefined behavior. The marketplace Postgres backend
@@ -90,7 +90,7 @@ PP-13, and the schema portion of PP-14.)
 - Move each backend's DDL into numbered migration files; `connect` verifies the schema
   is at the expected version and refuses to run against an unmigrated/newer schema
   (fail-closed), rather than silently `CREATE TABLE IF NOT EXISTS`.
-- Separate `apex admin migrate` (or a startup flag) from `serve`, so the serving path
+- Separate `wovyr admin migrate` (or a startup flag) from `serve`, so the serving path
   needs no DDL privilege.
 
 **Acceptance criteria.**
@@ -100,23 +100,23 @@ PP-13, and the schema portion of PP-14.)
   against a migrated schema in the CI service-container job (CI-901 from Phase 2).
 - A version-skew test: an old binary refuses a newer schema rather than corrupting it.
 
-**Files.** `crates/apex-workflow/src/postgres.rs`, `crates/apex-memory/src/backends.rs`,
-`crates/apex-marketplace/src/postgres.rs`; migration files under each crate;
-`apps/apex-cli/src/admin.rs` (migrate command). **Size.** L. **Depends on:** Phase-2
+**Files.** `crates/wovyr-workflow/src/postgres.rs`, `crates/wovyr-memory/src/backends.rs`,
+`crates/wovyr-marketplace/src/postgres.rs`; migration files under each crate;
+`apps/wovyr-cli/src/admin.rs` (migrate command). **Size.** L. **Depends on:** Phase-2
 CI-901 (to actually exercise the migrated backends). **Blocks:** all Track-B tickets.
 
 **Status: Done (2026-07-07).** Adopted `refinery`. Each of the three
 backends' `connect()` was rewritten to only ever *read* the applied schema
 version (fail-closed `Error::Config` on a mismatch, too old or too new) —
 `run_migrations(database_url)` is the sole DDL path now, wired into a new
-`apex admin migrate --target <workflow|memory|marketplace> --database-url
+`wovyr admin migrate --target <workflow|memory|marketplace> --database-url
 <url>` command. Each crate migrates into its own distinct tracking table
-(`apex_{workflow,memory,marketplace}_schema_history`) so all three can share
+(`wovyr_{workflow,memory,marketplace}_schema_history`) so all three can share
 one physical database without colliding — verified necessary since CI's
-service-container job points all three `APEX_*_POSTGRES_URL` env vars at the
+service-container job points all three `WOVYR_*_POSTGRES_URL` env vars at the
 same Postgres instance. The version-skew acceptance criterion is proven by
 `connect_refuses_a_schema_newer_than_this_binary_understands`
-(`apex-workflow/tests/postgres_store.rs`), which inserts a fake
+(`wovyr-workflow/tests/postgres_store.rs`), which inserts a fake
 future-version row directly into the tracking table and asserts `connect`
 refuses it; CI-901's service-container job now runs the migrate command for
 all three schemas before the capability-gated integration tests.
@@ -128,9 +128,9 @@ all three schemas before the capability-gated integration tests.
 **Problem.** The distributed-execution machinery (workflow `PostgresStore`, `WorkQueue`,
 `Worker`, leases, sharded partitions), Redis breakers, and the Qdrant semantic cache
 are positioned in docs/roadmap as platform capabilities, but **no shipping binary wires
-them** — `default_workflows_engine` (`crates/apex-server/src/lib.rs:496-524`) hardwires
+them** — `default_workflows_engine` (`crates/wovyr-server/src/lib.rs:496-524`) hardwires
 `FileStore`, and `with_redis_breakers`/`with_qdrant_semantic_cache`
-(`crates/apex-provider/src/gateway.rs:146,186`) have zero references in `apex-server` or
+(`crates/wovyr-provider/src/gateway.rs:146,186`) have zero references in `wovyr-server` or
 `apps/`. `docs/12-deployment/{kubernetes,helm}.md` describe an unbuilt multi-service
 split. Shipping GA while docs claim an unwired capability is itself a defect. (PRD-003
 R-5.5; closes PP-06/PP-08 honesty.)
@@ -178,24 +178,24 @@ code, cross-referencing ADR-0010 and this ticket doc's Track B.
 ## DIST-B1 `[P1]` — Env-select a Postgres-backed workflow store in the server
 
 **Problem.** `default_workflows_engine` unconditionally builds a `FileStore` (or
-in-memory fallback); the `APEX_WORKFLOW_POSTGRES_URL` env var is referenced only in
-tests (`crates/apex-workflow/tests/postgres_store.rs`), never in a binary. The
-`PostgresStore` (`crates/apex-workflow/src/postgres.rs`, `connect`/`with_partitions`)
+in-memory fallback); the `WOVYR_WORKFLOW_POSTGRES_URL` env var is referenced only in
+tests (`crates/wovyr-workflow/tests/postgres_store.rs`), never in a binary. The
+`PostgresStore` (`crates/wovyr-workflow/src/postgres.rs`, `connect`/`with_partitions`)
 exists and is tested but unreachable. (PRD-003 R-5.1; closes PP-06.)
 
 **Change.**
-- Mirror the marketplace pattern (`crates/apex-server/src/marketplace.rs:76`): when
-  built with the `postgres` feature and `APEX_WORKFLOW_POSTGRES_URL` is set, back the
+- Mirror the marketplace pattern (`crates/wovyr-server/src/marketplace.rs:76`): when
+  built with the `postgres` feature and `WOVYR_WORKFLOW_POSTGRES_URL` is set, back the
   engine with `PostgresStore`; else the file store. Forward the feature through the
-  server's `Cargo.toml` (`postgres = [..., "apex-workflow/postgres"]`).
+  server's `Cargo.toml` (`postgres = [..., "wovyr-workflow/postgres"]`).
 - Respect MIG-A1: connect verifies schema version, does not auto-DDL.
 
 **Acceptance criteria.**
 - With the env var set, workflow events/checkpoints persist to Postgres (verified via
   the integration job); without it, behavior is unchanged (file store).
 
-**Files.** `crates/apex-server/src/lib.rs` (`default_workflows_engine`),
-`crates/apex-server/Cargo.toml`. **Size.** M. **Depends on:** MIG-A1. **Blocks:**
+**Files.** `crates/wovyr-server/src/lib.rs` (`default_workflows_engine`),
+`crates/wovyr-server/Cargo.toml`. **Size.** M. **Depends on:** MIG-A1. **Blocks:**
 DIST-B2.
 
 ---
@@ -203,9 +203,9 @@ DIST-B2.
 ## DIST-B2 `[P1]` — Route server-submitted workflows through the queue/worker/lease path
 
 **Problem.** The server drives executions with a fire-and-forget
-`tokio::spawn(engine.resume(...))` (`crates/apex-server/src/workflow_runner.rs:300-302`)
+`tokio::spawn(engine.resume(...))` (`crates/wovyr-server/src/workflow_runner.rs:300-302`)
 — no lease guards it, so two replicas would double-drive one execution. The
-`WorkQueue`/`Worker` machinery (`crates/apex-workflow/src/queue.rs`, `worker.rs` —
+`WorkQueue`/`Worker` machinery (`crates/wovyr-workflow/src/queue.rs`, `worker.rs` —
 `Worker::new`/`with_partitions`, `PostgresStore` `FOR UPDATE SKIP LOCKED` leasing)
 exists but the server doesn't use it. This is what makes "exactly-once with horizontal
 scaling" real. (PRD-003 R-5.1; closes PP-06.)
@@ -222,7 +222,7 @@ scaling" real. (PRD-003 R-5.1; closes PP-06.)
   duplicated activity effects); a killed worker's lease expires and another reclaims and
   completes the run.
 
-**Files.** `crates/apex-server/src/workflow_runner.rs`, `lib.rs` (worker pool in
+**Files.** `crates/wovyr-server/src/workflow_runner.rs`, `lib.rs` (worker pool in
 `serve`). **Size.** L. **Depends on:** DIST-B1. **Blocks:** DIST-B6.
 
 ---
@@ -230,13 +230,13 @@ scaling" real. (PRD-003 R-5.1; closes PP-06.)
 ## DIST-B3 `[P1]` — Promote control-plane catalogs to a shared backend
 
 **Problem.** Every control-plane catalog (tenancy, secrets, KMS, plugins, webhooks,
-audit, agents) is file-only under `~/.apex`. Two replicas cannot share them, so
+audit, agents) is file-only under `~/.wovyr`. Two replicas cannot share them, so
 tenancy/quotas/agents diverge across replicas. (PRD-003 R-5.2; closes PP-08.)
 
 **Change.**
 - Behind the existing trait ports (`TenancyStore`, `SecretStore`, `KmsStore`,
   `WebhookStore`, `AuditSink`, and the persisted agent store from Phase-2 DUR-404),
-  add Postgres-backed implementations selected by env (one `APEX_*_POSTGRES_URL` per
+  add Postgres-backed implementations selected by env (one `WOVYR_*_POSTGRES_URL` per
   catalog, or a shared connection). Reuse MIG-A1's migration framework.
 - Prioritize the catalogs whose divergence is most harmful (tenancy, agents, audit).
 
@@ -244,31 +244,31 @@ tenancy/quotas/agents diverge across replicas. (PRD-003 R-5.2; closes PP-08.)
 - Two replicas against one Postgres see the same tenancy/agents/audit state; a write on
   replica A is immediately visible on replica B.
 
-**Files.** `crates/apex-tenancy`, `apex-secrets`, `apex-kms`, `apex-events`,
-`apex-audit` (Postgres impls); `crates/apex-server/src/lib.rs` (selection). **Size.**
+**Files.** `crates/wovyr-tenancy`, `wovyr-secrets`, `wovyr-kms`, `wovyr-events`,
+`wovyr-audit` (Postgres impls); `crates/wovyr-server/src/lib.rs` (selection). **Size.**
 L. **Depends on:** MIG-A1, Phase-2 DUR-404. **Blocks:** DIST-B6, DIST-B7.
 
 ---
 
 ## DIST-B4 `[P1]` — KMS root key injection-only in multi-replica mode
 
-**Problem.** The KMS root key is generated-and-persisted per host at `~/.apex/kms/root.key`
-if `APEX_KMS_ROOT_KEY` is unset (`crates/apex-kms/src/root.rs`, `default_kms` in
-`crates/apex-server/src/lib.rs`). With per-pod volumes, replica 2 generates its **own**
+**Problem.** The KMS root key is generated-and-persisted per host at `~/.wovyr/kms/root.key`
+if `WOVYR_KMS_ROOT_KEY` is unset (`crates/wovyr-kms/src/root.rs`, `default_kms` in
+`crates/wovyr-server/src/lib.rs`). With per-pod volumes, replica 2 generates its **own**
 root key and cannot decrypt replica 1's sealed data — a silent, catastrophic split.
 (PRD-003 R-5.2; closes PP-08 for the crypto path.)
 
 **Change.**
-- In multi-replica mode (detected via config, e.g. `APEX_REPLICAS>1` or an explicit
-  `APEX_KMS_REQUIRE_INJECTED_ROOT=1`), refuse to start without `APEX_KMS_ROOT_KEY`;
+- In multi-replica mode (detected via config, e.g. `WOVYR_REPLICAS>1` or an explicit
+  `WOVYR_KMS_REQUIRE_INJECTED_ROOT=1`), refuse to start without `WOVYR_KMS_ROOT_KEY`;
   never auto-generate. Builds on Phase-2 DR-1002 (escrow made mandatory).
 
 **Acceptance criteria.**
-- Two replicas started with the same injected `APEX_KMS_ROOT_KEY` cross-decrypt each
+- Two replicas started with the same injected `WOVYR_KMS_ROOT_KEY` cross-decrypt each
   other's sealed records; a replica with no injected key in multi-replica mode refuses
   to start.
 
-**Files.** `crates/apex-kms/src/root.rs`, `crates/apex-server/src/lib.rs`. **Size.** S.
+**Files.** `crates/wovyr-kms/src/root.rs`, `crates/wovyr-server/src/lib.rs`. **Size.** S.
 **Depends on:** Phase-2 DR-1002. **Blocks:** DIST-B6.
 
 ---
@@ -276,13 +276,13 @@ root key and cannot decrypt replica 1's sealed data — a silent, catastrophic s
 ## DIST-B5 `[P2]` — Wire Redis breakers and Qdrant semantic cache into the gateway
 
 **Problem.** `Gateway::with_redis_breakers` and `with_qdrant_semantic_cache`
-(`crates/apex-provider/src/gateway.rs:146,186`) provide fleet-shared circuit-breaker
+(`crates/wovyr-provider/src/gateway.rs:146,186`) provide fleet-shared circuit-breaker
 state and a shared semantic cache, but `default_gateway` never calls them. A fleet of
 gateways can't trip/recover together or share cache entries. (PRD-003 R-5.4; closes
 PP-06 for the gateway path.)
 
 **Change.**
-- In `default_gateway`, when `APEX_REDIS_URL` / `APEX_QDRANT_URL` (+ the relevant cargo
+- In `default_gateway`, when `WOVYR_REDIS_URL` / `WOVYR_QDRANT_URL` (+ the relevant cargo
   features) are set, attach shared breakers and the Qdrant semantic cache; else the
   in-process defaults. KV/cache errors already fail open/degrade per the crate design.
 
@@ -291,7 +291,7 @@ PP-06 for the gateway path.)
   the other); with Qdrant configured, a cache entry written by one is served to the
   other.
 
-**Files.** `crates/apex-server/src/lib.rs` (`default_gateway`), server `Cargo.toml`
+**Files.** `crates/wovyr-server/src/lib.rs` (`default_gateway`), server `Cargo.toml`
 feature forwarding. **Size.** M. **Depends on:** none (independent Track-B item).
 
 ---
@@ -302,7 +302,7 @@ feature forwarding. **Size.** M. **Depends on:** none (independent Track-B item)
 core claim Path B exists to deliver. (PRD-003 R-5.1/R-5.2 verification; closes PP-08.)
 
 **Change.**
-- An integration test (docker-compose or a two-process harness) runs two `apex`
+- An integration test (docker-compose or a two-process harness) runs two `wovyr`
   replicas against one Postgres (+ Redis/Qdrant), and asserts: shared tenancy/agents/
   audit, exactly-once workflow execution under concurrent submit, replica-crash
   mid-workflow reclaim-and-complete, and cross-replica KMS decryption.
@@ -311,7 +311,7 @@ core claim Path B exists to deliver. (PRD-003 R-5.1/R-5.2 verification; closes P
 - The suite passes in CI's service-container job; killing one replica mid-workflow does
   not lose or duplicate work.
 
-**Files.** `crates/apex-server/tests/multi_replica.rs` (new); CI job. **Size.** L.
+**Files.** `crates/wovyr-server/tests/multi_replica.rs` (new); CI job. **Size.** L.
 **Depends on:** DIST-B2, DIST-B3, DIST-B4.
 
 ---
@@ -319,7 +319,7 @@ core claim Path B exists to deliver. (PRD-003 R-5.1/R-5.2 verification; closes P
 ## DIST-B7 `[P2]` — Helm chart multi-replica topology
 
 **Problem.** The Helm chart pins `replicas: 1`
-(`deployment/helm/apex/templates/apex-statefulset.yaml`) because durable state is
+(`deployment/helm/wovyr/templates/wovyr-statefulset.yaml`) because durable state is
 local files. Once DIST-B3 makes state shared, the chart can scale out. (PRD-003 R-5.2
 deployment; closes PP-08 deployment.)
 
@@ -334,13 +334,13 @@ deployment; closes PP-08 deployment.)
   manifest that wires the shared backends and injected KMS root; single-replica remains
   the default.
 
-**Files.** `deployment/helm/apex/`. **Size.** M. **Depends on:** DIST-B3, DIST-B6.
+**Files.** `deployment/helm/wovyr/`. **Size.** M. **Depends on:** DIST-B3, DIST-B6.
 
 ---
 
 ## DIST-B9 `[P2]` — Cross-replica distributed event bus
 
-**Problem.** `apex-events` is a custom in-process event/webhook/audit system —
+**Problem.** `wovyr-events` is a custom in-process event/webhook/audit system —
 correct and sufficient for the single-node appliance
 ([ADR-0010](../../17-adr/ADR-0010-ga-deployment-topology.md) Path A), but it has no
 way to fan an event out to *other* replicas. [ADR-0005](../../17-adr/ADR-0005-nats.md)
@@ -357,21 +357,21 @@ specifically, not general async messaging.
 
 **Change.**
 - Stand up a NATS JetStream backend behind a new port trait alongside
-  `apex-events`'s existing `WebhookStore`/dispatch abstractions (mirroring how
-  `apex-provider`'s `with_redis_breakers` sits behind the `Gateway` rather than
-  replacing it): `default_event_bus` selects NATS when `APEX_NATS_URL` (+ a
+  `wovyr-events`'s existing `WebhookStore`/dispatch abstractions (mirroring how
+  `wovyr-provider`'s `with_redis_breakers` sits behind the `Gateway` rather than
+  replacing it): `default_event_bus` selects NATS when `WOVYR_NATS_URL` (+ a
   `nats` cargo feature) is set, else the existing in-process dispatch.
   Deduplicate on the consumer side by `request_id`/event id — JetStream is
   at-least-once, not exactly-once, exactly as ADR-0005's original consequences
   section anticipated.
 
 **Acceptance criteria.**
-- With `APEX_NATS_URL` configured, an event emitted by one server process is
+- With `WOVYR_NATS_URL` configured, an event emitted by one server process is
   observed by a subscriber on a second, independent process; without it, behavior
   is unchanged from today's in-process dispatch.
 
-**Files.** `crates/apex-events/src/` (new NATS backend + port trait);
-`crates/apex-server/src/lib.rs` (selection); workspace `Cargo.toml` (`nats` feature).
+**Files.** `crates/wovyr-events/src/` (new NATS backend + port trait);
+`crates/wovyr-server/src/lib.rs` (selection); workspace `Cargo.toml` (`nats` feature).
 **Size.** L. **Depends on:** DIST-B3 (shared control-plane state is the more
 foundational Track-B prerequisite; this is independent but more valuable once it
 exists).
@@ -383,7 +383,7 @@ exists).
 **Problem.** The server always wraps memory in `EncryptingMemoryStore`, which
 **unconditionally reports `supports_pushdown() = false`** (documented design), so even a
 Qdrant-backed tiered store degrades to a full `all()` scan + in-process decrypt +
-O(N) cosine (`crates/apex-memory/src/engine.rs:203-205`). This caps practical retrieval
+O(N) cosine (`crates/wovyr-memory/src/engine.rs:203-205`). This caps practical retrieval
 at ~10³–10⁴ records/namespace — a design choice (correct-but-slow) that becomes the
 binding constraint the moment PRD-002's real-scale work starts. This ticket **decides
 the design**, it does not chase throughput. (Bridges PP-08/PP-14 to
@@ -394,14 +394,14 @@ the design**, it does not chase throughput. (Bridges PP-08/PP-14 to
   `embedding`s plaintext so the index can score them (with a documented threat-model
   note), vs. a searchable-encryption scheme, vs. accepting the scan ceiling for the
   single-node appliance. Whichever is chosen, the O(N) `put` seq re-read
-  (`crates/apex-memory/src/store.rs`) is fixed with a per-namespace counter.
+  (`crates/wovyr-memory/src/store.rs`) is fixed with a per-namespace counter.
 
 **Acceptance criteria.**
 - A decision ADR exists with the threat-model trade-off stated; if "embeddings
   plaintext" is chosen, pushdown survives encryption and a perf test shows sub-linear
   retrieval on a Qdrant-backed encrypted namespace.
 
-**Files.** new ADR under `docs/17-adr/`; `crates/apex-memory/src/encrypting_store.rs`,
+**Files.** new ADR under `docs/17-adr/`; `crates/wovyr-memory/src/encrypting_store.rs`,
 `engine.rs`, `store.rs`. **Size.** M (design) + follow-on. **Depends on:** none.
 *(Hand-off point to PRD-002 Scale / GA-001.)*
 
@@ -455,7 +455,7 @@ exactly-once effects — Track B, not started, gated on the GA milestone shippin
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.4.0 | 2026-07-07 | Added Track-B ticket **DIST-B9** (cross-replica distributed event bus / NATS) — found while reconciling the Day-1 architecture docs (`docs/02-architecture/`) against ADR-0010's Path A reality: [ADR-0005](../../17-adr/ADR-0005-nats.md) decided NATS in 2026-06-27 but it was never implemented and nothing else in Track B picks it up. Not part of the original 21-finding review; added so the gap is deferred deliberately, not silently dropped |
-| 1.3.0 | 2026-07-07 | MIG-A1 done: adopted `refinery` for all three Postgres backends (workflow/memory/marketplace) — versioned migration files, fail-closed schema-version checks on connect, a new `apex admin migrate` command, and a version-skew test. Phase 3's entire Path-A GA scope is now complete |
+| 1.3.0 | 2026-07-07 | MIG-A1 done: adopted `refinery` for all three Postgres backends (workflow/memory/marketplace) — versioned migration files, fail-closed schema-version checks on connect, a new `wovyr admin migrate` command, and a version-skew test. Phase 3's entire Path-A GA scope is now complete |
 | 1.2.0 | 2026-07-07 | DOC-A2 done: corrected `README.md` (a much larger, long-stale gap than anticipated), `docs/12-deployment/{index,docker,terraform}.md`, and `docs/03-workflow-engine/distributed-execution.md` to state plainly what's shipped vs. aspirational/library-only |
 | 1.1.0 | 2026-07-06 | ADR-0010 ratified **Path A**: Track A confirmed as the entire Phase-3 GA scope; Track B confirmed deferred to the v1.1 "Scale-Out" milestone (status/gate wording updated accordingly) |
 | 1.0.0 | 2026-07-06 | Initial Phase-3 (scale & distribution) ticket breakdown: 2 Track-A (GA, both paths) + 8 Track-B (v1.1 Scale-Out, Path B only) tickets, gated on the ADR-0010 decision, with the real-scale-capacity boundary handed off to PRD-002/GA-001 |

@@ -16,7 +16,7 @@ Document ID: CLI-001
 
 # 1. Purpose
 
-This document describes how to install, update, and verify the `apex` CLI across platforms.
+This document describes how to install, update, and verify the `wovyr` CLI across platforms.
 
 ---
 
@@ -37,29 +37,29 @@ The CLI is a single statically-linked Rust binary with no runtime dependencies.
 ## 3.1 Install script (Linux/macOS)
 
 ```bash
-curl -fsSL https://get.apex.example.com/install.sh | sh
+curl -fsSL https://get.wovyr.example.com/install.sh | sh
 ```
 
-Installs the latest stable release to `~/.apex/bin` and adds it to `PATH`.
+Installs the latest stable release to `~/.wovyr/bin` and adds it to `PATH`.
 
 ## 3.2 Homebrew (macOS/Linux)
 
 ```bash
-brew install apex-ai/tap/apex
+brew install wovyr-ai/tap/wovyr
 ```
 
 ## 3.3 Windows
 
 ```powershell
-winget install Apex.CLI
+winget install Wovyr.CLI
 # or Scoop:
-scoop install apex
+scoop install wovyr
 ```
 
 ## 3.4 Container image
 
 ```bash
-docker run --rm -v "$PWD:/work" ghcr.io/apex-ai/cli:latest version
+docker run --rm -v "$PWD:/work" ghcr.io/wovyr-ai/cli:latest version
 ```
 
 ## 3.5 Direct download
@@ -84,12 +84,12 @@ and warns when it is older than the target server's API.
 # 5. Updating
 
 ```bash
-apex upgrade            # self-update to latest on the current channel
-apex upgrade --channel beta
+wovyr upgrade            # self-update to latest on the current channel
+wovyr upgrade --channel beta
 ```
 
 Package-manager installs update through their package manager
-(`brew upgrade apex`, `winget upgrade Apex.CLI`).
+(`brew upgrade wovyr`, `winget upgrade Wovyr.CLI`).
 
 ---
 
@@ -99,7 +99,7 @@ Releases are signed (Sigstore-style, consistent with
 [plugin signing](../08-plugin-sdk/distribution.md#3-signing)):
 
 ```bash
-apex verify ./apex                 # verifies the running binary's signature
+wovyr verify ./wovyr                 # verifies the running binary's signature
 # or manually compare the published SHA-256 checksum
 ```
 
@@ -108,10 +108,10 @@ apex verify ./apex                 # verifies the running binary's signature
 # 7. Shell Completion
 
 ```bash
-apex completion bash   > /etc/bash_completion.d/apex
-apex completion zsh    > "${fpath[1]}/_apex"
-apex completion fish   > ~/.config/fish/completions/apex.fish
-apex completion powershell | Out-String | Invoke-Expression
+wovyr completion bash   > /etc/bash_completion.d/wovyr
+wovyr completion zsh    > "${fpath[1]}/_wovyr"
+wovyr completion fish   > ~/.config/fish/completions/wovyr.fish
+wovyr completion powershell | Out-String | Invoke-Expression
 ```
 
 ---
@@ -119,12 +119,12 @@ apex completion powershell | Out-String | Invoke-Expression
 # 8. First Run
 
 ```bash
-apex version           # confirm install
-apex login             # authenticate (see Configuration)
-apex doctor            # environment diagnostics
+wovyr version           # confirm install
+wovyr login             # authenticate (see Configuration)
+wovyr doctor            # environment diagnostics
 ```
 
-`apex doctor` checks connectivity, auth, version compatibility, and local toolchain
+`wovyr doctor` checks connectivity, auth, version compatibility, and local toolchain
 prerequisites for `--local` execution and plugin builds.
 
 ---
@@ -132,8 +132,8 @@ prerequisites for `--local` execution and plugin builds.
 # 9. Uninstall
 
 ```bash
-apex uninstall         # removes the binary; prompts about ~/.apex config
-# package managers: brew uninstall apex / winget uninstall Apex.CLI
+wovyr uninstall         # removes the binary; prompts about ~/.wovyr config
+# package managers: brew uninstall wovyr / winget uninstall Wovyr.CLI
 ```
 
 ---

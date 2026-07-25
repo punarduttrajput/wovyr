@@ -16,7 +16,7 @@ Document ID: DASH-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and architecture index** for the Apex AI Platform Dashboard — the web application through which users design agents and workflows, explore memory, manage plugins, and monitor the platform.
+This document is the **central navigation and architecture index** for the Wovyr AI Platform Dashboard — the web application through which users design agents and workflows, explore memory, manage plugins, and monitor the platform.
 
 The Dashboard is a **client of the [Platform API](../09-api/index.md)**: it adds no
 privileged capability of its own. Everything it does is an authenticated,
@@ -30,9 +30,9 @@ authorized API call.
 |-------|-----------|------|
 | Dashboard UI | Angular | Single-page application (c4-container §4.9). **Built** — `dashboard/`, first surface: Agent Studio. |
 | Dashboard Backend | NestJS | Backend-for-frontend (BFF): session, aggregation, websockets. **Deferred** — see below. |
-| Platform API | REST/gRPC | Source of truth for all resources (`apex-server`). |
+| Platform API | REST/gRPC | Source of truth for all resources (`wovyr-server`). |
 
-> **Status (v0.3):** the SPA currently calls **`apex-server` directly** (it already
+> **Status (v0.3):** the SPA currently calls **`wovyr-server` directly** (it already
 > serves `/api/v1` + SSE), so the **NestJS BFF is deferred** until production auth
 > (server-side sessions / OAuth2-PKCE) and view aggregation are needed. See
 > [`overview.md`](overview.md) for the rationale and the deferred BFF responsibilities.
@@ -40,7 +40,7 @@ authorized API call.
 When introduced, the BFF never bypasses platform authorization — it forwards the
 user's identity to the [Platform API](../09-api/index.md) and the
 [Policy Engine](../04-agent-framework/policy-engine.md) enforces access. Until then,
-the same enforcement happens at `apex-server`.
+the same enforcement happens at `wovyr-server`.
 
 ---
 

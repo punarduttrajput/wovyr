@@ -1,6 +1,6 @@
-"""`apex_sdk.aio.AsyncApexClient` (DX-301) — offline unit tests over fake
+"""`wovyr_sdk.aio.AsyncWovyrClient` (DX-301) — offline unit tests over fake
 openers (no server needed), plus live integration tests that skip cleanly
-when no `apex dev` answers at `APEX_TEST_BASE_URL` (same gating as
+when no `wovyr dev` answers at `WOVYR_TEST_BASE_URL` (same gating as
 `test_client.py`)."""
 
 from __future__ import annotations
@@ -14,14 +14,14 @@ import urllib.request
 from email.message import Message
 from typing import Any
 
-from apex_sdk import ApexTimeoutError
-from apex_sdk.aio import AsyncApexClient, paginate_all
-from apex_sdk.http import Opener
+from wovyr_sdk import WovyrTimeoutError
+from wovyr_sdk.aio import AsyncWovyrClient, paginate_all
+from wovyr_sdk.http import Opener
 
-BASE_URL = os.environ.get("APEX_TEST_BASE_URL", "http://127.0.0.1:8080")
+BASE_URL = os.environ.get("WOVYR_TEST_BASE_URL", "http://127.0.0.1:8080")
 
 HELLO_MANIFEST = """
-apiVersion: agent.apex.io/v1
+apiVersion: agent.wovyr.io/v1
 kind: Agent
 metadata:
   name: hello
@@ -95,7 +95,7 @@ class AsyncClientUnitTests(unittest.TestCase):
                 ),
             ]
         )
-        client = AsyncApexClient("http://unit-test.invalid", opener=opener)
+        client = AsyncWovyrClient("http://unit-test.invalid", opener=opener)
 
         async def main() -> None:
             health = await client.health()
@@ -116,10 +116,10 @@ class AsyncClientUnitTests(unittest.TestCase):
                 ),
             ]
         )
-        client = AsyncApexClient("http://unit-test.invalid", opener=opener)
+        client = AsyncWovyrClient("http://unit-test.invalid", opener=opener)
 
         async def main() -> None:
-            with self.assertRaises(ApexTimeoutError):
+            with self.assertRaises(WovyrTimeoutError):
                 await client.workflows.wait_for_completion(
                     "wf-1", interval_s=0.005, timeout_s=0.02
                 )
@@ -139,7 +139,7 @@ class AsyncClientUnitTests(unittest.TestCase):
             return _FakeHttpResponse(200, sse, headers)
 
         opener = _ScriptedOpener([("/api/v1/agents:stream", stream_response)])
-        client = AsyncApexClient("http://unit-test.invalid", opener=opener)
+        client = AsyncWovyrClient("http://unit-test.invalid", opener=opener)
 
         async def main() -> None:
             kinds = []
@@ -162,7 +162,7 @@ class AsyncClientUnitTests(unittest.TestCase):
             return _json_response(body)
 
         opener = _ScriptedOpener([("/api/v1/agents", next_page)])
-        client = AsyncApexClient("http://unit-test.invalid", opener=opener)
+        client = AsyncWovyrClient("http://unit-test.invalid", opener=opener)
 
         async def main() -> None:
             items = [item async for item in paginate_all(client.agents.list)]
@@ -177,8 +177,8 @@ class AsyncClientIntegrationTests(unittest.TestCase):
 
     def setUp(self) -> None:
         if not _server_available():
-            self.skipTest(f"no apex-server reachable at {BASE_URL}")
-        self.client = AsyncApexClient(BASE_URL, principal="sdk-test-admin")
+            self.skipTest(f"no wovyr-server reachable at {BASE_URL}")
+        self.client = AsyncWovyrClient(BASE_URL, principal="sdk-test-admin")
 
     def test_health_reports_ok(self) -> None:
         health = asyncio.run(self.client.health())
@@ -226,10 +226,10 @@ class AsyncClientIntegrationTests(unittest.TestCase):
         try:
             asyncio.run(main())
         except Exception as err:  # pragma: no cover - env-dependent skip
-            from apex_sdk import ApexApiError
+            from wovyr_sdk import WovyrApiError
 
-            if isinstance(err, ApexApiError) and err.status == 403:
-                self.skipTest("server not started with APEX_PLATFORM_ADMINS=sdk-test-admin")
+            if isinstance(err, WovyrApiError) and err.status == 403:
+                self.skipTest("server not started with WOVYR_PLATFORM_ADMINS=sdk-test-admin")
             raise
 
 

@@ -16,7 +16,7 @@ Document ID: IMPL-002
 
 # 1. Purpose
 
-This document describes how the Apex AI Platform is built — the Cargo workspace, the
+This document describes how the Wovyr AI Platform is built — the Cargo workspace, the
 task runner, build performance, artifact production, and the Rust SDK.
 
 ---
@@ -26,18 +26,18 @@ task runner, build performance, artifact production, and the Rust SDK.
 Per [ADR-0001](../17-adr/ADR-0001-project-structure.md), a single Cargo workspace:
 
 ```text
-apex/
+wovyr/
 ├── crates/        # libraries: common, provider-sdk, tool-sdk, plugin-sdk, ...
 ├── apps/          # service binaries: api-gateway, agent-runtime, ...
 ├── sdk/           # public Rust SDK (+ generated clients)
 ├── plugins/       # first-party plugins
-├── dashboard/     # Angular SPA (built; calls apex-server directly — NestJS BFF deferred)
+├── dashboard/     # Angular SPA (built; calls wovyr-server directly — NestJS BFF deferred)
 └── deployment/    # Docker, Helm, Terraform
 ```
 
 Shared logic lives in `crates/`; each deployable is a thin binary over them. The
 `dashboard/` Angular workspace (npm) builds with `ng build`; its dev server proxies
-`/api` to `apex-server` (`dashboard/proxy.conf.json`). The NestJS BFF is deferred —
+`/api` to `wovyr-server` (`dashboard/proxy.conf.json`). The NestJS BFF is deferred —
 see [dashboard/overview.md](../10-dashboard/overview.md).
 
 ---
@@ -72,9 +72,9 @@ make sdk          # build/package the SDK
 |----------|----------|
 | Service binaries | `cargo build --release` per app |
 | Container images | per-service Dockerfiles (signed) |
-| `apex` CLI | `apps/cli` |
+| `wovyr` CLI | `apps/cli` |
 | Rust SDK crate | `sdk/` |
-| Plugin packages | `apex plugin build` ([plugin SDK](../08-plugin-sdk/plugin-api.md)) |
+| Plugin packages | `wovyr plugin build` ([plugin SDK](../08-plugin-sdk/plugin-api.md)) |
 
 Images and releases are **signed** with provenance
 ([release process](release-process.md), [distribution](../08-plugin-sdk/distribution.md#3-signing)).
@@ -122,8 +122,8 @@ Two additional jobs run in parallel with the default-feature pipeline
   a compile too heavy for every PR; it stays buildable locally).
 - **Service-container integration** — Postgres, Qdrant, and Redis run as CI
   service containers, and the capability-gated integration tests
-  (`apex-workflow`/`apex-marketplace` Postgres stores, `apex-memory` tiered
-  backend, `apex-provider` Qdrant semantic cache + Redis breaker) run against
+  (`wovyr-workflow`/`wovyr-marketplace` Postgres stores, `wovyr-memory` tiered
+  backend, `wovyr-provider` Qdrant semantic cache + Redis breaker) run against
   them with their gating env vars set. The job greps for the tests' `skipping:`
   convention and fails on it, so a silently-skipped test can never read as
   green coverage.

@@ -28,7 +28,7 @@ Every plugin declares itself in a manifest — the single source of truth the Pl
 Engine reads.
 
 ```yaml
-apiVersion: plugin.apex.io/v1
+apiVersion: plugin.wovyr.io/v1
 kind: Plugin
 
 metadata:
@@ -200,22 +200,22 @@ none do.
 # 8. Developer Workflow & CLI
 
 ```bash
-apex plugin new github --kind tool,workflow_activity   # scaffold
-apex plugin build                                      # compile capabilities
-apex plugin test                                       # run capability tests
-apex plugin sign --key <key>                           # sign package
-apex plugin publish --registry <url>                   # publish
-apex plugin install ./github-1.4.0.apexpkg             # local install
+wovyr plugin new github --kind tool,workflow_activity   # scaffold
+wovyr plugin build                                      # compile capabilities
+wovyr plugin test                                       # run capability tests
+wovyr plugin sign --key <key>                           # sign package
+wovyr plugin publish --registry <url>                   # publish
+wovyr plugin install ./github-1.4.0.wovyrpkg             # local install
 ```
 
-The CLI produces a reproducible, signed `.apexpkg` package (see
+The CLI produces a reproducible, signed `.wovyrpkg` package (see
 [Distribution](distribution.md)).
 
 ---
 
 # 9. Versioning the API
 
-- Plugin API is namespaced `plugin.apex.io/v1`.
+- Plugin API is namespaced `plugin.wovyr.io/v1`.
 - The SDK is semver-versioned; plugins declare a compatible `platform_api` range.
 - Trait additions are backward compatible (default methods); breaking changes bump
   the API version (`v2`) and run side by side during deprecation. See

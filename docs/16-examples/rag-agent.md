@@ -35,7 +35,7 @@ retention: { semantic: permanent }
 ```
 
 ```bash
-apex memory namespaces create -f memory/knowledge.yaml
+wovyr memory namespaces create -f memory/knowledge.yaml
 ```
 
 The [embedding model is fixed per namespace](../06-memory-engine/semantic-memory.md#3-embeddings).
@@ -45,7 +45,7 @@ The [embedding model is fixed per namespace](../06-memory-engine/semantic-memory
 # 3. Ingest Knowledge
 
 ```bash
-apex memory put -f - <<'YAML'
+wovyr memory put -f - <<'YAML'
 scope: project
 project: docs-bot
 type: semantic
@@ -87,7 +87,7 @@ call.
 # 5. Run
 
 ```bash
-apex agents run --local -f agents/docs-bot.yaml \
+wovyr agents run --local -f agents/docs-bot.yaml \
   --input '{"message":"How long do refunds take?"}' --stream
 ```
 

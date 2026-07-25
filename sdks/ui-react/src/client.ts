@@ -1,22 +1,22 @@
 import type { PendingUiFrame, UiDecision } from "./types.js";
 
 /** Options for {@link createUiClient}. Deliberately standalone (no dependency
- * on `@apex-ai/sdk`) — the renderer is meant to be embeddable in *any* host
+ * on `@wovyr/sdk`) — the renderer is meant to be embeddable in *any* host
  * (PRD-005 EMB-701), including one that never adopts the rest of the
  * platform's TypeScript SDK. */
 export interface UiClientOptions {
-  /** Base URL of a running `apex-server` (e.g. `http://127.0.0.1:8080`). */
+  /** Base URL of a running `wovyr-server` (e.g. `http://127.0.0.1:8080`). */
   baseUrl: string;
-  /** Sent as `X-Apex-Tenant`. Defaults to `"default"`. */
+  /** Sent as `X-Wovyr-Tenant`. Defaults to `"default"`. */
   tenant?: string;
-  /** Sent as `X-Apex-Principal`, if set. */
+  /** Sent as `X-Wovyr-Principal`, if set. */
   principal?: string;
   /** `fetch` override, mainly for tests. Defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
 }
 
 /** Thrown on any non-2xx response from the three ui routes. Mirrors the
- * shape of `@apex-ai/sdk`'s `ApexApiError` closely enough to switch on
+ * shape of `@wovyr/sdk`'s `WovyrApiError` closely enough to switch on
  * `.status`, without importing that package. */
 export class UiApiError extends Error {
   readonly status: number;
@@ -33,7 +33,7 @@ export class UiApiError extends Error {
 
 /** A minimal client over the three generative-UI routes (PRD-005 RM-GUI-P1):
  * pull pending frames, and post typed decisions. This is deliberately a thin
- * fetch wrapper, not a general Apex API client — reach for `@apex-ai/sdk`'s
+ * fetch wrapper, not a general Wovyr API client — reach for `@wovyr/sdk`'s
  * `ui` resource instead if the host already depends on it. */
 export interface UiClient {
   listFrames(): Promise<PendingUiFrame[]>;
@@ -47,8 +47,8 @@ export function createUiClient(options: UiClientOptions): UiClient {
 
   function headers(extra?: Record<string, string>): Record<string, string> {
     const h: Record<string, string> = { ...extra };
-    if (options.tenant !== undefined) h["X-Apex-Tenant"] = options.tenant;
-    if (options.principal !== undefined) h["X-Apex-Principal"] = options.principal;
+    if (options.tenant !== undefined) h["X-Wovyr-Tenant"] = options.tenant;
+    if (options.principal !== undefined) h["X-Wovyr-Principal"] = options.principal;
     return h;
   }
 

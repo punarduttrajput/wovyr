@@ -1,0 +1,25 @@
+[package]
+name = "wovyr-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Agent definition and minimal agent run loop for the Wovyr AI Platform."
+
+[dependencies]
+wovyr-common.workspace = true
+wovyr-provider.workspace = true
+wovyr-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+futures = "0.3"
+
+[dev-dependencies]
+# `time` + `test-util` for the AIC-102 concurrent-tool-call test: a paused clock
+# (`start_paused`) makes the wall-clock ≈ max(delays) assertion deterministic, the
+# same pattern wovyr-provider's hedging tests use.
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }

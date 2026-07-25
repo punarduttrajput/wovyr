@@ -80,8 +80,8 @@ point at fixtures or recorded pages.
 # 7. Example
 
 ```bash
-apex tools enable browser.navigate --project research
-apex tools invoke browser.navigate --input '{"url":"https://example.com"}'
+wovyr tools enable browser.navigate --project research
+wovyr tools invoke browser.navigate --input '{"url":"https://example.com"}'
 ```
 
 ---

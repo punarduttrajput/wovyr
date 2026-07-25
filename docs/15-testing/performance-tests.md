@@ -16,7 +16,7 @@ Document ID: TEST-004
 
 # 1. Purpose
 
-This document defines **performance testing** for the Apex AI Platform — validating that services meet their latency and throughput [non-functional requirements](../07-tool-runtime/overview.md#9-non-functional-requirements) under realistic and extreme load.
+This document defines **performance testing** for the Wovyr AI Platform — validating that services meet their latency and throughput [non-functional requirements](../07-tool-runtime/overview.md#9-non-functional-requirements) under realistic and extreme load.
 
 ---
 

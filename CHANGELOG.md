@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the Apex AI Platform are documented here.
+All notable changes to the Wovyr AI Platform are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
@@ -23,15 +23,15 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
 ### Added
 - **MCP Connection Management (RM-MCX, PRD-006/ADR-0012):** a persisted,
   API/dashboard-managed layer over the already-shipped, programmatic-only MCP
-  client (`apex-tools::mcp`, ECO-301) — connect an external MCP server once,
+  client (`wovyr-tools::mcp`, ECO-301) — connect an external MCP server once,
   grant it to agents declaratively, see its tools in the existing tool picker.
   **Connection core:** a tenant-scoped, file-backed `McpConnectionStore` +
-  bounded-idle-timeout client cache (`apex-tools/src/mcp_store.rs`/
+  bounded-idle-timeout client cache (`wovyr-tools/src/mcp_store.rs`/
   `mcp_cache.rs`); `POST/GET/DELETE /api/v1/mcp/connections[/{name}]` +
-  `.../refresh` (`apex-server/src/mcp.rs`); a `Stdio`-transport connection
+  `.../refresh` (`wovyr-server/src/mcp.rs`); a `Stdio`-transport connection
   (arbitrary local command execution) requires *both* the `mcp:admin` RBAC
-  scope *and* the operator's `APEX_ENABLE_MCP_STDIO=1` opt-in (the
-  `APEX_ENABLE_SHELL_TOOL` precedent) while `Http` reuses `http_get`'s SEC-304
+  scope *and* the operator's `WOVYR_ENABLE_MCP_STDIO=1` opt-in (the
+  `WOVYR_ENABLE_SHELL_TOOL` precedent) while `Http` reuses `http_get`'s SEC-304
   SSRF guard verbatim; a credential is always a `SecretRef`, never an inline
   value; a new `max_mcp_connections` quota dimension bounds the cache's warm
   process pool. **Agent wiring:** `AgentDefinition.spec.mcp_servers` is a
@@ -59,18 +59,18 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
   sharing the identical `judge_frame` policy path the workflow `ui` activity
   uses (`PendingFrame`'s `execution_id`/`activity_id` became `Option<String>`
   to model a standalone frame). A public, reusable conformance suite
-  (EMB-704, `apex_ui_guard::conformance`) — must-allow/must-block/must-redact
+  (EMB-704, `wovyr_ui_guard::conformance`) — must-allow/must-block/must-redact
   vectors any deployer can run against their own policy
   (`conformance_report(&policy)`), gated in this workspace's own `cargo test
-  --workspace`. RDR-402's P2 cut ("React only") was revisited: `<apex-ui-frame>`
-  (`@apex/ui-react/web-component`) is a framework-agnostic custom element
+  --workspace`. RDR-402's P2 cut ("React only") was revisited: `<wovyr-ui-frame>`
+  (`@wovyr/ui-react/web-component`) is a framework-agnostic custom element
   wrapping `UiFrameView` via `react-dom/client`, dispatching a `decide`
   `CustomEvent` — proven with a React-free demo page
   (`examples/ui/checkout-demo/web-component.html`). A real dashboard Surfaces
   panel (ITS-601/602, `dashboard/src/app/features/surfaces/`) dogfoods the
-  whole loop on Apex's own ops surface: an operator composes a real `UiFrame`,
+  whole loop on Wovyr's own ops surface: an operator composes a real `UiFrame`,
   presents it through the dashboard's own `HttpClient` + tenant interceptor,
-  renders it with `<apex-ui-frame>`, and decides it under their own
+  renders it with `<wovyr-ui-frame>`, and decides it under their own
   RBAC-scoped session — including a live demonstration of the trust layer
   blocking a destructive action. A design-partner onboarding guide
   (`docs/01-product/design-partner-onboarding.md`, PRD-005 §8) ships with
@@ -81,7 +81,7 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
   saveable/shareable surfaces (ITS-603/604), and the design-partner program's
   actual execution (a business activity, not a code deliverable).
 - **Generative UI Trust Runtime — Renderer & Interaction Loop (RM-GUI-P2, PRD-005):**
-  `@apex/ui-react` (`sdks/ui-react`), a React renderer for the full frame
+  `@wovyr/ui-react` (`sdks/ui-react`), a React renderer for the full frame
   vocabulary — themeable CSS-custom-property design tokens, an inert visible
   placeholder for unrecognized node types, and client-side frame-hash
   verification (canonical-JSON + Web Crypto SHA-256, cross-checked against a
@@ -95,8 +95,8 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
   §9 end to end in a real browser: the poisoned frame blocks and never
   renders; the safe frame renders, is approved with a real decision POST,
   and clears from the pending list. A scoped, explicitly non-durable
-  HIL-304 landed too: the `ui_present` tool (`apex-tools`, opt-in only) +
-  `UiInteraction` trait + `apex agents run --local --interactive-ui`'s
+  HIL-304 landed too: the `ui_present` tool (`wovyr-tools`, opt-in only) +
+  `UiInteraction` trait + `wovyr agents run --local --interactive-ui`'s
   stdin presenter, so a bare agent run can present a policy-checked frame
   outside a workflow. Deferred, documented in
   [the roadmap](docs/18-roadmap/v1.2-generative-ui.md): a web-component
@@ -104,17 +104,17 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
   audit-chain integration for the bare-agent-run path, WASI-sandboxed
   validators, and signed UI templates.
 - **Generative UI Trust Runtime — Protocol & Trust Core (RM-GUI-P1, PRD-005):**
-  the `apex-ui` frame protocol (constrained component vocabulary — no raw
+  the `wovyr-ui` frame protocol (constrained component vocabulary — no raw
   HTML/script, no credential-input component; fail-closed parsing; semver'd
   schema version with newer-than-understood rejection; runtime-stamped
   provenance; canonical content hashes; typed decision validation) and the
-  `apex-ui-guard` trust layer (declarative YAML `UiPolicy`:
+  `wovyr-ui-guard` trust layer (declarative YAML `UiPolicy`:
   sensitive-input-name blocking, destructive-action gating, intent-mismatch
   deception checks, media-origin allow-lists, text redaction, tighten-only
   budgets; `hosted_floor` denies interactive frames when no policy exists;
-  `APEX_UNRESTRICTED_UI=1` escape hatch). Server: the `ui` workflow activity
+  `WOVYR_UNRESTRICTED_UI=1` escape hatch). Server: the `ui` workflow activity
   (present a policy-checked frame → suspend durably → resume on a validated
-  decision), a durable pending-frame store under `~/.apex/ui`,
+  decision), a durable pending-frame store under `~/.wovyr/ui`,
   `GET /api/v1/ui/frames[/{id}]` + `POST /api/v1/ui/decisions/{id}`, every
   verdict and decision recorded in the tamper-evident audit chain paired with
   the frame hash, and a `RunEvent::UiFrame` SSE event. Proven end-to-end by
@@ -124,9 +124,9 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
 
 ### Fixed
 - **A real lost-update race in the workflow engine's `resume`/`deliver`
-  path** (`apex-workflow`): with no per-execution serialization, two
+  path** (`wovyr-workflow`): with no per-execution serialization, two
   same-process callers driving the same `execution_id` concurrently — the
-  exact shape `apex-server`'s `submit_handler` produces (a fire-and-forget
+  exact shape `wovyr-server`'s `submit_handler` produces (a fire-and-forget
   background `resume()` right after `start()`, racing an immediate
   `signal`/`approve`/`ui`-decide call) — could each read the same stale
   checkpoint and independently drive it; whichever finished its write *last*
@@ -134,7 +134,7 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
   running". Found investigating an intermittent flake in the RM-GUI-P1
   `ui:` SDK test suite; reproduced deterministically (no wall-clock race,
   confirmed to fail pre-fix and pass post-fix) in
-  `crates/apex-workflow/tests/engine.rs`'s
+  `crates/wovyr-workflow/tests/engine.rs`'s
   `concurrent_resume_and_signal_do_not_lose_a_completed_state`. Fixed with
   an in-process per-execution async lock shared by `resume`/`deliver`
   (`signal_event`/`fire_timer`)/`run`. `Engine::cancel`'s racy-tolerant
@@ -144,9 +144,9 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
   alphabetically key-sorted `Value` form every real consumer (the server's
   JSON responses, the renderer) actually receives — silently breaking
   client-side integrity verification (RDR-403) the moment a struct's fields
-  weren't already alphabetical. Found while building `@apex/ui-react`'s hash
+  weren't already alphabetical. Found while building `@wovyr/ui-react`'s hash
   check and cross-verifying it against a live server, not by inspection.
-- **Security floor (RM-GA-P1):** real request authentication (`APEX_AUTH_MODE` —
+- **Security floor (RM-GA-P1):** real request authentication (`WOVYR_AUTH_MODE` —
   HS256/RS256 JWT or hashed API keys) replacing trusted headers; TLS-or-refuse on
   non-loopback binds; per-principal rate limiting; CORS allow-list; HTTP limits;
   safe-by-default tool registry (`shell` opt-in); workspace-confined `fs_read`;
@@ -154,18 +154,18 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
 - **Durability & DR (RM-GA-P2):** crash-safe `atomic_write`/`fsync` for every store;
   cross-process `FileLock`s; durable timers/schedules/crash recovery driven by the
   server itself; real workflow cancellation; async agent runs (`Prefer:
-  respond-async`); `apex admin backup|restore` (incl. S3-compatible destinations, a
+  respond-async`); `wovyr admin backup|restore` (incl. S3-compatible destinations, a
   hand-rolled SigV4 signer); KMS root-key escrow drill; RPO/RTO targets validated by
   timed restore drills.
 - **Scale & distribution (RM-GA-P3):** versioned schema migrations (`refinery`, one
-  history table per Postgres-backed crate, `apex admin migrate`); CI feature matrix +
+  history table per Postgres-backed crate, `wovyr admin migrate`); CI feature matrix +
   service-container integration jobs.
 - **Contract & operability (RM-GA-P4):** uniform cursor pagination + idempotency keys
   on every mutating route + request-id propagation; `snake_case` on every wire enum;
   RED metrics for every route; audit coverage for every state-changing handler;
   OpenAPI contract gate in CI (boots a real server against both SDKs); `cargo-deny`
-  gate; `apex-runtime` (one shared activity executor for CLI/server/eval) and
-  `apex-config` (one shared `~/.apex`/env/KMS/secrets construction).
+  gate; `wovyr-runtime` (one shared activity executor for CLI/server/eval) and
+  `wovyr-config` (one shared `~/.wovyr`/env/KMS/secrets construction).
 - **Angular dashboard** covering agents, workflows, memory, plugins, marketplace,
   secrets + real login/session.
 - **v1.1 Phase 1 (RM-AIM-P1, in progress):** real per-model LLM cost accounting
@@ -184,7 +184,7 @@ Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
   system-prompt hoisting, prompt caching with cache-rate-aware `cost_usd`, real SSE
   streaming; wired into `Gateway::from_env()` (`ANTHROPIC_API_KEY`), class-based model
   resolution (haiku/sonnet/opus), current Claude prices in the `PriceBook`, and
-  `apex agents run --local --provider anthropic`. Structured output + forced tool
+  `wovyr agents run --local --provider anthropic`. Structured output + forced tool
   (PRV-202): `ChatRequest` gained `tool_choice` (auto/none/required/named) and
   `response_format` (`json_object`/`json_schema`), translated per provider
   (OpenAI `response_format` + `strict`, Anthropic `output_config.format` +
@@ -207,29 +207,29 @@ post-tag deferred slices (Postgres-backed marketplace registry, human review
 workflow) also completed.
 
 ### Added
-- **Plugin Engine** (`apex-plugin`): signed (`ed25519`) plugin packages, manifest
+- **Plugin Engine** (`wovyr-plugin`): signed (`ed25519`) plugin packages, manifest
   validation, permission grants, dependency resolution, full lifecycle
   (install/enable/disable/upgrade/rollback/uninstall), WASM (WASI) capability
   runtime, durable catalog, SBOM + provenance policy.
-- **Plugin Marketplace** (`apex-marketplace`): registry with signature-verified
+- **Plugin Marketplace** (`wovyr-marketplace`): registry with signature-verified
   publish, discovery/search, downloads, reviews/ratings, static security scanning,
   human review workflow gating the verified badge, abuse reports + delisting;
   file-backed or Postgres-backed store.
-- **Multi-tenancy** (`apex-tenancy` + server routes): Tenant → Org → Project model,
+- **Multi-tenancy** (`wovyr-tenancy` + server routes): Tenant → Org → Project model,
   default-deny RBAC, quotas enforced on the run path (concurrent runs + daily LLM
   spend), ETag optimistic concurrency.
-- **Secret vault** (`apex-secrets`): reference-addressed, tenant-scoped, grant-gated
-  secrets with masking + rotation; sandbox secret injection (`APEX_SECRET_*`).
-- **Envelope-encryption KMS** (`apex-kms`): root → tenant keys → DEKs, rotation,
+- **Secret vault** (`wovyr-secrets`): reference-addressed, tenant-scoped, grant-gated
+  secrets with masking + rotation; sandbox secret injection (`WOVYR_SECRET_*`).
+- **Envelope-encryption KMS** (`wovyr-kms`): root → tenant keys → DEKs, rotation,
   crypto-shredding `destroy`; at-rest-encrypting secret/memory/webhook stores.
-- **Tamper-evident audit log** (`apex-audit`): hash-chained, `fsync`ed, queryable
+- **Tamper-evident audit log** (`wovyr-audit`): hash-chained, `fsync`ed, queryable
   over `GET /api/v1/audit`.
-- **Domain events + webhooks** (`apex-events`): HMAC-signed deliveries, topic
+- **Domain events + webhooks** (`wovyr-events`): HMAC-signed deliveries, topic
   matching, backoff retry; `/v1` API hardening (pagination, idempotency, request-id).
 - Sandbox spectrum: container (Docker/Podman), gVisor, Firecracker microVM, WASI
   backends; egress proxy + host-side `iptables`/`nsenter` lockdown; warm pooling +
   tenant-fair scheduling.
-- The `apex-eval` deterministic evaluation harness (FUT-006 spike) and the
+- The `wovyr-eval` deterministic evaluation harness (FUT-006 spike) and the
   workflow-orchestrated multi-agent prototype (FUT-001(b)).
 
 ## [0.2.0] — 2026-06-28
@@ -238,18 +238,18 @@ The intelligence + durability milestone
 ([docs/18-roadmap/v0.2.md](docs/18-roadmap/v0.2.md)); not tagged at the time.
 
 ### Added
-- **Durable workflow engine** (`apex-workflow`): YAML DSL → validated DAG,
+- **Durable workflow engine** (`wovyr-workflow`): YAML DSL → validated DAG,
   event-sourced execution with per-step checkpoints and idempotent `resume`,
   retries, saga compensation, conditional branching, human-in-the-loop suspension,
   durable wall-clock timers, cron schedules, queries/visibility, child workflows,
   definition pinning, distributed workers over leases (in-memory/file/Postgres).
-- **Memory engine** (`apex-memory`): hybrid retrieval (vector + keyword, RRF),
+- **Memory engine** (`wovyr-memory`): hybrid retrieval (vector + keyword, RRF),
   weighted ranking, MMR diversification, ABAC scope filtering, compression;
   file-backed or tiered Postgres+Qdrant store; RAG-grounded agent runs.
-- **Gateway resilience** (`apex-provider`): retry, failover, circuit breakers
+- **Gateway resilience** (`wovyr-provider`): retry, failover, circuit breakers
   (local or Redis-shared), exact + semantic response caching (in-memory or Qdrant),
   request hedging, cost events; chaos + p95 perf gate tests.
-- **Observability** (`apex-telemetry`): Prometheus/OpenMetrics metrics with
+- **Observability** (`wovyr-telemetry`): Prometheus/OpenMetrics metrics with
   exemplars, structured logging, OTLP traces/logs/metrics (opt-in).
 
 ## [0.1.0] — 2026-06-27
@@ -258,20 +258,20 @@ The runnable foundation slice ([docs/18-roadmap/v0.1.md](docs/18-roadmap/v0.1.md
 
 ### Added
 - Cargo workspace skeleton (ADR-0001): shared `crates/`, thin `apps/`.
-- `apex-common`: shared `Error`/`Result` + `Usage` accounting.
-- `apex-provider`: vendor-neutral `AIProvider` trait, deterministic offline
+- `wovyr-common`: shared `Error`/`Result` + `Usage` accounting.
+- `wovyr-provider`: vendor-neutral `AIProvider` trait, deterministic offline
   `MockProvider`, OpenAI-compatible provider, streaming, model-selector `Gateway`.
-- `apex-tools`: `Tool` trait + registry, `echo`/`fs_read`/`http_get`/`shell`
+- `wovyr-tools`: `Tool` trait + registry, `echo`/`fs_read`/`http_get`/`shell`
   built-ins, native process sandbox (timeout + output cap + `setrlimit`).
-- `apex-agent`: K8s-style YAML agent manifests and the model→tool→model run loop
+- `wovyr-agent`: K8s-style YAML agent manifests and the model→tool→model run loop
   with step budgets and streamed events.
-- `apex-server`: single-node Axum server — `/healthz`, `/metrics`, agent run/stream
+- `wovyr-server`: single-node Axum server — `/healthz`, `/metrics`, agent run/stream
   (SSE) + persistence routes, error envelope.
-- `apex` CLI: `login`/`dev`/`agents run` (local embedded or remote server).
+- `wovyr` CLI: `login`/`dev`/`agents run` (local embedded or remote server).
 - The `docs/` specification tree (product → architecture → per-subsystem specs →
   ADRs → roadmap) that the codebase implements spec-first.
 
-[Unreleased]: https://github.com/punarduttrajput/Apex/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/punarduttrajput/Apex/releases/tag/v0.3.0
-[0.2.0]: https://github.com/punarduttrajput/Apex/tree/v0.3.0/docs/18-roadmap/v0.2.md
-[0.1.0]: https://github.com/punarduttrajput/Apex/tree/v0.3.0/docs/18-roadmap/v0.1.md
+[Unreleased]: https://github.com/punarduttrajput/Wovyr/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/punarduttrajput/Wovyr/releases/tag/v0.3.0
+[0.2.0]: https://github.com/punarduttrajput/Wovyr/tree/v0.3.0/docs/18-roadmap/v0.2.md
+[0.1.0]: https://github.com/punarduttrajput/Wovyr/tree/v0.3.0/docs/18-roadmap/v0.1.md

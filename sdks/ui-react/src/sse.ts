@@ -12,7 +12,7 @@ export interface UiFrameSseEvent {
  * agent via `POST /api/v1/agents:stream` rather than the pull-based
  * {@link usePendingFrames}. Deliberately minimal (no `id:`/`retry:`, no
  * reconnection — matching what that endpoint actually emits), self-contained
- * so this package has no dependency on `@apex-ai/sdk`. Non-`ui_frame` events
+ * so this package has no dependency on `@wovyr/sdk`. Non-`ui_frame` events
  * in the stream are silently skipped; a malformed `ui_frame` payload (bad
  * JSON, missing fields) is dropped rather than thrown — a stream consumer
  * shouldn't crash on one bad frame. */

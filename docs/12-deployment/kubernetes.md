@@ -11,9 +11,9 @@ Document ID: DEP-003
 **Status:** Draft — describes the **long-term, aspirational** multi-service
 topology (independent api-gateway/agent-runtime/workflow-engine/… services,
 each with its own HPA, plus a tool-worker DaemonSet with gVisor/Kata sandbox
-pools). **Not built.** The platform today is one binary (`apex-cli`). For
+pools). **Not built.** The platform today is one binary (`wovyr-cli`). For
 what actually deploys, see
-[`deployment/helm/apex/README.md`](../../deployment/helm/apex/README.md) — a
+[`deployment/helm/wovyr/README.md`](../../deployment/helm/wovyr/README.md) — a
 real Helm chart for the single-binary + Postgres + Qdrant topology (the same
 shape as `deployment/docker-compose.yml`), authored 2026-07-05, validated
 offline (`helm lint`/`helm template`/`kubeconform`) but never applied to a
@@ -25,7 +25,7 @@ live cluster.
 
 # 1. Purpose
 
-This document describes deploying the Apex AI Platform on Kubernetes — the recommended production topology with independent scaling, health-gated rollouts, and isolated tool execution.
+This document describes deploying the Wovyr AI Platform on Kubernetes — the recommended production topology with independent scaling, health-gated rollouts, and isolated tool execution.
 
 ---
 
@@ -76,9 +76,9 @@ spec:
       securityContext: { runAsNonRoot: true, readOnlyRootFilesystem: true }
       containers:
         - name: api-gateway
-          image: apex/api-gateway:1.0.0
+          image: wovyr/api-gateway:1.0.0
           ports: [{ containerPort: 8080 }, { containerPort: 9090 }]
-          envFrom: [{ secretRef: { name: apex-config } }]
+          envFrom: [{ secretRef: { name: wovyr-config } }]
           resources:
             requests: { cpu: "500m", memory: "256Mi" }
             limits:   { cpu: "2",    memory: "512Mi" }
@@ -117,8 +117,8 @@ autoscaler adds nodes for the **untrusted/microVM** pool separately.
 ```yaml
 spec:
   runtimeClassName: gvisor
-  nodeSelector: { apex.io/pool: untrusted }
-  tolerations: [{ key: apex.io/untrusted, operator: Exists }]
+  nodeSelector: { wovyr.io/pool: untrusted }
+  tolerations: [{ key: wovyr.io/untrusted, operator: Exists }]
 ```
 
 ---
@@ -170,5 +170,5 @@ spec:
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.1.0 | 2026-07-05 | Added a status note pointing to `deployment/helm/apex/` — a real chart for the actual single-binary topology, distinct from this doc's aspirational multi-service split |
+| 1.1.0 | 2026-07-05 | Added a status note pointing to `deployment/helm/wovyr/` — a real chart for the actual single-binary topology, distinct from this doc's aspirational multi-service split |
 | 1.0.0 | 2026-06-27 | Initial Kubernetes deployment guide |

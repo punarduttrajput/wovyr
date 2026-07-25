@@ -80,7 +80,7 @@ non-idempotent methods are never cached
 # 7. Example
 
 ```bash
-apex tools invoke http.request --input '{"method":"GET","url":"https://api.example.com/health"}'
+wovyr tools invoke http.request --input '{"method":"GET","url":"https://api.example.com/health"}'
 ```
 
 The basis for most plugin integrations (e.g. [VPN agent](../16-examples/vpn-agent.md)).

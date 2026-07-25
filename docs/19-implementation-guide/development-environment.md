@@ -16,7 +16,7 @@ Document ID: IMPL-001
 
 # 1. Purpose
 
-This document describes how to set up a local development environment for the Apex
+This document describes how to set up a local development environment for the Wovyr
 AI Platform.
 
 ---
@@ -29,7 +29,7 @@ AI Platform.
 | Docker + Compose | Local backends ([compose](../12-deployment/docker-compose.md)) |
 | Node.js + pnpm | Dashboard (Angular UI + NestJS BFF) |
 | `cargo nextest` | Fast test runner |
-| `apex` CLI | Local run + auth ([CLI](../11-cli/index.md)) |
+| `wovyr` CLI | Local run + auth ([CLI](../11-cli/index.md)) |
 
 A devcontainer is provided so the toolchain is reproducible.
 
@@ -38,7 +38,7 @@ A devcontainer is provided so the toolchain is reproducible.
 # 3. Bootstrap
 
 ```bash
-git clone <repo> && cd apex
+git clone <repo> && cd wovyr
 make setup        # rustup components, hooks, node deps
 ```
 
@@ -51,7 +51,7 @@ make setup        # rustup components, hooks, node deps
 ```bash
 make dev          # all-in-one platform with local backends
 # or with the CLI:
-apex dev          # embedded runtime for quick iteration
+wovyr dev          # embedded runtime for quick iteration
 ```
 
 `make dev` starts the [Compose](../12-deployment/docker-compose.md) backends and the
@@ -84,14 +84,14 @@ make build        # build all crates
 make test         # unit + integration
 make lint         # clippy + fmt check
 make run-svc SVC=llm-gateway   # run one service
-apex doctor       # diagnose env + connectivity
+wovyr doctor       # diagnose env + connectivity
 ```
 
 ---
 
 # 8. Troubleshooting
 
-- `apex doctor` checks toolchain, backends, and version compatibility
+- `wovyr doctor` checks toolchain, backends, and version compatibility
   ([CLI](../11-cli/installation.md#8-first-run)).
 - Slow builds: ensure `sccache`/workspace caching is enabled
   ([build system](build-system.md)).

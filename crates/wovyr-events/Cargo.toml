@@ -1,0 +1,20 @@
+[package]
+name = "wovyr-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Domain events and outbound webhooks: event model, subscriptions, HMAC-SHA256 signing, topic matching, and retry/backoff."
+
+[dependencies]
+wovyr-common.workspace = true
+# At-rest encryption of a subscription's signing secret (EncryptedFileWebhookStore).
+# wovyr-kms itself depends only on wovyr-common, so the workspace spine stays
+# one-directional (the same shape as wovyr-secrets' dependency on wovyr-kms).
+wovyr-kms.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Webhook payload signing (HMAC-SHA256).
+hmac.workspace = true
+sha2.workspace = true

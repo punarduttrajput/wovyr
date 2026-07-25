@@ -31,7 +31,7 @@ Where PRD-003 asked *"is the platform safe and honest?"*, this PRD asks *"is it 
 capable, operable AI product a team would actually build on?"* The audit's
 one-sentence verdict:
 
-> **Apex has excellent primitives, but three structural problems recur at every
+> **Wovyr has excellent primitives, but three structural problems recur at every
 > layer: sophisticated machinery is built and tested yet never wired into the real
 > run path; the AI core is missing table-stakes production capabilities; and
 > single-node assumptions are baked into surfaces the product markets as
@@ -154,7 +154,7 @@ Twelve workstreams (A–L). Each requirement's ticket code and phase are in §12
 - **R-A.2 (P0)** — Execute independent tool calls in one turn concurrently, ordered
   by call id. *(Sequential tool loop.)*
 - **R-A.3 (P1)** — Apply the agent manifest's `max_steps` as the default budget in
-  `run_agent_inner` (not only via `apex-runtime`). *(max_steps ignored.)*
+  `run_agent_inner` (not only via `wovyr-runtime`). *(max_steps ignored.)*
 - **R-A.4 (P1)** — Step-level error recovery: retry a recoverable model-step error;
   on budget exhaustion, force a final tool-less answer instead of hard-erroring.
 - **R-A.5 (P2)** — Richer streaming: emit tool-call-argument and reasoning/thinking
@@ -183,7 +183,7 @@ Twelve workstreams (A–L). Each requirement's ticket code and phase are in §12
 
 ## WS-D — Evaluation
 - **R-D.1 (P1)** — LLM-as-judge + semantic-similarity scoring alongside substring.
-- **R-D.2 (P1)** — Turn `apex-eval` into a real gate: golden baselines, pass-rate
+- **R-D.2 (P1)** — Turn `wovyr-eval` into a real gate: golden baselines, pass-rate
   thresholds, variance-over-N, persisted score artifacts compared in CI.
 - **R-D.3 (P2)** — Evaluate the RAG path (`run_agent_with_memory`) and manifest
   `max_steps`; add retrieval metrics (recall@k / nDCG / MRR).
@@ -202,10 +202,10 @@ Twelve workstreams (A–L). Each requirement's ticket code and phase are in §12
 ## WS-F — Ecosystem & Extensibility
 - **R-F.1 (P1)** — An MCP client tool-source (stdio/HTTP) proxying external tools
   into `ToolRegistry`. *(No external tool servers at all.)*
-- **R-F.2 (P1)** — A plugin authoring SDK crate + `apex plugin new` scaffold
+- **R-F.2 (P1)** — A plugin authoring SDK crate + `wovyr plugin new` scaffold
   (manifest + wasm build + digest computation + trust snippet). *(Format docs only.)*
 - **R-F.3 (P2)** — A container capability loader (reuse `ContainerSandbox`).
-- **R-F.4 (P2)** — One-shot `apex plugin publish` (sign + fill digests + emit trust).
+- **R-F.4 (P2)** — One-shot `wovyr plugin publish` (sign + fill digests + emit trust).
 - **R-F.5 (P3)** — Marketplace OSV/CVE feed keyed on SBOM `name@version`.
 
 ## WS-G — Server & Multi-Tenancy
@@ -242,7 +242,7 @@ Twelve workstreams (A–L). Each requirement's ticket code and phase are in §12
 - **R-I.3 (P1)** — Default the secrets store to encrypted-at-rest (plaintext becomes
   the explicit opt-out); **R-I.4 (P2)** — audit-log time-range + cursor pagination +
   indexed sink; **R-I.5 (P3)** — request-scoped secret channel (vsock/stdin) instead
-  of `APEX_SECRET_*` env injection.
+  of `WOVYR_SECRET_*` env injection.
 
 ## WS-J — DX, SDKs & Release
 - **R-J.1 (P1)** — Reconcile versioning: bump workspace/badges/SDKs to the real tag,
@@ -335,7 +335,7 @@ This PRD's scope is met when:
 3. Claude is a first-class provider; structured output and moderation hooks exist
    (WS-B, WS-I).
 4. Memory chunks + reranks; the semantic cache never serves a wrong-context hit
-   (WS-C). `apex-eval` fails CI on a real quality regression (WS-D).
+   (WS-C). `wovyr-eval` fails CI on a real quality regression (WS-D).
 5. A server restart loses no pollable run or pending webhook; shutdown drains
    (WS-G). Multi-node rate limits and quotas are correct (WS-G/WS-H).
 6. Versioning/CHANGELOG/release automation exist and a container image is published;
@@ -433,7 +433,7 @@ implement exactly these.
 | Timer/schedule poll O(N) / accuracy | Med | R-H.7 | WFL-306 | 3 |
 | No activity progress events | Low | R-H.8 | WFL-307 | 3 |
 | Event enum no versioning | Low | R-H.8 | WFL-308 | 3 |
-| apex-runtime `ai` activity underspecified | Med | R-A.4 | RUN-201 | 2 |
+| wovyr-runtime `ai` activity underspecified | Med | R-A.4 | RUN-201 | 2 |
 | Sub-agent observability lost (NullSink, $0) | Low | R-B.1 | RUN-202 | 2 |
 | No guardrails/moderation/PII | Med | R-I.1 | SAF-201 | 2 |
 | No prompt template/versioning | Med | R-I.2 | SAF-202 | 2 |

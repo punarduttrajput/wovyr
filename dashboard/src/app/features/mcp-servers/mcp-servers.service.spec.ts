@@ -5,7 +5,7 @@ import { McpServersService } from './mcp-servers.service';
 
 /** PRD-006: pins the exact request shape this service sends against the MCP
  * connection-management routes — a drifted method/URL/body here would
- * silently 404/400 against a real `apex-server` without any type error. */
+ * silently 404/400 against a real `wovyr-server` without any type error. */
 describe('McpServersService', () => {
   let service: McpServersService;
   let http: HttpTestingController;

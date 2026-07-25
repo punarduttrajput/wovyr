@@ -1,45 +1,45 @@
 #!/usr/bin/env bash
-# Seed the "Kingdom of Eldoria" game knowledge base into Apex memory, one record per
+# Seed the "Kingdom of Eldoria" game knowledge base into Wovyr memory, one record per
 # entity (good RAG: each query retrieves just the relevant chunk, not the whole KB).
 #
 # Usage:
 #   ./seed.sh                 # seeds namespace "eldoria-kb"
 #   ./seed.sh my-namespace    # seeds a custom namespace
 #
-# Re-running appends duplicates — clear ~/.apex/memory/<ns>.jsonl first to reseed.
+# Re-running appends duplicates — clear ~/.wovyr/memory/<ns>.jsonl first to reseed.
 #
-# The apex binary is auto-located: $APEX_BIN, else ./target/{debug,release}/apex[.exe]
-# (run from the repo root), else `apex` on PATH. Build it first: cargo build -p apex-cli.
+# The wovyr binary is auto-located: $WOVYR_BIN, else ./target/{debug,release}/wovyr[.exe]
+# (run from the repo root), else `wovyr` on PATH. Build it first: cargo build -p wovyr-cli.
 set -euo pipefail
 
 NS="${1:-eldoria-kb}"
 
-# Resolve the apex CLI binary.
-APEX="${APEX_BIN:-}"
-if [ -z "$APEX" ]; then
-  for c in target/debug/apex target/release/apex target/debug/apex.exe target/release/apex.exe; do
-    [ -x "$c" ] && { APEX="$c"; break; }
+# Resolve the wovyr CLI binary.
+WOVYR="${WOVYR_BIN:-}"
+if [ -z "$WOVYR" ]; then
+  for c in target/debug/wovyr target/release/wovyr target/debug/wovyr.exe target/release/wovyr.exe; do
+    [ -x "$c" ] && { WOVYR="$c"; break; }
   done
 fi
-APEX="${APEX:-$(command -v apex || true)}"
-if [ -z "$APEX" ]; then
-  echo "error: apex binary not found. Build it first:" >&2
-  echo "  cargo build -p apex-cli" >&2
-  echo "then re-run from the repo root, or set APEX_BIN=/path/to/apex." >&2
+WOVYR="${WOVYR:-$(command -v wovyr || true)}"
+if [ -z "$WOVYR" ]; then
+  echo "error: wovyr binary not found. Build it first:" >&2
+  echo "  cargo build -p wovyr-cli" >&2
+  echo "then re-run from the repo root, or set WOVYR_BIN=/path/to/wovyr." >&2
   exit 1
 fi
-echo "Using apex: $APEX"
+echo "Using wovyr: $WOVYR"
 
 # Seeding embeds each record via the gateway. A chat-only endpoint (e.g. Ollama's
 # glm-4.7) has no /embeddings model, so a real key makes every `put` fail — and `set -e`
 # would abort on the first one, storing nothing. Unset the provider here so embeddings
 # use the offline/deterministic path; this KB is retrieved by KEYWORD, which never uses
 # the embedding vector anyway. (The chat model is only needed later, at agent-run time.)
-unset OPENAI_API_KEY APEX_OPENAI_BASE_URL
+unset OPENAI_API_KEY WOVYR_OPENAI_BASE_URL
 
 # put <tag> <content> [importance]
 put() {
-  "$APEX" memory put --namespace "$NS" --tag "$1" --content "$2" ${3:+--importance "$3"}
+  "$WOVYR" memory put --namespace "$NS" --tag "$1" --content "$2" ${3:+--importance "$3"}
 }
 
 echo "Seeding '$NS'…"
@@ -138,6 +138,6 @@ put faq "FAQ: How do I unlock fast travel? Visit each town once."
 put glossary "Glossary: HP = Health Points, MP = Mana Points, XP = Experience Points, NPC = Non Player Character, DPS = Damage Per Second."
 
 echo "Done. Seeded into namespace '$NS'."
-echo "Verify (offline, no embeddings):  env -u OPENAI_API_KEY $APEX memory query 'Ice Dragon weakness' --namespace $NS"
+echo "Verify (offline, no embeddings):  env -u OPENAI_API_KEY $WOVYR memory query 'Ice Dragon weakness' --namespace $NS"
 echo "Ask the guide (keyword RAG, your chat model OK):"
-echo "  $APEX agents run --local -f examples/games/eldoria/game-guide.yaml --input '{\"message\":\"What is the Ice Dragon weak to?\"}'"
+echo "  $WOVYR agents run --local -f examples/games/eldoria/game-guide.yaml --input '{\"message\":\"What is the Ice Dragon weak to?\"}'"

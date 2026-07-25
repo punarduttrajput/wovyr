@@ -79,8 +79,8 @@ Side-effecting; never cached. Pin image digests for reproducibility.
 # 7. Example
 
 ```bash
-apex tools enable docker.run --project ci
-apex tools invoke docker.run --input '{"image":"alpine","cmd":["echo","hi"]}'
+wovyr tools enable docker.run --project ci
+wovyr tools invoke docker.run --input '{"image":"alpine","cmd":["echo","hi"]}'
 ```
 
 ---

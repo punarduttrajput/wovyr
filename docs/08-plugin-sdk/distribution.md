@@ -22,12 +22,12 @@ Distribution is where trust is established: every package must be verifiable, ta
 
 ---
 
-# 2. Package Format (`.apexpkg`)
+# 2. Package Format (`.wovyrpkg`)
 
 A plugin is distributed as a single content-addressed archive:
 
 ```text
-github-1.4.0.apexpkg
+github-1.4.0.wovyrpkg
 ├── plugin.yaml          # manifest
 ├── artifacts/           # wasm / binaries / images (each digest-pinned)
 ├── schemas/             # input/output/config JSON schemas
@@ -73,7 +73,7 @@ Build → compute digest manifest → sign manifest with publisher key → attac
 | Public Marketplace | Community + verified publishers (see [Marketplace](marketplace.md)) |
 | Private registry | Org-internal plugins, not publicly listed |
 | Mirror | Cached copy for air-gapped/enterprise deployments |
-| Local file | Direct install from a `.apexpkg` (dev/testing) |
+| Local file | Direct install from a `.wovyrpkg` (dev/testing) |
 
 A deployment can configure multiple sources with precedence (e.g. private over
 public) and an allowlist of trusted publishers.
@@ -83,7 +83,7 @@ public) and an allowlist of trusted publishers.
 # 6. Publish Flow
 
 ```text
-apex plugin publish
+wovyr plugin publish
    │
    ▼
 Validate manifest + schemas + SBOM

@@ -15,8 +15,8 @@ Document ID: DASH-001
 ---
 
  > **Implementation status (v0.3, 2026-06-30).** The first dashboard slice ships the
-> **Angular SPA only**, talking **directly to `apex-server`** (the Rust platform API)
-> — the NestJS **BFF is deferred**. This is sound because `apex-server` already serves
+> **Angular SPA only**, talking **directly to `wovyr-server`** (the Rust platform API)
+> — the NestJS **BFF is deferred**. This is sound because `wovyr-server` already serves
 > the `/api/v1` REST surface and native **SSE** (`agents:stream`), which the browser
 > consumes directly (`fetch` streaming), so no Node WebSocket bridge is needed yet. In
 > development the SPA reaches the API through the Angular dev-server proxy
@@ -24,14 +24,14 @@ Document ID: DASH-001
 > behind the gateway. The BFF's responsibilities below (server-side sessions /
 > OAuth2-PKCE, view aggregation, stream fan-in, CSRF) are **deferred until production
 > auth is needed**, at which point they will be added either as a thin Node tier or
-> folded into `apex-server`. The target architecture in §3–§7 remains the goal; the
+> folded into `wovyr-server`. The target architecture in §3–§7 remains the goal; the
 > sections below describe that end state. First built surface: **Agent Studio**
 > (`dashboard/src/app/features/agent-studio`). Stack deviation tracked here and in
 > [`index.md`](index.md); the documented Angular UI is unchanged.
 
 # 1. Purpose
 
-This document specifies the architecture of the Apex AI Platform **Dashboard**: the Angular single-page application (SPA), the NestJS backend-for-frontend (BFF), how they consume the [Platform API](../09-api/index.md), and the cross-cutting concerns (auth, real-time, RBAC-driven UI, theming, observability).
+This document specifies the architecture of the Wovyr AI Platform **Dashboard**: the Angular single-page application (SPA), the NestJS backend-for-frontend (BFF), how they consume the [Platform API](../09-api/index.md), and the cross-cutting concerns (auth, real-time, RBAC-driven UI, theming, observability).
 
 ---
 
@@ -234,4 +234,4 @@ Dashboard adoption is a tracked [success metric](../00-executive/success-metrics
 | Version | Date | Description |
 |---------|------|-------------|
 | 1.0.0 | 2026-06-27 | Initial Dashboard Overview & Architecture |
-| 1.1.0 | 2026-06-30 | Implementation status: first slice ships the Angular SPA directly against apex-server; NestJS BFF deferred until production auth. Agent Studio built first. |
+| 1.1.0 | 2026-06-30 | Implementation status: first slice ships the Angular SPA directly against wovyr-server; NestJS BFF deferred until production auth. Agent Studio built first. |

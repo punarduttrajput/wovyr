@@ -8,67 +8,67 @@ export const routes: Routes = [
   { path: '', pathMatch: 'full', redirectTo: 'agents' },
   {
     path: 'agents',
-    title: 'Agent Studio · Apex',
+    title: 'Agent Studio · Wovyr',
     loadComponent: () =>
       import('./features/agent-studio/agent-studio').then((m) => m.AgentStudio),
   },
   {
     path: 'monitoring',
-    title: 'Monitoring · Apex',
+    title: 'Monitoring · Wovyr',
     loadComponent: () => import('./features/monitoring/monitoring').then((m) => m.Monitoring),
   },
   {
     path: 'audit',
-    title: 'Audit log · Apex',
+    title: 'Audit log · Wovyr',
     loadComponent: () => import('./features/audit/audit').then((m) => m.Audit),
   },
   {
     path: 'workflows',
-    title: 'Workflow Builder · Apex',
+    title: 'Workflow Builder · Wovyr',
     loadComponent: () =>
       import('./features/workflow-builder/workflow-builder').then((m) => m.WorkflowBuilder),
   },
   {
     path: 'executions/:id',
-    title: 'Execution · Apex',
+    title: 'Execution · Wovyr',
     loadComponent: () =>
       import('./features/execution-detail/execution-detail').then((m) => m.ExecutionDetail),
   },
   {
     path: 'playground',
-    title: 'Playground · Apex',
+    title: 'Playground · Wovyr',
     loadComponent: () => import('./features/playground/playground').then((m) => m.Playground),
   },
   {
     path: 'memory',
-    title: 'Memory Explorer · Apex',
+    title: 'Memory Explorer · Wovyr',
     loadComponent: () =>
       import('./features/memory-explorer/memory-explorer').then((m) => m.MemoryExplorer),
   },
   {
     path: 'surfaces',
-    title: 'Surfaces · Apex',
+    title: 'Surfaces · Wovyr',
     loadComponent: () => import('./features/surfaces/surfaces').then((m) => m.Surfaces),
   },
   {
     path: 'mcp-servers',
-    title: 'MCP Servers · Apex',
+    title: 'MCP Servers · Wovyr',
     loadComponent: () =>
       import('./features/mcp-servers/mcp-servers').then((m) => m.McpServers),
   },
   {
     path: 'marketplace',
-    title: 'Marketplace · Apex',
+    title: 'Marketplace · Wovyr',
     loadComponent: () => import('./features/marketplace/marketplace').then((m) => m.Marketplace),
   },
   {
     path: 'settings',
-    title: 'Settings · Apex',
+    title: 'Settings · Wovyr',
     loadComponent: () => import('./features/settings/settings').then((m) => m.Settings),
   },
   {
     path: 'login',
-    title: 'Sign in · Apex',
+    title: 'Sign in · Wovyr',
     loadComponent: () => import('./features/login/login').then((m) => m.Login),
   },
   { path: '**', redirectTo: 'agents' },

@@ -55,7 +55,7 @@ export interface ExecutionDetail {
   events: unknown[];
 }
 
-/** Client for the workflow-builder routes on apex-server. */
+/** Client for the workflow-builder routes on wovyr-server. */
 @Injectable({ providedIn: 'root' })
 export class WorkflowService {
   private http = inject(HttpClient);

@@ -92,15 +92,15 @@ export class MonitoringService {
       return code >= 400;
     };
 
-    const requestsTotal = sum('apex_api_requests_total');
-    const errorsTotal = sum('apex_api_requests_total', isErr);
-    const durSum = sum('apex_api_request_duration_seconds_sum');
-    const durCount = sum('apex_api_request_duration_seconds_count');
+    const requestsTotal = sum('wovyr_api_requests_total');
+    const errorsTotal = sum('wovyr_api_requests_total', isErr);
+    const durSum = sum('wovyr_api_request_duration_seconds_sum');
+    const durCount = sum('wovyr_api_request_duration_seconds_count');
 
     // Per-route rollup.
     const byRoute = new Map<string, { count: number; errors: number }>();
     for (const s of samples) {
-      if (s.name !== 'apex_api_requests_total') continue;
+      if (s.name !== 'wovyr_api_requests_total') continue;
       const route = s.labels['route'] ?? s.labels['path'] ?? '—';
       const cur = byRoute.get(route) ?? { count: 0, errors: 0 };
       cur.count += s.value;
@@ -114,9 +114,9 @@ export class MonitoringService {
       errorsTotal,
       errorRate: requestsTotal ? errorsTotal / requestsTotal : 0,
       avgLatencyMs: durCount ? (durSum / durCount) * 1000 : 0,
-      llmCostUsd: sum('apex_llm_cost_usd_total'),
-      llmTokens: sum('apex_llm_tokens_total'),
-      cacheSavingsUsd: sum('apex_cache_savings_usd_total'),
+      llmCostUsd: sum('wovyr_llm_cost_usd_total'),
+      llmTokens: sum('wovyr_llm_tokens_total'),
+      cacheSavingsUsd: sum('wovyr_cache_savings_usd_total'),
       routes: [...byRoute.entries()]
         .map(([route, v]) => ({ route, ...v }))
         .sort((a, b) => b.count - a.count),

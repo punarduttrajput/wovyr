@@ -10,7 +10,7 @@
 
 # 1. Purpose
 
-This document defines the Compensation Engine for the Apex Workflow Engine.
+This document defines the Compensation Engine for the Wovyr Workflow Engine.
 
 The Compensation Engine provides reliable rollback for long-running distributed workflows by executing business-defined compensation actions instead of relying on traditional ACID database transactions.
 

@@ -1,0 +1,21 @@
+[package]
+name = "wovyr-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The one ActivityExecutor dispatch body shared by the CLI, server, and eval harness (RM-GA-P4 HLTH-902/HLTH-901) — tool/ai/human dispatch and retry classification live here once; only agent resolution (file, stored-by-id, in-memory map) is parameterized per platform."
+
+[dependencies]
+wovyr-common.workspace = true
+wovyr-agent.workspace = true
+wovyr-provider.workspace = true
+wovyr-tools.workspace = true
+wovyr-workflow.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

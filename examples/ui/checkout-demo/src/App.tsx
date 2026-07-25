@@ -1,9 +1,9 @@
-import { UiFrameView, createUiClient, usePendingFrames } from "@apex/ui-react";
+import { UiFrameView, createUiClient, usePendingFrames } from "@wovyr/ui-react";
 import { useMemo, useState } from "react";
 
 // Mirrors examples/workflows/ui-checkout-approve.yaml / ui-checkout-block.yaml
 // verbatim — inlined so this static demo needs no server-side file serving.
-const APPROVE_MANIFEST = `apiVersion: workflow.apex.io/v1
+const APPROVE_MANIFEST = `apiVersion: workflow.wovyr.io/v1
 kind: Workflow
 metadata:
   name: ui-checkout-approve
@@ -35,7 +35,7 @@ spec:
                   - { type: button, action: cancel, label: Cancel, class: cancel }
 `;
 
-const BLOCK_MANIFEST = `apiVersion: workflow.apex.io/v1
+const BLOCK_MANIFEST = `apiVersion: workflow.wovyr.io/v1
 kind: Workflow
 metadata:
   name: ui-checkout-block
@@ -84,7 +84,7 @@ export function App() {
     try {
       const res = await fetch(`${baseUrl}/api/v1/workflows`, {
         method: "POST",
-        headers: { "content-type": "application/json", "X-Apex-Principal": principal },
+        headers: { "content-type": "application/json", "X-Wovyr-Principal": principal },
         body: JSON.stringify({ manifest, execution_id: executionId }),
       });
       const body = await res.json();
@@ -104,7 +104,7 @@ export function App() {
     const interval = setInterval(async () => {
       attempts++;
       const res = await fetch(`${baseUrl}/api/v1/workflows/${executionId}`, {
-        headers: { "X-Apex-Principal": principal },
+        headers: { "X-Wovyr-Principal": principal },
       });
       if (res.ok) {
         const body = await res.json();
@@ -123,10 +123,10 @@ export function App() {
 
   return (
     <main className="demo-shell">
-      <h1>Apex — Generative UI Trust Runtime</h1>
+      <h1>Wovyr — Generative UI Trust Runtime</h1>
       <p className="demo-subtitle">
         The killer demo (PRD-005 §9): submit a safe checkout or a poisoned one, and watch the
-        trust layer render, block, and resume — for real, against a running <code>apex-server</code>.
+        trust layer render, block, and resume — for real, against a running <code>wovyr-server</code>.
       </p>
 
       <section className="demo-config">

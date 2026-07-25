@@ -21,7 +21,7 @@ caveats (never rendered against a live Grafana in this dev environment).
 
 # 1. Purpose
 
-This document defines the **standard dashboards** for operating the Apex AI Platform — the curated views over [metrics](metrics.md), [traces](tracing.md), and [logs](logging.md) that operators rely on.
+This document defines the **standard dashboards** for operating the Wovyr AI Platform — the curated views over [metrics](metrics.md), [traces](tracing.md), and [logs](logging.md) that operators rely on.
 
 These power both Grafana and the native
 [dashboard monitoring](../10-dashboard/monitoring.md) surfaces.

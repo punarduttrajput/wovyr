@@ -12,8 +12,8 @@ Document ID: RM-GA-P1
 SEC-301–305). This doc was never updated when the work landed (commits
 `8a9e4cb`, `64ab69d`, `8a48eb0`, `da5f0dd`, `8f3cb0e`, `9ca9228`) — a real
 documentation-drift gap, caught and corrected 2026-07-07. See `CLAUDE.md`'s
-`apex-server`/`apex-tools` bullets for the implemented behavior and
-`crates/apex-server/src/{auth,rate_limit}.rs`/`crates/apex-tools/src/
+`wovyr-server`/`wovyr-tools` bullets for the implemented behavior and
+`crates/wovyr-server/src/{auth,rate_limit}.rs`/`crates/wovyr-tools/src/
 {registry,builtin}.rs` for the code.
 **Owner:** Engineering (Security)
 **Last Updated:** 2026-07-07
@@ -66,11 +66,11 @@ without a verified identity, and SEC-203 keys its rate limit on it.
 ## SEC-101 `[P0]` — Introduce a credential verification layer
 
 **Problem.** Identity is an unverified header. `context()`
-(`crates/apex-server/src/tenancy.rs:80-86`) reads `X-Apex-Tenant` and
-`X-Apex-Principal` verbatim, and treats an `Authorization: Bearer <t>` token as an
+(`crates/wovyr-server/src/tenancy.rs:80-86`) reads `X-Wovyr-Tenant` and
+`X-Wovyr-Principal` verbatim, and treats an `Authorization: Bearer <t>` token as an
 *opaque principal string* — it is never validated. `is_platform_admin`
 (`tenancy.rs:66-71`) then matches that unverified string against
-`APEX_PLATFORM_ADMINS`. Any caller can assert any principal, including platform
+`WOVYR_PLATFORM_ADMINS`. Any caller can assert any principal, including platform
 admin. (PRD-003 R-1.1; closes PP-01.)
 
 **Change.**
@@ -82,30 +82,30 @@ admin. (PRD-003 R-1.1; closes PP-01.)
   **API keys** hashed (argon2/sha256) in a store, mapping key → principal + tenant.
   `ring` is already in the dependency graph (via `reqwest`'s `rustls-tls`).
 - `context()` / `tenant_context()` derive principal + tenant from the verified
-  `Identity`, never from raw headers. Raw `X-Apex-*` headers are honored only when
+  `Identity`, never from raw headers. Raw `X-Wovyr-*` headers are honored only when
   they match the verified credential (or ignored entirely).
-- Config via env: `APEX_AUTH_MODE` (`jwt` | `apikey` | `disabled-loopback`),
-  `APEX_JWT_JWKS_URL`/`APEX_JWT_HS_SECRET`, `APEX_JWT_ISSUER`, `APEX_JWT_AUDIENCE`.
+- Config via env: `WOVYR_AUTH_MODE` (`jwt` | `apikey` | `disabled-loopback`),
+  `WOVYR_JWT_JWKS_URL`/`WOVYR_JWT_HS_SECRET`, `WOVYR_JWT_ISSUER`, `WOVYR_JWT_AUDIENCE`.
 
 **Acceptance criteria.**
 - A request with no/invalid credential to any non-public route → `401`.
 - A request with a valid credential resolves the correct principal/tenant; forged
-  `X-Apex-Principal` cannot override the verified identity.
+  `X-Wovyr-Principal` cannot override the verified identity.
 - Public routes (`/healthz`, `/metrics`) remain unauthenticated (metrics gating is a
   separate WS-8 concern).
 - Unit + integration tests for token accept/reject, expiry, wrong issuer/audience.
 
-**Files.** `crates/apex-server/src/` — new `auth.rs`; `lib.rs` (router layer),
+**Files.** `crates/wovyr-server/src/` — new `auth.rs`; `lib.rs` (router layer),
 `tenancy.rs` (context derivation). New dep: a JWT crate (e.g. `jsonwebtoken`).
 **Size.** L. **Depends on:** none (foundational). **Blocks:** SEC-102, SEC-103,
 SEC-104, SEC-105, SEC-203.
 
-**Status: Done.** `crates/apex-server/src/auth.rs`'s `authenticate` middleware
+**Status: Done.** `crates/wovyr-server/src/auth.rs`'s `authenticate` middleware
 mounts over every route except `/healthz`/`/metrics` and verifies before any
-handler runs: `AuthMode::Jwt` (HS256 via `APEX_JWT_HS_SECRET` or RS256 via
-`APEX_JWT_RS_PUBLIC_KEY`, with optional issuer/audience checks) and
+handler runs: `AuthMode::Jwt` (HS256 via `WOVYR_JWT_HS_SECRET` or RS256 via
+`WOVYR_JWT_RS_PUBLIC_KEY`, with optional issuer/audience checks) and
 `AuthMode::ApiKey` (SHA-256-hashed lookup in a `FileApiKeyStore` at
-`~/.apex/auth`) both overwrite `X-Apex-Principal` with the verified `sub`/
+`~/.wovyr/auth`) both overwrite `X-Wovyr-Principal` with the verified `sub`/
 principal before the request reaches `tenancy::context`, so a forged header
 can no longer win. `AuthMode::DisabledLoopback` (the default) is SEC-102's
 concern. Proven by `jwt_hs256_accepts_a_valid_token_and_extracts_the_principal`,
@@ -119,7 +119,7 @@ raw header).
 
 ## SEC-102 `[P0]` — Remove the anonymous-default-tenant authorization bypass
 
-**Problem.** `tenant_authorize` (`crates/apex-server/src/tenancy.rs:542-553`)
+**Problem.** `tenant_authorize` (`crates/wovyr-server/src/tenancy.rs:542-553`)
 short-circuits `Ok(tenant)` — skipping `authorize()` entirely — whenever
 `principal.is_empty() && tenant == DEFAULT_TENANT`, which is the state when no
 headers are sent. Every sensitive route funnels through this: KMS crypto-shred
@@ -130,7 +130,7 @@ material. (PRD-003 R-1.2; closes PP-02.)
 **Change.**
 - Delete the bypass branch (`tenancy.rs:548-550`). All routes go through
   `ctx.authorize(scope)`.
-- Preserve local-dev ergonomics behind an explicit opt-in: `APEX_ALLOW_ANONYMOUS=1`
+- Preserve local-dev ergonomics behind an explicit opt-in: `WOVYR_ALLOW_ANONYMOUS=1`
   grants the anonymous default-tenant role set **only** when the listener is bound to
   loopback; refuse the flag (fail to boot, or ignore + warn loudly) on any
   non-loopback bind.
@@ -138,23 +138,23 @@ material. (PRD-003 R-1.2; closes PP-02.)
   "no auth, dev only."
 
 **Acceptance criteria.**
-- With no `APEX_ALLOW_ANONYMOUS`: an unauthenticated request to any mutating/secret/
+- With no `WOVYR_ALLOW_ANONYMOUS`: an unauthenticated request to any mutating/secret/
   KMS/audit route → `401`/`403`.
-- With `APEX_ALLOW_ANONYMOUS=1` on a non-loopback bind: server refuses to start (or
+- With `WOVYR_ALLOW_ANONYMOUS=1` on a non-loopback bind: server refuses to start (or
   logs an error and does not grant anonymous access).
 - Existing tenant-scoped tests updated to pass a credential.
 
-**Files.** `crates/apex-server/src/tenancy.rs`, `lib.rs` (`serve` bind check).
+**Files.** `crates/wovyr-server/src/tenancy.rs`, `lib.rs` (`serve` bind check).
 **Size.** M. **Depends on:** SEC-101. **Blocks:** SEC-105.
 
 **Status: Done, then further narrowed (RM-GA-P4/GA-003, 2026-07-09).** This
 ticket's original fix made the bypass conditional on `AppState.anonymous_allowed`
 (`auth::resolve_anonymous_allowed`, real-deployment default `false`, opt-in via
-`APEX_ALLOW_ANONYMOUS=1`), with `serve()`'s `check_insecure_bind` refusing to
+`WOVYR_ALLOW_ANONYMOUS=1`), with `serve()`'s `check_insecure_bind` refusing to
 bind a non-loopback address when that flag is set. That was SEC-102's own
 literal, intentional design — "gated, not open by default" — but
 `compliance-mapping.md` §7 item 1 still flagged it as a residual finding worth
-closing further at GA, since `APEX_ALLOW_ANONYMOUS=1` alone still granted an
+closing further at GA, since `WOVYR_ALLOW_ANONYMOUS=1` alone still granted an
 anonymous caller *every* scope with zero grant. **That residual has now been
 closed too**: the bypass branch in `tenant_authorize` is deleted outright.
 `anonymous_allowed` today governs only whether `auth::authenticate`'s
@@ -166,8 +166,8 @@ would. Proven by
 (flag on → `403`, not the old `200`/"destroyed"),
 `anonymous_default_tenant_caller_is_denied_when_the_flag_is_off` (flag off →
 `401`), and `refuses_anonymous_on_non_loopback_bind_only_when_flag_is_set`.
-~10 apex-server tests that relied on the old permissive bypass (mostly in
-`workflow_runner.rs`) were migrated to a real `APEX_PLATFORM_ADMINS` principal
+~10 wovyr-server tests that relied on the old permissive bypass (mostly in
+`workflow_runner.rs`) were migrated to a real `WOVYR_PLATFORM_ADMINS` principal
 rather than left passing on a now-false assumption. See
 [A3-security-completion.md §3 item 3](A3-security-completion.md) for the
 GA-completion tracking.
@@ -177,7 +177,7 @@ GA-completion tracking.
 ## SEC-103 `[P0]` — Gate plugin lifecycle routes with platform-admin RBAC
 
 **Problem.** `install/enable/upgrade/trust/uninstall` handlers in
-`crates/apex-server/src/plugins.rs` take only `Json(req)` — no `HeaderMap`, no
+`crates/wovyr-server/src/plugins.rs` take only `Json(req)` — no `HeaderMap`, no
 `tenant_authorize` call. An anonymous caller can trust their own key, install and
 enable a WASM tool, and that tool then runs *inside every tenant's agent runs* with
 tenant-scoped secrets injected. (PRD-003 R-1.3; closes PP-03.)
@@ -186,7 +186,7 @@ tenant-scoped secrets injected. (PRD-003 R-1.3; closes PP-03.)
 - Add `HeaderMap` to each plugin-mutation handler and call
   `tenant_authorize(&state, &headers, "plugins:admin")` (new scope) before acting.
 - `plugins:admin` is a platform-admin-tier scope (mirror how `kms:admin` is
-  defined/tested in `apex-tenancy`); add it to the privilege-ladder test.
+  defined/tested in `wovyr-tenancy`); add it to the privilege-ladder test.
 - Attribute the action to the verified principal for the audit record (WS-8/R-8.4
   will consume this).
 
@@ -195,7 +195,7 @@ tenant-scoped secrets injected. (PRD-003 R-1.3; closes PP-03.)
   non-admin, `200/201` for a platform admin.
 - A regression test asserts an anonymous caller cannot `trust` a publisher key.
 
-**Files.** `crates/apex-server/src/plugins.rs`; `crates/apex-tenancy/src/` (scope
+**Files.** `crates/wovyr-server/src/plugins.rs`; `crates/wovyr-tenancy/src/` (scope
 definition + ladder test). **Size.** M. **Depends on:** SEC-101. **Blocks:**
 SEC-105.
 
@@ -207,7 +207,7 @@ SEC-105.
 
 ## SEC-104 `[P0]` — Gate marketplace moderation & publish routes with RBAC
 
-**Problem.** `crates/apex-server/src/marketplace.rs` has **no** `tenant_authorize`
+**Problem.** `crates/wovyr-server/src/marketplace.rs` has **no** `tenant_authorize`
 call anywhere; `approve_review`/`resolve_abuse_report` attribute the actor from a raw
 header string (`actor_identity`, ~`marketplace.rs:427`) with no RBAC check. Anyone
 can approve their own listing to "verified," delist a competitor, or publish. (PRD-003
@@ -226,7 +226,7 @@ R-1.3; closes PP-03.)
 - `publish` rejects an unauthenticated caller.
 - Discovery/download behavior unchanged for legitimate read callers.
 
-**Files.** `crates/apex-server/src/marketplace.rs`; `apex-tenancy` (scope). **Size.**
+**Files.** `crates/wovyr-server/src/marketplace.rs`; `wovyr-tenancy` (scope). **Size.**
 M. **Depends on:** SEC-101. **Blocks:** SEC-105.
 
 **Status: Done.** Moderation routes now gate on `marketplace:moderate`;
@@ -253,10 +253,10 @@ route table. (PRD-003 R-1.4; closes PP-01/02/03 verification.)
   from being added without an entry).
 - CI fails if any listed route returns `2xx` for an unauthorized caller.
 
-**Files.** `crates/apex-server/tests/authz_matrix.rs` (new); `.github/workflows/ci.yml`.
+**Files.** `crates/wovyr-server/tests/authz_matrix.rs` (new); `.github/workflows/ci.yml`.
 **Size.** M. **Depends on:** SEC-101, SEC-102, SEC-103, SEC-104.
 
-**Status: Done.** `crates/apex-server/tests/authz_matrix.rs` exists and is
+**Status: Done.** `crates/wovyr-server/tests/authz_matrix.rs` exists and is
 wired into `.github/workflows/ci.yml`, running on every PR.
 
 ---
@@ -266,7 +266,7 @@ wired into `.github/workflows/ci.yml`, running on every PR.
 ## SEC-201 `[P0]` — Request timeout, body-size limit, and concurrency cap
 
 **Problem.** The router's only layer is `hardening::request_id`
-(`crates/apex-server/src/lib.rs:560-603`); grep finds no `Timeout`/`body_limit`/
+(`crates/wovyr-server/src/lib.rs:560-603`); grep finds no `Timeout`/`body_limit`/
 `ConcurrencyLimit`. `run_definition` holds the HTTP connection and a project
 `RunPermit` for the whole agent loop — a wedged upstream holds both indefinitely.
 (PRD-003 R-2.2; closes PP-05 in part.)
@@ -275,7 +275,7 @@ wired into `.github/workflows/ci.yml`, running on every PR.
 - Add `tower-http` (new workspace dep) layers: `TimeoutLayer`, `RequestBodyLimitLayer`
   (`DefaultBodyLimit`), and a `tower::limit::ConcurrencyLimitLayer` (or
   `GlobalConcurrencyLimitLayer`), all env-configurable
-  (`APEX_HTTP_TIMEOUT_SECS`, `APEX_HTTP_MAX_BODY_BYTES`, `APEX_HTTP_MAX_CONCURRENCY`).
+  (`WOVYR_HTTP_TIMEOUT_SECS`, `WOVYR_HTTP_MAX_BODY_BYTES`, `WOVYR_HTTP_MAX_CONCURRENCY`).
 - Sensible defaults (e.g. 30s timeout, 1 MiB body, bounded concurrency); the agent
   run path may need a longer per-route timeout — apply a route-scoped override rather
   than a huge global.
@@ -285,7 +285,7 @@ wired into `.github/workflows/ci.yml`, running on every PR.
   the concurrency cap sheds cleanly (no unbounded task growth).
 - The run permit is released when the client-facing timeout fires.
 
-**Files.** `Cargo.toml` (workspace dep `tower-http`), `crates/apex-server/src/lib.rs`.
+**Files.** `Cargo.toml` (workspace dep `tower-http`), `crates/wovyr-server/src/lib.rs`.
 **Size.** S. **Depends on:** none. *(Land early — cheap, high value.)*
 
 **Status: Done.** `HttpLimits` (env-configurable) drives a `TimeoutLayer`,
@@ -300,7 +300,7 @@ permit is released when the timeout fires).
 
 ## SEC-202 `[P0]` — TLS termination or refuse insecure non-loopback bind
 
-**Problem.** `serve()` (`crates/apex-server/src/lib.rs:635-643`) binds a plain
+**Problem.** `serve()` (`crates/wovyr-server/src/lib.rs:635-643`) binds a plain
 `TcpListener` — cleartext HTTP only. All traffic, including credentials (post
 SEC-101) and secret responses, is plaintext. (PRD-003 R-2.1; closes PP-05 in part.)
 
@@ -308,8 +308,8 @@ SEC-101) and secret responses, is plaintext. (PRD-003 R-2.1; closes PP-05 in par
 - Add optional in-process TLS via a rustls acceptor (`axum-server` with the `tls-rustls`
   feature, or `tokio-rustls` directly). `rustls`/`ring` are already in the graph via
   `reqwest`.
-- Config: `APEX_TLS_CERT`/`APEX_TLS_KEY` enable TLS. If neither is set **and** the
-  bind address is non-loopback **and** `APEX_TLS_TERMINATED_UPSTREAM` is not declared,
+- Config: `WOVYR_TLS_CERT`/`WOVYR_TLS_KEY` enable TLS. If neither is set **and** the
+  bind address is non-loopback **and** `WOVYR_TLS_TERMINATED_UPSTREAM` is not declared,
   refuse to start.
 
 **Acceptance criteria.**
@@ -318,13 +318,13 @@ SEC-101) and secret responses, is plaintext. (PRD-003 R-2.1; closes PP-05 in par
   failure with a clear message.
 - Loopback dev bind still works without TLS.
 
-**Files.** `crates/apex-server/src/lib.rs`; `Cargo.toml` (TLS server dep);
+**Files.** `crates/wovyr-server/src/lib.rs`; `Cargo.toml` (TLS server dep);
 `deployment/*` docs note. **Size.** M. **Depends on:** none.
 
 **Status: Done.** `serve()` installs an in-process rustls acceptor
-(`axum_server::bind_rustls`) when `APEX_TLS_CERT`/`APEX_TLS_KEY` are set;
+(`axum_server::bind_rustls`) when `WOVYR_TLS_CERT`/`WOVYR_TLS_KEY` are set;
 `check_insecure_bind` refuses a non-loopback bind without TLS unless
-`APEX_TLS_TERMINATED_UPSTREAM` declares a fronting proxy. Proven by
+`WOVYR_TLS_TERMINATED_UPSTREAM` declares a fronting proxy. Proven by
 `tls_config_serves_https_end_to_end` and
 `insecure_bind_is_refused_only_without_tls_and_without_upstream_termination_on_non_loopback`.
 
@@ -345,7 +345,7 @@ PP-05 in part.)
 - Exceeding the bucket → `429` with a `Retry-After` header.
 - Limits are per-principal (one noisy tenant cannot starve others) and configurable.
 
-**Files.** `crates/apex-server/src/` (layer); `Cargo.toml`. **Size.** M.
+**Files.** `crates/wovyr-server/src/` (layer); `Cargo.toml`. **Size.** M.
 **Depends on:** SEC-101 (principal keying).
 
 **Status: Done.** `rate_limit.rs`'s dependency-free per-key token bucket backs
@@ -367,18 +367,18 @@ R-2.4; supports the WS-8 dashboard work.)
 
 **Change.**
 - Add `tower_http::cors::CorsLayer` with a configurable allow-list
-  (`APEX_CORS_ALLOWED_ORIGINS`, default: none / same-origin), correct handling of
-  credentialed requests and the custom `X-Apex-*` / `Idempotency-Key` headers.
+  (`WOVYR_CORS_ALLOWED_ORIGINS`, default: none / same-origin), correct handling of
+  credentialed requests and the custom `X-Wovyr-*` / `Idempotency-Key` headers.
 
 **Acceptance criteria.**
 - A configured origin passes preflight; an unlisted origin is refused.
 - Default posture is same-origin only (no wildcard with credentials).
 
-**Files.** `crates/apex-server/src/lib.rs`; `Cargo.toml`. **Size.** S. **Depends
+**Files.** `crates/wovyr-server/src/lib.rs`; `Cargo.toml`. **Size.** S. **Depends
 on:** none. *(Coordinate with WS-8/R-8.5 dashboard login.)*
 
 **Status: Done.** `cors_layer(&state.cors_allowed_origins)` (from
-`APEX_CORS_ALLOWED_ORIGINS`) builds a `tower_http::cors::CorsLayer`
+`WOVYR_CORS_ALLOWED_ORIGINS`) builds a `tower_http::cors::CorsLayer`
 allow-list; no configured origins means no CORS headers at all (same-origin
 only), not a wildcard. Proven by
 `configured_origin_passes_preflight_but_unlisted_origin_gets_no_allow_header`
@@ -390,7 +390,7 @@ dashboard login work (not yet done) is what will actually *use* this.
 ## SEC-205 `[P1]` — Bound and TTL-evict the idempotency store
 
 **Problem.** `IdempotencyStore` is an unbounded in-memory `HashMap`
-(`crates/apex-server/src/hardening.rs:88-94`, comment: "a TTL/eviction policy is a
+(`crates/wovyr-server/src/hardening.rs:88-94`, comment: "a TTL/eviction policy is a
 later refinement"). A client generating fresh `Idempotency-Key`s grows server memory
 forever; replay protection also vanishes on restart. (PRD-003 R-2.5; closes the
 idempotency portion of PP-07.)
@@ -405,7 +405,7 @@ idempotency portion of PP-07.)
 - Entries expire after a configurable TTL; total entries are capped.
 - A soak test with unique keys shows bounded memory.
 
-**Files.** `crates/apex-server/src/hardening.rs`. **Size.** S. **Depends on:** none.
+**Files.** `crates/wovyr-server/src/hardening.rs`. **Size.** S. **Depends on:** none.
 
 **Status: Done.** `IdempotencyStore` evicts by TTL and caps total entries
 (FIFO eviction of the oldest when at capacity), both configurable. Later
@@ -421,7 +421,7 @@ Proven by `entries_expire_after_the_configured_ttl`,
 ## SEC-301 `[P0]` — Do not register `shell` by default in server/hosted context
 
 **Problem.** `ToolRegistry::with_builtins()`
-(`crates/apex-tools/src/registry.rs:25-32`) registers `EchoTool`, `FsReadTool`,
+(`crates/wovyr-tools/src/registry.rs:25-32`) registers `EchoTool`, `FsReadTool`,
 `HttpGetTool`, **and `ShellTool`** unconditionally — arbitrary command execution as
 the server user, contradicting the builtin doc comment claiming shell is "deferred."
 (PRD-003 R-3.1; closes PP-04 in part.)
@@ -431,28 +431,28 @@ the server user, contradicting the builtin doc comment claiming shell is "deferr
   see SEC-302], http_get [guarded, see SEC-304]) and an explicit
   `with_shell()`/`with_privileged_builtins()` opt-in.
 - The server registry construction path must not include `shell` unless an operator
-  sets `APEX_ENABLE_SHELL_TOOL=1`.
+  sets `WOVYR_ENABLE_SHELL_TOOL=1`.
 
 **Acceptance criteria.**
 - Default server agent runs have no `shell` tool available (a run requesting it fails
   closed with a clear error).
 - Opt-in flag re-enables it; covered by a test.
 
-**Files.** `crates/apex-tools/src/registry.rs`; server registry construction in
-`crates/apex-server/src/lib.rs`. **Size.** S. **Depends on:** none.
+**Files.** `crates/wovyr-tools/src/registry.rs`; server registry construction in
+`crates/wovyr-server/src/lib.rs`. **Size.** S. **Depends on:** none.
 
 **Status: Done.** `with_builtins()` registers only echo/fs_read/http_get;
 `shell` requires the separate, explicit `with_shell()`/
 `with_privileged_builtins()`. The server only adds it when an operator sets
-`APEX_ENABLE_SHELL_TOOL=1`. Proven by `shell_tool_opt_in_env_var_re_enables_it`.
+`WOVYR_ENABLE_SHELL_TOOL=1`. Proven by `shell_tool_opt_in_env_var_re_enables_it`.
 
 ---
 
 ## SEC-302 `[P0]` — Confine `fs_read` to an allow-listed workspace root
 
-**Problem.** `FsReadTool::execute` (`crates/apex-tools/src/builtin.rs:83-96`) calls
+**Problem.** `FsReadTool::execute` (`crates/wovyr-tools/src/builtin.rs:83-96`) calls
 `tokio::fs::read_to_string(path)` on any caller-supplied path — no confinement. An
-agent can read `~/.apex/kms/root.key`, `~/.apex/secrets/secrets.json`, `/etc/passwd`.
+agent can read `~/.wovyr/kms/root.key`, `~/.wovyr/secrets/secrets.json`, `/etc/passwd`.
 Reading the KMS root key defeats the entire at-rest encryption design. (PRD-003 R-3.2;
 closes PP-04 — the highest-impact item in this workstream.)
 
@@ -461,14 +461,14 @@ closes PP-04 — the highest-impact item in this workstream.)
   against a configured root (from `ToolContext`, e.g. the run's workspace), canonicalizes
   it, and rejects any path escaping the root (symlink-aware — canonicalize then verify
   prefix).
-- The confinement root must **never** include `~/.apex` or other platform state.
+- The confinement root must **never** include `~/.wovyr` or other platform state.
 
 **Acceptance criteria.**
 - Reading a file inside the workspace succeeds; `../`, absolute paths outside the
   root, and symlink escapes → `PermissionDenied`.
-- A regression test explicitly asserts `~/.apex/kms/root.key` is unreadable.
+- A regression test explicitly asserts `~/.wovyr/kms/root.key` is unreadable.
 
-**Files.** `crates/apex-tools/src/builtin.rs`, `crates/apex-tools/src/tool.rs`
+**Files.** `crates/wovyr-tools/src/builtin.rs`, `crates/wovyr-tools/src/tool.rs`
 (`ToolContext` workspace-root field if not present). **Size.** M. **Depends on:**
 none.
 
@@ -485,7 +485,7 @@ test `fs_read_cannot_reach_the_kms_root_key`.
 ## SEC-303 `[P0]` — Default permission grants to deny (empty) in hosted context
 
 **Problem.** `run_agent` sets `granted_permissions: def.spec.permissions.clone()`
-(`crates/apex-agent/src/runtime.rs:288`), `permissions` is `Option`
+(`crates/wovyr-agent/src/runtime.rs:288`), `permissions` is `Option`
 (`definition.rs`), and the registry treats `None` as unrestricted. So any manifest
 without a `permissions:` block can call every tool freely. (PRD-003 R-3.3; closes
 PP-04 in part.)
@@ -493,7 +493,7 @@ PP-04 in part.)
 **Change.**
 - In a hosted/server context, `None` grants MUST mean **deny-all**, not unrestricted;
   a manifest must explicitly list the tool permissions it needs.
-- Keep an escape hatch for trusted first-party/local use (`APEX_UNRESTRICTED_TOOLS=1`
+- Keep an escape hatch for trusted first-party/local use (`WOVYR_UNRESTRICTED_TOOLS=1`
   or a `TrustClass::FirstParty` context), so local CLI ergonomics are preserved while
   the network-facing default is fail-closed.
 - Thread the decision through `ToolContext.granted_permissions` so `check_permissions`
@@ -504,12 +504,12 @@ PP-04 in part.)
   permissioned tool (`PermissionDenied`).
 - An explicit allow-list works; the first-party escape hatch works and is tested.
 
-**Files.** `crates/apex-agent/src/runtime.rs`, `crates/apex-tools/src/tool.rs`/`registry.rs`.
+**Files.** `crates/wovyr-agent/src/runtime.rs`, `crates/wovyr-tools/src/tool.rs`/`registry.rs`.
 **Size.** M. **Depends on:** none. **Blocks:** SEC-305 (shares run-context plumbing).
 
 **Status: Done.** A hosted run (`RunOptions::with_hosted(true)`, set on every
 server-submitted run) with no manifest `permissions:` block now grants
-**nothing** (`Some(vec![])`), not unrestricted access; `APEX_UNRESTRICTED_TOOLS=1`
+**nothing** (`Some(vec![])`), not unrestricted access; `WOVYR_UNRESTRICTED_TOOLS=1`
 is the documented escape hatch for trusted first-party/local use. Enforced by
 `ToolRegistry::check_permissions` against `ToolContext.granted_permissions`.
 
@@ -517,7 +517,7 @@ is the documented escape hatch for trusted first-party/local use. Enforced by
 
 ## SEC-304 `[P1]` — SSRF guard in `http_get`
 
-**Problem.** `HttpGetTool` (`crates/apex-tools/src/builtin.rs:156-198`) accepts any
+**Problem.** `HttpGetTool` (`crates/wovyr-tools/src/builtin.rs:156-198`) accepts any
 `http(s)` URL with no allow-list and no private-range block; the only real egress
 enforcement (`egress_lockdown.rs`) is on the Linux/Docker container path, not the
 native/default path the builtins use. An agent can reach `169.254.169.254`
@@ -537,7 +537,7 @@ closes PP-04 in part.)
 - A DNS name resolving to a private IP is blocked.
 - Allow-listed public hosts still work.
 
-**Files.** `crates/apex-tools/src/builtin.rs`; a small IP-classification helper.
+**Files.** `crates/wovyr-tools/src/builtin.rs`; a small IP-classification helper.
 **Size.** M. **Depends on:** none.
 
 **Status: Done.** `HttpGetTool` resolves the target host and rejects
@@ -550,7 +550,7 @@ resolved IP for the actual request to defeat DNS-rebinding. Proven by the
 ## SEC-305 `[P1]` — Drive sandbox selection from a real `TrustClass` on the run path
 
 **Problem.** `ShellTool` hardcodes `TrustClass::FirstParty`
-(`crates/apex-tools/src/builtin.rs`), and nothing maps an untrusted agent/plugin to
+(`crates/wovyr-tools/src/builtin.rs`), and nothing maps an untrusted agent/plugin to
 `TrustClass::Untrusted`/gVisor at runtime — the `TrustClass::floor` logic in
 `sandbox.rs` exists but is never driven from the agent run path. (PRD-003 R-3.5;
 closes PP-04 in part.)
@@ -566,8 +566,8 @@ closes PP-04 in part.)
   trust floor.
 - Backend-selection unit tests cover first-party vs. untrusted provenance.
 
-**Files.** `crates/apex-agent/src/runtime.rs`, `crates/apex-tools/src/sandbox.rs`,
-`crates/apex-tools/src/tool.rs`. **Size.** M. **Depends on:** SEC-303.
+**Files.** `crates/wovyr-agent/src/runtime.rs`, `crates/wovyr-tools/src/sandbox.rs`,
+`crates/wovyr-tools/src/tool.rs`. **Size.** M. **Depends on:** SEC-303.
 
 **Status: Done.** `ToolSpec.trust_class` (default `TrustClass::FirstParty`)
 flows into `select_backend`, flooring an untrusted/verified-but-not-first-party

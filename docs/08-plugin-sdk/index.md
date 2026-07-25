@@ -16,9 +16,9 @@ Document ID: PLG-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and architecture index** for the Plugin SDK in the Apex AI Platform.
+This document is the **central navigation and architecture index** for the Plugin SDK in the Wovyr AI Platform.
 
-Apex is **Plugin First**: every capability that can be a plugin should be one (see [Vision §Plugin First](../00-executive/vision.md)). The Plugin SDK is how developers build those capabilities, and the **Plugin Engine** is the service that installs, versions, governs, and loads them at runtime.
+Wovyr is **Plugin First**: every capability that can be a plugin should be one (see [Vision §Plugin First](../00-executive/vision.md)). The Plugin SDK is how developers build those capabilities, and the **Plugin Engine** is the service that installs, versions, governs, and loads them at runtime.
 
 ---
 

@@ -1,0 +1,20 @@
+[package]
+name = "wovyr-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Tamper-evident audit logging: hash-chained, append-only security records (who did what, when, with what outcome)."
+
+[dependencies]
+wovyr-common.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# Hash-chaining for tamper-evidence (each entry commits to the prior entry's hash).
+sha2.workspace = true
+# Keyed MAC over the chain + the tamper-evident head anchor (SEC-403): a keyed
+# HMAC-SHA256 an actor who can rewrite `audit.jsonl` cannot forge without the
+# externally-held key.
+hmac.workspace = true

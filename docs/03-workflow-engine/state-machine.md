@@ -10,7 +10,7 @@
 
 # 1. Purpose
 
-This document defines the finite state machine (FSM) used by the Apex Workflow Engine.
+This document defines the finite state machine (FSM) used by the Wovyr Workflow Engine.
 
 The FSM governs:
 

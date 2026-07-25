@@ -146,7 +146,7 @@ Redis is a **cache and ephemeral store** — losing it degrades latency, not dur
 Aged or low-importance records are serialized and moved to object storage:
 
 ```text
-s3://apex-memory/{tenant}/{year}/{month}/{id}.json.zst
+s3://wovyr-memory/{tenant}/{year}/{month}/{id}.json.zst
 ```
 
 The PostgreSQL row is retained as a lightweight stub (`tier = 'archive'`) pointing

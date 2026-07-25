@@ -16,7 +16,7 @@ Document ID: OBS-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and architecture index** for observability across the Apex AI Platform — logging, metrics, tracing, dashboards, and alerting. **Observable by Default** is a [core principle](../00-executive/vision.md).
+This document is the **central navigation and architecture index** for observability across the Wovyr AI Platform — logging, metrics, tracing, dashboards, and alerting. **Observable by Default** is a [core principle](../00-executive/vision.md).
 
 This section is the platform-wide reference; subsystem docs (e.g.
 [Tool Runtime Observability](../07-tool-runtime/observability-ops.md)) implement it

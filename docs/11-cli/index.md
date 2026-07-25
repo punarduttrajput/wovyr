@@ -16,7 +16,7 @@ Document ID: CLI-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and architecture index** for the `apex` command-line interface — the primary terminal client for the Apex AI Platform.
+This document is the **central navigation and architecture index** for the `wovyr` command-line interface — the primary terminal client for the Wovyr AI Platform.
 
 The CLI serves developers, operators, and CI/CD. It is both a **client of the
 [Platform API](../09-api/index.md)** (managing remote resources) and a **local
@@ -30,10 +30,10 @@ diagnostics) — see the CLI Service in
 
 | Mode | Examples |
 |------|----------|
-| Remote management | `apex agents run`, `apex workflows publish`, `apex plugins install` |
-| Local development | `apex init`, `apex plugin new`, `apex workflow run --local` |
-| Authoring/build | `apex plugin build`, `apex plugin sign` |
-| Operations | `apex deploy`, `apex doctor`, `apex logs` |
+| Remote management | `wovyr agents run`, `wovyr workflows publish`, `wovyr plugins install` |
+| Local development | `wovyr init`, `wovyr plugin new`, `wovyr workflow run --local` |
+| Authoring/build | `wovyr plugin build`, `wovyr plugin sign` |
+| Operations | `wovyr deploy`, `wovyr doctor`, `wovyr logs` |
 
 It mirrors the [Platform API](../09-api/index.md) resource model so anything doable
 in the [Dashboard](../10-dashboard/index.md) is scriptable from the terminal.
@@ -43,10 +43,10 @@ in the [Dashboard](../10-dashboard/index.md) is scriptable from the terminal.
 # 3. Composition
 
 ```text
-apex (Rust binary)
+wovyr (Rust binary)
    │
    ├── command parser + help
-   ├── config + profiles (~/.apex/config)
+   ├── config + profiles (~/.wovyr/config)
    ├── auth (OAuth device flow / API key)
    ├── API client (REST/gRPC → API Gateway)
    └── local engine (embedded runtime for --local)
@@ -75,7 +75,7 @@ The CLI is a single self-contained Rust binary
 3. **Secure** — same authn/authz as every client; no privileged backdoor.
 4. **Context-aware** — profiles bind a server, tenant, and project.
 5. **Local-first dev** — scaffold, build, and run without a remote.
-6. **Helpful** — rich `--help`, completion, and `apex doctor` diagnostics.
+6. **Helpful** — rich `--help`, completion, and `wovyr doctor` diagnostics.
 
 ---
 
@@ -83,14 +83,14 @@ The CLI is a single self-contained Rust binary
 
 - [`09-api/index.md`](../09-api/index.md) — the API the CLI consumes
 - [`09-api/authentication.md`](../09-api/authentication.md) — login + tokens
-- [`08-plugin-sdk/plugin-api.md`](../08-plugin-sdk/plugin-api.md) — `apex plugin` build/publish
+- [`08-plugin-sdk/plugin-api.md`](../08-plugin-sdk/plugin-api.md) — `wovyr plugin` build/publish
 
 ---
 
 # 7. Related Documents
 
 - [`10-dashboard/index.md`](../10-dashboard/index.md) — the other primary client
-- [`12-deployment`](../SUMMARY.md) *(planned: `apex deploy` targets)*
+- [`12-deployment`](../SUMMARY.md) *(planned: `wovyr deploy` targets)*
 - [`19-implementation-guide`](../SUMMARY.md) *(planned: dev environment)*
 
 ---

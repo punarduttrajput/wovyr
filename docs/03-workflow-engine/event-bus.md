@@ -10,7 +10,7 @@
 
 # 1. Purpose
 
-This document defines the Event Bus architecture for the Apex Workflow Engine.
+This document defines the Event Bus architecture for the Wovyr Workflow Engine.
 
 The Event Bus is responsible for delivering immutable events between internal engine components and external systems.
 

@@ -5,9 +5,9 @@
       <h1>Sign in</h1>
       <p>
         The dashboard authorizes its API calls as this tenant/principal. If the
-        server is running with real auth (<code>APEX_AUTH_MODE=apikey</code> or
+        server is running with real auth (<code>WOVYR_AUTH_MODE=apikey</code> or
         <code>jwt</code>), paste an already-minted credential below — minted via
-        <code>apex auth create-key &lt;principal&gt;</code> — so requests carry a real
+        <code>wovyr auth create-key &lt;principal&gt;</code> — so requests carry a real
         <code>Authorization: Bearer</code> header instead of a spoofable header alone.
       </p>
     </div>
@@ -20,7 +20,7 @@
     </div>
     <div class="field">
       <label for="principal">Principal</label>
-      <input id="principal" type="text" [(ngModel)]="principal" placeholder="admin@apex.local" />
+      <input id="principal" type="text" [(ngModel)]="principal" placeholder="admin@wovyr.local" />
     </div>
     <div class="field">
       <label for="apiKey">API key / JWT (optional — dev mode works without one)</label>

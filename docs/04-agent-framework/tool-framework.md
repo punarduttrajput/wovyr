@@ -17,11 +17,11 @@ Part: 1/4
 
 # 1. Purpose
 
-The Tool Framework is one of the core subsystems of the Apex AI Platform.
+The Tool Framework is one of the core subsystems of the Wovyr AI Platform.
 
 It enables AI agents to safely interact with external systems through a standardized, secure, observable, and extensible tool execution framework.
 
-Unlike traditional AI applications where tools are directly embedded inside prompts, Apex treats tools as first-class runtime components.
+Unlike traditional AI applications where tools are directly embedded inside prompts, Wovyr treats tools as first-class runtime components.
 
 Every tool:
 
@@ -321,7 +321,7 @@ Every tool contains metadata.
 Example:
 
 ```yaml
-apiVersion: apex.ai/v1
+apiVersion: wovyr.ai/v1
 
 kind: Tool
 
@@ -617,7 +617,7 @@ Part: 2/4
 
 # 21. Tool SDK
 
-The Tool SDK is the primary interface for developing tools that integrate with the Apex AI Platform.
+The Tool SDK is the primary interface for developing tools that integrate with the Wovyr AI Platform.
 
 The SDK provides:
 
@@ -1151,7 +1151,7 @@ Part: 3/4
 
 # 41. Rust Tool SDK
 
-The Rust SDK is the reference implementation for developing Apex tools.
+The Rust SDK is the reference implementation for developing Wovyr tools.
 
 The SDK provides:
 
@@ -1165,7 +1165,7 @@ The SDK provides:
 - Streaming support
 - Error serialization
 
-All official Apex tools are implemented using the Rust SDK.
+All official Wovyr tools are implemented using the Rust SDK.
 
 ---
 
@@ -2097,7 +2097,7 @@ Planned capabilities include:
 
 # Document Summary
 
-This specification defines the complete Tool Framework for the Apex AI Platform, including:
+This specification defines the complete Tool Framework for the Wovyr AI Platform, including:
 
 - Tool lifecycle management
 - Registry and discovery

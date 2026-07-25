@@ -16,7 +16,7 @@ Document ID: TRT-001
 
 # 1. Purpose
 
-This document specifies the **Tool Runtime**, the deployable service that executes tools for agents and workflows in the Apex AI Platform.
+This document specifies the **Tool Runtime**, the deployable service that executes tools for agents and workflows in the Wovyr AI Platform.
 
 The Runtime is the operational counterpart to the [Tool Framework](../04-agent-framework/tool-framework.md). The framework defines the tool model, SDK, manifest, registry, and permission/sandbox *schemas*; the Runtime **provisions sandboxes, enforces policy, runs the tool, and returns the result** — safely and at scale.
 

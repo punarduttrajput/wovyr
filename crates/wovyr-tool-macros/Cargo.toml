@@ -1,0 +1,19 @@
+[package]
+name = "wovyr-tool-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "#[derive(Tool)] — generates ToolMetadata + JSON Schema + typed parameter parsing from a struct, so a tool author never hand-writes a json! schema literal or a .get().and_then() parameter chain (SBX-303)."
+
+[lib]
+proc-macro = true
+
+# Deliberately tiny and dependency-light — the standard proc-macro trio only.
+# The *generated* code references `wovyr_tools`/`schemars`/`serde_json` paths,
+# which the consuming crate (not this one) must depend on directly.
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

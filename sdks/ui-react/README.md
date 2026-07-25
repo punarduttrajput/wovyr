@@ -1,10 +1,10 @@
-# @apex/ui-react
+# @wovyr/ui-react
 
-The React renderer for [Apex](../../README.md)'s generative-UI trust runtime
+The React renderer for [Wovyr](../../README.md)'s generative-UI trust runtime
 (PRD-005 RDR-4xx): it consumes trust-layer-**validated** `UiFrame`s and turns
 a human's click into a typed, boundary-validated decision. It never renders
 raw HTML/script and has no credential-input component — the vocabulary it
-understands is exactly the constrained set `apex-ui-guard` polices
+understands is exactly the constrained set `wovyr-ui-guard` polices
 server-side (see [ADR-0011](../../docs/17-adr/ADR-0011-generative-ui-repositioning.md)).
 
 ## Install
@@ -13,17 +13,17 @@ Not yet published; consume from the repo directly (`file:` dependency) until
 it ships to npm:
 
 ```bash
-npm install --save "file:../path/to/Apex/sdks/ui-react"
+npm install --save "file:../path/to/Wovyr/sdks/ui-react"
 ```
 
 ## Quickstart (< 30 minutes, frame to pixel)
 
-1. Start a local `apex-server` with a UI policy configured — without one,
+1. Start a local `wovyr-server` with a UI policy configured — without one,
    the hosted floor (GRD-207) denies every interactive frame:
 
    ```bash
-   APEX_UI_POLICY=examples/policies/default-ui-policy.yaml \
-     cargo run -p apex-cli -- dev
+   WOVYR_UI_POLICY=examples/policies/default-ui-policy.yaml \
+     cargo run -p wovyr-cli -- dev
    ```
 
 2. Submit a workflow with a `ui` activity (see
@@ -38,8 +38,8 @@ npm install --save "file:../path/to/Apex/sdks/ui-react"
 3. Render it:
 
    ```tsx
-   import { createUiClient, usePendingFrames, UiFrameView } from "@apex/ui-react";
-   import "@apex/ui-react/styles.css";
+   import { createUiClient, usePendingFrames, UiFrameView } from "@wovyr/ui-react";
+   import "@wovyr/ui-react/styles.css";
 
    const client = createUiClient({ baseUrl: "http://127.0.0.1:8080" });
 
@@ -80,7 +80,7 @@ interactive so the human can correct and retry.
 Pass a pending frame's `frame_hash` as `expectedHash` and `UiFrameView`
 recomputes the content hash client-side (`hash.ts`'s `verifyFrame`,
 SHA-256 over a canonical, alphabetically-key-sorted JSON form — matching
-`apex_ui::UiFrame::content_hash()` exactly) before rendering anything. A
+`wovyr_ui::UiFrame::content_hash()` exactly) before rendering anything. A
 mismatch renders a warning instead of the frame. This is defense-in-depth
 against transport/render tampering, confirming the pixels match what the
 audit chain recorded — it is not a substitute for TLS.
@@ -91,7 +91,7 @@ If the host already holds an `agents:stream` connection, extract `ui_frame`
 events directly instead of polling:
 
 ```ts
-import { extractUiFrames } from "@apex/ui-react";
+import { extractUiFrames } from "@wovyr/ui-react";
 
 const response = await fetch(`${baseUrl}/api/v1/agents:stream`, { method: "POST", ... });
 for await (const { frame_id, frame } of extractUiFrames(response.body!)) {
@@ -101,7 +101,7 @@ for await (const { frame_id, frame } of extractUiFrames(response.body!)) {
 
 ## Theming
 
-Every visual value is a CSS custom property under the `.apex-ui` wrapper
+Every visual value is a CSS custom property under the `.wovyr-ui` wrapper
 class (`styles.css`) — override them in a parent selector, or set
 `data-theme="dark"`/`"light"` on `<UiFrameView className>`'s container to
 force a scheme regardless of `prefers-color-scheme`.

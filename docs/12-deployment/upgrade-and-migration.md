@@ -17,7 +17,7 @@ whole has been walked through on a dev host, not yet on a production fleet
 
 # 1. Purpose
 
-The operator's end-to-end procedure for upgrading a running Apex deployment from
+The operator's end-to-end procedure for upgrading a running Wovyr deployment from
 one released version to the next (RM-AIM-P3 DEP-302): back up, swap the binary,
 run schema migrations, verify, and — if needed — roll back. Variants for the three
 supported deployment shapes: **systemd** ([systemd.md](systemd.md)), **Compose**
@@ -29,10 +29,10 @@ supported deployment shapes: **systemd** ([systemd.md](systemd.md)), **Compose**
 
 | Surface | Mechanism | Version coupling |
 |---------|-----------|------------------|
-| The `apex` binary (server + CLI are one binary) | Replace and restart | Release tags; see `CHANGELOG.md` |
-| `~/.apex` durable state (auth, secrets, KMS, workflows, webhooks, tenancy, audit, …) | Carried forward in place; **no migration step** — on-disk formats are versioned and fail closed on skew | Wrapped payloads (workflow events, UI frames) reject *newer-than-understood* versions, so never run an **older** binary against state a newer binary wrote (see §7) |
-| Postgres schemas (workflow, memory, marketplace — only if you opted into these backends) | `apex admin migrate`, the **only** thing that ever runs DDL | `connect` reads the schema version and fails closed on any mismatch — an un-migrated binary refuses to start serving that backend, and an old binary refuses a newer schema |
-| SDKs (`@apex-ai/sdk`, `apex-ai-sdk`) | Client-side upgrade, out of band | Same `major.minor` as the platform = same API; `health()` warns once per client on skew |
+| The `wovyr` binary (server + CLI are one binary) | Replace and restart | Release tags; see `CHANGELOG.md` |
+| `~/.wovyr` durable state (auth, secrets, KMS, workflows, webhooks, tenancy, audit, …) | Carried forward in place; **no migration step** — on-disk formats are versioned and fail closed on skew | Wrapped payloads (workflow events, UI frames) reject *newer-than-understood* versions, so never run an **older** binary against state a newer binary wrote (see §7) |
+| Postgres schemas (workflow, memory, marketplace — only if you opted into these backends) | `wovyr admin migrate`, the **only** thing that ever runs DDL | `connect` reads the schema version and fails closed on any mismatch — an un-migrated binary refuses to start serving that backend, and an old binary refuses a newer schema |
+| SDKs (`@wovyr/sdk`, `wovyr-sdk`) | Client-side upgrade, out of band | Same `major.minor` as the platform = same API; `health()` warns once per client on skew |
 
 Startup after any restart is self-healing by design: in-flight durable workflow
 executions are resumed, the webhook outbox re-dispatches pending deliveries, and
@@ -46,14 +46,14 @@ interrupted **bare** async agent runs (not resumable by design) are reconciled t
 1. **Read the release notes** for every version between yours and the target
    (`CHANGELOG.md` on the GitHub release). Pre-GA, breaking wire/on-disk changes
    are permitted and called out there.
-2. **Confirm your KMS root key is escrowed** (`APEX_KMS_ROOT_KEY`, or the
-   generate-once `~/.apex/kms/root.key`). A backup without it does not restore
+2. **Confirm your KMS root key is escrowed** (`WOVYR_KMS_ROOT_KEY`, or the
+   generate-once `~/.wovyr/kms/root.key`). A backup without it does not restore
    secrets/encrypted memory — see
    [backup-and-restore.md §3](backup-and-restore.md).
 3. **Note which Postgres-backed features you use** (`--target workflow`,
    `memory`, `marketplace`) — each has its own schema and its own migrate call.
 4. **Plan the window.** The server drains gracefully on SIGTERM
-   (`APEX_SHUTDOWN_GRACE_SECS`, default 30s), so expect up to that long between
+   (`WOVYR_SHUTDOWN_GRACE_SECS`, default 30s), so expect up to that long between
    "stop" and "stopped". Single-node deployments have no rolling path — this is
    a brief hard outage; suspended workflows and queued webhooks resume on start.
 
@@ -65,14 +65,14 @@ The same five steps in every deployment shape; §5 gives the shape-specific
 commands for steps 2–4.
 
 **Step 1 — Backup.** With the old binary, while the server is still running
-(backup quiesces writers via the shared `~/.apex` file locks — no stop needed):
+(backup quiesces writers via the shared `~/.wovyr` file locks — no stop needed):
 
 ```bash
-apex admin backup /var/backups/apex/pre-$(date +%Y%m%d)   # or s3://bucket/prefix
+wovyr admin backup /var/backups/wovyr/pre-$(date +%Y%m%d)   # or s3://bucket/prefix
 ```
 
 If you use Postgres backends, also snapshot the database with your normal tooling
-(`pg_dump`/provider snapshot) — `apex admin backup` covers `~/.apex` only.
+(`pg_dump`/provider snapshot) — `wovyr admin backup` covers `~/.wovyr` only.
 
 **Step 2 — Stop the old server.** SIGTERM and wait for the drain (§5 per shape).
 
@@ -82,9 +82,9 @@ If you use Postgres backends, also snapshot the database with your normal toolin
 server, once per schema, from any host that can reach the database:
 
 ```bash
-apex admin migrate --target workflow    --database-url "$APEX_PG_URL"
-apex admin migrate --target memory      --database-url "$APEX_MEMORY_POSTGRES_URL"
-apex admin migrate --target marketplace --database-url "$APEX_MARKETPLACE_POSTGRES_URL"
+wovyr admin migrate --target workflow    --database-url "$WOVYR_PG_URL"
+wovyr admin migrate --target memory      --database-url "$WOVYR_MEMORY_POSTGRES_URL"
+wovyr admin migrate --target marketplace --database-url "$WOVYR_MARKETPLACE_POSTGRES_URL"
 ```
 
 Migrations are versioned (refinery), forward-only, and idempotent — re-running
@@ -102,28 +102,28 @@ startup, deliberately.
 ## systemd (bare-metal appliance)
 
 ```bash
-sudo systemctl stop apex                       # SIGTERM + drain
-sudo ./deployment/install.sh --binary ./apex   # idempotent: replaces /usr/local/bin/apex,
-                                               # never clobbers /etc/apex/apex.env
-# step 4 migrations here (run as the apex user if the DB URL lives in apex.env:
-#   sudo -u apex env $(grep -v '^#' /etc/apex/apex.env | xargs) apex admin migrate ...)
-sudo systemctl start apex
+sudo systemctl stop wovyr                       # SIGTERM + drain
+sudo ./deployment/install.sh --binary ./wovyr   # idempotent: replaces /usr/local/bin/wovyr,
+                                               # never clobbers /etc/wovyr/wovyr.env
+# step 4 migrations here (run as the wovyr user if the DB URL lives in wovyr.env:
+#   sudo -u wovyr env $(grep -v '^#' /etc/wovyr/wovyr.env | xargs) wovyr admin migrate ...)
+sudo systemctl start wovyr
 ```
 
-`install.sh` is CI-tested to preserve an existing `/etc/apex/apex.env` — operator
+`install.sh` is CI-tested to preserve an existing `/etc/wovyr/wovyr.env` — operator
 config survives the upgrade. If you don't use install.sh, replace
-`/usr/local/bin/apex` by hand and `systemctl start apex`.
+`/usr/local/bin/wovyr` by hand and `systemctl start wovyr`.
 
 ## Compose
 
 ```bash
-docker compose -f deployment/docker-compose.yml stop apex   # drains via SIGTERM
-# bump the apex image tag in docker-compose.yml (or your override file)
-docker compose -f deployment/docker-compose.yml pull apex
+docker compose -f deployment/docker-compose.yml stop wovyr   # drains via SIGTERM
+# bump the wovyr image tag in docker-compose.yml (or your override file)
+docker compose -f deployment/docker-compose.yml pull wovyr
 # step 4 migrations, e.g. through the new image against the compose network:
-docker compose -f deployment/docker-compose.yml run --rm apex \
-  admin migrate --target workflow --database-url "$APEX_PG_URL"
-docker compose -f deployment/docker-compose.yml up -d apex
+docker compose -f deployment/docker-compose.yml run --rm wovyr \
+  admin migrate --target workflow --database-url "$WOVYR_PG_URL"
+docker compose -f deployment/docker-compose.yml up -d wovyr
 ```
 
 ## Helm
@@ -131,13 +131,13 @@ docker compose -f deployment/docker-compose.yml up -d apex
 ```bash
 # step 4 first (kubectl run a one-off pod with the new image, or port-forward
 # Postgres and run migrate from a workstation), then:
-helm upgrade apex deployment/helm/apex --reuse-values \
-  --set apex.image.tag=<new-version>
-kubectl rollout status statefulset/apex
+helm upgrade wovyr deployment/helm/wovyr --reuse-values \
+  --set wovyr.image.tag=<new-version>
+kubectl rollout status statefulset/wovyr
 ```
 
 The chart is a single-replica StatefulSet over a PVC — `helm upgrade` recreates
-the one pod (brief outage, same as the other shapes), and `~/.apex` rides the
+the one pod (brief outage, same as the other shapes), and `~/.wovyr` rides the
 PVC through it.
 
 ---
@@ -148,14 +148,14 @@ PVC through it.
 # 1. The process is up and reports the new version:
 curl -fsS http://127.0.0.1:8080/healthz          # {"status":"ok","version":"<new>"}
 # 2. Metrics scrape works and the operability gauges recomputed from the stores:
-curl -fsS http://127.0.0.1:8080/metrics | grep -E "apex_(workflow_executions_active|webhook_outbox_pending)"
+curl -fsS http://127.0.0.1:8080/metrics | grep -E "wovyr_(workflow_executions_active|webhook_outbox_pending)"
 # 3. Postgres-backed features actually connect (fails closed if a migrate was missed):
-apex workflows list --server http://127.0.0.1:8080
+wovyr workflows list --server http://127.0.0.1:8080
 # 4. A smoke run end to end:
-apex agents run --server http://127.0.0.1:8080 -f examples/agents/hello.yaml --input '{"message":"Hi"}'
+wovyr agents run --server http://127.0.0.1:8080 -f examples/agents/hello.yaml --input '{"message":"Hi"}'
 ```
 
-Then watch the logs for one dispatcher interval (`APEX_DISPATCH_INTERVAL_SECS`,
+Then watch the logs for one dispatcher interval (`WOVYR_DISPATCH_INTERVAL_SECS`,
 default 5s) to confirm startup recovery: resumed executions, re-dispatched
 webhook deliveries, and any bare runs reconciled to `Failed` are all logged.
 Finally, expect SDK clients on the old `major.minor` to log a one-time
@@ -174,7 +174,7 @@ formats fail closed on *newer* versions — restore the pre-upgrade state rather
 than pointing the old binary at state the new one may have touched:
 
 ```bash
-apex admin restore /var/backups/apex/pre-<date> --yes   # verifies the sha256 manifest before writing
+wovyr admin restore /var/backups/wovyr/pre-<date> --yes   # verifies the sha256 manifest before writing
 ```
 
 For Postgres backends, restore the matching database snapshot from step 1.
@@ -191,12 +191,12 @@ as the disaster path.
 
 # 8. Version-skew rules (summary)
 
-- **Never** run an older binary against `~/.apex` state or a Postgres schema a
+- **Never** run an older binary against `~/.wovyr` state or a Postgres schema a
   newer binary has written/migrated — every versioned surface (workflow event
   envelopes, UI frame schema, refinery schema versions) rejects
   newer-than-understood data by design. Rollback = old binary **plus** restored
   old state, never old binary alone.
-- The single binary serves CLI and server, and both share `~/.apex` — upgrade
+- The single binary serves CLI and server, and both share `~/.wovyr` — upgrade
   them as one unit on a host; don't run a new CLI against an old server's state
   directory on the same machine.
 - SDKs are forward/backward tolerant within the same `major.minor`; across
@@ -206,7 +206,7 @@ as the disaster path.
 
 # 9. Related documents
 
-- [backup-and-restore.md](backup-and-restore.md) — what `apex admin
+- [backup-and-restore.md](backup-and-restore.md) — what `wovyr admin
   backup`/`restore` covers, S3 targets, RPO/RTO, KMS escrow
 - [systemd.md](systemd.md) / [docker-compose.md](docker-compose.md) /
   [helm.md](helm.md) — the three deployment shapes

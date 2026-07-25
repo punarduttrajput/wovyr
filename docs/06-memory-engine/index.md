@@ -16,7 +16,7 @@ Document ID: MEM-INDEX-001
 
 # 1. Purpose
 
-This document is the **central navigation and architecture index** for the Memory Engine in the Apex AI Platform.
+This document is the **central navigation and architecture index** for the Memory Engine in the Wovyr AI Platform.
 
 The Memory Engine is the deployable service that stores, indexes, retrieves, and governs all agent memory. It operates the memory abstraction defined for agents in the [Memory System](../04-agent-framework/memory-system.md) and exposes it as a shared, multi-tenant platform container backed by PostgreSQL, Qdrant, Redis, and object storage.
 

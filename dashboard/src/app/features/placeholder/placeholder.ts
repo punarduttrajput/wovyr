@@ -44,5 +44,5 @@ import { Component, input } from '@angular/core';
 })
 export class Placeholder {
   readonly surface = input('Surface');
-  readonly eyebrow = input('Apex');
+  readonly eyebrow = input('Wovyr');
 }

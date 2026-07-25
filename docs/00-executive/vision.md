@@ -2,13 +2,13 @@
 
 **Status:** Active — repositioned per [ADR-0011](../17-adr/ADR-0011-generative-ui-repositioning.md) (2026-07-14)
 
-**Owner:** Apex AI Platform Team
+**Owner:** Wovyr AI Platform Team
 
 ---
 
 # Purpose
 
-This document defines the long-term vision of the Apex AI Platform.
+This document defines the long-term vision of the Wovyr AI Platform.
 
 It establishes why the platform exists, the problems it solves, the customers it serves, and the principles guiding its evolution over the next decade.
 
@@ -37,9 +37,9 @@ Developers are required to combine numerous independent technologies:
 
 Each project reinvents the same infrastructure.
 
-The Apex AI Platform exists to eliminate this fragmentation.
+The Wovyr AI Platform exists to eliminate this fragmentation.
 
-Rather than offering another AI framework, Apex provides a complete enterprise platform for building, orchestrating, deploying, and operating intelligent autonomous systems.
+Rather than offering another AI framework, Wovyr provides a complete enterprise platform for building, orchestrating, deploying, and operating intelligent autonomous systems.
 
 ---
 
@@ -55,7 +55,7 @@ Software interfaces are shifting from hard-coded pages to interfaces generated a
 runtime around user intent. That shift breaks the web's security assumptions: a
 generated form can be a hallucinated phishing vector, prompt injection can
 manifest as UI, and no system of record can prove what an AI actually showed a
-user. Apex owns that missing layer, as three combined plays:
+user. Wovyr owns that missing layer, as three combined plays:
 
 1. **The trust & security layer for generative UI** — every generated frame is
    policy-validated, constrained to a declarative component vocabulary,
@@ -303,35 +303,35 @@ The platform adopts:
 
 The long-term ecosystem includes:
 
-Apex Runtime
+Wovyr Runtime
 
 AI execution engine.
 
-Apex Workflow
+Wovyr Workflow
 
 Distributed workflow orchestration.
 
-Apex Memory
+Wovyr Memory
 
 Semantic memory and retrieval.
 
-Apex Gateway
+Wovyr Gateway
 
 Unified LLM provider abstraction.
 
-Apex Studio
+Wovyr Studio
 
 Visual development environment.
 
-Apex CLI
+Wovyr CLI
 
 Command-line tooling.
 
-Apex Cloud
+Wovyr Cloud
 
 Managed cloud offering.
 
-Apex Marketplace
+Wovyr Marketplace
 
 Plugins, workflows, and templates.
 
@@ -375,7 +375,7 @@ Marketplace
 
 # Definition of Success
 
-A successful Apex AI Platform enables organizations to build reliable, secure, and scalable AI-driven systems without assembling and maintaining dozens of disconnected technologies.
+A successful Wovyr AI Platform enables organizations to build reliable, secure, and scalable AI-driven systems without assembling and maintaining dozens of disconnected technologies.
 
 The platform should become a trusted foundation for autonomous software across industries while remaining open, extensible, and community-driven.
 

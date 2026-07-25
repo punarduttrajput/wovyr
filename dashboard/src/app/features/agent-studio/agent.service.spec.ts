@@ -93,7 +93,7 @@ describe('AgentService', () => {
 
     it('parses the real hello-agent example manifest shape', () => {
       const yaml = [
-        'apiVersion: agent.apex.io/v1',
+        'apiVersion: agent.wovyr.io/v1',
         'kind: Agent',
         'metadata:',
         '  name: hello',

@@ -1,6 +1,6 @@
 # Gitleaks configuration — extends the default ruleset.
 # Allowlists cover documented examples and env-var *names*, not credentials:
-# the two historical findings are `APEX_ALLOW_ANONYMOUS=1` (an env-var toggle
+# the two historical findings are `WOVYR_ALLOW_ANONYMOUS=1` (an env-var toggle
 # named in SECURITY.md) and `Idempotency-Key: fetch-order-123` (a docs example).
 
 [extend]
@@ -10,6 +10,6 @@ useDefault = true
 description = "Documented examples and boolean env-var toggles, not secrets"
 regexTarget = "match"
 regexes = [
-  '''APEX_[A-Z_]+=1''',
+  '''WOVYR_[A-Z_]+=1''',
   '''Idempotency-Key: [A-Za-z0-9._-]+''',
 ]

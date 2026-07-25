@@ -60,7 +60,7 @@ A frontier-class model is selected for harder reasoning; a policy forbids egress
 # 4. Run
 
 ```bash
-apex agents run -f agents/code-agent.yaml --stream \
+wovyr agents run -f agents/code-agent.yaml --stream \
   --input '{"message":"Add input validation to parse_config and run the tests."}'
 ```
 

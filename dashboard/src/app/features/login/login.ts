@@ -8,7 +8,7 @@ import { Session } from '../../core/session';
  * dashboard acts as, replacing the previous hardcoded build-time constants.
  * There is no username/password login endpoint anywhere in the platform (see
  * `Session`'s doc comment for why) — this collects an already-minted API key
- * (`apex auth create-key <principal>`) or JWT instead.
+ * (`wovyr auth create-key <principal>`) or JWT instead.
  */
 @Component({
   selector: 'app-login',

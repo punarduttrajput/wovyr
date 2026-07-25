@@ -1,7 +1,7 @@
 import { Injectable, signal } from '@angular/core';
 
 type Theme = 'light' | 'dark';
-const KEY = 'apex.theme';
+const KEY = 'wovyr.theme';
 
 /** Toggles the `data-theme` attribute on <html>, persisted to localStorage. */
 @Injectable({ providedIn: 'root' })

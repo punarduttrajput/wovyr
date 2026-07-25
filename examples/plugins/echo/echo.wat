@@ -1,4 +1,4 @@
-;; echo — a wasm32-wasi plugin capability for the Apex platform.
+;; echo — a wasm32-wasi plugin capability for the Wovyr platform.
 ;; Reads the JSON request from stdin (fd 0) and writes it back verbatim to stdout
 ;; (fd 1): the simplest demonstration of the plugin capability ABI
 ;; (request JSON in → response JSON out). Build: wat2wasm echo.wat -o echo.wasm

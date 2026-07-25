@@ -49,12 +49,12 @@ warm pools, and AI-assisted plugin scaffolding/review.
 # 3. Current Baseline (what this would build on)
 
 - **Cost/quality signals** — the `Gateway`'s `CostObserver` and the
-  `apex-telemetry` `Metrics` registry (RED metrics, `apex_llm_*`) already produce
+  `wovyr-telemetry` `Metrics` registry (RED metrics, `wovyr_llm_*`) already produce
   the raw telemetry.
 - **Resilience knobs** — the `Gateway` already has failover, a circuit breaker,
   caching, and hedging; live scoring would feed the *candidate ordering* those
   mechanisms consume.
-- **Ranker + MMR** — `apex-memory` already exposes a `score_breakdown`, so the
+- **Ranker + MMR** — `wovyr-memory` already exposes a `score_breakdown`, so the
   effect of any weight change is observable and explainable.
 - **Autoscaler** — `SandboxPool::autoscale()` is already caller-driven and
   deterministic; a demand signal would drive it instead of a static policy.
@@ -74,7 +74,7 @@ a target pool size). The core still runs deterministically given that input.
   promoted only after evaluation.
 - **Warm pools:** an autoscaler driven by observed acquire pressure.
 - **Plugin scaffolding/review:** AI-assisted generation checked by the existing
-  static scanner (`apex-marketplace` `scan.rs`) — assistance, not autonomy.
+  static scanner (`wovyr-marketplace` `scan.rs`) — assistance, not autonomy.
 
 ---
 

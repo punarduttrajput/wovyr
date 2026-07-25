@@ -31,7 +31,7 @@ export class McpServers implements OnInit {
    * after create/refresh) — `undefined` while unknown, `null` if the last
    * dial attempt failed (a stale/unreachable connection). */
   readonly toolCounts = signal<Record<string, number | null>>({});
-  /** Whether the operator has set `APEX_ENABLE_MCP_STDIO=1` (MCX-302) — the
+  /** Whether the operator has set `WOVYR_ENABLE_MCP_STDIO=1` (MCX-302) — the
    * `stdio` transport option is hidden, not silently offered-then-rejected,
    * when this is `false`. */
   readonly stdioEnabled = signal(false);

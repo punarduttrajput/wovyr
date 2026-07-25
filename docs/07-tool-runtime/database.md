@@ -80,7 +80,7 @@ restrict agents to read-only.
 # 7. Example
 
 ```bash
-apex tools invoke db.query --input '{"connection":"secret://acme/reporting-db","sql":"SELECT count(*) FROM users","params":[]}'
+wovyr tools invoke db.query --input '{"connection":"secret://acme/reporting-db","sql":"SELECT count(*) FROM users","params":[]}'
 ```
 
 ---

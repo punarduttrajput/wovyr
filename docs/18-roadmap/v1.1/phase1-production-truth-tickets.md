@@ -61,10 +61,10 @@ everything at $0 — so PRV-101 is a prerequisite for trusting any Phase-2 quota
 ## PRV-101 `[P0]` — Per-model price table + real `cost_usd` — **DONE (2026-07-09)**
 
 **Problem.** `OpenAiProvider` hardcodes `cost_usd = 0.0`
-(`crates/apex-provider/src/openai.rs:442,513-515`) and mistralrs likewise
+(`crates/wovyr-provider/src/openai.rs:442,513-515`) and mistralrs likewise
 (`mistralrs_provider.rs:197-203`); the only price constant is the mock's synthetic
 `MOCK_USD_PER_TOKEN` (`mock.rs:16`). Every `CostEvent`, and the server's per-project
-budget accounting fed from `output.usage.cost_usd` (`apex-runtime/src/lib.rs:257`),
+budget accounting fed from `output.usage.cost_usd` (`wovyr-runtime/src/lib.rs:257`),
 sees **$0** in production — so `llm_cost_per_day_usd` quota enforcement (PRD-003) is
 a no-op. (PRD-004 R-B.1; audit High.)
 
@@ -83,21 +83,21 @@ a no-op. (PRD-004 R-B.1; audit High.)
   advances by the computed amount (not 0).
 - Unknown-model lookups fail safe (documented default or a loud warn), never panic.
 
-**Files.** `crates/apex-provider/src/{openai.rs,mistralrs_provider.rs,gateway.rs}`, a
-new `pricing.rs`; `crates/apex-server/src/tenancy.rs` (quota assertions).
+**Files.** `crates/wovyr-provider/src/{openai.rs,mistralrs_provider.rs,gateway.rs}`, a
+new `pricing.rs`; `crates/wovyr-server/src/tenancy.rs` (quota assertions).
 **Size.** M. **Depends on:** none. **Blocks:** SRV-202 (token quotas), EVL-202.
 
-**Implementation notes (2026-07-09).** New `apex-provider::pricing` module: a
+**Implementation notes (2026-07-09).** New `wovyr-provider::pricing` module: a
 `PriceBook` (model → `ModelPrice { input_per_1m, output_per_1m }`) with built-in
-defaults for common OpenAI/Anthropic models, overridable via `APEX_MODEL_PRICES`
-(inline JSON) or `APEX_PRICEBOOK_FILE` (a JSON file); lookup is
+defaults for common OpenAI/Anthropic models, overridable via `WOVYR_MODEL_PRICES`
+(inline JSON) or `WOVYR_PRICEBOOK_FILE` (a JSON file); lookup is
 exact-match-then-longest-prefix (so `gpt-4o-mini-2024-07-18` → `gpt-4o-mini`), then
 a configurable `default`, then a one-time `tracing::warn!` returning `$0` for a
 genuinely unknown/undefaulted model (fail-safe, never a panic). `OpenAiProvider`
 carries a `PriceBook` (from `PriceBook::from_env()` by default; `with_price_book`
 override) and computes `cost_usd` from returned `Usage` in both `parse_response`
 (non-streaming) and `StreamAccumulator::finish` (streaming), logging it at
-`debug` (`target: "apex.pricing"`) — the "observe" half of observe-then-enforce.
+`debug` (`target: "wovyr.pricing"`) — the "observe" half of observe-then-enforce.
 mistral.rs keeps `$0` with an expanded comment: a local model has no vendor bill,
 so that's the *correct* cost, not a placeholder. **Acceptance:**
 `pricing::tests::known_token_count_times_price_is_expected_cost` +
@@ -115,7 +115,7 @@ fail-safe. `MOCK_USD_PER_TOKEN` is unchanged (the mock already priced its output
 ## AIC-101 `[P0]` — Context-window management: tokenizer + history compaction — **DONE (2026-07-09)**
 
 **Problem.** `run_agent` clones the *entire* message history into every request
-(`crates/apex-agent/src/runtime.rs:240` `messages.clone()`) and appends
+(`crates/wovyr-agent/src/runtime.rs:240` `messages.clone()`) and appends
 assistant+tool-result messages every tool turn (`runtime.rs:259-270`) with no
 budgeting, truncation, or summarization. There is **no tokenizer anywhere** (the
 mock estimates chars/4, `mock.rs:33`). A long tool loop silently blows the model's
@@ -133,25 +133,25 @@ context window and cost. (PRD-004 R-A.1; audit High.)
   a configured budget while preserving the system + latest user turn.
 - Compaction is deterministic given the same input (house determinism rule).
 
-**Files.** `crates/apex-agent/src/runtime.rs`; new token-count util (in
-`apex-provider` or `apex-common`). **Size.** L. **Depends on:** none.
+**Files.** `crates/wovyr-agent/src/runtime.rs`; new token-count util (in
+`wovyr-provider` or `wovyr-common`). **Size.** L. **Depends on:** none.
 **Blocks:** EVL-203.
 
-**Implementation notes (2026-07-09).** Two new modules. `apex-provider::tokenizer`:
+**Implementation notes (2026-07-09).** Two new modules. `wovyr-provider::tokenizer`:
 a `TokenCounter` trait with a dependency-free, deterministic `HeuristicTokenizer`
 default (each whitespace-delimited chunk → ~4-char subword tokens + one per
 punctuation char; a `count_message` helper adds role/tool-call framing overhead via
 `PER_MESSAGE_OVERHEAD`/`PER_TOOL_OVERHEAD`). Deliberately **not** a real BPE encoder
 — a bundled vocab is a heavy dep and this workspace builds offline; documented as a
 ~10–20% estimate suitable for *budgeting* (not billing — real cost is PRV-101's
-provider `usage`). A real tokenizer drops in behind the trait later. `apex-agent::
+provider `usage`). A real tokenizer drops in behind the trait later. `wovyr-agent::
 context`: `compact(messages, tools_overhead, policy, counter)` drops the **oldest
 tool rounds** first (an `assistant` tool-call message + its `tool` results, kept
 whole so the wire sequence stays valid) while always preserving the leading system
 prompt(s) + first user turn; `ContextPolicy { max_prompt_tokens, strategy }` with a
 generous 96k default (so short runs are untouched, back-compat) and a `DropOldest`
 strategy, wired into `RunOptions` (`with_context_policy`) and applied at the top of
-every `run_agent` loop iteration (logged at `debug`, `target: "apex.context"`).
+every `run_agent` loop iteration (logged at `debug`, `target: "wovyr.context"`).
 **Acceptance:** `context::tests::long_tool_loop_stays_under_budget_and_keeps_system_
 and_user` + the through-`run_agent` integration test `runtime::tests::long_tool_
 loop_request_stays_under_context_budget` (a scripted 30-round tool loop asserts the
@@ -172,7 +172,7 @@ preserving result ordering by call id when feeding results back to the model.
 **Acceptance criteria.** A test with two artificially-delayed tools asserts wall-clock
 ≈ max(individual), not sum; result ordering is stable/deterministic.
 
-**Files.** `crates/apex-agent/src/runtime.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-agent/src/runtime.rs`. **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-09).** `execute_tool_call` was refactored to *not*
 touch the `&mut` sink (it now returns a `ToolOutcome { result_text, ok }`), so the
@@ -190,12 +190,12 @@ mutable data, so on-task concurrency is both sufficient and simpler. **Acceptanc
 asserts paused wall-clock ≈ 300ms = max, definitively under the 400ms a serial loop
 would take, and that results feed back as `[slow, fast]` = call order, not the
 `[fast, slow]` completion order). Added `tokio` `time`+`test-util` dev-features for
-the paused clock (same pattern as apex-provider's hedging tests).
+the paused clock (same pattern as wovyr-provider's hedging tests).
 
 ## AIC-103 `[P1]` — Apply manifest `max_steps` as the default budget — **DONE (2026-07-09)**
 
 **Problem.** `spec.max_steps` is parsed (`definition.rs:56-57`) but `run_agent_inner`
-reads only `opts.max_steps` (`runtime.rs:239`); only `apex-runtime` wires it
+reads only `opts.max_steps` (`runtime.rs:239`); only `wovyr-runtime` wires it
 (`lib.rs:248-250`), so the eval runner and any direct `run_agent` caller ignore the
 manifest budget. (PRD-004 R-A.3; audit Med.)
 
@@ -205,7 +205,7 @@ unless `RunOptions` explicitly overrides it.
 **Acceptance criteria.** A test with a manifest `max_steps: N` and no `RunOptions`
 override stops at N steps.
 
-**Files.** `crates/apex-agent/src/runtime.rs`. **Size.** S. **Depends on:** none.
+**Files.** `crates/wovyr-agent/src/runtime.rs`. **Size.** S. **Depends on:** none.
 
 **Implementation notes (2026-07-09).** `RunOptions.max_steps` changed from `usize`
 (default 8, indistinguishable from an explicit 8) to `Option<usize>` (`None` =
@@ -213,7 +213,7 @@ override stops at N steps.
 `run_agent_inner` now resolves the budget as `opts.max_steps.or(def.spec.max_steps)
 .unwrap_or(DEFAULT_MAX_STEPS)` — precedence **explicit override > manifest >
 built-in** — used for the loop bound, the "did not finish within N steps" error, and
-the `agent.run` span field. Existing pre-resolving callers (`apex-runtime`, the
+the `agent.run` span field. Existing pre-resolving callers (`wovyr-runtime`, the
 server's `agents.rs` doing `req.max_steps.or(def.spec.max_steps)`) are unaffected —
 they set `Some(..)` before the call, so the new default branch only ever fires for
 the previously-broken direct/eval callers. **Acceptance:**
@@ -231,9 +231,9 @@ and the `with_max_steps` unit test (`Some(0)`).
 ## SBX-101 `[P0]` — Wire `SandboxManager::detect()` + `SandboxPool` into the run path — **DONE (2026-07-09)**
 
 **Problem.** `ShellTool` hardcodes `SandboxManager::native_only()`
-(`crates/apex-tools/src/builtin.rs:561`), so `ContainerSandbox`, `FirecrackerSandbox`,
+(`crates/wovyr-tools/src/builtin.rs:561`), so `ContainerSandbox`, `FirecrackerSandbox`,
 `SandboxPool`, and `FairScheduler` are referenced only in tests/defs — never in the
-`apex-agent`/`apex-server` run path. A node with Docker/gVisor/Firecracker never uses
+`wovyr-agent`/`wovyr-server` run path. A node with Docker/gVisor/Firecracker never uses
 them, and untrusted/verified runs simply fail closed. (PRD-004 R-E.1; audit High.)
 
 **Change.**
@@ -248,11 +248,11 @@ them, and untrusted/verified runs simply fail closed. (PRD-004 R-E.1; audit High
 - A first-party run still uses native; a node with no strong backend fails closed
   for untrusted work (unchanged).
 
-**Files.** `crates/apex-tools/src/builtin.rs`, `sandbox/*`, `pool.rs`;
-`crates/apex-agent`/`apex-server` run wiring. **Size.** L. **Depends on:** none.
+**Files.** `crates/wovyr-tools/src/builtin.rs`, `sandbox/*`, `pool.rs`;
+`crates/wovyr-agent`/`wovyr-server` run wiring. **Size.** L. **Depends on:** none.
 
 **Implementation notes (2026-07-09).** `ShellTool` is now stateful — it holds a
-`SandboxManager` and a container image (`APEX_SANDBOX_IMAGE`, default `alpine:3.20`):
+`SandboxManager` and a container image (`WOVYR_SANDBOX_IMAGE`, default `alpine:3.20`):
 `ShellTool::native_only()` (native-only caps; fail-closed for verified/untrusted — the
 CLI/local/test default) and `ShellTool::with_manager(detected)`. `execute` resolves
 the backend from `ctx.trust_class` against the manager's capabilities and dispatches:
@@ -260,8 +260,8 @@ the backend from `ctx.trust_class` against the manager's capabilities and dispat
 `run_container`, which runs `sh -c <cwd-wrapped>` inside a network-isolated
 `ContainerSandbox` (a non-`sh` shell request is rejected there, since the container is
 Linux). The registry gained `with_shell_using(manager)` (`with_shell()` stays
-native-only for back-compat); `apex-server`'s `AppState::from_env` calls
-`SandboxManager::detect().await` and uses it when `APEX_ENABLE_SHELL_TOOL=1`, so a
+native-only for back-compat); `wovyr-server`'s `AppState::from_env` calls
+`SandboxManager::detect().await` and uses it when `WOVYR_ENABLE_SHELL_TOOL=1`, so a
 Docker/gVisor node actually runs verified/untrusted shell work in a container.
 **Acceptance:** capability-gated `sandbox_backends.rs::shell_tool_runs_a_verified_run_
 in_a_container_not_native` (a `Verified` run executes `cat /etc/alpine-release` — only
@@ -284,7 +284,7 @@ session-capable-backend work rather than added here as non-functional ceremony.
 
 **Problem.** `setrlimit` memory/CPU/PID enforcement is `#[cfg(unix)]`-only; the
 `not(unix)` branch applies only a timeout + output cap
-(`crates/apex-tools/src/sandbox/native.rs:37-70,149-173`). On this Windows host
+(`crates/wovyr-tools/src/sandbox/native.rs:37-70,149-173`). On this Windows host
 `shell` runs with **zero resource isolation**. (PRD-004 R-E.2; audit High.)
 
 **Change.** Add a Windows Job Object (`JOBOBJECT_EXTENDED_LIMIT_INFORMATION`:
@@ -294,7 +294,7 @@ path, mirroring the Unix `setrlimit` caps.
 **Acceptance criteria.** A Windows-gated test asserts a child exceeding the memory or
 process-count cap is terminated; caps match the Unix path's semantics.
 
-**Files.** `crates/apex-tools/src/sandbox/native.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-tools/src/sandbox/native.rs`. **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-09).** A `#[cfg(windows)]` `JobObject` guard
 (`windows-sys` 0.61, `Win32_System_JobObjects`) is created from `ResourceLimits` and
@@ -324,7 +324,7 @@ it), so no new duplicate version / offline fetch and no `cargo-deny` change.
 ## SRV-101 `[P0]` — Graceful shutdown / drain — **DONE (2026-07-09)**
 
 **Problem.** `axum::serve` is called without `with_graceful_shutdown` and no
-SIGTERM/SIGINT handling (`crates/apex-server/src/lib.rs:339-344`); in-flight runs and
+SIGTERM/SIGINT handling (`crates/wovyr-server/src/lib.rs:339-344`); in-flight runs and
 spawned tasks are killed abruptly, and the dispatch-loop abort only runs *after*
 `serve` returns (which only happens on hard error). (PRD-004 R-G.1; audit High.)
 
@@ -334,14 +334,14 @@ in-flight requests within a bounded deadline, and cleanly stop the dispatcher lo
 **Acceptance criteria.** A test sends the shutdown signal mid-request and asserts the
 in-flight request completes and new connections are refused; dispatch loops stop.
 
-**Files.** `crates/apex-server/src/lib.rs`. **Size.** M. **Depends on:** none.
+**Files.** `crates/wovyr-server/src/lib.rs`. **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-09).** `serve()` extracted into `serve_http`/`serve_tls`
 helpers, each taking a `shutdown: impl Future`. HTTP uses axum's
 `.with_graceful_shutdown(shutdown)`; TLS uses `axum_server::Handle::graceful_shutdown
 (Some(grace))` triggered from a task awaiting the same future. `shutdown_signal()`
 resolves on SIGINT (any platform) or SIGTERM (Unix) via `tokio::select!`. A bounded
-`APEX_SHUTDOWN_GRACE_SECS` (default 30) caps the drain; after the serving future
+`WOVYR_SHUTDOWN_GRACE_SECS` (default 30) caps the drain; after the serving future
 returns, the dispatch loops are aborted (previously that abort only ran on a hard
 error, since nothing signaled a clean stop). Added `tokio` `signal`+`macros` features.
 **Acceptance:** `graceful_shutdown_drains_in_flight_then_refuses_new_connections`
@@ -351,7 +351,7 @@ connection is refused once the drained serving future returns.
 
 ## SRV-102 `[P1]` — Durable async-run store (or documented non-durability) — **DONE (2026-07-09)**
 
-**Problem.** `RunStore` is in-memory only (`crates/apex-server/src/state.rs:171-180`);
+**Problem.** `RunStore` is in-memory only (`crates/wovyr-server/src/state.rs:171-180`);
 the background `tokio::spawn` executing an async agent run
 (`agents.rs:144`) has no checkpoint, so a restart loses every in-flight/pollable run
 and clients poll a run that can never finish. (PRD-004 R-G.2; audit High.)
@@ -364,7 +364,7 @@ the API and return a clear terminal status.
 **Acceptance criteria.** A restart-simulation test asserts a previously-`Running`
 async run is reported terminally (not stuck `Running`) after reopen.
 
-**Files.** `crates/apex-server/src/{state.rs,agents.rs}`. **Size.** M.
+**Files.** `crates/wovyr-server/src/{state.rs,agents.rs}`. **Size.** M.
 **Depends on:** none.
 
 **Implementation notes (2026-07-09).** Chose durability + reconcile-on-startup (the
@@ -375,7 +375,7 @@ first ticket option). `RunStore` gained a `path` and `new_with_path`; `RunRecord
 On reopen, any run still `Running` is reconciled to terminal `Failed` ("server
 restarted while the run was in flight; agent runs are not resumable") and re-persisted,
 so a poller gets a truthful terminal status rather than a stuck-`Running` poll or a
-404. `AppState::from_env` opens it at `~/.apex/server/async_runs.json`; `path: None`
+404. `AppState::from_env` opens it at `~/.wovyr/server/async_runs.json`; `path: None`
 stays in-memory (tests). **Acceptance:** `run_store_tests::running_run_is_reconciled_
 to_failed_after_restart` (reopen against the same path shows the orphan `Failed`, a
 finished run keeps its terminal status) + `in_memory_store_persists_nothing`.
@@ -383,7 +383,7 @@ finished run keeps its terminal status) + `in_memory_store_persists_nothing`.
 ## SRV-103 `[P1]` — Durable webhook outbox + delivery worker — **DONE (2026-07-09)**
 
 **Problem.** Webhook delivery + retries are in-process fire-and-forget
-(`crates/apex-server/src/webhooks.rs:138-152`), retrying via `tokio::sleep` in a
+(`crates/wovyr-server/src/webhooks.rs:138-152`), retrying via `tokio::sleep` in a
 spawned task (`:116-119`); a crash drops all pending retries and dead-letters are only
 logged (`:107-113`), not persisted. (PRD-004 R-G.3; audit High.)
 
@@ -393,7 +393,7 @@ worker that survives restart; dead-letters land in a queryable store, not just a
 **Acceptance criteria.** A restart-simulation test asserts a pending delivery is
 retried after reopen; an exhausted delivery lands in the persisted DLQ.
 
-**Files.** `crates/apex-server/src/webhooks.rs`; a durable outbox store.
+**Files.** `crates/wovyr-server/src/webhooks.rs`; a durable outbox store.
 **Size.** L. **Depends on:** none.
 
 **Implementation notes (2026-07-09).** New `webhook_outbox` module: a durable
@@ -416,7 +416,7 @@ so concurrent `from_env` tests don't race the shared durable file.
 ## SRV-104 `[P1]` — API-key lifecycle: expiry, rotation, revocation — **DONE (2026-07-09)**
 
 **Problem.** The API-key store is a bare `hash → principal` map; the only operation
-is mint (`crates/apex-server/src/auth.rs:238-241,275-277,301-312`). No `created_at`,
+is mint (`crates/wovyr-server/src/auth.rs:238-241,275-277,301-312`). No `created_at`,
 TTL, revoke, rotate, or last-used. (PRD-004 R-G.4; audit High.)
 
 **Change.** Add key metadata (created/expires/revoked/last-used), a revoke endpoint,
@@ -425,7 +425,7 @@ and rotation; reject expired/revoked keys at auth time.
 **Acceptance criteria.** Tests: an expired key is rejected; a revoked key is rejected;
 rotation issues a new key and invalidates the old on a grace schedule.
 
-**Files.** `crates/apex-server/src/auth.rs`; CLI `apex auth` subcommands.
+**Files.** `crates/wovyr-server/src/auth.rs`; CLI `wovyr auth` subcommands.
 **Size.** M. **Depends on:** none.
 
 **Implementation notes (2026-07-09).** The store value went from a bare `principal`
@@ -438,13 +438,13 @@ once/min/key to avoid rewriting the file on every request. `FileApiKeyStore` gai
 `rotate(key_id, grace)` (mints a replacement, sets the old key to expire after the
 grace window — both valid during it, only the old lapses after). `load()` transparently
 migrates the pre-SRV-104 `hash → principal` on-disk format, so existing keys keep
-authenticating. CLI: `apex auth create-key [--ttl-days]`, `list-keys`, `revoke <id>`,
+authenticating. CLI: `wovyr auth create-key [--ttl-days]`, `list-keys`, `revoke <id>`,
 `rotate <id> [--grace-hours]`. **Acceptance:** `auth::tests::{expired_key_is_rejected,
 revoked_key_is_rejected, rotation_issues_new_key_and_expires_old_after_grace,
 legacy_hash_to_principal_format_is_migrated}`. **Scope note:** the revoke/rotate
-surface is the CLI (operating on the shared `~/.apex/auth` store, like `kms`/`memory`);
+surface is the CLI (operating on the shared `~/.wovyr/auth` store, like `kms`/`memory`);
 a server *route* for it wasn't added — the CLI is the operator path, consistent with
-how `apex auth create-key` already worked pre-ticket.
+how `wovyr auth create-key` already worked pre-ticket.
 
 ---
 
@@ -453,7 +453,7 @@ how `apex auth create-key` already worked pre-ticket.
 ## WFL-101 `[P0]` — Postgres connection pool + reconnect — **DONE (2026-07-10)**
 
 **Problem.** The Postgres store uses a single `tokio_postgres::Client`
-(`crates/apex-workflow/src/postgres.rs:87`); every call serializes on one TCP
+(`crates/wovyr-workflow/src/postgres.rs:87`); every call serializes on one TCP
 connection and there is no reconnect if the driver task dies (it only logs,
 `:102-106`). (PRD-004 R-H.1; audit High.)
 
@@ -463,11 +463,11 @@ reconnect.
 **Acceptance criteria.** A capability-gated test asserts concurrent store calls don't
 serialize on one connection and that a dropped connection recovers on the next call.
 
-**Files.** `crates/apex-workflow/src/postgres.rs`. **Size.** M.
+**Files.** `crates/wovyr-workflow/src/postgres.rs`. **Size.** M.
 **Depends on:** none. **Blocks:** WFL-103, WFL-104.
 
 **Implementation notes (2026-07-10).** Replaced the single `tokio_postgres::Client`
-with a hand-rolled `PgPool` (semaphore-bounded, `APEX_PG_POOL_MAX` default 8) that
+with a hand-rolled `PgPool` (semaphore-bounded, `WOVYR_PG_POOL_MAX` default 8) that
 reuses idle clients and **transparently reconnects** — a client whose background
 driver died (`is_closed()`) is discarded on return to the pool and a fresh one dialed
 on the next checkout. Every store method now does `self.pool.get().await?` +
@@ -486,7 +486,7 @@ left to a dedicated drill.
 
 **Problem.** A `workflow` activity naming its own (or a mutually-recursive) workflow
 recurses forever; `run_subworkflow` boxes the future but caps nothing
-(`crates/apex-workflow/src/engine.rs:998-1029`). (PRD-004 R-H.2; audit High.)
+(`crates/wovyr-workflow/src/engine.rs:998-1029`). (PRD-004 R-H.2; audit High.)
 
 **Change.** Thread a depth counter (or ancestor set) through sub-workflow resolution;
 fail closed past a configurable max depth / on a detected cycle.
@@ -494,7 +494,7 @@ fail closed past a configurable max depth / on a detected cycle.
 **Acceptance criteria.** A test with a self-referential workflow fails with a clear
 depth/cycle error instead of hanging/overflowing.
 
-**Files.** `crates/apex-workflow/src/engine.rs`. **Size.** S. **Depends on:** none.
+**Files.** `crates/wovyr-workflow/src/engine.rs`. **Size.** S. **Depends on:** none.
 
 **Implementation notes (2026-07-10).** `Engine` gained a `max_subworkflow_depth`
 (`with_max_subworkflow_depth`, default `DEFAULT_MAX_SUBWORKFLOW_DEPTH = 16`).
@@ -511,7 +511,7 @@ hang/overflow).
 ## WFL-103 `[P1]` — TLS to Postgres — **DONE (2026-07-10, live-validated)**
 
 **Problem.** `connect`/`run_migrations` hardcode `NoTls`
-(`crates/apex-workflow/src/postgres.rs:98,121`). (PRD-004 R-H.3; audit High.)
+(`crates/wovyr-workflow/src/postgres.rs:98,121`). (PRD-004 R-H.3; audit High.)
 
 **Change.** Support `MakeRustlsConnect`; require TLS for non-loopback DB hosts
 (refuse plaintext to a remote host).
@@ -519,23 +519,23 @@ hang/overflow).
 **Acceptance criteria.** A test asserts a non-loopback URL without TLS config is
 refused; a TLS connection to a loopback test server succeeds.
 
-**Files.** `crates/apex-workflow/src/postgres.rs`. **Size.** M.
+**Files.** `crates/wovyr-workflow/src/postgres.rs`. **Size.** M.
 **Depends on:** WFL-101.
 
 **Implementation notes (2026-07-10).** `resolve_tls_mode` parses the connection string
 and **refuses plaintext to a non-loopback host** (`Error::Config`) unless TLS is
-requested (`sslmode=require` or `APEX_PG_TLS=1`) — loopback/Unix-socket hosts still
+requested (`sslmode=require` or `WOVYR_PG_TLS=1`) — loopback/Unix-socket hosts still
 allow plaintext (trusted-local). The `dial` path branches `NoTls` vs a rustls
 `MakeRustlsConnect` (`tokio-postgres-rustls` 0.13, rustls 0.23 `ring` provider passed
 explicitly so no process-global default is needed). Certificate handling matches libpq
 `sslmode` semantics: `require` encrypts **without identity verification**
 (`AcceptAnyServerCert` — signatures still checked via the ring provider's algorithms),
 which is what lets a managed DB with a private project CA connect without its CA bundle;
-`APEX_PG_TLS_VERIFY=1` opts into full Mozilla-webpki-root verification for a public-CA
+`WOVYR_PG_TLS_VERIFY=1` opts into full Mozilla-webpki-root verification for a public-CA
 host. **Acceptance:** the refuse-plaintext guard is unit-tested offline
 (`postgres::tests::tls_guard_refuses_plaintext_to_remote_but_allows_loopback`), and the
 **whole store was validated live end-to-end against a real remote managed Postgres
-(Aiven, `sslmode=require`, TCP :10281)** — `apex admin migrate --target workflow`
+(Aiven, `sslmode=require`, TCP :10281)** — `wovyr admin migrate --target workflow`
 succeeded over TLS, and all six `postgres_store` integration tests passed against it
 (so WFL-101's pool and WFL-104's concurrent-seq test are live-validated too, not just
 capability-gated). The earlier offline blocker (only `tokio-postgres-rustls` 0.10 /
@@ -546,7 +546,7 @@ skips cleanly on a TLS-only host (that behavior is orthogonal to transport).
 ## WFL-104 `[P1]` — Fenced event-sequence generation — **PARTIAL (seq-safety done; lease fencing deferred, 2026-07-10)**
 
 **Problem.** Postgres event `append` computes seq via `SELECT MAX(seq)+1`
-(`crates/apex-workflow/src/postgres.rs:152-166`), safe only under "one driver per
+(`crates/wovyr-workflow/src/postgres.rs:152-166`), safe only under "one driver per
 execution"; a lease-expiry race (old worker still running while a new one resumes,
 `worker.rs:98-101`) yields concurrent appends → PK violation. (PRD-004 R-H.4; audit
 Med.)
@@ -557,7 +557,7 @@ lease token (reject an append from a superseded lease).
 **Acceptance criteria.** A capability-gated test simulating two overlapping workers on
 one execution asserts no PK violation and no forked history.
 
-**Files.** `crates/apex-workflow/src/{postgres.rs,worker.rs}`. **Size.** M.
+**Files.** `crates/wovyr-workflow/src/{postgres.rs,worker.rs}`. **Size.** M.
 **Depends on:** WFL-101.
 
 **Implementation notes (2026-07-10).** The **PK-violation half is fixed**: per-execution
@@ -587,26 +587,26 @@ level (though they can still interleave events until fencing lands).
 ## SEC-101 `[P1]` — Default the secrets store to encrypted-at-rest — **DONE (2026-07-10)**
 
 **Problem.** The default secrets store writes plaintext `secrets.json`
-(`crates/apex-secrets/src/store.rs:82-126`); at-rest encryption
-(`EncryptedFileSecretStore` via KMS) is opt-in behind `APEX_SECRETS_ENCRYPT_AT_REST`
-(`crates/apex-config/src/secrets.rs`). (PRD-004 R-I.3; audit High.)
+(`crates/wovyr-secrets/src/store.rs:82-126`); at-rest encryption
+(`EncryptedFileSecretStore` via KMS) is opt-in behind `WOVYR_SECRETS_ENCRYPT_AT_REST`
+(`crates/wovyr-config/src/secrets.rs`). (PRD-004 R-I.3; audit High.)
 
 **Change.** Make encrypted-at-rest the default; plaintext becomes an explicit opt-out
-(`APEX_SECRETS_PLAINTEXT=1`). Provide a documented migration for an existing
+(`WOVYR_SECRETS_PLAINTEXT=1`). Provide a documented migration for an existing
 plaintext store (the two use distinct filenames, so a one-time re-seal step).
 
 **Acceptance criteria.** A fresh vault writes ciphertext to disk by default; the
 plaintext opt-out still works; a migration test re-seals an existing plaintext file.
 
-**Files.** `crates/apex-config/src/secrets.rs`, `crates/apex-secrets/src/*`; docs.
+**Files.** `crates/wovyr-config/src/secrets.rs`, `crates/wovyr-secrets/src/*`; docs.
 **Size.** M. **Depends on:** none.
 
-**Implementation notes (2026-07-10).** `apex_config::env::secrets_encrypt_at_rest()`
-now returns `true` by default; `APEX_SECRETS_PLAINTEXT=1` is the explicit opt-out, and
-the old opt-*in* var (`APEX_SECRETS_ENCRYPT_AT_REST`) is still honored and wins over a
+**Implementation notes (2026-07-10).** `wovyr_config::env::secrets_encrypt_at_rest()`
+now returns `true` by default; `WOVYR_SECRETS_PLAINTEXT=1` is the explicit opt-out, and
+the old opt-*in* var (`WOVYR_SECRETS_ENCRYPT_AT_REST`) is still honored and wins over a
 contradictory plaintext opt-out (fail toward the safer mode). The migration is
 **automatic, not just documented**: `EncryptedFileSecretStore::migrate_plaintext()`
-(new, in `apex-secrets`) re-seals every legacy `secrets.json` record whose
+(new, in `wovyr-secrets`) re-seals every legacy `secrets.json` record whose
 `(namespace, name)` isn't already sealed (existing encrypted records win), persists
 once atomically (all-or-nothing — a KMS failure writes nothing and leaves the
 plaintext file for a retry), then retires `secrets.json` →
@@ -629,8 +629,8 @@ idempotent; sealed records never clobbered).
 
 **Problem.** `Cargo.toml` version is `0.1.0` (`Cargo.toml:26`), README badge `0.1.0`,
 both SDKs `0.1.0` — while the repo is tagged `v0.3.0`; there is no root `CHANGELOG.md`.
-The `repository` URL also diverges (`Cargo.toml` → `apex-ai/apex`; Python
-`pyproject.toml` → `punarduttrajput/Apex`). (PRD-004 R-J.1; audit High/Low.)
+The `repository` URL also diverges (`Cargo.toml` → `wovyr-ai/wovyr`; Python
+`pyproject.toml` → `punarduttrajput/Wovyr`). (PRD-004 R-J.1; audit High/Low.)
 
 **Change.** Bump workspace/badge/SDK versions to match the tag; add a maintained root
 `CHANGELOG.md` (Keep-a-Changelog); unify the `repository` URL across all manifests.
@@ -647,8 +647,8 @@ propagates to `/healthz` and the backup manifest automatically), the README badg
 "Current Version" note, both SDK manifests (`package.json` + lockfile,
 `pyproject.toml`), the Helm `Chart.yaml` (`version`/`appVersion`), and
 `openapi.yaml`'s `info.version`. Canonical repository URL unified to
-`https://github.com/punarduttrajput/Apex` (the actual remote — the old
-`apex-ai/apex` in `Cargo.toml` was fictional); the TS SDK gained the `repository`
+`https://github.com/punarduttrajput/Wovyr` (the actual remote — the old
+`wovyr-ai/wovyr` in `Cargo.toml` was fictional); the TS SDK gained the `repository`
 field it never had. Root `CHANGELOG.md` added (Keep-a-Changelog): `0.1.0`/`0.2.0`/
 `0.3.0` entries dated from the roadmap docs' own records, plus an `[Unreleased]`
 section covering the v1.0 GA-hardening work and v1.1 Phase 1 to date.
@@ -657,24 +657,24 @@ section covering the v1.0 GA-hardening work and v1.1 Phase 1 to date.
 
 **Problem.** Only `ci.yml` exists; no `release.yml`, no cargo-dist/`dist-workspace.toml`,
 no changelog generation. The TS SDK is unpublished (`sdks/typescript/README.md`), and
-the container image is only ever built in CI (`apex:ci`), never pushed
-(`deployment/helm/apex/values.yaml:5-11`). (PRD-004 R-J.2; audit High.)
+the container image is only ever built in CI (`wovyr:ci`), never pushed
+(`deployment/helm/wovyr/values.yaml:5-11`). (PRD-004 R-J.2; audit High.)
 
 **Change.** A tag-triggered release workflow producing signed cross-platform binaries,
-a **published container image** (GHCR/Docker Hub), npm publish of `@apex-ai/sdk` and
-PyPI publish of `apex-ai-sdk`, and a generated changelog. Default the Helm chart image
+a **published container image** (GHCR/Docker Hub), npm publish of `@wovyr/sdk` and
+PyPI publish of `wovyr-sdk`, and a generated changelog. Default the Helm chart image
 to the published repo.
 
 **Acceptance criteria.** A dry-run (or tagged pre-release) produces binaries + a pushed
 image + packed SDK tarballs; the Helm chart references the published image.
 
-**Files.** `.github/workflows/release.yml`, `deployment/helm/apex/values.yaml`,
+**Files.** `.github/workflows/release.yml`, `deployment/helm/wovyr/values.yaml`,
 SDK publish config. **Size.** L. **Depends on:** DX-101.
 
 **Implementation notes (2026-07-10).** New `.github/workflows/release.yml`: on a
-`v*` tag it builds `apex` binaries for Linux x86_64 / Windows x86_64 / macOS arm64
+`v*` tag it builds `wovyr` binaries for Linux x86_64 / Windows x86_64 / macOS arm64
 (+ sha256 sums), pushes the container image to GHCR
-(`ghcr.io/punarduttrajput/apex:{version,latest}`, built with
+(`ghcr.io/punarduttrajput/wovyr:{version,latest}`, built with
 `FEATURES=tiered-memory,postgres` — the compose/Helm feature set), packs both SDKs
 (npm tarball, wheel+sdist) as release artifacts, and mints a GitHub Release whose
 body is that version's `CHANGELOG.md` section (awk-extracted). Registry publishes
@@ -738,14 +738,14 @@ via `window.localStorage`; auth still works across a page reload per the chosen 
 **Depends on:** none.
 
 **Implementation notes (2026-07-10).** The credential moved to **`sessionStorage`**
-(`apex.credential.v1`): survives reloads within the tab (the chosen persistence
+(`wovyr.credential.v1`): survives reloads within the tab (the chosen persistence
 model), dies with it, and is never written to `localStorage` — which now holds only
 the non-secret tenant/principal. A legacy pre-UI-101 blob that still embeds an
 `apiKey` is **migrated on first load**: adopted into `sessionStorage` (unless a newer
 credential is already there) and scrubbed from the persisted blob, so upgraders keep
 no residual copy in the weaker store. (`tenant.interceptor.ts` needed no change — it
 reads the `Session` signals, not storage.) The httpOnly-cookie BFF remains the
-preferred end state but the dashboard talks directly to apex-server today (BFF
+preferred end state but the dashboard talks directly to wovyr-server today (BFF
 deferred, pre-existing decision). **Verified three ways:** unit specs
 (`session.spec.ts`, incl. the literal acceptance assertion that the token appears
 nowhere in `window.localStorage`); **live in a real browser** — this dev machine's

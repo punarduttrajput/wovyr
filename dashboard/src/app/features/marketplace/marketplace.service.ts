@@ -5,7 +5,7 @@ import { map } from 'rxjs/operators';
 import { MarketplaceListing, PluginAttestation, PluginInfo } from '../../core/api.types';
 
 /**
- * Client for the plugin + marketplace routes on apex-server: the installed catalog and
+ * Client for the plugin + marketplace routes on wovyr-server: the installed catalog and
  * full lifecycle (`/api/v1/plugins*`), plus the hosted registry discovery/install
  * surface (`/api/v1/marketplace*`).
  */
@@ -27,9 +27,9 @@ export class MarketplaceService {
     return this.http.post<{ id: string; state: string }>('/api/v1/plugins:disable', { id });
   }
 
-  /** Install a plugin from a base64-encoded `.apexpkg` file. */
-  install(apexpkg: string, grants: string[] = []): Observable<PluginInfo> {
-    return this.http.post<PluginInfo>('/api/v1/plugins:install', { apexpkg, grants });
+  /** Install a plugin from a base64-encoded `.wovyrpkg` file. */
+  install(wovyrpkg: string, grants: string[] = []): Observable<PluginInfo> {
+    return this.http.post<PluginInfo>('/api/v1/plugins:install', { wovyrpkg, grants });
   }
 
   /** Uninstall a plugin by its qualified id (`publisher/name`). */

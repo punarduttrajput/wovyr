@@ -16,7 +16,7 @@ Document ID: WF-013
 
 # 1. Purpose
 
-This document defines the Agent Runtime responsible for executing AI-powered agents inside the Apex Workflow Engine.
+This document defines the Agent Runtime responsible for executing AI-powered agents inside the Wovyr Workflow Engine.
 
 The Agent Runtime is the execution environment that enables autonomous and semi-autonomous agents to participate in workflow execution while maintaining deterministic orchestration.
 

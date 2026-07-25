@@ -43,7 +43,7 @@ frontier in [FUT-005](../future/B5-ecosystem-interop.md).
   search/get, download refused, like a policy blocklist entry but as a dynamic
   moderation decision) or dismisses it — over server routes
   (`.../report`, `.../reports`, `.../reports/{id}/resolve|dismiss`) and the
-  matching `apex plugin report|reports|resolve-abuse|dismiss-abuse` CLI commands,
+  matching `wovyr plugin report|reports|resolve-abuse|dismiss-abuse` CLI commands,
   emitting `plugin.abuse_reported`/`plugin.delisted`.
 - **No economics, no browse UI.** There is still no monetization or revenue
   share, and the dashboard SPA covers every core surface *except* a marketplace

@@ -16,7 +16,7 @@ Document ID: AGENT-003
 
 # 1. Purpose
 
-The Memory System provides persistent and transient memory capabilities for AI agents executing within the Apex AI Platform.
+The Memory System provides persistent and transient memory capabilities for AI agents executing within the Wovyr AI Platform.
 
 Unlike traditional chat history, the Memory System enables agents to remember information across:
 

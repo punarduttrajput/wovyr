@@ -14,7 +14,7 @@ Document ID: ADR-0012
 
 # 1. Context
 
-`apex-tools::mcp` (RM-AIM-P3 ECO-301, shipped 2026-07-14) lets Apex connect to an
+`wovyr-tools::mcp` (RM-AIM-P3 ECO-301, shipped 2026-07-14) lets Wovyr connect to an
 external MCP server and proxy its tools into a `ToolRegistry`. It is
 **programmatic only** — no persisted connection, no API, no UI. [PRD-006](../01-product/prd-mcp-connections.md)
 scopes making it a first-class, dashboard-managed capability. Doing that safely
@@ -35,7 +35,7 @@ the two transports `McpClient` already supports are not equally dangerous:
 
 This codebase already has a precedent for exactly the `Stdio` risk: the `shell`
 tool is not in `ToolRegistry::with_builtins()` — it requires an explicit,
-operator-only opt-in (`with_shell()`/`APEX_ENABLE_SHELL_TOOL`, SEC-301) precisely
+operator-only opt-in (`with_shell()`/`WOVYR_ENABLE_SHELL_TOOL`, SEC-301) precisely
 because handing every agent arbitrary command execution by default is not a
 decision a hosted deployment should make silently. A dashboard "Add MCP Server"
 button that lets any authenticated user type a shell command and have it run
@@ -47,8 +47,8 @@ just through a different door.
 1. **A `Stdio`-transport connection is exactly as privileged as the `shell`
    tool, and is gated identically.** It requires:
    - An explicit operator opt-in at the deployment level
-     (`APEX_ENABLE_MCP_STDIO=1`), refused otherwise regardless of caller — the
-     same shape as `APEX_ENABLE_SHELL_TOOL`. A tenant cannot reach this on
+     (`WOVYR_ENABLE_MCP_STDIO=1`), refused otherwise regardless of caller — the
+     same shape as `WOVYR_ENABLE_SHELL_TOOL`. A tenant cannot reach this on
      their own no matter what role they hold; only the operator's own process
      environment can.
    - A distinct RBAC tier above ordinary write access: `mcp:admin`, not
@@ -63,7 +63,7 @@ just through a different door.
    today. No second, possibly-divergent SSRF implementation.
 3. **A connection's credential is a secret reference, never a value.** If an
    `Http` connection needs an auth header, the connection record stores a
-   `SecretRef` into `apex-secrets`'s `Vault`, tenant-scoped exactly like every
+   `SecretRef` into `wovyr-secrets`'s `Vault`, tenant-scoped exactly like every
    other secret in this codebase. The connection store itself is never an
    acceptable place for a raw credential to live, encrypted or not — it
    already has a durable, tenant-scoped, audited place to live.
@@ -81,7 +81,7 @@ just through a different door.
    `McpClient`, `StdioTransport`, `HttpTransport`, and the `Tool` proxy that
    `register_into` produces do not change. Everything above is enforced in the
    new management layer PRD-006 scopes (the connection store, the API routes,
-   the agent-manifest resolution step) — never inside `apex-tools::mcp` itself.
+   the agent-manifest resolution step) — never inside `wovyr-tools::mcp` itself.
 
 # 3. Consequences
 
@@ -100,7 +100,7 @@ just through a different door.
 
 **Negative / accepted costs**
 - `Stdio` connections stay a genuinely unsandboxed capability in v1 — a
-  deployment that enables `APEX_ENABLE_MCP_STDIO` is accepting that any
+  deployment that enables `WOVYR_ENABLE_MCP_STDIO` is accepting that any
   `mcp:admin`-scoped principal can execute arbitrary local commands, exactly
   as they already accept for the `shell` tool. This is a real, standing risk,
   not a solved one — it is scoped down to "who," not eliminated.
@@ -108,7 +108,7 @@ just through a different door.
   transport) is more nuanced than a single `mcp:write` gate would be — the
   dashboard and docs must explain this distinction clearly or it will
   surprise an operator expecting one uniform "MCP" permission.
-- Extracting SEC-304's guard into a shared helper touches `apex-tools`'
+- Extracting SEC-304's guard into a shared helper touches `wovyr-tools`'
   existing, already-tested `http_get` code path — a real, if small,
   refactor risk against working code, to be done under the existing
   `http_get` SSRF test suite, not a rewrite.
@@ -134,7 +134,7 @@ just through a different door.
    the `shell`-tool precedent shows this codebase already has a workable
    gating pattern rather than needing to avoid the risk outright.
 4. **Store connection credentials inline, encrypted with a connection-specific
-   key** — rejected: `apex-secrets`'s `Vault` already solves tenant-scoped
+   key** — rejected: `wovyr-secrets`'s `Vault` already solves tenant-scoped
    credential storage, rotation, and at-rest encryption; a second, bespoke
    encryption scheme for one feature's credentials would be duplicated,
    untested machinery solving an already-solved problem.
@@ -143,5 +143,5 @@ just through a different door.
 
 Accepted; no code exists yet. PRD-006 defines the requirements this decision
 gates (MCX-102/103/104/105); the v1.3 roadmap phases them. Nothing in this ADR
-changes any shipped contract — `apex-tools::mcp` (ECO-301) is unmodified by
+changes any shipped contract — `wovyr-tools::mcp` (ECO-301) is unmodified by
 this decision, only wrapped by a new management layer that has not been built.

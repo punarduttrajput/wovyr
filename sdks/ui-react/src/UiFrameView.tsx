@@ -23,7 +23,7 @@ export interface UiFrameViewProps {
    * frame is stale). Independent of the view's own in-flight tracking. */
   disabled?: boolean;
   className?: string;
-  /** Forces `.apex-ui`'s light/dark tokens (`data-theme`, see `styles.css`)
+  /** Forces `.wovyr-ui`'s light/dark tokens (`data-theme`, see `styles.css`)
    * instead of following the browser's `prefers-color-scheme`. Omit to keep
    * following the OS/browser preference (the pre-existing default). A host
    * with its own fixed (not OS-linked) light/dark mode — like a page that
@@ -50,7 +50,7 @@ export function UiFrameView({
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [submitting, setSubmitting] = useState(false);
   const [integrityOk, setIntegrityOk] = useState<boolean | null>(expectedHash ? null : true);
-  const wrapperClassName = `apex-ui${className ? ` ${className}` : ""}`;
+  const wrapperClassName = `wovyr-ui${className ? ` ${className}` : ""}`;
 
   useEffect(() => {
     if (!expectedHash) {
@@ -85,7 +85,7 @@ export function UiFrameView({
   if (integrityOk === null) {
     return (
       <div className={wrapperClassName} data-theme={theme}>
-        <p className="apex-ui-text-caption">Verifying frame integrity…</p>
+        <p className="wovyr-ui-text-caption">Verifying frame integrity…</p>
       </div>
     );
   }
@@ -93,7 +93,7 @@ export function UiFrameView({
   if (integrityOk === false) {
     return (
       <div className={wrapperClassName} data-theme={theme}>
-        <div className="apex-ui-integrity-warning" role="alert">
+        <div className="wovyr-ui-integrity-warning" role="alert">
           This interface's content doesn't match what was recorded when it was presented and has
           not been rendered. Do not act on it — refresh and try again.
         </div>
@@ -104,7 +104,7 @@ export function UiFrameView({
   return (
     <div className={wrapperClassName} data-theme={theme}>
       {frame.title && (
-        <p className="apex-ui-text-heading" role="heading" aria-level={1}>
+        <p className="wovyr-ui-text-heading" role="heading" aria-level={1}>
           {frame.title}
         </p>
       )}

@@ -196,14 +196,14 @@ publisher paid; a reported plugin can be triaged and disabled.
 2FA OTP); there are no further language clients or migration guides.
 
 **Requirements.**
-- Publish `@apex-ai/sdk` to npm (operator-supplied OTP).
+- Publish `@wovyr/sdk` to npm (operator-supplied OTP).
 - Evaluate additional language clients (Go/Java) against the same OpenAPI
   contract.
 - Author migration guides once the first `/v1`→`/v2` deprecation actually occurs
   (the [deprecation policy](../09-api/deprecation-policy.md) exists; nothing has
   been deprecated to write against yet).
 
-**Success criteria.** `npm i @apex-ai/sdk` installs a working client; the
+**Success criteria.** `npm i @wovyr/sdk` installs a working client; the
 deprecation-policy headers are enforced in code once there is something to
 deprecate.
 
@@ -256,7 +256,7 @@ no quality regression.
 **Exploration doc:** [FUT-003](../18-roadmap/future/B3-advanced-memory.md)
 
 **Opportunity.** Knowledge-graph reasoning at scale (tagged v1-deferred in
-[apex-memory]), multi-modal memory (image/audio), time-travel queries,
+[wovyr-memory]), multi-modal memory (image/audio), time-travel queries,
 cross-agent memory fusion, and confidence scoring
 ([memory futures](../06-memory-engine/overview.md#16-future-enhancements)).
 
