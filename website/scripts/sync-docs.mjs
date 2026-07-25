@@ -11,8 +11,12 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+// fileURLToPath (not `new URL(...).pathname`) so this resolves correctly on
+// Windows too — .pathname yields a URL-encoded, leading-slash path like
+// `/D:/New%20folder/...` that breaks on drive letters and spaces.
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DOCS = path.resolve(ROOT, '../docs');
 const OUT = path.join(ROOT, 'src/content/docs');
 const GITHUB_BLOB = 'https://github.com/punarduttrajput/Wovyr/blob/main/';
@@ -175,50 +179,10 @@ for (const rel of files) {
   fs.writeFileSync(dest, out);
 }
 
-// Landing page (not sourced from ../docs).
-fs.writeFileSync(
-  path.join(OUT, 'index.mdx'),
-  `---
-title: Wovyr
-description: Generative UI Trust Runtime — built on an enterprise AI Agent Operating System written in Rust.
-template: splash
-hero:
-  tagline: The infrastructure that lets AI agents render rich, interactive interfaces to humans — safely, auditable, and with durable human-in-the-loop decisions.
-  actions:
-    - text: Read the vision
-      link: /00-executive/vision/
-      icon: right-arrow
-    - text: Hello, agent
-      link: /16-examples/hello-agent/
-      variant: minimal
-    - text: GitHub
-      link: https://github.com/punarduttrajput/Wovyr
-      icon: external
-      variant: minimal
----
-
-import { Card, CardGrid } from '@astrojs/starlight/components';
-
-<CardGrid stagger>
-  <Card title="Trust & policy" icon="approve-check">
-    Every agent-generated frame is validated against declarative, fail-closed
-    policy and recorded in a tamper-evident audit chain before a human sees it.
-  </Card>
-  <Card title="Durable interaction" icon="setting">
-    Agent shows an interface → human decides → agent continues, on an
-    event-sourced workflow engine that survives crashes, restarts, and time.
-  </Card>
-  <Card title="Embeddable runtime" icon="puzzle">
-    A frame protocol, React renderer SDK, and MCP surface any agent stack can
-    adopt as middleware.
-  </Card>
-  <Card title="Enterprise engine" icon="rocket">
-    Multi-LLM gateway, tool sandboxing, memory engine, plugin marketplace,
-    multi-tenancy — one Rust binary.
-  </Card>
-</CardGrid>
-`
-);
+// The site root (/) is a custom marketing landing page at
+// src/pages/index.astro — NOT a Starlight splash. We deliberately do NOT
+// generate src/content/docs/index.mdx here: that would claim `/` and collide
+// with the Astro page. Docs keep their own section routes (/00-executive/…).
 
 console.log(
   `synced ${files.length} pages (${plannedCount} marked "Status: Planned") → ${path.relative(ROOT, OUT)}`

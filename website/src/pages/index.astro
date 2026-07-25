@@ -1,0 +1,913 @@
+---
+// Wovyr marketing landing — the site root (/). Docs keep their section routes.
+// Ported from website/landing/prototypes/wovyr-landing-v1.html (reviewed).
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Wovyr — The trust layer for AI-generated interfaces" />
+  <meta property="og:description" content="Validate, record, and durably run every interface an AI agent shows a human — on a Rust runtime that survives crashes, restarts, and time." />
+  <meta property="og:image" content="/og.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <script is:inline>
+    /* set the theme before first paint to avoid a flash */
+    try { var m = localStorage.getItem("wovyr-theme"); if (m) document.documentElement.setAttribute("data-theme", m); } catch (e) {}
+  </script>
+  <title>Wovyr — The trust layer for AI-generated interfaces</title>
+  <meta name="description" content="Wovyr validates, records, and durably runs every interface an AI agent shows a human — built on a Rust agent runtime that survives crashes, restarts, and time." />
+
+<style is:global>
+  /* ============================================================= TOKENS */
+  :root{
+    --canvas:#0A0E18; --surface:#121826; --surface-2:#0E1420;
+    --ink:#EAEEF6; --ink-dim:#9AA6BF; --line:#1E2740;
+    --accent:#5B7BFF; --accent-2:#9B87FF;
+    --block:#FF5C6A; --ok:#3FBF86;
+    --accent-soft:rgba(91,123,255,.14); --accent-line:rgba(91,123,255,.42);
+
+    --mono:"Cascadia Code","SF Mono","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+
+    --f0:.75rem; --f1:.875rem; --f2:1rem; --f3:1.25rem; --f4:1.6rem;
+    --f5:2.1rem; --f6:2.9rem; --f7:4rem;
+    --maxw:1200px; --pad:clamp(20px,5vw,64px);
+    --r:10px; --r-sm:7px;
+  }
+  @media (prefers-color-scheme:light){
+    :root{
+      --canvas:#F6F7F9; --surface:#FFFFFF; --surface-2:#EEF1F6;
+      --ink:#0D1424; --ink-dim:#55617A; --line:#E2E7F0;
+      --accent:#2D54E8; --accent-2:#7B61FF;
+      --block:#D23B43; --ok:#18935A;
+      --accent-soft:rgba(45,84,232,.10); --accent-line:rgba(45,84,232,.30);
+    }
+  }
+  :root[data-theme="dark"]{
+    --canvas:#0A0E18; --surface:#121826; --surface-2:#0E1420;
+    --ink:#EAEEF6; --ink-dim:#9AA6BF; --line:#1E2740;
+    --accent:#5B7BFF; --accent-2:#9B87FF; --block:#FF5C6A; --ok:#3FBF86;
+    --accent-soft:rgba(91,123,255,.14); --accent-line:rgba(91,123,255,.42);
+  }
+  :root[data-theme="light"]{
+    --canvas:#F6F7F9; --surface:#FFFFFF; --surface-2:#EEF1F6;
+    --ink:#0D1424; --ink-dim:#55617A; --line:#E2E7F0;
+    --accent:#2D54E8; --accent-2:#7B61FF; --block:#D23B43; --ok:#18935A;
+    --accent-soft:rgba(45,84,232,.10); --accent-line:rgba(45,84,232,.30);
+  }
+
+  /* ============================================================= BASE */
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+  body{
+    margin:0; background:var(--canvas); color:var(--ink);
+    font-family:var(--sans); font-size:var(--f2); line-height:1.6;
+    -webkit-font-smoothing:antialiased; overflow-x:hidden;
+  }
+  a{color:inherit; text-decoration:none}
+  h1,h2,h3{font-family:var(--mono); font-weight:650; letter-spacing:-.02em;
+    text-wrap:balance; line-height:1.08; margin:0}
+  p{margin:0}
+  ::selection{background:var(--accent); color:#fff}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:4px}
+
+  .wrap{max-width:var(--maxw); margin:0 auto; padding-inline:var(--pad)}
+  .eyebrow{font-family:var(--mono); font-size:var(--f0); letter-spacing:.14em;
+    text-transform:uppercase; color:var(--ink-dim)}
+  .accent{color:var(--accent)}
+
+  /* ============================================================= NAV */
+  header.nav{position:sticky; top:0; z-index:50;
+    backdrop-filter:blur(10px); background:color-mix(in srgb,var(--canvas) 78%,transparent);
+    border-bottom:1px solid transparent; transition:border-color .3s, background .3s}
+  header.nav[data-stuck="1"]{border-bottom-color:var(--line)}
+  .nav-in{display:flex; align-items:center; gap:24px; height:62px}
+  .brand{display:flex; align-items:center; gap:10px; font-family:var(--mono);
+    font-weight:650; letter-spacing:.02em; font-size:var(--f2)}
+  .brand svg{width:22px; height:22px; display:block; overflow:visible}
+  .mk-win{fill:none; stroke:var(--ink); stroke-width:1.6; stroke-linejoin:round}
+  .mk-dot{fill:var(--ink-dim)}
+  .mk-scan{stroke:var(--accent); stroke-width:1.7; stroke-linecap:round}
+  .mk-node{fill:var(--accent)}
+  .nav-links{display:flex; gap:22px; margin-left:auto; align-items:center}
+  .nav-links a{font-size:var(--f1); color:var(--ink-dim); transition:color .2s}
+  .nav-links a:hover{color:var(--ink)}
+  .nav-cta{font-family:var(--mono); font-size:var(--f1); padding:7px 14px;
+    border:1px solid var(--accent-line); border-radius:var(--r-sm); color:var(--accent)}
+  .nav-cta:hover{background:var(--accent-soft)}
+  .tgl{display:grid; place-items:center; width:34px; height:34px; cursor:pointer;
+    border:1px solid var(--line); border-radius:var(--r-sm); background:var(--surface);
+    color:var(--ink-dim); font-family:var(--mono); font-size:var(--f1)}
+  .tgl:hover{color:var(--ink); border-color:var(--accent-line)}
+  @media(max-width:760px){.nav-links a:not(.nav-cta){display:none}}
+
+  /* ============================================================= HERO */
+  #hero{position:relative; min-height:min(92vh,820px); display:flex; align-items:center;
+    border-bottom:1px solid var(--line); overflow:hidden}
+  #gate{position:absolute; inset:0; width:100%; height:100%; z-index:0}
+  .hero-scrim{position:absolute; inset:0; z-index:1; pointer-events:none;
+    background:
+      linear-gradient(105deg,var(--canvas) 0%,var(--canvas) 34%,
+        color-mix(in srgb,var(--canvas) 62%,transparent) 56%,
+        color-mix(in srgb,var(--canvas) 20%,transparent) 100%),
+      radial-gradient(120% 80% at 12% 30%,color-mix(in srgb,var(--canvas) 55%,transparent),transparent 60%)}
+  .hero-in{position:relative; z-index:2; padding-block:clamp(48px,9vh,110px); max-width:660px}
+  .hero-tag{display:inline-flex; align-items:center; gap:8px; margin-bottom:22px;
+    font-family:var(--mono); font-size:var(--f0); letter-spacing:.1em;
+    text-transform:uppercase; color:var(--ink-dim);
+    border:1px solid var(--line); border-radius:100px; padding:5px 12px; background:var(--surface)}
+  .hero-tag .dot{width:6px; height:6px; border-radius:50%; background:var(--ok);
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 22%,transparent)}
+  h1{font-size:clamp(2.1rem,5.6vw,var(--f7)); margin-bottom:20px}
+  h1 .b{color:var(--accent)}
+  .hero-sub{font-size:clamp(var(--f2),2.2vw,var(--f3)); color:var(--ink-dim);
+    max-width:56ch; margin-bottom:30px}
+  .cta-row{display:flex; flex-wrap:wrap; gap:12px; align-items:center}
+  .btn{font-family:var(--mono); font-size:var(--f1); font-weight:600;
+    padding:12px 20px; border-radius:var(--r-sm); cursor:pointer; border:1px solid transparent;
+    display:inline-flex; gap:9px; align-items:center; transition:transform .15s, background .2s, border-color .2s}
+  .btn:hover{transform:translateY(-1px)}
+  .btn-primary{background:var(--accent); color:#fff}
+  .btn-primary:hover{background:color-mix(in srgb,var(--accent) 88%,#fff)}
+  .btn-ghost{border-color:var(--line); color:var(--ink); background:var(--surface)}
+  .btn-ghost:hover{border-color:var(--accent-line); color:var(--accent)}
+  .hero-chip{margin-top:26px; display:inline-flex; align-items:center; gap:10px;
+    font-family:var(--mono); font-size:var(--f0); color:var(--ink-dim);
+    background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-sm);
+    padding:8px 12px}
+  .hero-chip b{color:var(--ok); font-weight:600}
+
+  /* ============================================================= STATUS RAIL */
+  .rail{font-family:var(--mono); font-size:var(--f0); color:var(--ink-dim);
+    border-bottom:1px solid var(--line); background:var(--surface-2)}
+  .rail-in{display:flex; gap:10px 26px; flex-wrap:wrap; padding-block:9px; align-items:center}
+  .rail .s{color:var(--ink)}
+  .rail .k{color:var(--ok)}
+  .rail .sep{color:var(--line)}
+
+  /* ============================================================= SECTION */
+  section.band{padding-block:clamp(64px,10vh,120px); border-bottom:1px solid var(--line)}
+  .sec-head{max-width:64ch; margin-bottom:44px}
+  .sec-head h2{font-size:clamp(var(--f4),3.6vw,var(--f6)); margin:14px 0}
+  .sec-head p{color:var(--ink-dim); font-size:var(--f3)}
+  .reveal{opacity:0; transform:translateY(14px); transition:opacity .6s ease, transform .6s ease}
+  .reveal.in{opacity:1; transform:none}
+  @media (prefers-reduced-motion:reduce){.reveal{opacity:1; transform:none; transition:none}}
+
+  /* consequence chips */
+  .chips{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px}
+  .chip{background:var(--surface); border:1px solid var(--line); border-radius:var(--r);
+    padding:20px}
+  .chip .glyph{font-family:var(--mono); color:var(--block); font-size:var(--f3); margin-bottom:10px}
+  .chip h3{font-size:var(--f2); margin-bottom:6px; letter-spacing:-.01em}
+  .chip p{color:var(--ink-dim); font-size:var(--f1)}
+
+  /* pipeline (numbered — real sequence) */
+  .pipe{display:grid; grid-template-columns:repeat(4,1fr); gap:16px}
+  @media(max-width:900px){.pipe{grid-template-columns:1fr 1fr}}
+  @media(max-width:560px){.pipe{grid-template-columns:1fr}}
+  .step{position:relative; background:var(--surface); border:1px solid var(--line);
+    border-radius:var(--r); padding:22px; transition:border-color .25s, transform .25s}
+  .step:hover{border-color:var(--accent-line); transform:translateY(-3px)}
+  .step .num{font-family:var(--mono); font-size:var(--f0); color:var(--accent);
+    letter-spacing:.14em}
+  .step h3{font-size:var(--f2); margin:12px 0 8px}
+  .step p{color:var(--ink-dim); font-size:var(--f1)}
+  .step pre{margin:14px 0 0; font-family:var(--mono); font-size:.72rem; color:var(--ink-dim);
+    background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-sm);
+    padding:10px; overflow-x:auto; line-height:1.5}
+  .step pre .p{color:var(--accent)} .step pre .x{color:var(--block)} .step pre .o{color:var(--ok)}
+
+  /* platform grid */
+  .grid8{display:grid; grid-template-columns:repeat(4,1fr); gap:14px}
+  @media(max-width:900px){.grid8{grid-template-columns:1fr 1fr}}
+  @media(max-width:520px){.grid8{grid-template-columns:1fr}}
+  .cap{background:var(--surface); border:1px solid var(--line); border-radius:var(--r);
+    padding:20px; transition:border-color .25s}
+  .cap:hover{border-color:var(--accent-line)}
+  .cap .t{font-family:var(--mono); font-size:var(--f1); font-weight:600; margin-bottom:6px}
+  .cap .t::before{content:"▸ "; color:var(--accent)}
+  .cap p{color:var(--ink-dim); font-size:var(--f0); line-height:1.55}
+
+  /* trust two-col */
+  .two{display:grid; grid-template-columns:1.05fr .95fr; gap:40px; align-items:start}
+  @media(max-width:860px){.two{grid-template-columns:1fr; gap:28px}}
+  .tlist{display:flex; flex-direction:column; gap:16px}
+  .trow{display:flex; gap:14px; align-items:flex-start}
+  .trow .mk{font-family:var(--mono); color:var(--accent); font-size:var(--f2); margin-top:1px}
+  .trow h3{font-size:var(--f2); margin-bottom:4px; letter-spacing:-.01em}
+  .trow p{color:var(--ink-dim); font-size:var(--f1)}
+  .panel{background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r);
+    padding:22px; font-family:var(--mono); font-size:.78rem; line-height:1.7; overflow-x:auto}
+  .panel .c{color:var(--ink-dim)} .panel .p{color:var(--accent)} .panel .x{color:var(--block)}
+  .panel .o{color:var(--ok)} .panel .h{color:var(--accent-2)}
+  .badge-honest{margin-top:22px; display:flex; gap:12px; align-items:flex-start;
+    background:var(--surface); border:1px solid var(--accent-line); border-radius:var(--r);
+    padding:16px 18px}
+  .badge-honest .mk{font-family:var(--mono); color:var(--accent)}
+  .badge-honest p{font-size:var(--f1); color:var(--ink-dim)}
+  .badge-honest b{color:var(--ink)}
+
+  /* rust spine */
+  .spine{font-family:var(--mono); font-size:.74rem; line-height:1.65; color:var(--ink-dim);
+    background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r);
+    padding:22px; overflow-x:auto; white-space:pre}
+  .spine .n{color:var(--accent)} .spine .m{color:var(--accent-2)}
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-top:8px}
+  @media(max-width:640px){.stats{grid-template-columns:1fr 1fr}}
+  .stat{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:18px}
+  .stat .v{font-family:var(--mono); font-size:var(--f4); font-weight:650;
+    font-variant-numeric:tabular-nums; letter-spacing:-.02em}
+  .stat .l{font-size:var(--f0); color:var(--ink-dim); margin-top:4px}
+
+  /* quickstart */
+  .qs{background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r);
+    overflow:hidden}
+  .qs-bar{display:flex; align-items:center; gap:8px; padding:11px 16px;
+    border-bottom:1px solid var(--line); font-family:var(--mono); font-size:var(--f0);
+    color:var(--ink-dim)}
+  .qs-bar .d{width:10px; height:10px; border-radius:50%}
+  .qs-bar .d1{background:#FF5C6A}.qs-bar .d2{background:#FFB84D}.qs-bar .d3{background:#3FBF86}
+  .qs-bar .path{margin-left:8px}
+  .qs-body{position:relative}
+  .qs pre{margin:0; padding:20px; font-family:var(--mono); font-size:var(--f1);
+    line-height:1.85; overflow-x:auto}
+  .qs .c{color:var(--ink-dim)} .qs .cmd{color:var(--ink)} .qs .fl{color:var(--accent)}
+  .qs .out{color:var(--ok)}
+  .copy{position:absolute; top:12px; right:12px; font-family:var(--mono); font-size:var(--f0);
+    padding:6px 11px; border:1px solid var(--line); border-radius:var(--r-sm);
+    background:var(--surface); color:var(--ink-dim); cursor:pointer}
+  .copy:hover{color:var(--accent); border-color:var(--accent-line)}
+  .qs-links{display:flex; flex-wrap:wrap; gap:10px 22px; margin-top:20px;
+    font-family:var(--mono); font-size:var(--f1)}
+  .qs-links a{color:var(--ink-dim)} .qs-links a:hover{color:var(--accent)}
+  .qs-links a::before{content:"→ "; color:var(--accent)}
+
+  /* ecosystem */
+  .eco{display:grid; grid-template-columns:repeat(3,1fr); gap:14px}
+  @media(max-width:760px){.eco{grid-template-columns:1fr}}
+  .eco .cap p{font-size:var(--f1)}
+
+  /* final cta */
+  #cta{text-align:center}
+  #cta h2{font-size:clamp(var(--f4),4vw,var(--f6)); margin-bottom:16px}
+  #cta p{color:var(--ink-dim); font-size:var(--f3); max-width:56ch; margin:0 auto 28px}
+  #cta .cta-row{justify-content:center}
+
+  /* footer */
+  footer{padding-block:52px 40px; background:var(--surface-2)}
+  .foot{display:grid; grid-template-columns:1.4fr 1fr 1fr 1fr; gap:30px}
+  @media(max-width:760px){.foot{grid-template-columns:1fr 1fr}}
+  .foot h4{font-family:var(--mono); font-size:var(--f0); letter-spacing:.12em;
+    text-transform:uppercase; color:var(--ink-dim); margin:0 0 14px; font-weight:600}
+  .foot a{display:block; color:var(--ink-dim); font-size:var(--f1); margin-bottom:9px}
+  .foot a:hover{color:var(--accent)}
+  .foot .brand{margin-bottom:12px}
+  .foot .blurb{color:var(--ink-dim); font-size:var(--f1); max-width:32ch}
+  .foot-base{border-top:1px solid var(--line); margin-top:40px; padding-top:22px;
+    display:flex; flex-wrap:wrap; gap:12px 24px; align-items:center;
+    font-family:var(--mono); font-size:var(--f0); color:var(--ink-dim)}
+  .foot-base .k{color:var(--ok)}
+</style>
+</head>
+<body>
+
+<!-- ================================================================ NAV -->
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top" aria-label="Wovyr home">
+      <svg viewBox="0 0 24 24" aria-hidden="true" class="mark"><rect class="mk-win" x="3.5" y="4.5" width="17" height="15" rx="2.6"/><circle class="mk-dot" cx="6.6" cy="8" r="0.9"/><circle class="mk-dot" cx="9.2" cy="8" r="0.9"/><path class="mk-scan" d="M6.4 14H18"/><circle class="mk-node" cx="14.6" cy="14" r="1.7"/></svg>
+      wovyr
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#how">How it works</a>
+      <a href="#platform">Platform</a>
+      <a href="#trust">Trust</a>
+      <a href="/00-executive/vision/">Docs</a>
+      <a href="https://github.com/punarduttrajput/Wovyr" class="nav-cta">GitHub ↗</a>
+      <button class="tgl" id="tgl" aria-label="Toggle color theme" title="Toggle theme">◐</button>
+    </nav>
+  </div>
+</header>
+
+<a id="top"></a>
+
+<!-- ================================================================ HERO -->
+<section id="hero">
+  <canvas id="gate" aria-hidden="true"></canvas>
+  <div class="hero-scrim"></div>
+  <div class="wrap hero-in">
+    <span class="hero-tag"><span class="dot"></span> Generative UI Trust Runtime · Rust</span>
+    <h1>The trust layer for<br><span class="b">AI-generated interfaces.</span></h1>
+    <p class="hero-sub">
+      Wovyr validates, records, and durably runs every interface an AI agent shows a
+      human — on a Rust runtime that survives crashes, restarts, and time.
+    </p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="/00-executive/vision/">Read the docs</a>
+      <a class="btn btn-ghost" href="#quickstart">Quickstart — 5 min ▸</a>
+    </div>
+    <div class="hero-chip">
+      <span>$ curl :8080/healthz</span>
+      <span>→</span>
+      <span><b>&#123;"status":"ok","version":"0.3.0"&#125;</b></span>
+    </div>
+  </div>
+</section>
+
+<!-- status rail -->
+<div class="rail"><div class="wrap rail-in">
+  <span>wovyr <span class="s">v0.3.0</span></span><span class="sep">·</span>
+  <span>license <span class="s">Apache-2.0</span></span><span class="sep">·</span>
+  <span>healthz <span class="k">ok</span></span><span class="sep">·</span>
+  <span>rust <span class="s">edition 2024</span></span><span class="sep">·</span>
+  <span>runs <span class="k">offline</span></span>
+</div></div>
+
+<!-- ================================================================ SHIFT -->
+<section class="band" id="shift">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">01 · Why now</span>
+      <h2>Interfaces are moving from pages to <span class="accent">runtime output.</span></h2>
+      <p>When an AI generates the UI at runtime, the web's security assumptions break.
+        The interface is no longer authored, reviewed, or trusted — it's emitted.</p>
+    </div>
+    <div class="chips reveal">
+      <div class="chip">
+        <div class="glyph">[▤ ●●●●●]</div>
+        <h3>Hallucinated phishing</h3>
+        <p>A generated form can ask for a password that was never supposed to exist.</p>
+      </div>
+      <div class="chip">
+        <div class="glyph">&lt;script&gt;⌁&lt;/script&gt;</div>
+        <h3>Injection as UI</h3>
+        <p>Prompt injection stops being text and becomes an interface the user acts on.</p>
+      </div>
+      <div class="chip">
+        <div class="glyph">? ? ?</div>
+        <h3>No proof of what was shown</h3>
+        <p>Nothing records the exact frame a human actually saw and decided on.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ HOW -->
+<section class="band" id="how">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">02 · How it works</span>
+      <h2>Every frame passes the gate — <span class="accent">fail-closed.</span></h2>
+      <p>The path from an agent's intent to a human's decision, recorded end to end.</p>
+    </div>
+    <div class="pipe reveal">
+      <div class="step">
+        <div class="num">01 · EMIT</div>
+        <h3>Agent emits a frame</h3>
+        <p>Declarative JSON over a safe component vocabulary — never raw model HTML or JS.</p>
+        <pre>frame &#123;
+  card,
+  <span class="p">button</span>: approve
+&#125;</pre>
+      </div>
+      <div class="step">
+        <div class="num">02 · VALIDATE</div>
+        <h3>Policy validates it</h3>
+        <p>Checked against declarative policy. Unsafe shapes are blocked before render.</p>
+        <pre><span class="o">✓</span> vocabulary ok
+<span class="o">✓</span> no secrets
+<span class="x">✕</span> block on fail</pre>
+      </div>
+      <div class="step">
+        <div class="num">03 · RECORD</div>
+        <h3>Audit chain records it</h3>
+        <p>The exact frame + verdict is written to a tamper-evident, hash-chained log.</p>
+        <pre><span class="p">sha256</span>:1a2f9c…
+prev←<span class="p">e07b</span></pre>
+      </div>
+      <div class="step">
+        <div class="num">04 · DECIDE</div>
+        <h3>Human decides, durably</h3>
+        <p>The decision loop is event-sourced — it survives crashes, restarts, and time.</p>
+        <pre>await <span class="o">decision</span>
+resume ✓</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ PLATFORM -->
+<section class="band" id="platform">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">03 · The platform underneath</span>
+      <h2>A complete agent runtime, <span class="accent">not just an SDK.</span></h2>
+      <p>The trust layer rides on a full AI Agent Operating System — eight engines,
+        one Rust binary.</p>
+    </div>
+    <div class="grid8 reveal">
+      <div class="cap"><div class="t">Agent Runtime</div><p>The model→tool→model loop with context management and step budgets.</p></div>
+      <div class="cap"><div class="t">Workflow Engine</div><p>Durable, event-sourced DAGs that resume exactly where they crashed.</p></div>
+      <div class="cap"><div class="t">Tool Runtime</div><p>Sandboxed execution — native, container, gVisor, microVM — fail-closed.</p></div>
+      <div class="cap"><div class="t">Memory Engine</div><p>Hybrid vector + keyword retrieval with recency and importance ranking.</p></div>
+      <div class="cap"><div class="t">LLM Gateway</div><p>OpenAI, Anthropic, or a local model — with failover, caching, breakers.</p></div>
+      <div class="cap"><div class="t">Plugin Framework</div><p>Signed, sandboxed WASM extensions with a governed marketplace.</p></div>
+      <div class="cap"><div class="t">Workflow Studio</div><p>A dashboard to compose, run, and monitor agents and workflows.</p></div>
+      <div class="cap"><div class="t">Enterprise Security</div><p>Multi-tenancy, RBAC, KMS envelope encryption, quotas, audit.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ TRUST -->
+<section class="band" id="trust">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">04 · Trust &amp; security</span>
+      <h2>Built to be <span class="accent">provable,</span> not just careful.</h2>
+    </div>
+    <div class="two reveal">
+      <div class="tlist">
+        <div class="trow"><span class="mk">◇</span><div>
+          <h3>Fail-closed policy</h3>
+          <p>An unknown node, a sensitive input, a deceptive label — denied by default, before a human ever sees it.</p></div></div>
+        <div class="trow"><span class="mk">◇</span><div>
+          <h3>Safe component vocabulary</h3>
+          <p>Agents compose from a constrained set of components. No raw model-authored HTML or scripts ever reach the DOM.</p></div></div>
+        <div class="trow"><span class="mk">◇</span><div>
+          <h3>Tamper-evident audit</h3>
+          <p>A keyed, hash-chained log with a head anchor — interior edits and tail truncation are both detectable.</p></div></div>
+        <div class="trow"><span class="mk">◇</span><div>
+          <h3>Sandbox spectrum</h3>
+          <p>Tool execution scales from native confinement to microVMs, with SSRF and egress guards on by default.</p></div></div>
+      </div>
+      <div>
+        <div class="panel"><span class="c"># policy verdict — a generated login frame</span>
+frame  <span class="h">uif-9c1a</span>
+node   input[type=<span class="x">password</span>]
+rule   <span class="x">sensitive_input</span>
+<span class="x">✕ BLOCKED</span> — never rendered
+audit  <span class="p">sha256</span>:1a2f9c… <span class="c">(recorded)</span>
+
+<span class="c"># a safe frame, same pipeline</span>
+frame  <span class="h">uif-4b7e</span>
+<span class="o">✓ ALLOW</span> → human decision
+resume <span class="o">durable ✓</span></div>
+        <div class="badge-honest">
+          <span class="mk">▲</span>
+          <p><b>We mark shipped vs. roadmap plainly.</b> GA ships as a single-node
+            appliance; the distributed multi-replica scheduler is tested library
+            code, not yet in the binary. For a security product, candor is the point.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ RUST -->
+<section class="band" id="rust">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">05 · Built in Rust</span>
+      <h2>Memory-safe, deterministic, <span class="accent">one binary.</span></h2>
+      <p>A 22-crate workspace on edition 2024. The core is deterministic — no ambient
+        clocks or randomness — so behavior is testable and reproducible.</p>
+    </div>
+    <div class="two reveal">
+      <div class="spine"><span class="n">wovyr-cli</span> ─┬─ <span class="n">wovyr-server</span> ───┐
+          ├─ <span class="n">wovyr-agent</span> ────┼─ <span class="n">wovyr-provider</span> ─┐
+          ├─ <span class="n">wovyr-tools</span> ────┤                  │
+          ├─ <span class="n">wovyr-memory</span> ───┘                  ├─ <span class="m">wovyr-common</span>
+          ├─ <span class="n">wovyr-workflow</span> ────────────────────┤
+          ├─ <span class="n">wovyr-ui</span> ─ <span class="n">wovyr-ui-guard</span> ──────────┤
+          └─ <span class="n">wovyr-kms</span> · <span class="n">wovyr-audit</span> · <span class="n">…</span> ───────┘</div>
+      <div class="stats">
+        <div class="stat"><div class="v">22</div><div class="l">crates in the workspace</div></div>
+        <div class="stat"><div class="v">1143</div><div class="l">tests, 0 failing</div></div>
+        <div class="stat"><div class="v">1</div><div class="l">binary to deploy</div></div>
+        <div class="stat"><div class="v">0</div><div class="l">unsafe ambient state</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ QUICKSTART -->
+<section class="band" id="quickstart">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">06 · Quickstart</span>
+      <h2>Running in <span class="accent">five minutes,</span> fully offline.</h2>
+      <p>No API key. A deterministic mock provider answers so you can see the whole loop
+        before wiring a real model.</p>
+    </div>
+    <div class="qs reveal">
+      <div class="qs-bar"><span class="d d1"></span><span class="d d2"></span><span class="d d3"></span>
+        <span class="path">bash — first agent run</span></div>
+      <div class="qs-body">
+        <button class="copy" id="copyBtn">copy</button>
+        <pre id="qsCode"><span class="c"># 1 · clone &amp; start the all-in-one local server</span>
+<span class="cmd">git clone https://github.com/punarduttrajput/Wovyr &amp;&amp; cd Wovyr</span>
+<span class="cmd">WOVYR_ALLOW_ANONYMOUS=1 cargo run -p wovyr-cli -- dev</span>
+<span class="out">→ listening on http://127.0.0.1:8080</span>
+
+<span class="c"># 2 · run your first agent (mock provider, deterministic)</span>
+<span class="cmd">cargo run -p wovyr-cli -- agents run <span class="fl">--local</span> \
+  <span class="fl">-f</span> examples/agents/hello.yaml <span class="fl">--input</span> '&#123;"message":"Hi"&#125;' <span class="fl">--stream</span></span></pre>
+      </div>
+    </div>
+    <div class="qs-links reveal">
+      <a href="/00-executive/vision/">Full docs</a>
+      <a href="https://github.com/punarduttrajput/Wovyr/tree/main/sdks">TypeScript &amp; Python SDKs</a>
+      <a href="https://github.com/punarduttrajput/Wovyr/tree/main/dashboard">Dashboard</a>
+      <a href="/16-examples/">Examples</a>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ ECOSYSTEM -->
+<section class="band" id="ecosystem">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="eyebrow">07 · Adopt anywhere</span>
+      <h2>An embeddable runtime, <span class="accent">not a walled garden.</span></h2>
+      <p>Drop the trust layer in front of any agent stack — Wovyr-native or external.</p>
+    </div>
+    <div class="eco reveal">
+      <div class="cap"><div class="t">Frame protocol</div><p>A versioned SSE + pull protocol for streaming validated interface frames to a client.</p></div>
+      <div class="cap"><div class="t">React renderer</div><p><span style="font-family:var(--mono);color:var(--accent)">@wovyr/ui-react</span> renders validated frames and re-checks their content hash client-side.</p></div>
+      <div class="cap"><div class="t">MCP surface</div><p>Expose and consume tools over the Model Context Protocol — namespaced and permission-gated.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ CTA -->
+<section class="band" id="cta">
+  <div class="wrap reveal" id="docs-link">
+    <span class="eyebrow">Get started</span>
+    <h2>Put a trust layer between<br>your agents and your users.</h2>
+    <p>Read the architecture, run it offline in five minutes, or read the source.
+      It's Apache-2.0, all the way down.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="/00-executive/vision/">Read the docs</a>
+      <a class="btn btn-ghost" href="https://github.com/punarduttrajput/Wovyr">View on GitHub ↗</a>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="foot">
+      <div>
+        <a class="brand" href="#top" aria-label="Wovyr home">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="mark"><rect class="mk-win" x="3.5" y="4.5" width="17" height="15" rx="2.6"/><circle class="mk-dot" cx="6.6" cy="8" r="0.9"/><circle class="mk-dot" cx="9.2" cy="8" r="0.9"/><path class="mk-scan" d="M6.4 14H18"/><circle class="mk-node" cx="14.6" cy="14" r="1.7"/></svg>
+          wovyr
+        </a>
+        <p class="blurb">The trust layer for AI-generated interfaces, built on a Rust
+          agent operating system.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <a href="#how">How it works</a><a href="#platform">Platform</a>
+        <a href="#trust">Trust &amp; security</a><a href="#quickstart">Quickstart</a>
+      </div>
+      <div>
+        <h4>Docs</h4>
+        <a href="/00-executive/vision/">Executive &amp; vision</a><a href="/02-architecture/c4-context/">Architecture</a>
+        <a href="/09-api/">API &amp; SDKs</a><a href="/18-roadmap/">Roadmap</a>
+      </div>
+      <div>
+        <h4>Project</h4>
+        <a href="https://github.com/punarduttrajput/Wovyr">GitHub ↗</a><a href="https://github.com/punarduttrajput/Wovyr/blob/main/SECURITY.md">Security policy</a>
+        <a href="https://github.com/punarduttrajput/Wovyr/blob/main/CHANGELOG.md">Changelog</a><a href="https://github.com/punarduttrajput/Wovyr/blob/main/LICENSE">License · Apache-2.0</a>
+      </div>
+    </div>
+    <div class="foot-base">
+      <span>© 2026 Wovyr</span><span>·</span>
+      <span>v0.3.0</span><span>·</span>
+      <span>healthz <span class="k">ok</span></span><span>·</span>
+      <span>built in Rust · edition 2024</span>
+    </div>
+  </div>
+</footer>
+
+<script is:inline>
+(function(){
+  /* ---------- theme toggle ---------- */
+  var root=document.documentElement;
+  var stored=null; try{stored=localStorage.getItem("wovyr-theme")}catch(e){}
+  if(stored) root.setAttribute("data-theme",stored);
+  document.getElementById("tgl").addEventListener("click",function(){
+    var cur=root.getAttribute("data-theme");
+    if(!cur){ cur = matchMedia("(prefers-color-scheme: dark)").matches ? "dark":"light"; }
+    var next=cur==="dark"?"light":"dark";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("wovyr-theme",next)}catch(e){}
+  });
+
+  /* ---------- nav stuck state ---------- */
+  var nav=document.getElementById("nav");
+  var sentinel=document.createElement("div");
+  document.getElementById("top").before(sentinel);
+  new IntersectionObserver(function(es){
+    nav.setAttribute("data-stuck", es[0].isIntersecting ? "0":"1");
+  }).observe(sentinel);
+
+  /* ---------- scroll reveal ---------- */
+  var reduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if(reduce){
+    document.querySelectorAll(".reveal").forEach(function(n){n.classList.add("in")});
+  }else{
+    var io=new IntersectionObserver(function(es){
+      es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target);} });
+    },{threshold:.12});
+    document.querySelectorAll(".reveal").forEach(function(n){io.observe(n)});
+  }
+
+  /* ---------- copy button ---------- */
+  var btn=document.getElementById("copyBtn");
+  btn.addEventListener("click",function(){
+    var txt=document.getElementById("qsCode").innerText;
+    var done=function(){ btn.textContent="copied ✓"; setTimeout(function(){btn.textContent="copy"},1600); };
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(txt).then(done,done);}
+    else{done();}
+  });
+
+  /* ============================================================
+     THE TRUST GATE — character-art hero (Canvas 2D), art pass
+     Frames = miniature ASCII UI cards flowing toward a luminous
+     policy gate. Safe → ripple of light + hash stamp. Unsafe →
+     shatter into scattering glyphs. Ambient glyph field for depth.
+     ============================================================ */
+  var cv=document.getElementById("gate"), ctx=cv.getContext("2d");
+  var W=0,H=0,DPR=1, FS=12, LH=13, CW=7.2;
+  function css(v){return getComputedStyle(root).getPropertyValue(v).trim();}
+  var COL={}, LIGHT=false;
+  function luminance(hex){ hex=(hex||"#0A0E18").replace("#","");
+    if(hex.length===3){hex=hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];}
+    var n=parseInt(hex,16); if(isNaN(n)) return 0;
+    return (0.2126*((n>>16)&255)+0.7152*((n>>8)&255)+0.0722*(n&255))/255; }
+  function readColors(){
+    COL.accent=css("--accent"); COL.block=css("--block"); COL.ok=css("--ok");
+    COL.dim=css("--ink-dim"); COL.line=css("--line"); COL.a2=css("--accent-2");
+    LIGHT=luminance(css("--canvas"))>0.5;
+  }
+  function hexA(h,a){ h=(h||"#5B7BFF").replace("#","");
+    if(h.length===3){h=h[0]+h[0]+h[1]+h[1]+h[2]+h[2];}
+    var n=parseInt(h,16); if(isNaN(n)) return "rgba(91,123,255,"+a+")";
+    return "rgba("+((n>>16)&255)+","+((n>>8)&255)+","+(n&255)+","+a+")"; }
+  var FONT='"Cascadia Code","SF Mono","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace';
+  function setFont(px){ ctx.font=px+'px '+FONT; }
+  function resize(){
+    var r=cv.getBoundingClientRect(); DPR=Math.min(devicePixelRatio||1,2);
+    W=r.width; H=r.height; cv.width=Math.max(1,W*DPR); cv.height=Math.max(1,H*DPR);
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    setFont(FS); ctx.textBaseline="middle"; CW=ctx.measureText("M").width||7.2;
+    seedField();
+  }
+
+  /* deterministic PRNG so the scene reads the same each load */
+  function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);
+    t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+  var rnd=mulberry32(20260725);
+
+  /* miniature generative-UI cards the runtime verifies, node by node.
+     safe → allow · redact → sanitize one node, frame still passes · block → deny */
+  var SAFE=[
+    ["┌──────────┐","│ ▤ report │","│ ▦▦▦▦ ▦▦▦ │","│ [ view ] │","└──────────┘"],
+    ["┌──────────┐","│ ▤ orders │","│ ▤ 128 new│","│ [ open ] │","└──────────┘"],
+    ["┌──────────┐","│ ◹ chart  │","│ ▁▃▅▂▇▄▆▂ │","│ [ zoom ] │","└──────────┘"],
+    ["┌──────────┐","│ ▤ inbox  │","│ ▦▦ · ▦▦▦ │","│ [ read ] │","└──────────┘"]
+  ];
+  var REDACT=[
+    {lines:["┌──────────┐","│ ▤ login  │","│ pass●●●● │","│ [submit] │","└──────────┘"], bad:2},
+    {lines:["┌──────────┐","│ ▤ pay    │","│ card ●●●●│","│ [ pay  ] │","└──────────┘"], bad:2}
+  ];
+  var BLOCK=[
+    ["┌──────────┐","│ ⚠ eval   │","│ <script> │","│ run code │","└──────────┘"],
+    ["┌──────────┐","│ ⚠ embed  │","│ <iframe> │","│ steal ⌗  │","└──────────┘"]
+  ];
+  var REDACTED_LINE="│ ▓▓▓▓▓▓▓▓ │";
+
+  var frames=[], shards=[], stamps=[], ripples=[], field=[];
+  var t=0, running=true, gateFlash=0;
+  function gateX(){ return Math.max(W*0.54, 300); }
+  function cardW(){ return 12*CW; }
+
+  function seedField(){
+    field=[]; var n=Math.min(90,Math.max(24,Math.round((W*H)/15000)));
+    var g="·∙˙•:+░.".split("");
+    for(var i=0;i<n;i++) field.push({x:rnd()*W, y:rnd()*H,
+      ch:g[Math.floor(rnd()*g.length)], a:0.05+rnd()*0.10,
+      vy:-(0.04+rnd()*0.14), tw:rnd()*6.28});
+  }
+
+  function spawn(){
+    var r=rnd(), kind = r<0.55?"safe":(r<0.80?"redact":"block");
+    var lines, bad=-1;
+    if(kind==="safe"){ lines=SAFE[Math.floor(rnd()*SAFE.length)].slice(); }
+    else if(kind==="redact"){ var tp=REDACT[Math.floor(rnd()*REDACT.length)]; lines=tp.lines.slice(); bad=tp.bad; }
+    else { lines=BLOCK[Math.floor(rnd()*BLOCK.length)].slice(); }
+    var laneN=Math.max(2,Math.floor((H-130)/86));
+    var lane=Math.floor(rnd()*laneN);
+    frames.push({
+      x:-cardW()-20, y:74+lane*((H-130)/laneN)+(rnd()-0.5)*22,
+      lines:lines, kind:kind, bad:bad, judged:false, alpha:0, flash:0,
+      vx:0.7+rnd()*0.5, scale:0.9+rnd()*0.22,
+      hash:Math.floor(rnd()*0xffffff).toString(16).padStart(6,"0")
+    });
+  }
+
+  function shatter(f){
+    var lh=LH*f.scale, cw=CW*f.scale;
+    for(var li=0; li<f.lines.length; li++){
+      var line=f.lines[li];
+      for(var ci=0; ci<line.length; ci++){
+        var ch=line[ci]; if(ch===" "||shards.length>240) continue;
+        shards.push({x:f.x+ci*cw, y:f.y+li*lh, ch:ch,
+          vx:0.3+rnd()*1.7, vy:(rnd()-0.5)*2.6, a:1});
+      }
+    }
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    var gx=gateX(), acc=COL.accent, blk=COL.block;
+
+    // ---- background: dark = luminous halo · light = a legible scanner track ----
+    if(!LIGHT){
+      var g=ctx.createRadialGradient(gx,H*0.5,8, gx,H*0.5,Math.max(W,H)*0.55);
+      g.addColorStop(0,hexA(acc,0.12)); g.addColorStop(0.45,hexA(acc,0.03));
+      g.addColorStop(1,"rgba(0,0,0,0)");
+      ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    } else {
+      ctx.fillStyle=hexA("#0D1424",0.05); ctx.fillRect(gx-17,44,34,H-80);
+      ctx.fillStyle=hexA(acc,0.10);      ctx.fillRect(gx-17,44,34,H-80);
+    }
+
+    // ---- ambient drifting glyph field ----
+    setFont(FS); ctx.fillStyle=COL.dim;
+    for(var i=0;i<field.length;i++){ var p=field[i];
+      p.y+=p.vy; if(p.y<-6){ p.y=H+6; p.x=rnd()*W; }
+      ctx.globalAlpha=(LIGHT?p.a*1.5:p.a)*(0.55+0.45*Math.sin(t*0.02+p.tw));
+      ctx.fillText(p.ch,p.x,p.y);
+    }
+    ctx.globalAlpha=1;
+
+    // ---- the scanner: a glyph membrane with a bright sweep travelling it ----
+    var sweepY=54+((t*3)%Math.max(40,H-108));
+    ctx.save(); if(!LIGHT){ ctx.shadowColor=acc; ctx.shadowBlur=8; } setFont(FS);
+    var colg="╎┊┆╎┊", off=Math.floor(t*0.2);
+    for(var y=54;y<H-36;y+=LH){
+      var s=Math.sin(t*0.05+y*0.06);
+      var near=1-Math.min(1,Math.abs(y-sweepY)/44);
+      ctx.globalAlpha=(LIGHT?0.5:0.30)+0.35*Math.abs(s)+0.5*near;
+      ctx.fillStyle=(near>0.4||s>0.55)?acc:COL.dim;
+      ctx.fillText(colg[(y+off)%colg.length], gx-3, y);
+    }
+    ctx.restore(); ctx.globalAlpha=1;
+    // scan reticle riding the sweep
+    ctx.save(); ctx.globalAlpha=0.95; ctx.fillStyle=acc;
+    if(!LIGHT){ ctx.shadowColor=acc; ctx.shadowBlur=12; }
+    setFont(11); ctx.fillText("◂ scan ▸", gx-22, sweepY);
+    ctx.restore(); ctx.globalAlpha=1;
+    // label
+    setFont(11); ctx.fillStyle=acc; ctx.globalAlpha=0.95;
+    ctx.fillText("╺ VERIFY", gx-24, 40);
+    ctx.fillStyle=COL.dim; ctx.fillText("fail-closed ╸", gx+42, 40);
+    ctx.globalAlpha=1;
+
+    // ---- allow ripples along the scanner ----
+    for(var ri=ripples.length-1;ri>=0;ri--){ var rp=ripples[ri]; rp.age++;
+      var a=1-rp.age/22; if(a<=0){ ripples.splice(ri,1); continue; }
+      ctx.globalAlpha=a; ctx.strokeStyle=acc; ctx.lineWidth=LIGHT?2.4:2;
+      if(!LIGHT){ ctx.shadowColor=acc; ctx.shadowBlur=10; }
+      ctx.beginPath(); ctx.moveTo(gx, rp.y-14-rp.age); ctx.lineTo(gx, rp.y+14+rp.age); ctx.stroke();
+      ctx.shadowBlur=0;
+    }
+    ctx.globalAlpha=1;
+
+    // ---- frames: generative-UI cards being verified node by node ----
+    for(var fi=frames.length-1; fi>=0; fi--){ var f=frames[fi];
+      if(f.alpha<1) f.alpha=Math.min(1,f.alpha+0.05);
+      if(!f.judged && (f.x+cardW()*f.scale*0.5)>=gx){
+        f.judged=true;
+        var yc=f.y+LH*f.scale*2;
+        if(f.kind==="block"){ shatter(f); gateFlash=1; frames.splice(fi,1); continue; }
+        ripples.push({y:yc, age:0});
+        if(f.kind==="redact"){
+          f.flash=1; f.lines[f.bad]=REDACTED_LINE;         // sanitize the offending node
+          stamps.push({x:gx+8, y:yc, a:1, vx:0.9, txt:"↺ redacted · 1 node", warn:true});
+          var rl=LH*f.scale;
+          for(var k=0;k<5;k++) shards.push({x:gx+k*6, y:f.y+f.bad*rl,
+            vx:0.2+rnd()*0.9, vy:(rnd()-0.5)*1.6, a:1});
+        } else {
+          stamps.push({x:gx+8, y:yc, a:1, vx:0.9, txt:"✓ verified · sha256:"+f.hash+"…"});
+        }
+      }
+      f.x+=f.vx; if(f.flash>0) f.flash-=0.06;
+      var fs=FS*f.scale, lh=LH*f.scale, passed=f.judged;   // safe + redact both pass
+      setFont(fs); ctx.globalAlpha=f.alpha*(passed?0.98:0.85);
+      if(passed && !LIGHT){ ctx.shadowColor=acc; ctx.shadowBlur=6; }
+      for(var li=0; li<f.lines.length; li++){
+        ctx.fillStyle=(f.flash>0 && li===f.bad) ? blk : (passed?acc:COL.dim);
+        ctx.fillText(f.lines[li], f.x, f.y+li*lh);
+      }
+      ctx.shadowBlur=0;
+      if(f.x>W+cardW()){ frames.splice(fi,1); }
+    }
+    ctx.globalAlpha=1;
+
+    // ---- verdict stamps drifting toward the human (audit ledger accumulating) ----
+    setFont(11);
+    for(var si=stamps.length-1; si>=0; si--){ var st=stamps[si];
+      st.x+=st.vx; st.a-=0.005;
+      if(st.a<=0||st.x>W+140){ stamps.splice(si,1); continue; }
+      ctx.globalAlpha=st.a; ctx.fillStyle=st.warn?COL.a2:acc; ctx.fillText(st.txt, st.x, st.y);
+    }
+    ctx.globalAlpha=1;
+
+    // ---- shards from blocked / redacted nodes ----
+    setFont(FS); ctx.fillStyle=blk;
+    for(var di=shards.length-1; di>=0; di--){ var d=shards[di];
+      d.x+=d.vx; d.y+=d.vy; d.vy+=0.03; d.a-=0.02;
+      if(d.a<=0){ shards.splice(di,1); continue; }
+      ctx.globalAlpha=d.a; ctx.fillText(d.ch, d.x, d.y);
+    }
+    ctx.globalAlpha=1;
+
+    // ---- block flare + label (solid, so it reads on white too) ----
+    if(gateFlash>0){
+      ctx.save(); ctx.globalAlpha=Math.min(1,gateFlash);
+      ctx.strokeStyle=blk; ctx.lineWidth=LIGHT?3:2;
+      if(!LIGHT){ ctx.shadowColor=blk; ctx.shadowBlur=12; }
+      ctx.beginPath(); ctx.moveTo(gx,48); ctx.lineTo(gx,H-38); ctx.stroke(); ctx.restore();
+      setFont(11); ctx.globalAlpha=Math.min(1,gateFlash); ctx.fillStyle=blk;
+      ctx.fillText("✕ BLOCKED · unsafe_frame", gx-92, H-22);
+      ctx.globalAlpha=1; gateFlash-=0.028;
+    }
+
+    // ---- human marker ----
+    if(W>660){ setFont(11); ctx.globalAlpha=0.9; ctx.fillStyle=COL.a2;
+      ctx.fillText("◇ human", W-98, 58); ctx.fillStyle=COL.dim;
+      ctx.fillText("  decides", W-98, 72); ctx.globalAlpha=1; }
+  }
+
+  readColors(); resize();
+  addEventListener("resize",function(){resize()});
+  addEventListener("load",function(){resize()});
+  requestAnimationFrame(function(){resize()});
+  new MutationObserver(function(){readColors()})
+    .observe(root,{attributes:true,attributeFilter:["data-theme"]});
+
+  var last=0;
+  function loop(ts){
+    if(!running) return;
+    var rw=cv.getBoundingClientRect().width;
+    if(rw && Math.abs(rw-W)>1) resize();
+    if(ts-last>33){ last=ts; t++;
+      if(t%40===0 && frames.length<10) spawn();
+      draw();
+    }
+    requestAnimationFrame(loop);
+  }
+
+  if(reduce){
+    // rich static composition (no motion): cards mid-flight, one passed, one blocked
+    var composeStatic=function(){
+      resize(); frames.length=0; shards.length=0; stamps.length=0; ripples.length=0;
+      for(var s=0;s<5;s++){ spawn(); var f=frames[frames.length-1];
+        f.alpha=1; f.x=50+s*((gateX()+120)/5);
+        if(f.x+cardW()*f.scale*0.5>=gateX()){
+          if(f.kind==="block"){ f.x=gateX()-cardW(); }
+          else { f.judged=true; if(f.kind==="redact"){ f.lines[f.bad]=REDACTED_LINE; } }
+        } }
+      stamps.push({x:gateX()+30,y:120,a:0.9,vx:0,txt:"✓ verified · sha256:1a2f9c…"});
+      stamps.push({x:gateX()+120,y:214,a:0.8,vx:0,txt:"↺ redacted · 1 node",warn:true});
+      gateFlash=0.9; draw();
+    };
+    requestAnimationFrame(composeStatic);
+    addEventListener("load",composeStatic);
+    addEventListener("resize",composeStatic);
+  }else{
+    for(var pp=0;pp<3;pp++){ spawn(); frames[pp].x=60+pp*160; frames[pp].alpha=1; }
+    requestAnimationFrame(loop);
+    var heroIO=new IntersectionObserver(function(es){
+      var vis=es[0].isIntersecting;
+      if(vis&&!running){ running=true; last=0; requestAnimationFrame(loop); }
+      running=vis;
+    },{threshold:0});
+    heroIO.observe(document.getElementById("hero"));
+    document.addEventListener("visibilitychange",function(){
+      if(document.hidden){ running=false; }
+      else{ running=true; last=0; requestAnimationFrame(loop); }
+    });
+  }
+})();
+</script>
+</body>
+</html>
