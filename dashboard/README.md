@@ -80,8 +80,18 @@ Which of the server's three `WOVYR_AUTH_MODE`s you run against changes what's re
 
    ```bash
    # from dashboard/
+   npm install
    npm start                           # ng serve, http://localhost:4200
    ```
+
+   `npm start`/`build`/`test`/`watch` all first run
+   `scripts/ensure-ui-react-built.js` (a `pre*` npm hook), which builds
+   [`../sdks/ui-react`](../sdks/ui-react) if its `dist/` is missing or stale.
+   The dashboard depends on that package via `file:../sdks/ui-react` and
+   resolves its compiled `dist/` output (the web component + styles), so this
+   step is required, not optional — a clean checkout without it fails with
+   `TS2307`/unresolved-import errors. Equivalently, from the repo root:
+   `make dashboard-dev` / `dashboard-build` / `dashboard-test`.
 
 3. Open the app, visit **Sign in** once to set your tenant/principal (and, for
    `apikey`/`jwt` mode, paste a credential), then go to **Agent Studio** and click

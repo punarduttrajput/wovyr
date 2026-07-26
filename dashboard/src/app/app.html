@@ -11,12 +11,17 @@
       <span class="env">v0.3</span>
     </div>
 
-    <button class="scope" type="button" title="Switch tenant / project">
-      <span class="lbl">Tenant · Project</span>
-      <span class="row"><span class="dot"></span><b>Acme · production</b>
+    <!-- DASH-403: this used to be a styled, non-functional button (no click
+         handler) showing a hardcoded "Acme · production" — and "project" was
+         never a real concept anywhere in Session/tenant.interceptor.ts to
+         begin with. Now a real link to Sign in (where the tenant actually
+         changes), showing the real tenant. -->
+    <a class="scope" routerLink="/login" title="Switch tenant — opens Sign in">
+      <span class="lbl">Tenant</span>
+      <span class="row"><span class="dot"></span><b>{{ session.tenant() }}</b>
         <svg viewBox="0 0 24 24" fill="none"><path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </span>
-    </button>
+    </a>
 
     <nav aria-label="Primary">
       <div class="nav-sec">Operate</div>
@@ -45,17 +50,45 @@
       }
     </nav>
 
+    <!-- DASH-401: bound to the real Session (tenant.interceptor.ts's actual
+         source of X-Wovyr-Principal/-Tenant) — previously a hardcoded
+         "Punar R." / "org.admin" unrelated to who the console really acts
+         as, which made it impossible to tell which tenant a destructive
+         action would execute under. No role is shown: the shell has no
+         membership/role data client-side without an extra call, so the
+         tenant (which IS known) is shown instead of an invented role. -->
     <div class="rail-foot">
-      <span class="ava">PR</span>
-      <div class="who"><b>Punar R.</b><span>org.admin</span></div>
-      <button class="icon-btn theme-toggle" type="button" (click)="theme.toggle()"
-              [attr.aria-label]="'Switch to ' + (theme.theme() === 'dark' ? 'light' : 'dark') + ' theme'">
-        @if (theme.theme() === 'dark') {
-          <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        } @else {
-          <svg viewBox="0 0 24 24" fill="none"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
-        }
-      </button>
+      <div class="who-row">
+        <span class="ava">{{ initials() }}</span>
+        <div class="who"><b>{{ session.principal() }}</b><span>{{ session.tenant() }}</span></div>
+        <button class="icon-btn theme-toggle" type="button" (click)="theme.toggle()"
+                [attr.aria-label]="'Switch to ' + (theme.theme() === 'dark' ? 'light' : 'dark') + ' theme'">
+          @if (theme.theme() === 'dark') {
+            <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          } @else {
+            <svg viewBox="0 0 24 24" fill="none"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          }
+        </button>
+      </div>
+      <!-- DASH-402: an operator previously had no way to tell whether the
+           server is running in the spoofable disabled-loopback dev mode (no
+           credential — the header alone is trusted, unverified) or a real
+           apikey/jwt mode. Inferred client-side from whether Session holds a
+           bearer credential (see session.ts's hasCredential()) — worded as
+           such, not asserted as the server's own reported truth, since no
+           endpoint is queried for it here. -->
+      <span
+        class="pill auth-pill"
+        [class.ok]="session.hasCredential()"
+        [class.warn]="!session.hasCredential()"
+        [title]="
+          session.hasCredential()
+            ? 'A bearer credential is set on this session and sent as Authorization: Bearer — authenticated if the server verifies it (apikey/jwt mode).'
+            : 'No credential set. In the server\'s default disabled-loopback mode, the tenant/principal headers alone are trusted unverified — set a credential on the Sign in page for real auth.'
+        "
+      >
+        <span class="pd"></span>{{ session.hasCredential() ? 'authenticated' : 'no credential · dev mode' }}
+      </span>
     </div>
   </aside>
 

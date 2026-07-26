@@ -14,8 +14,21 @@
   <meta property="og:image" content="/og.png" />
   <meta name="twitter:card" content="summary_large_image" />
   <script is:inline>
-    /* set the theme before first paint to avoid a flash */
-    try { var m = localStorage.getItem("wovyr-theme"); if (m) document.documentElement.setAttribute("data-theme", m); } catch (e) {}
+    /* WEB-302: flag JS as active *before* the reveal styles below can apply —
+       html.js is what gates .reveal's hidden-by-default state, so a page with
+       JS disabled/blocked (or this script tag blocked by CSP) never gets it
+       and stays fully visible. This must run before the body's reveal setup
+       could possibly fail, so it's a separate, minimal, first script — not
+       folded into the larger IIFE further down the page. */
+    document.documentElement.classList.add("js");
+    /* DSY-104: set the theme before first paint to avoid a flash — reads the
+       SAME "starlight-theme" key the docs site's `ThemeProvider.astro` uses
+       (this page and the docs are the same Astro build/origin per
+       astro.config.mjs's `site`, so this is real cross-page continuity, not
+       just a matching name). Starlight stores "" for "follow system" and
+       "light"/"dark" for an explicit choice — `if (m)` already treats ""
+       as "no explicit preference," matching its own ThemeProvider exactly. */
+    try { var m = localStorage.getItem("starlight-theme"); if (m) document.documentElement.setAttribute("data-theme", m); } catch (e) {}
   </script>
   <title>Wovyr — The trust layer for AI-generated interfaces</title>
   <meta name="description" content="Wovyr validates, records, and durably runs every interface an AI agent shows a human — built on a Rust agent runtime that survives crashes, restarts, and time." />
@@ -26,6 +39,13 @@
     --canvas:#0A0E18; --surface:#121826; --surface-2:#0E1420;
     --ink:#EAEEF6; --ink-dim:#9AA6BF; --line:#1E2740;
     --accent:#5B7BFF; --accent-2:#9B87FF;
+    /* A11Y-202: white-on-accent is only 3.67:1 in dark mode (cobalt can't
+       carry white text) — a near-black foreground on filled buttons clears
+       AA (5.17:1) while --accent itself stays unchanged for links/borders/
+       focus, where it already clears AA against canvas/surface. Matches the
+       --wovyr-ui-accent-fg convention sdks/ui-react/src/styles.css already
+       uses for the identical problem. */
+    --accent-fg:#101014;
     --block:#FF5C6A; --ok:#3FBF86;
     --accent-soft:rgba(91,123,255,.14); --accent-line:rgba(91,123,255,.42);
 
@@ -41,7 +61,7 @@
     :root{
       --canvas:#F6F7F9; --surface:#FFFFFF; --surface-2:#EEF1F6;
       --ink:#0D1424; --ink-dim:#55617A; --line:#E2E7F0;
-      --accent:#2D54E8; --accent-2:#7B61FF;
+      --accent:#2D54E8; --accent-2:#7B61FF; --accent-fg:#fff;
       --block:#D23B43; --ok:#18935A;
       --accent-soft:rgba(45,84,232,.10); --accent-line:rgba(45,84,232,.30);
     }
@@ -49,13 +69,13 @@
   :root[data-theme="dark"]{
     --canvas:#0A0E18; --surface:#121826; --surface-2:#0E1420;
     --ink:#EAEEF6; --ink-dim:#9AA6BF; --line:#1E2740;
-    --accent:#5B7BFF; --accent-2:#9B87FF; --block:#FF5C6A; --ok:#3FBF86;
+    --accent:#5B7BFF; --accent-2:#9B87FF; --accent-fg:#101014; --block:#FF5C6A; --ok:#3FBF86;
     --accent-soft:rgba(91,123,255,.14); --accent-line:rgba(91,123,255,.42);
   }
   :root[data-theme="light"]{
     --canvas:#F6F7F9; --surface:#FFFFFF; --surface-2:#EEF1F6;
     --ink:#0D1424; --ink-dim:#55617A; --line:#E2E7F0;
-    --accent:#2D54E8; --accent-2:#7B61FF; --block:#D23B43; --ok:#18935A;
+    --accent:#2D54E8; --accent-2:#7B61FF; --accent-fg:#fff; --block:#D23B43; --ok:#18935A;
     --accent-soft:rgba(45,84,232,.10); --accent-line:rgba(45,84,232,.30);
   }
 
@@ -131,7 +151,9 @@
     padding:12px 20px; border-radius:var(--r-sm); cursor:pointer; border:1px solid transparent;
     display:inline-flex; gap:9px; align-items:center; transition:transform .15s, background .2s, border-color .2s}
   .btn:hover{transform:translateY(-1px)}
-  .btn-primary{background:var(--accent); color:#fff}
+  /* A11Y-202: --accent-fg (not a hardcoded #fff) — clears AA in both themes,
+     see the --accent-fg definitions in :root above. */
+  .btn-primary{background:var(--accent); color:var(--accent-fg)}
   .btn-primary:hover{background:color-mix(in srgb,var(--accent) 88%,#fff)}
   .btn-ghost{border-color:var(--line); color:var(--ink); background:var(--surface)}
   .btn-ghost:hover{border-color:var(--accent-line); color:var(--accent)}
@@ -154,9 +176,14 @@
   .sec-head{max-width:64ch; margin-bottom:44px}
   .sec-head h2{font-size:clamp(var(--f4),3.6vw,var(--f6)); margin:14px 0}
   .sec-head p{color:var(--ink-dim); font-size:var(--f3)}
-  .reveal{opacity:0; transform:translateY(14px); transition:opacity .6s ease, transform .6s ease}
-  .reveal.in{opacity:1; transform:none}
-  @media (prefers-reduced-motion:reduce){.reveal{opacity:1; transform:none; transition:none}}
+  /* WEB-302: hidden-by-default only applies once html.js is set (by the head
+     script, before first paint) — a page with JS disabled/blocked, or one
+     where the reveal-setup script below throws, never gets this rule and its
+     .reveal content stays at the browser default (visible). See the head
+     script and the "scroll reveal" block in the body script. */
+  html.js .reveal{opacity:0; transform:translateY(14px); transition:opacity .6s ease, transform .6s ease}
+  html.js .reveal.in{opacity:1; transform:none}
+  @media (prefers-reduced-motion:reduce){html.js .reveal{opacity:1; transform:none; transition:none}}
 
   /* consequence chips */
   .chips{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px}
@@ -597,16 +624,44 @@ resume <span class="o">durable ✓</span></div>
 
 <script is:inline>
 (function(){
-  /* ---------- theme toggle ---------- */
+  /* ---------- scroll reveal ----------
+     WEB-302: runs FIRST and wrapped in its own try/catch, so a failure
+     anywhere later in this script (theme toggle, canvas hero, copy button —
+     any of which could throw on a markup change or an unsupported API) can
+     never leave .reveal content stuck at opacity:0. On any failure here the
+     catch immediately reveals everything, so the worst case is "no reveal
+     animation," never "no content." */
+  try{
+    var reduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if(reduce){
+      document.querySelectorAll(".reveal").forEach(function(n){n.classList.add("in")});
+    }else{
+      var io=new IntersectionObserver(function(es){
+        es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target);} });
+      },{threshold:.12});
+      document.querySelectorAll(".reveal").forEach(function(n){io.observe(n)});
+    }
+  }catch(e){
+    document.querySelectorAll(".reveal").forEach(function(n){n.classList.add("in")});
+  }
+
+  /* ---------- theme toggle ----------
+     DSY-104: shares "starlight-theme" with the docs site's own theme
+     control (same key/encoding `ThemeProvider.astro`/`ThemeSelect.astro`
+     use) — toggling here and navigating to a docs page keeps the choice,
+     and picking a theme in the docs' own selector (light/dark/auto) is
+     respected back here too. Always stores an explicit "light"/"dark" —
+     this toggle has no third "auto" state of its own, so it never writes
+     Starlight's "" (auto) encoding. */
   var root=document.documentElement;
-  var stored=null; try{stored=localStorage.getItem("wovyr-theme")}catch(e){}
+  var stored=null; try{stored=localStorage.getItem("starlight-theme")}catch(e){}
   if(stored) root.setAttribute("data-theme",stored);
   document.getElementById("tgl").addEventListener("click",function(){
     var cur=root.getAttribute("data-theme");
     if(!cur){ cur = matchMedia("(prefers-color-scheme: dark)").matches ? "dark":"light"; }
     var next=cur==="dark"?"light":"dark";
     root.setAttribute("data-theme",next);
-    try{localStorage.setItem("wovyr-theme",next)}catch(e){}
+    try{localStorage.setItem("starlight-theme",next)}catch(e){}
   });
 
   /* ---------- nav stuck state ---------- */
@@ -616,17 +671,6 @@ resume <span class="o">durable ✓</span></div>
   new IntersectionObserver(function(es){
     nav.setAttribute("data-stuck", es[0].isIntersecting ? "0":"1");
   }).observe(sentinel);
-
-  /* ---------- scroll reveal ---------- */
-  var reduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if(reduce){
-    document.querySelectorAll(".reveal").forEach(function(n){n.classList.add("in")});
-  }else{
-    var io=new IntersectionObserver(function(es){
-      es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target);} });
-    },{threshold:.12});
-    document.querySelectorAll(".reveal").forEach(function(n){io.observe(n)});
-  }
 
   /* ---------- copy button ---------- */
   var btn=document.getElementById("copyBtn");

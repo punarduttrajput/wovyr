@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "sync": "node scripts/sync-docs.mjs",
-    "dev": "npm run sync && astro dev",
-    "build": "npm run sync && astro build",
+    "og": "node scripts/generate-og-image.mjs",
+    "dev": "npm run sync && npm run og && astro dev",
+    "build": "npm run sync && npm run og && astro build",
     "preview": "astro preview"
   },
   "dependencies": {

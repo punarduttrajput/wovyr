@@ -16,3 +16,6 @@ Thumbs.db
 # Local-only AI-assistant context (kept out of the public repo)
 /CLAUDE.md
 /CLAUDE.full.md
+
+# Local-only MCP server config (personal connectors — not for the public repo)
+/.mcp.json

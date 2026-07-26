@@ -6,7 +6,13 @@
   --canvas:#F6F7F9; --surface:#FFFFFF; --surface-2:#FBFCFD;
   --ink:#0D1424; --ink-2:#4A5468; --ink-3:#8A93A6;
   --line:#E6E9EF; --line-2:#EEF0F4;
-  --accent:#2D54E8; --accent-weak:#EAEEFD; --accent-ink:#1B3BB8;
+  /* A11Y-202: white-on-accent is 3.67:1 in dark mode (cobalt can't carry
+     white text) — --accent-fg is a theme-aware filled-button foreground
+     that clears AA in both themes; --accent stays unchanged for links/
+     borders/focus, where it already clears AA. Matches the
+     --wovyr-ui-accent-fg convention sdks/ui-react/src/styles.css uses for
+     the same problem. */
+  --accent:#2D54E8; --accent-fg:#fff; --accent-weak:#EAEEFD; --accent-ink:#1B3BB8;
   --violet:#7B61FF;
   --ok:#18935A; --ok-bg:#E6F4EC; --warn:#B26A00; --warn-bg:#FAF0DC;
   --crit:#D23B43; --crit-bg:#FBE9EA; --neutral-bg:#EEF1F5;
@@ -20,7 +26,7 @@
   --canvas:#0A0E18; --surface:#121826; --surface-2:#0F1421;
   --ink:#EAEEF6; --ink-2:#9AA6BC; --ink-3:#697587;
   --line:#222B3D; --line-2:#1A2233;
-  --accent:#5B7BFF; --accent-weak:#19233F; --accent-ink:#9DB1FF;
+  --accent:#5B7BFF; --accent-fg:#101014; --accent-weak:#19233F; --accent-ink:#9DB1FF;
   --ok:#36C586; --ok-bg:#10271E; --warn:#E0A33A; --warn-bg:#2A2113;
   --crit:#F26168; --crit-bg:#2C1517; --neutral-bg:#1A2233;
   --shadow:0 1px 2px rgba(0,0,0,.3), 0 2px 6px rgba(0,0,0,.3);
@@ -58,7 +64,13 @@ a { color:inherit; }
 .btn svg { width:15px; height:15px; }
 .btn:hover { border-color:var(--ink-3); }
 .btn:active { transform:translateY(1px); }
-.btn.pri { background:var(--accent); border-color:var(--accent); color:#fff; }
+.btn.pri { background:var(--accent); border-color:var(--accent); color:var(--accent-fg); }
+/* :hover inherits `color` above (not redeclared here) — --accent-ink flips
+   direction per theme (dark navy in light mode, pale blue in dark mode),
+   which happens to pair correctly with --accent-fg's own per-theme flip:
+   white-on-navy (8.88:1) in light, near-black-on-pale (9.19:1) in dark. The
+   old hardcoded white text against dark mode's pale hover fill was 2.07:1 —
+   a worse, pre-existing failure this same fix also corrects. */
 .btn.pri:hover { background:var(--accent-ink); }
 .btn:disabled { opacity:.5; cursor:not-allowed; transform:none; }
 .icon-btn {

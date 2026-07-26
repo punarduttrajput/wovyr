@@ -169,9 +169,6 @@ jobs:
   dashboard:
     name: dashboard build + test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: dashboard
     steps:
       - uses: actions/checkout@v4
 
@@ -179,16 +176,34 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: dashboard/package-lock.json
+          cache-dependency-path: |
+            dashboard/package-lock.json
+            sdks/ui-react/package-lock.json
+
+      # DX-501: the dashboard depends on `@wovyr/ui-react` via `file:../sdks/ui-react`
+      # and resolves its `dist/` output (the web component + compiled styles) — that
+      # only exists after the SDK's own install+build. This job used to skip it
+      # entirely and go straight to `npx ng build`, which fails closed here exactly
+      # like it does on a clean local checkout (four TS2307/unresolved-import
+      # errors) — this step is what makes that failure visible in CI instead of only
+      # ever being discovered by a contributor.
+      - name: Build @wovyr/ui-react (dashboard dependency)
+        working-directory: sdks/ui-react
+        run: |
+          npm ci
+          npm run build
 
       - name: Install
+        working-directory: dashboard
         run: npm ci
 
       - name: Build (production)
-        run: npx ng build
+        working-directory: dashboard
+        run: npm run build
 
       - name: Test (headless)
-        run: npx ng test --watch=false --browsers=ChromeHeadless
+        working-directory: dashboard
+        run: npm test -- --watch=false --browsers=ChromeHeadless
 
   # DX-302 (coverage half): line/branch coverage over the whole workspace via
   # cargo-llvm-cov, published as a CI artifact (lcov + human summary) on every

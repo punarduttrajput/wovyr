@@ -1,7 +1,8 @@
 # Task runner for the Wovyr AI Platform.
 # See docs/19-implementation-guide/build-system.md.
 
-.PHONY: build test lint fmt run-hello docker-build docker-run-hello compose-up compose-down clean
+.PHONY: build test lint fmt run-hello docker-build docker-run-hello compose-up compose-down clean \
+	dashboard-build dashboard-test dashboard-dev
 
 build:
 	cargo build --workspace
@@ -42,3 +43,17 @@ compose-down:
 
 clean:
 	cargo clean
+
+# DX-501: the dashboard depends on `@wovyr/ui-react` (sdks/ui-react) via a
+# `file:` dependency and resolves its dist/ output — these targets build that
+# dependency first (via dashboard's own prebuild/pretest/prestart npm hooks,
+# see dashboard/scripts/ensure-ui-react-built.js) so `make dashboard-build` etc.
+# work the same from a clean checkout as they do in CI.
+dashboard-build:
+	cd dashboard && npm ci && npm run build
+
+dashboard-test:
+	cd dashboard && npm ci && npm test -- --watch=false --browsers=ChromeHeadless
+
+dashboard-dev:
+	cd dashboard && npm ci && npm start

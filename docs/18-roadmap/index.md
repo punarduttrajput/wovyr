@@ -7,10 +7,10 @@ Document ID: RM-INDEX-001
 
 **Document ID:** RM-INDEX-001  
 **File Path:** `docs/18-roadmap/index.md`  
-**Version:** 1.5.0  
+**Version:** 1.7.0  
 **Status:** Active  
 **Owner:** Product Team  
-**Last Updated:** 2026-07-23
+**Last Updated:** 2026-07-26
 
 ---
 
@@ -26,6 +26,9 @@ see [v1.0.md](v1.0.md); **v1.1 is complete** (all three phases, 2026-07-19);
 shipped**. **v1.4 (Audit Remediation & Truth Reconciliation) is planned** — a
 truth-and-hardening milestone (not features) scoped by
 [PRD-007](../01-product/prd-audit-remediation.md) from a 2026-07-23 four-lens
+audit. **v1.5 (Design System Unification & UI Truth) Phase 1 is done** (all 9
+ship-blocker tickets, 2026-07-26); Phases 2/3 remain planned — the equivalent
+remediation pass for the three user-facing surfaces, from a 2026-07-26 UI/UX
 audit.
 
 ---
@@ -42,6 +45,7 @@ audit.
 | v1.2 | **Generative UI Trust Runtime** — the product milestone: frame protocol, trust/policy engine, durable interaction loop, renderer SDK, internal-tools beachhead | [v1.2-generative-ui.md](v1.2-generative-ui.md) |
 | v1.3 | **MCP Connection Management** — a persisted, UI-managed layer over the shipped MCP client: connection store, agent-manifest wiring, dashboard panel | [v1.3-mcp-connections.md](v1.3-mcp-connections.md) |
 | v1.4 | **Audit Remediation & Truth Reconciliation** — a truth-and-hardening milestone: day-one security fixes (SSRF, cross-tenant authz, audit MAC, KMS fail-closed), AI-core correctness (Anthropic embeddings, bounded caches, default retrieval), CI/claim honesty, and a sustainability scope freeze | [v1.4-audit-remediation.md](v1.4-audit-remediation.md) |
+| v1.5 | **Design System Unification & UI Truth** — a unification-and-truth milestone for the three user-facing surfaces: one token source across landing/docs/dashboard/renderer, WCAG AA remediation with a CI gate, dashboard identity truth, and the first browser e2e harness. Phase 1 (ship blockers) done | [v1.5-design-system-unification.md](v1.5-design-system-unification.md) |
 | Future | Beyond 1.0 — research bets | [future.md](future.md) |
 
 **v1.1 (AI Platform Maturity)** is scoped by [PRD-004](../01-product/prd-ai-platform-maturity.md)
@@ -83,6 +87,24 @@ the version and the claims with reality, and draw a sustainability line around
 the ~20-subsystem surface. Tickets: [v1.4-audit-remediation.md](v1.4-audit-remediation.md)
 (RM-AR-P1..P3).
 
+**v1.5 (Design System Unification & UI Truth)** is scoped by a 2026-07-26 UI/UX
+audit of the three shipped user-facing surfaces — the marketing landing page, the
+Starlight docs site, and the operator dashboard (plus the `@wovyr/ui-react`
+renderer it embeds), all measured live rather than read from source. Like v1.4 it
+is **remediation, not features**: the landing page's own
+[DESIGN-system.md](../../website/landing/DESIGN-system.md) claims `/`, the docs,
+and the dashboard "read as one product," and they measurably do not — four
+independent token systems, three theme-persistence keys, two brand marks, eight
+colour pairs below WCAG AA, a dashboard that cannot build from a clean checkout,
+and a console that displays an acting principal it is not acting as. The
+milestone unifies the tokens, gates contrast in CI (the previous pass was
+deferred to human review and missed eight pairs), and adds the browser e2e
+harness whose absence is why several shipped UI claims are still qualified
+"manually spot-checked, not CI-gated." Tickets:
+[v1.5-design-system-unification.md](v1.5-design-system-unification.md)
+(RM-DSU-P1..P3). No PRD — the findings are the requirements; requirement IDs are
+defined in that document's §3.
+
 ---
 
 # 3. Principles
@@ -113,6 +135,8 @@ learning. ADRs ([section 17](../17-adr/index.md)) record decisions that reshape 
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.7.0 | 2026-07-26 | v1.5 Phase 1 (ship blockers) marked done — all 9 tickets shipped and verified same-day; Phases 2/3 remain planned |
+| 1.6.0 | 2026-07-26 | Added v1.5 (Design System Unification & UI Truth, RM-DSU-001) — 31 tickets across three phases remediating the 2026-07-26 UI/UX audit of the landing page, docs site, and dashboard; requirement IDs defined in-document (no PRD, since the findings are the requirements) |
 | 1.5.0 | 2026-07-23 | Added v1.4 (Audit Remediation & Truth Reconciliation, PRD-007/RM-AR-001) — a truth-and-hardening milestone from the 2026-07-23 four-lens audit; not a feature release |
 | 1.4.0 | 2026-07-19 | v1.1 marked complete (Phase 3 finished — ECO-305/SEC-302/RAG-301 were the last tickets) |
 | 1.3.0 | 2026-07-15 | Status-truth pass: replaced the stale "Planning / Documentation phase (v0.1.0)" claim with the real current position — v0.3.0 tagged, PRD-003 engineering scope complete, v1.1 P3 partial, v1.2/v1.3 shipped |

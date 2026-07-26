@@ -3,9 +3,13 @@
   "version": "0.0.0",
   "scripts": {
     "ng": "ng",
+    "prestart": "node scripts/ensure-ui-react-built.js",
     "start": "ng serve",
+    "prebuild": "node scripts/ensure-ui-react-built.js",
     "build": "ng build",
+    "prewatch": "node scripts/ensure-ui-react-built.js",
     "watch": "ng build --watch --configuration development",
+    "pretest": "node scripts/ensure-ui-react-built.js",
     "test": "ng test"
   },
   "prettier": {

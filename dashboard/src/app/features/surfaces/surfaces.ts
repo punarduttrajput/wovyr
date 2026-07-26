@@ -4,6 +4,7 @@ import {
   CUSTOM_ELEMENTS_SCHEMA,
   ElementRef,
   ViewChild,
+  effect,
   inject,
   signal,
 } from '@angular/core';
@@ -14,16 +15,18 @@ import type { WovyrUiFrameDecideDetail } from '@wovyr/ui-react/web-component';
 // Side-effecting: registers the `<wovyr-ui-frame>` custom element (RDR-402).
 import '@wovyr/ui-react/web-component';
 import { errText } from '../../core/http-error';
+import { ThemeService } from '../../core/theme.service';
 import { PendingUiFrame, SurfacesService, UiDecisionOutcome } from './surfaces.service';
 
 /** The runtime shape of an `<wovyr-ui-frame>` DOM node (its `frame`/
- * `expectedHash` are JS properties, not HTML attributes — see
+ * `expectedHash`/`theme` are JS properties, not HTML attributes — see
  * `sdks/ui-react/src/webComponent.tsx`'s doc comment — so they're set
  * imperatively here rather than via template binding). */
 interface WovyrUiFrameElement extends HTMLElement {
   frame: unknown;
   expectedHash: string | undefined;
   disabled: boolean;
+  theme: 'light' | 'dark' | undefined;
 }
 
 /**
@@ -44,11 +47,29 @@ interface WovyrUiFrameElement extends HTMLElement {
 export class Surfaces {
   private svc = inject(SurfacesService);
   private cdr = inject(ChangeDetectorRef);
+  private themeSvc = inject(ThemeService);
 
   private frameElRef?: ElementRef<WovyrUiFrameElement>;
   @ViewChild('frameEl') set frameElSetter(ref: ElementRef<WovyrUiFrameElement> | undefined) {
     this.frameElRef = ref;
     this.applyFrameToElement();
+  }
+
+  constructor() {
+    // DSY-105: keep the embedded `<wovyr-ui-frame>` in the dashboard's own
+    // theme, including a live toggle while a frame is on screen — the
+    // renderer's tokens must never silently disagree with the surrounding
+    // chrome (previously nothing forwarded `data-theme` to it at all, so an
+    // OS-dark/dashboard-light combination rendered a dark frame in a light
+    // console). `frameElRef` is a plain property, not itself tracked, so this
+    // effect re-applies whenever the theme signal changes and simply no-ops
+    // if the element isn't mounted yet; `applyFrameToElement` below covers
+    // the element-just-mounted case.
+    effect(() => {
+      const theme = this.themeSvc.theme();
+      const el = this.frameElRef?.nativeElement;
+      if (el) el.theme = theme;
+    });
   }
 
   title = 'Confirm refund';
@@ -143,6 +164,7 @@ export class Surfaces {
     if (!el || !pf) return;
     el.frame = pf.frame;
     el.expectedHash = pf.frame_hash;
+    el.theme = this.themeSvc.theme();
   }
 
   private failPresent(e: unknown): void {
