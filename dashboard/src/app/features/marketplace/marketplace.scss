@@ -36,7 +36,10 @@
 .plug .top { display:flex; gap:11px; align-items:flex-start; }
 .plug .logo {
   width:40px; height:40px; border-radius:10px; display:grid; place-items:center; flex:none;
-  background:linear-gradient(135deg, var(--accent), var(--violet)); color:#fff;
+  /* was a hardcoded #fff — failed AA against the violet end of this gradient
+     in both themes (measured 4.20:1) and against the accent end in dark mode
+     (3.67:1). See the --violet definitions in styles.scss for the full fix. */
+  background:linear-gradient(135deg, var(--accent), var(--violet)); color:var(--accent-fg);
   font-family:var(--mono); font-weight:700; font-size:14px;
 }
 .plug .ident { min-width:0; }

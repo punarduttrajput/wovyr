@@ -13,7 +13,20 @@
      --wovyr-ui-accent-fg convention sdks/ui-react/src/styles.css uses for
      the same problem. */
   --accent:#2D54E8; --accent-fg:#fff; --accent-weak:#EAEEFD; --accent-ink:#1B3BB8;
-  --violet:#7B61FF;
+  /* Avatar/badge-gradient contrast fix (found while auditing A11Y-202): the
+     .ava/.plug .logo badges render initials over
+     linear-gradient(135deg, var(--accent), var(--violet)) with var(--accent-fg)
+     text (was a hardcoded #fff). --violet had no dark-theme override at all,
+     so its one value had to work as a gradient endpoint against BOTH a light
+     and a dark accent — impossible for a single flat text color spanning both
+     the accent AND violet ends of the actual rendered gradient (verified by
+     sampling 400+ points along the interpolation, not just the two flat
+     endpoints — the worst point is always exactly at one endpoint here, but
+     that isn't true of arbitrary hue pairs, hence sampling rather than
+     assuming). This --violet value is darkened slightly (hue-preserving) so
+     white text clears AA (4.91:1 worst-case) across the whole light-theme
+     gradient; --violet:#7B61FF is used by nothing else in this codebase. */
+  --violet:#7050FF;
   --ok:#18935A; --ok-bg:#E6F4EC; --warn:#B26A00; --warn-bg:#FAF0DC;
   --crit:#D23B43; --crit-bg:#FBE9EA; --neutral-bg:#EEF1F5;
   --shadow:0 1px 2px rgba(13,20,36,.04), 0 1px 3px rgba(13,20,36,.06);
@@ -27,6 +40,13 @@
   --ink:#EAEEF6; --ink-2:#9AA6BC; --ink-3:#697587;
   --line:#222B3D; --line-2:#1A2233;
   --accent:#5B7BFF; --accent-fg:#101014; --accent-weak:#19233F; --accent-ink:#9DB1FF;
+  /* Lightened (not darkened) relative to light mode's --violet — matches the
+     existing --accent light/dark pattern of going brighter in dark mode, and
+     is what the contrast math actually needs here: with near-black
+     --accent-fg text, a darker violet converges toward the already-dark
+     canvas/accent lightness and *reduces* contrast, while lightening it
+     clears AA with margin (5.15:1 worst-case across the gradient). */
+  --violet:#8570FF;
   --ok:#36C586; --ok-bg:#10271E; --warn:#E0A33A; --warn-bg:#2A2113;
   --crit:#F26168; --crit-bg:#2C1517; --neutral-bg:#1A2233;
   --shadow:0 1px 2px rgba(0,0,0,.3), 0 2px 6px rgba(0,0,0,.3);
