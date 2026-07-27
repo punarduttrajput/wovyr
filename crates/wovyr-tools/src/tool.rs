@@ -23,10 +23,19 @@ pub struct ToolMetadata {
     /// Permissions the tool requires, enforced against the caller's grants by
     /// [`check_permissions`] / [`ToolRegistry::execute`](crate::ToolRegistry::execute).
     pub permissions: Vec<String>,
+    /// Request vendor strict/schema-constrained tool-calling for this tool
+    /// specifically (`wovyr-provider`'s `ToolSpec::strict`, PRV-202/203) when
+    /// the resolved provider supports it. `false` by default — most tools'
+    /// schemas are loose enough (or the tool tolerant enough of odd input)
+    /// that strict mode isn't worth the vendor schema-normalization pass;
+    /// opt in via [`with_strict`](Self::with_strict) for a tool whose schema
+    /// is the actual contract a model must hit exactly (e.g. `ui_present`'s
+    /// `UiFrame` vocabulary, GUI-501).
+    pub strict: bool,
 }
 
 impl ToolMetadata {
-    /// Convenience constructor with no declared permissions.
+    /// Convenience constructor with no declared permissions, non-strict.
     pub fn new(
         id: impl Into<String>,
         version: impl Into<String>,
@@ -39,12 +48,19 @@ impl ToolMetadata {
             category: category.into(),
             description: description.into(),
             permissions: Vec::new(),
+            strict: false,
         }
     }
 
     /// Builder-style setter for required permissions.
     pub fn with_permissions(mut self, perms: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.permissions = perms.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Builder-style setter for [`strict`](Self::strict).
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
         self
     }
 }

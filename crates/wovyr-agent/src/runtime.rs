@@ -223,7 +223,7 @@ fn resolve_tools(def: &AgentDefinition, registry: &ToolRegistry) -> Result<Vec<T
             name: meta.id,
             description: meta.description,
             parameters: tool.input_schema(),
-            strict: false,
+            strict: meta.strict,
         });
     }
     Ok(specs)

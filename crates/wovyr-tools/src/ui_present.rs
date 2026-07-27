@@ -84,6 +84,49 @@ impl UiPresentTool {
     }
 }
 
+/// The `frame` parameter's JSON Schema, derived from [`UiFrame`]'s own
+/// `schemars::JsonSchema` impl (GUI-501) rather than the hand-written,
+/// prose-only stub this tool shipped with originally. PT-19's real-model test
+/// (OpenRouter gpt-4o-mini, 10 generated frames) found **10/10** failed
+/// `UiFrame::from_value`'s fail-closed parse when the model was only told
+/// "it's an object" — the trust layer's rejection was correct, but no real
+/// model can drive `ui_present` without seeing the actual component
+/// vocabulary and required fields to draw from.
+fn ui_frame_tool_schema() -> Value {
+    let mut frame_schema = serde_json::to_value(schemars::schema_for!(UiFrame))
+        .expect("UiFrame's derived JsonSchema always serializes to JSON");
+    // `schemars` hoists recursive/shared types (UiNode, ActionClass, ...) into
+    // a `$defs` map at the schema's *own* root and points to them via
+    // `"$ref": "#/$defs/Name"`. A `$ref` with no `$id` in scope resolves
+    // against the whole document root by JSON Pointer — not against wherever
+    // it's nested — so `$defs` must be hoisted again, up to *this* tool
+    // schema's root, for those refs to resolve once `frame_schema` is
+    // embedded under `properties.frame` below.
+    let defs = frame_schema
+        .as_object_mut()
+        .and_then(|obj| obj.remove("$defs"));
+    if let Some(obj) = frame_schema.as_object_mut() {
+        // Meaningful only at a schema's own root; embedded under
+        // `properties.frame` they'd just be misleading (a `$schema` dialect
+        // marker / `title` that both describe the outer tool schema, not the
+        // `frame` field).
+        obj.remove("$schema");
+        obj.remove("title");
+    }
+    let mut schema = json!({
+        "type": "object",
+        "required": ["frame"],
+        "properties": { "frame": frame_schema },
+    });
+    if let Some(defs) = defs {
+        schema
+            .as_object_mut()
+            .expect("schema is freshly built as an object")
+            .insert("$defs".to_string(), defs);
+    }
+    schema
+}
+
 #[async_trait]
 impl Tool for UiPresentTool {
     fn metadata(&self) -> ToolMetadata {
@@ -92,23 +135,20 @@ impl Tool for UiPresentTool {
             "1.0.0",
             "interaction",
             "Present a generative-UI frame to the human and wait for their decision. The \
-             `frame` parameter is a UiFrame document (schema_version, optional title, and a \
-             `root` component tree — see the generative-UI protocol docs). Returns the human's \
+             `frame` parameter must conform to this tool's input schema — the real UiFrame/ \
+             UiNode component vocabulary — not free-form HTML/markup. Returns the human's \
              decision as `{action, values}`.",
         )
+        // GUI-501: this tool's schema *is* the protocol contract, not a loose
+        // suggestion — a model that drifts from it produces a frame
+        // `UiFrame::from_value` will reject outright. Worth the vendor
+        // schema-normalization pass (PRV-202/203) where the resolved provider
+        // supports constrained decoding against it.
+        .with_strict(true)
     }
 
     fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "required": ["frame"],
-            "properties": {
-                "frame": {
-                    "type": "object",
-                    "description": "A UiFrame document: {schema_version, title?, root}."
-                }
-            }
-        })
+        ui_frame_tool_schema()
     }
 
     async fn execute(
@@ -156,6 +196,90 @@ impl Tool for UiPresentTool {
             "values": decision.values,
         })))
     }
+}
+
+/// A minimal JSON-Schema-subset evaluator, scoped to exactly the keywords
+/// `ui_frame_tool_schema()` emits (`$ref`/`$defs`, `oneOf`, `type`, `const`,
+/// `enum`, `properties`/`required`/`additionalProperties`, `items`) — not a
+/// general-purpose validator. It exists to prove the derived schema is a
+/// real, mechanically-checkable contract (GUI-501's acceptance criterion),
+/// without pulling in an external JSON-Schema crate for one test module.
+#[cfg(test)]
+fn schema_validates(defs: &Value, schema: &Value, instance: &Value) -> bool {
+    if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
+        let name = r
+            .strip_prefix("#/$defs/")
+            .expect("this schema only ever emits local $defs refs");
+        return schema_validates(defs, &defs[name], instance);
+    }
+    if let Some(one_of) = schema.get("oneOf").and_then(Value::as_array) {
+        return one_of.iter().any(|s| schema_validates(defs, s, instance));
+    }
+    if let Some(ty) = schema.get("type") {
+        let types: Vec<&str> = match ty {
+            Value::String(s) => vec![s.as_str()],
+            Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+            _ => vec![],
+        };
+        let ok = types.iter().any(|t| match *t {
+            "object" => instance.is_object(),
+            "array" => instance.is_array(),
+            "string" => instance.is_string(),
+            "number" | "integer" => instance.is_number(),
+            "boolean" => instance.is_boolean(),
+            "null" => instance.is_null(),
+            _ => false,
+        });
+        if !ok {
+            return false;
+        }
+    }
+    if let Some(c) = schema.get("const")
+        && instance != c
+    {
+        return false;
+    }
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
+        && !allowed.contains(instance)
+    {
+        return false;
+    }
+    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+        let Some(obj) = instance.as_object() else {
+            return false;
+        };
+        if schema.get("additionalProperties") == Some(&Value::Bool(false))
+            && obj.keys().any(|k| !props.contains_key(k))
+        {
+            return false;
+        }
+        for (name, subschema) in props {
+            if let Some(v) = obj.get(name)
+                && !schema_validates(defs, subschema, v)
+            {
+                return false;
+            }
+        }
+    }
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        let Some(obj) = instance.as_object() else {
+            return false;
+        };
+        if !required
+            .iter()
+            .filter_map(Value::as_str)
+            .all(|k| obj.contains_key(k))
+        {
+            return false;
+        }
+    }
+    if let Some(items) = schema.get("items")
+        && let Some(arr) = instance.as_array()
+        && !arr.iter().all(|item| schema_validates(defs, items, item))
+    {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -290,5 +414,78 @@ mod tests {
             .await
             .expect_err("a frame missing schema_version/root is invalid");
         assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    // --- GUI-501: the tool schema must teach a real model the UiFrame vocabulary ---
+
+    #[test]
+    fn metadata_requests_strict_schema_constrained_tool_calling() {
+        let tool = UiPresentTool::new(Arc::new(FixedInteraction(UiDecision {
+            action: "ok".into(),
+            values: Default::default(),
+        })));
+        assert!(
+            tool.metadata().strict,
+            "ui_present should opt into strict/PRV-202 tool calling"
+        );
+    }
+
+    #[test]
+    fn input_schema_is_derived_from_the_real_uiframe_vocabulary_not_a_hand_written_stub() {
+        let tool = UiPresentTool::new(Arc::new(FixedInteraction(UiDecision {
+            action: "ok".into(),
+            values: Default::default(),
+        })));
+        let schema = tool.input_schema();
+
+        // The old stub was `{"type": "object", "properties": {"frame": {"type":
+        // "object", "description": "..."}}}` — no `$defs`, no nested
+        // `properties`/`required` at all. Any of these presence checks alone
+        // is the concrete regression guard.
+        assert!(
+            schema.get("$defs").is_some(),
+            "$defs must be hoisted to the tool schema root"
+        );
+        let frame_schema = &schema["properties"]["frame"];
+        assert_eq!(frame_schema["required"], json!(["schema_version", "root"]));
+
+        let ui_node_variants = schema["$defs"]["UiNode"]["oneOf"]
+            .as_array()
+            .expect("UiNode is a oneOf over the component vocabulary");
+        let button = ui_node_variants
+            .iter()
+            .find(|v| v["properties"]["type"]["const"] == json!("button"))
+            .expect("the button variant must be present in the derived schema");
+        assert_eq!(
+            button["required"],
+            json!(["type", "action", "label"]),
+            "a schema-aware model is told `action` is required on a button"
+        );
+    }
+
+    #[test]
+    fn derived_schema_accepts_a_valid_frame_and_rejects_pt19s_button_missing_action() {
+        let tool = UiPresentTool::new(Arc::new(FixedInteraction(UiDecision {
+            action: "ok".into(),
+            values: Default::default(),
+        })));
+        let schema = tool.input_schema();
+        let defs = &schema["$defs"];
+        let frame_schema = &schema["properties"]["frame"];
+
+        assert!(
+            schema_validates(defs, frame_schema, &confirm_frame()),
+            "a real, protocol-valid frame must validate against the derived schema"
+        );
+
+        // PT-19's concrete invalid shape: a `button` node with no `action`.
+        let button_missing_action = json!({
+            "schema_version": "1.0.0",
+            "root": { "type": "button", "label": "Go" }
+        });
+        assert!(
+            !schema_validates(defs, frame_schema, &button_missing_action),
+            "a button missing `action` must fail as a schema-shape mismatch"
+        );
     }
 }

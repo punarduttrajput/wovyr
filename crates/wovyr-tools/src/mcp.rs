@@ -687,6 +687,7 @@ impl Tool for McpTool {
             category: "mcp".to_string(),
             description,
             permissions: self.client.tool_permissions.clone(),
+            strict: false,
         }
     }
 
