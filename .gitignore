@@ -20,6 +20,11 @@ Thumbs.db
 # Local-only MCP server config (personal connectors — not for the public repo)
 /.mcp.json
 
+# Internal / business docs (design-partner, pentest, outreach — not for the public repo)
+/DesignPartner-NCR.md
+/DesignPartner-Outreach-NCR.xlsx
+/Wovyr-Pentest-Report.xlsx
+
 # DX-503: Lighthouse CI's local scratch output
 .lighthouseci/
 lhci-reports/
