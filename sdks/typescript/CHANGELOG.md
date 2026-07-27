@@ -5,6 +5,11 @@ The SDK's version tracks the platform release it targets: same major.minor as
 fixes. `health()` warns (once per client) when it detects a server whose
 major.minor differs.
 
+## 0.3.1 — 2026-07-27
+
+- Docs: removed the stale "Known gaps" note claiming the package was not yet
+  published to npm (it is — `@wovyr/sdk` is live on the registry).
+
 ## Unreleased
 
 - **Opt-in mutation retry** (DX-301): mutating requests that carry an

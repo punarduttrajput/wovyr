@@ -1,10 +1,10 @@
 /** DX-303: SDK ↔ server version awareness.
  *
  * The SDK's version tracks the platform release it was written against
- * (`0.3.0` ↔ wovyr-server 0.3.0) — same major.minor means same API surface.
+ * (`0.3.x` ↔ wovyr-server 0.3.x) — same major.minor means same API surface.
  * `SDK_VERSION` is kept in lockstep with `package.json` by the release
  * process, and the unit suite asserts the two match so drift can't ship. */
-export const SDK_VERSION = "0.3.0";
+export const SDK_VERSION = "0.3.1";
 
 /** Human-readable warning when the SDK and server disagree on major.minor —
  * `null` when they agree (patch-level differences are compatible by policy)

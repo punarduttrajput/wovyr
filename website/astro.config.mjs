@@ -31,7 +31,7 @@ const cronGrammar = {
 };
 
 export default defineConfig({
-  site: 'https://punarduttrajput.github.io',
+  site: 'https://wovyr.com',
   integrations: [
     starlight({
       title: 'Wovyr',

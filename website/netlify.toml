@@ -1,0 +1,13 @@
+[build]
+  base    = "website"
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Starlight emits real static routes; a catch-all keeps deep links safe.
+[[redirects]]
+  from   = "/*"
+  to     = "/404.html"
+  status = 404

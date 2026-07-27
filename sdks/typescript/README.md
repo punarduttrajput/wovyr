@@ -79,8 +79,3 @@ run instead of skip.
 - **Versioning**: the SDK version tracks the platform release it targets
   (same major.minor = same API surface; see `CHANGELOG.md`). `health()`
   logs a `console.warn` once per client if the server's major.minor differs.
-
-## Known gaps
-
-- Not published to npm yet (the packed tarball is attached to each GitHub
-  Release; publishing needs an operator-supplied 2FA OTP).
