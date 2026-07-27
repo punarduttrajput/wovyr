@@ -13,22 +13,24 @@
     </div>
   </div>
 
-  <div class="card pad">
+  <form class="card pad" (ngSubmit)="save()">
     <div class="field">
       <label for="tenant">Tenant</label>
-      <input id="tenant" type="text" [(ngModel)]="tenant" placeholder="acme" />
+      <input id="tenant" name="tenant" type="text" [(ngModel)]="tenant" placeholder="acme" required />
     </div>
     <div class="field">
       <label for="principal">Principal</label>
-      <input id="principal" type="text" [(ngModel)]="principal" placeholder="admin@wovyr.local" />
+      <input id="principal" name="principal" type="text" [(ngModel)]="principal" placeholder="admin@wovyr.local" required />
     </div>
     <div class="field">
       <label for="apiKey">API key / JWT (optional — dev mode works without one)</label>
-      <input id="apiKey" type="password" [(ngModel)]="apiKey" placeholder="paste a minted credential" autocomplete="off" />
+      <!-- DASH-407: kept autocomplete="off" deliberately, not switched to a
+           password-manager-friendly value — a pasted API key/JWT isn't a
+           reusable password and shouldn't be offered for the browser to
+           save alongside real site passwords. -->
+      <input id="apiKey" name="apiKey" type="password" [(ngModel)]="apiKey" placeholder="paste a minted credential" autocomplete="off" />
     </div>
-    <button class="btn pri" (click)="save()">Save &amp; continue</button>
-    @if (saved) {
-      <span class="ok">Saved.</span>
-    }
-  </div>
+    <button class="btn pri" type="submit">Save &amp; continue</button>
+    <span class="ok" aria-live="polite">{{ saved ? 'Saved.' : '' }}</span>
+  </form>
 </section>

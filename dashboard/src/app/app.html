@@ -27,30 +27,19 @@
       </span>
     </a>
 
+    <!-- DASH-404: rendered straight from `navGroups` — the same source the
+         breadcrumb derives from — so the rail and the breadcrumb can never
+         disagree on what a group is called or what it contains. -->
     <nav aria-label="Primary">
-      <div class="nav-sec">Operate</div>
-      @for (item of operate; track item.path) {
-        <a class="navi" [routerLink]="item.path" routerLinkActive="on">
-          <svg aria-hidden="true"><use [attr.href]="'icons.svg#' + item.icon" /></svg>
-          {{ item.label }}
-          @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
-        </a>
-      }
-      <div class="nav-sec">Build</div>
-      @for (item of build; track item.path) {
-        <a class="navi" [routerLink]="item.path" routerLinkActive="on">
-          <svg aria-hidden="true"><use [attr.href]="'icons.svg#' + item.icon" /></svg>
-          {{ item.label }}
-          @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
-        </a>
-      }
-      <div class="nav-sec">Extend</div>
-      @for (item of extend; track item.path) {
-        <a class="navi" [routerLink]="item.path" routerLinkActive="on">
-          <svg aria-hidden="true"><use [attr.href]="'icons.svg#' + item.icon" /></svg>
-          {{ item.label }}
-          @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
-        </a>
+      @for (group of railGroups(); track group.key) {
+        <div class="nav-sec">{{ group.label }}</div>
+        @for (item of group.items; track item.path) {
+          <a class="navi" [routerLink]="item.path" routerLinkActive="on">
+            <svg aria-hidden="true"><use [attr.href]="'icons.svg#' + item.icon" /></svg>
+            {{ item.label }}
+            @if (item.badge) { <span class="badge tnum">{{ item.badge }}</span> }
+          </a>
+        }
       }
     </nav>
 
@@ -93,6 +82,12 @@
       >
         <span class="pd"></span>{{ session.hasCredential() ? 'authenticated' : 'no credential · dev mode' }}
       </span>
+      <!-- DASH-404: Sign in lived under "Extend" alongside Marketplace/Settings,
+           which is wrong information architecture — authentication isn't an
+           extension point. It now sits beside the identity block it belongs
+           next to; the "account" nav group (see app.ts) still backs its
+           breadcrumb, it's just not rendered as a rail section. -->
+      <a class="foot-link" routerLink="/login">Sign in</a>
     </div>
   </aside>
 

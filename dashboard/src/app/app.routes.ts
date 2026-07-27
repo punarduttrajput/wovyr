@@ -1,11 +1,16 @@
 import { Routes } from '@angular/router';
 
 /**
- * Feature routes are lazy-loaded (overview §8). Agent Studio is the first built
- * surface; the remaining surfaces resolve to a placeholder until their slices land.
+ * Feature routes are lazy-loaded (overview §8). DASH-406: `/` lands on
+ * Monitoring — "what is the state of my system" is the right first question
+ * for an operator console, and it's also the surface that degrades most
+ * informatively when the server is unreachable. (The stale comment this
+ * replaced dated from when Agent Studio was the only built surface and
+ * everything else was a placeholder — no longer true; every surface below is
+ * real.)
  */
 export const routes: Routes = [
-  { path: '', pathMatch: 'full', redirectTo: 'agents' },
+  { path: '', pathMatch: 'full', redirectTo: 'monitoring' },
   {
     path: 'agents',
     title: 'Agent Studio · Wovyr',
@@ -71,5 +76,13 @@ export const routes: Routes = [
     title: 'Sign in · Wovyr',
     loadComponent: () => import('./features/login/login').then((m) => m.Login),
   },
-  { path: '**', redirectTo: 'agents' },
+  {
+    // DASH-405: this used to be `redirectTo: 'agents'` — every unknown route
+    // silently landed in Agent Studio with a rewritten URL and a breadcrumb
+    // implying the operator arrived where they intended. No `redirectTo`
+    // here means the router renders this in place and keeps the real URL.
+    path: '**',
+    title: 'Not found · Wovyr',
+    loadComponent: () => import('./features/not-found/not-found').then((m) => m.NotFound),
+  },
 ];

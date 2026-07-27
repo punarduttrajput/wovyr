@@ -29,7 +29,7 @@
 :root[data-theme="dark"] .editor { background: #07090f; color: #b8cce0; }
 
 /* ── Validation cards ────────────────────────────────────────────────────────── */
-.val-err .err-h h3 { color: var(--crit); }
+.val-err .err-h h2 { color: var(--crit); }
 .err-pre {
   margin: 0; padding: 13px 16px;
   font-family: var(--mono); font-size: 12px; color: var(--crit);

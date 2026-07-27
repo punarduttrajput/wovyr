@@ -35,7 +35,7 @@
     <div>
       @if (showAdd()) {
         <div class="card add-card">
-          <div class="card-h"><h3>Add / seed memory</h3>
+          <div class="card-h"><h2>Add / seed memory</h2>
             <span class="sub">→ {{ add.namespace.trim() || 'name a namespace' }}</span></div>
           <div class="add-b">
             <input type="text" [(ngModel)]="add.namespace"
@@ -79,7 +79,7 @@
       <!-- results -->
       <div class="card">
         <div class="card-h">
-          <h3>{{ mode() === 'search' ? 'Results' : 'Records' }}</h3>
+          <h2>{{ mode() === 'search' ? 'Results' : 'Records' }}</h2>
           <span class="sub">{{ results().length }} {{ mode() === 'search' ? 'matches' : 'records' }}</span>
           @if (mode() === 'search') { <div class="right"><span class="pill info"><span class="pd"></span>{{ strategy.toUpperCase() }}</span></div> }
         </div>

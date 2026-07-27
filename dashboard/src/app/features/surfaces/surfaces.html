@@ -19,7 +19,7 @@
   <div class="surfaces-grid">
     <!-- compose -->
     <div class="card pad">
-      <div class="card-h"><h3>Compose a frame</h3></div>
+      <div class="card-h"><h2>Compose a frame</h2></div>
       <div class="field">
         <label for="surfaces-title">Title</label>
         <input id="surfaces-title" type="text" [(ngModel)]="title" placeholder="Confirm refund" />
@@ -42,7 +42,7 @@
 
     <!-- result -->
     <div class="card pad">
-      <div class="card-h"><h3>Result</h3>
+      <div class="card-h"><h2>Result</h2>
         @if (pending() || blockedReason()) {
           <button class="btn sub-btn right" (click)="reset()">Clear</button>
         }

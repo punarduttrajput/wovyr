@@ -18,7 +18,7 @@
   <!-- Install-from-file panel (applies to both tabs) -->
   @if (showInstall()) {
     <div class="card install-panel">
-      <div class="card-h"><h3>Install plugin from .wovyrpkg</h3></div>
+      <div class="card-h"><h2>Install plugin from .wovyrpkg</h2></div>
       <div class="install-body">
         <label class="field-label">
           Package file
@@ -48,7 +48,7 @@
   <!-- Trust publisher panel -->
   @if (showTrust()) {
     <div class="card install-panel">
-      <div class="card-h"><h3>Trust a publisher</h3></div>
+      <div class="card-h"><h2>Trust a publisher</h2></div>
       <div class="install-body">
         <label class="field-label">
           Publisher name
@@ -90,7 +90,7 @@
     <!-- Install-from-registry panel -->
     @if (installTarget(); as t) {
       <div class="card install-panel">
-        <div class="card-h"><h3>Install {{ t.name }}</h3></div>
+        <div class="card-h"><h2>Install {{ t.name }}</h2></div>
         <div class="install-body">
           <label class="field-label">
             Version
@@ -192,10 +192,10 @@
             <div class="top">
               <span class="logo">{{ initials(l.name) }}</span>
               <div class="ident">
-                <h3>
+                <h2>
                   {{ l.name }} <span class="ver mono">{{ l.versions[0] }}</span>
                   @if (l.verified) { <span class="pill ok verified">✓ verified</span> }
-                </h3>
+                </h2>
                 <div class="pub">{{ l.publisher }}</div>
               </div>
             </div>
@@ -277,7 +277,7 @@
             <div class="top">
               <span class="logo">{{ initials(p.name) }}</span>
               <div class="ident">
-                <h3>{{ p.name }} <span class="ver mono">{{ p.version }}</span></h3>
+                <h2>{{ p.name }} <span class="ver mono">{{ p.version }}</span></h2>
                 <div class="pub">{{ p.publisher }}</div>
               </div>
               <span class="pill" [class.ok]="p.state === 'enabled'" [class.mut]="p.state === 'disabled'">

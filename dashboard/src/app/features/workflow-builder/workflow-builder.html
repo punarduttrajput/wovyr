@@ -24,7 +24,7 @@
     <div class="left-col">
       <div class="card">
         <div class="card-h">
-          <h3>Definition</h3>
+          <h2>Definition</h2>
           <div class="right seg">
             <button class="seg-btn" [class.on]="mode() === 'design'" (click)="mode.set('design')">Canvas</button>
             <button class="seg-btn" [class.on]="mode() === 'yaml'" (click)="editYaml()">YAML</button>
@@ -156,14 +156,14 @@
       <!-- Validation result -->
       @if (validErr()) {
         <div class="card val-err">
-          <div class="card-h err-h"><h3>Validation error</h3></div>
+          <div class="card-h err-h"><h2>Validation error</h2></div>
           <pre class="err-pre">{{ validErr() }}</pre>
         </div>
       }
       @if (validation()) {
         <div class="card val-ok">
           <div class="card-h">
-            <h3>Valid ✓ &nbsp;<span class="sub">{{ validation()!.name }} · v{{ validation()!.version }}</span></h3>
+            <h2>Valid ✓ &nbsp;<span class="sub">{{ validation()!.name }} · v{{ validation()!.version }}</span></h2>
           </div>
           <div class="dag">
             @for (a of validation()!.activities; track a.id) {
@@ -188,7 +188,7 @@
 
       <!-- Submit options -->
       <div class="card opts-card">
-        <div class="card-h"><h3>Run options</h3></div>
+        <div class="card-h"><h2>Run options</h2></div>
         <div class="opts-b">
           <label class="opt-label">
             Input JSON
@@ -206,7 +206,7 @@
     <div class="right-col">
       <div class="card">
         <div class="card-h">
-          <h3>Executions</h3>
+          <h2>Executions</h2>
           <span class="sub">{{ executions().length }} recent</span>
           <div class="right"><button class="icon-btn" type="button" (click)="refresh()" title="Refresh" aria-label="Refresh executions">↺</button></div>
         </div>
@@ -227,7 +227,7 @@
       @if (selectedExec()) {
         <div class="card detail-card">
           <div class="card-h">
-            <h3 class="mono">{{ selectedExec()!.execution_id }}</h3>
+            <h2 class="mono">{{ selectedExec()!.execution_id }}</h2>
             <app-status-pill [status]="selectedExec()!.status" />
             <div class="right">
               <a class="btn" [routerLink]="['/executions', selectedExec()!.execution_id]">Full detail →</a>

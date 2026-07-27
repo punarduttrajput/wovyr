@@ -26,7 +26,7 @@
   @if (tab() === 'projects') {
     <div class="two">
       <div class="card">
-        <div class="card-h"><h3>Organizations</h3><span class="sub">{{ orgs().length }}</span></div>
+        <div class="card-h"><h2>Organizations</h2><span class="sub">{{ orgs().length }}</span></div>
         @for (o of orgs(); track o.id) {
           <div class="row">
             <b>{{ o.name }}</b>
@@ -42,7 +42,7 @@
       </div>
 
       <div class="card">
-        <div class="card-h"><h3>Projects</h3><span class="sub">{{ projects().length }}</span>
+        <div class="card-h"><h2>Projects</h2><span class="sub">{{ projects().length }}</span>
           <div class="right"><span class="muted mono mini">click to manage →</span></div></div>
         @for (p of projects(); track p.id) {
           <div class="row pick" [class.sel]="selected()?.id === p.id" (click)="select(p)">
@@ -74,7 +74,7 @@
   @if (tab() === 'members') {
     @if (selected(); as p) {
       <div class="card">
-        <div class="card-h"><h3>Members of {{ p.name }}</h3><span class="sub">{{ p.id }}</span></div>
+        <div class="card-h"><h2>Members of {{ p.name }}</h2><span class="sub">{{ p.id }}</span></div>
         <div class="table-wrap"><table>
           <thead><tr><th>User</th><th>Role</th><th></th></tr></thead>
           <tbody>
@@ -104,7 +104,7 @@
   @if (tab() === 'quotas') {
     @if (selected(); as p) {
       <div class="card">
-        <div class="card-h"><h3>Quotas — {{ p.name }}</h3><span class="sub">limits enforced at the run boundary</span></div>
+        <div class="card-h"><h2>Quotas — {{ p.name }}</h2><span class="sub">limits enforced at the run boundary</span></div>
         <div class="quota-grid">
           <div class="field"><label for="settings-llm-cost-day-usd">LLM cost / day (USD)</label><input id="settings-llm-cost-day-usd" type="number" step="0.01" [(ngModel)]="quota.llm_cost_per_day_usd" placeholder="unlimited" /></div>
           <div class="field"><label for="settings-llm-tokens-day">LLM tokens / day</label><input id="settings-llm-tokens-day" type="number" [(ngModel)]="quota.llm_tokens_per_day" placeholder="unlimited" /></div>
@@ -121,7 +121,7 @@
   <!-- ===== Integrations (webhooks) ===== -->
   @if (tab() === 'integrations') {
     <div class="card">
-      <div class="card-h"><h3>Webhooks</h3><span class="sub">HMAC-signed event delivery · secrets never shown</span></div>
+      <div class="card-h"><h2>Webhooks</h2><span class="sub">HMAC-signed event delivery · secrets never shown</span></div>
       <div class="table-wrap"><table>
         <thead><tr><th>Endpoint</th><th>Events</th><th>State</th><th></th></tr></thead>
         <tbody>

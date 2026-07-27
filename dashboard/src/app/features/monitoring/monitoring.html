@@ -33,12 +33,15 @@
         @if (sparkline().ok) {
           <svg viewBox="0 0 180 38" width="100%" height="38" preserveAspectRatio="none" fill="none">
             <defs>
-              <linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
+              <!-- A11Y-208/DASH-409: unique per Monitoring instance — a hardcoded
+                   id would collide the moment a second sparkline (or a second
+                   instance of this page) renders. -->
+              <linearGradient [attr.id]="sparkGradientId" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0" stop-color="var(--accent)" stop-opacity=".22" />
                 <stop offset="1" stop-color="var(--accent)" stop-opacity="0" />
               </linearGradient>
             </defs>
-            <path [attr.d]="sparkline().area" fill="url(#sg)" />
+            <path [attr.d]="sparkline().area" [attr.fill]="'url(#' + sparkGradientId + ')'" />
             <path [attr.d]="sparkline().line" stroke="var(--accent)" stroke-width="1.8"
               stroke-linecap="round" stroke-linejoin="round" />
           </svg>
@@ -77,7 +80,7 @@
   <div class="cols">
     <!-- health -->
     <div class="card">
-      <div class="card-h"><h3>Platform health</h3>
+      <div class="card-h"><h2>Platform health</h2>
         <div class="right">
           @if (health()) { <span class="pill ok"><span class="pd"></span>OK</span> }
           @else { <span class="pill crit"><span class="pd"></span>DOWN</span> }
@@ -102,7 +105,7 @@
 
     <!-- routes (RED per route) -->
     <div class="card">
-      <div class="card-h"><h3>Requests by route</h3><span class="sub">RED · cumulative</span></div>
+      <div class="card-h"><h2>Requests by route</h2><span class="sub">RED · cumulative</span></div>
       @if (metrics()?.routes?.length) {
         <div class="table-wrap"><table>
           <thead><tr><th>Route</th><th class="num">Requests</th><th class="num">Errors</th></tr></thead>
@@ -122,9 +125,41 @@
     </div>
   </div>
 
+  <!-- DASH-409: latency and LLM-spend history over the polling window — the
+       stat tiles above only ever show one scalar; the platform emits far
+       more (histogram exemplars, per-route RED metrics, per-tenant/project
+       LLM cost aggregates) than a single number can carry. -->
+  <div class="cols">
+    <div class="card">
+      <div class="card-h"><h2>Latency</h2><span class="sub">p50 / p95 · windowed, from the duration histogram</span></div>
+      @if (xTimes().length > 1) {
+        <app-time-series-chart
+          [data]="latencyChart()"
+          unit="ms"
+          ariaLabel="Request latency p50 and p95 over the polling window, in milliseconds"
+        />
+      } @else {
+        <div class="muted pad">Gathering samples…</div>
+      }
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>LLM spend</h2><span class="sub">$ per polling window</span></div>
+      @if (xTimes().length > 1) {
+        <app-time-series-chart
+          [data]="spendChart()"
+          unit="$"
+          ariaLabel="LLM spend per polling window, in US dollars"
+        />
+      } @else {
+        <div class="muted pad">Gathering samples…</div>
+      }
+    </div>
+  </div>
+
   <!-- live activity -->
   <div class="card">
-    <div class="card-h"><h3>Workflow executions</h3><span class="sub">visibility API · /api/v1/workflows</span>
+    <div class="card-h"><h2>Workflow executions</h2><span class="sub">visibility API · /api/v1/workflows</span>
       <div class="right">
         @if (reachable()) { <span class="live"><span class="blip"></span>LIVE</span> }
       </div>

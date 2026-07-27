@@ -817,6 +817,64 @@ jobs:
           path: e2e/playwright-report/
           retention-days: 14
 
+  lighthouse:
+    # DX-503: perf/a11y/best-practices/SEO budgets on the built landing page
+    # and one docs page — asserted against real, measured baselines (see
+    # lighthouserc.cjs's own header comment), so a regression fails the
+    # build instead of being noticed at the next manual audit.
+    name: Lighthouse CI (perf/a11y/best-practices/SEO budgets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install website deps
+        working-directory: website
+        run: npm ci
+
+      - name: Build website (fails on an expressive-code language warning)
+        working-directory: website
+        # WEB-304: `astro build` only *warns* on an unregistered Shiki
+        # language (falling back to plain text) — this failed silently for
+        # months (see WEB-304's own note). Grepping the build log turns that
+        # warning into a hard CI failure so the next one can't slip in the
+        # same way.
+        run: |
+          npm run build 2>&1 | tee build.log
+          if grep -q 'expressive-code.*language could not be found' build.log; then
+            echo "::error::astro build emitted an expressive-code language warning — register the grammar (see astro.config.mjs's cronGrammar) or change the fence's language."
+            exit 1
+          fi
+
+      # Reuses the e2e job's own Chromium download (DX-502) rather than
+      # pulling in a second browser via @lhci/cli's own puppeteer dep.
+      - name: Install Chromium
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install chromium
+
+      - name: Resolve Chromium path
+        id: chrome
+        working-directory: e2e
+        run: echo "path=$(node -e "console.log(require('@playwright/test').chromium.executablePath())")" >> "$GITHUB_OUTPUT"
+
+      - name: Run Lighthouse CI
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.path }}
+        run: npx --yes @lhci/cli@0.14 autorun --config=./lighthouserc.cjs
+
+      - name: Upload Lighthouse reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-reports
+          path: lhci-reports/
+          retention-days: 14
+
   security:
     name: dependency + secret scanning
     runs-on: ubuntu-latest

@@ -43,13 +43,19 @@
   font-family:var(--mono); font-weight:700; font-size:14px;
 }
 .plug .ident { min-width:0; }
-.plug h3 { font-size:14.5px; display:flex; align-items:baseline; gap:7px; }
+/* A11Y (heading-order): the per-card title is an <h2> now (there's no
+   intermediate section heading between the page's own <h1> and these
+   repeating card titles, so h2 is the correct depth, not h3 — matching
+   every other card-h heading on this page). Kept as its own selector
+   rather than folding into styles.scss's shared `.card-h h2, .card-h h3`
+   rule since this heading isn't inside `.card-h` — it sits in `.ident`. */
+.plug h2 { font-size:14.5px; display:flex; align-items:baseline; gap:7px; }
 .plug .ver { font-size:11px; color:var(--ink-3); font-weight:500; }
 .plug .pub { font-size:11.5px; color:var(--ink-3); margin-top:2px; }
 .plug .top .pill { margin-left:auto; }
 .plug .desc { font-size:12.5px; color:var(--ink-2); line-height:1.5; margin:0; }
 
-.plug h3 .verified { font-size:9.5px; margin-left:4px; vertical-align:middle; }
+.plug h2 .verified { font-size:9.5px; margin-left:4px; vertical-align:middle; }
 
 /* ── Browse meta row (rating / installs / risk) ────────────────────────────── */
 .meta-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }

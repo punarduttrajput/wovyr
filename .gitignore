@@ -19,3 +19,7 @@ Thumbs.db
 
 # Local-only MCP server config (personal connectors — not for the public repo)
 /.mcp.json
+
+# DX-503: Lighthouse CI's local scratch output
+.lighthouseci/
+lhci-reports/

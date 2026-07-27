@@ -29,6 +29,6 @@ export class Login {
     if (!this.tenant.trim() || !this.principal.trim()) return;
     this.session.save(this.tenant, this.principal, this.apiKey);
     this.saved = true;
-    this.router.navigateByUrl('/agents');
+    this.router.navigateByUrl('/monitoring');
   }
 }

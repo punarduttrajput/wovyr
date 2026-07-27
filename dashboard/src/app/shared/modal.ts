@@ -1,32 +1,29 @@
-import {
-  Component,
-  ElementRef,
-  HostListener,
-  effect,
-  input,
-  output,
-  viewChild,
-} from '@angular/core';
+import { Component, HostListener, input, output } from '@angular/core';
+import { A11yModule } from '@angular/cdk/a11y';
+import { restoreFocusOnClose } from './focus-restore.util';
 
 /**
  * UI-301: the in-app dialog primitive (there was none — destructive flows fell
  * back to the native `confirm()`). Renders over a scrim; Escape or a scrim
- * click closes. UI-305: focus moves into the dialog on open, Tab is trapped
- * inside it, and focus returns to the opener on close.
+ * click closes. UI-305/DASH-408: focus trapping is `cdkTrapFocus` +
+ * `cdkTrapFocusAutoCapture` (`@angular/cdk/a11y`) — the same mechanism the
+ * command palette uses (A11Y-206) — rather than a hand-rolled Tab handler;
+ * focus restore on close is the shared `restoreFocusOnClose` helper.
  */
 @Component({
   selector: 'app-modal',
+  imports: [A11yModule],
   template: `
     @if (open()) {
       <div class="scrim" (click)="close.emit()">
         <div
-          #panel
           class="modal card"
           role="dialog"
           aria-modal="true"
           [attr.aria-label]="title()"
+          cdkTrapFocus
+          [cdkTrapFocusAutoCapture]="open()"
           (click)="$event.stopPropagation()"
-          (keydown)="trapTab($event)"
         >
           <div class="card-h">
             <h3>{{ title() }}</h3>
@@ -59,51 +56,12 @@ export class Modal {
   readonly title = input('');
   readonly close = output<void>();
 
-  private readonly panel = viewChild<ElementRef<HTMLElement>>('panel');
-  private opener: HTMLElement | null = null;
-
   constructor() {
-    // On open: remember the opener and move focus into the dialog; on close,
-    // give focus back so keyboard users aren't dropped at the document root.
-    effect(() => {
-      if (this.open()) {
-        this.opener = document.activeElement as HTMLElement | null;
-        queueMicrotask(() => this.focusables()[0]?.focus());
-      } else if (this.opener) {
-        this.opener.focus();
-        this.opener = null;
-      }
-    });
+    restoreFocusOnClose(this.open);
   }
 
   @HostListener('document:keydown.escape')
   onEscape(): void {
     if (this.open()) this.close.emit();
-  }
-
-  /** Keep Tab/Shift-Tab cycling within the dialog. */
-  protected trapTab(e: KeyboardEvent): void {
-    if (e.key !== 'Tab') return;
-    const items = this.focusables();
-    if (!items.length) return;
-    const first = items[0];
-    const last = items[items.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  }
-
-  private focusables(): HTMLElement[] {
-    const root = this.panel()?.nativeElement;
-    if (!root) return [];
-    return Array.from(
-      root.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      ),
-    ).filter((el) => !el.hasAttribute('disabled'));
   }
 }

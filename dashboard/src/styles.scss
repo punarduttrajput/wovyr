@@ -61,6 +61,11 @@ a { color:inherit; }
 }
 .icon-btn:hover { color:var(--ink); border-color:var(--ink-3); }
 .icon-btn svg { width:16px; height:16px; }
+/* A11Y-208: 34×34 already clears the 24px AA minimum; a coarse pointer (no
+   hover state to aim with) gets the full 44×44 the guideline prefers. */
+@media (pointer:coarse) {
+  .icon-btn { width:44px; height:44px; }
+}
 
 /* ---- card ---- */
 .card {

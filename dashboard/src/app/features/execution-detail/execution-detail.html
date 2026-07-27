@@ -17,7 +17,7 @@
   } @else if (execution(); as e) {
     <div class="two">
       <div class="card">
-        <div class="card-h"><h3>Status</h3>
+        <div class="card-h"><h2>Status</h2>
           <div class="right"><app-status-pill [status]="e.status" /></div>
         </div>
         <div class="kv"><span>Execution</span><b class="mono">{{ e.execution_id }}</b></div>
@@ -27,7 +27,7 @@
       </div>
 
       <div class="card">
-        <div class="card-h"><h3>Activities</h3><span class="sub">{{ activities().length }}</span></div>
+        <div class="card-h"><h2>Activities</h2><span class="sub">{{ activities().length }}</span></div>
         @for (a of activities(); track a.id) {
           <div class="act">
             <span class="mono">{{ a.id }}</span>
@@ -38,7 +38,7 @@
     </div>
 
     <div class="card timeline">
-      <div class="card-h"><h3>Event timeline</h3><span class="sub">{{ events().length }} events · durable log</span></div>
+      <div class="card-h"><h2>Event timeline</h2><span class="sub">{{ events().length }} events · durable log</span></div>
       @for (ev of events(); track $index) {
         <div class="evt">
           <span class="seq mono">{{ $index + 1 }}</span>

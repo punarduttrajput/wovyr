@@ -8,6 +8,28 @@ const section = (label, directory) => ({
   autogenerate: { directory },
 });
 
+// WEB-304: shiki (via astro-expressive-code) has no bundled `cron` grammar,
+// so every ```cron fence in the synced docs (docs/12-deployment/
+// backup-and-restore.md) silently downgraded to plain text with only a
+// build-log warning — easy to never notice. A full crontab grammar is more
+// than this one line of docs needs; this minimal TextMate grammar still
+// gives real highlighting (the five schedule fields vs. the command, plus
+// `#` comment lines) rather than just suppressing the warning.
+const cronGrammar = {
+  name: 'cron',
+  scopeName: 'source.cron',
+  patterns: [
+    { match: '^\\s*#.*$', name: 'comment.line.number-sign.cron' },
+    {
+      match: '^(\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\S+)(\\s+)(.*)$',
+      captures: {
+        1: { name: 'constant.numeric.cron' },
+        3: { name: 'string.unquoted.cron' },
+      },
+    },
+  ],
+};
+
 export default defineConfig({
   site: 'https://punarduttrajput.github.io',
   integrations: [
@@ -24,6 +46,9 @@ export default defineConfig({
         replacesTitle: true,
       },
       customCss: ['./src/styles/starlight-brand.css', './src/styles/fonts.css'],
+      expressiveCode: {
+        shiki: { langs: [cronGrammar] },
+      },
       social: [
         {
           icon: 'github',

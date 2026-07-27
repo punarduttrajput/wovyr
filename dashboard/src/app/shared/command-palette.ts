@@ -1,5 +1,7 @@
 import { Component, HostListener, computed, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
+import { A11yModule } from '@angular/cdk/a11y';
+import { restoreFocusOnClose } from './focus-restore.util';
 
 interface Cmd {
   section: string;
@@ -11,26 +13,64 @@ interface Cmd {
 /**
  * A ⌘K / Ctrl-K command palette for jumping between surfaces. Opened by the shortcut
  * or by clicking the top-bar search; Esc closes, ↑/↓ move, ↵ runs the selection.
+ *
+ * A11Y-206/DASH-408: `cdkTrapFocus`+`cdkTrapFocusAutoCapture` (`@angular/cdk/a11y`,
+ * the same mechanism `Modal` uses) traps Tab and moves focus into the search
+ * input on open; `restoreFocusOnClose` returns it to the invoker on close. DOM
+ * focus never leaves the input — results are a `role="listbox"` of
+ * `role="option"` rows driven by `aria-activedescendant` on the combobox input,
+ * so arrowing through them is announced to a screen reader without any focus
+ * movement (there used to be neither `aria-modal`, a focus trap, nor this
+ * announcement path — the palette is the primary keyboard-navigation surface).
  */
 @Component({
   selector: 'app-command-palette',
+  imports: [A11yModule],
   template: `
     @if (open()) {
       <div class="scrim" (click)="close()">
-        <div class="cmdk" role="dialog" aria-label="Command palette" (click)="$event.stopPropagation()">
+        <div
+          class="cmdk"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Command palette"
+          cdkTrapFocus
+          [cdkTrapFocusAutoCapture]="open()"
+          (click)="$event.stopPropagation()"
+        >
           <div class="cin">
             <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-            <input #box [value]="q()" (input)="onInput($event)" placeholder="Jump to a surface…" autocomplete="off" />
+            <input
+              #box
+              [value]="q()"
+              (input)="onInput($event)"
+              placeholder="Jump to a surface…"
+              autocomplete="off"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls="cmdk-listbox"
+              [attr.aria-activedescendant]="filtered().length ? 'cmdk-opt-' + sel() : null"
+            />
             <kbd>esc</kbd>
           </div>
-          <div class="clist">
+          <div class="clist" role="listbox" id="cmdk-listbox" aria-label="Results">
             @for (c of filtered(); track c.label; let i = $index) {
-              <button class="crow" [class.sel]="i === sel()" (mouseenter)="sel.set(i)" (click)="run(c)">
+              <div
+                class="crow"
+                role="option"
+                tabindex="-1"
+                [id]="'cmdk-opt-' + i"
+                [attr.aria-selected]="i === sel()"
+                [class.sel]="i === sel()"
+                (mouseenter)="sel.set(i)"
+                (click)="run(c)"
+              >
                 <span class="ci"></span>
                 <span class="cl">{{ c.label }}</span>
                 <span class="cs">{{ c.section }}</span>
                 @if (c.hint) { <span class="ck">{{ c.hint }}</span> }
-              </button>
+              </div>
             } @empty {
               <div class="cempty">No matches</div>
             }
@@ -67,6 +107,10 @@ export class CommandPalette {
   readonly open = signal(false);
   readonly q = signal('');
   readonly sel = signal(0);
+
+  constructor() {
+    restoreFocusOnClose(this.open);
+  }
 
   private cmds: Cmd[] = [
     { section: 'Operate', label: 'Monitoring', hint: 'G M', go: '/monitoring' },

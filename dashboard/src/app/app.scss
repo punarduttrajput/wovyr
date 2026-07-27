@@ -81,6 +81,12 @@ nav { padding:6px 12px; display:flex; flex-direction:column; gap:1px; overflow:a
 .rail-foot .who span { font-size:11px; color:var(--ink-3); }
 .theme-toggle { margin-left:auto; width:30px; height:30px; flex:none; }
 .auth-pill { align-self:flex-start; }
+.foot-link {
+  align-self:flex-start; font-size:11.5px; font-weight:600; color:var(--accent);
+  text-decoration:none; padding:7px 2px; /* A11Y-208: pad the hit area, not the type */
+  display:inline-flex; align-items:center;
+}
+.foot-link:hover { text-decoration:underline; }
 
 main { display:flex; flex-direction:column; min-width:0; }
 
