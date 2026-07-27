@@ -3,26 +3,48 @@
  * defaults and a dark override via both `prefers-color-scheme` and an
  * explicit `[data-theme="dark"]` (whichever a host's own theme toggle sets
  * wins). Contrast ratios below are chosen to clear WCAG AA at these sizes
- * (RDR-405) — don't lower them without re-checking. */
+ * (RDR-405) — don't lower them without re-checking.
+ *
+ * DSY-102: these `--wovyr-ui-*` defaults are the brand tokens from
+ * ../../../packages/tokens/wovyr-tokens.css, re-expressed under this
+ * package's own `--wovyr-ui-*` namespace — NOT an `@import` of that file.
+ * This package is published and dependency-free and must render correctly
+ * standalone with zero host tokens present, so it can't literally depend on
+ * a file elsewhere in the monorepo at runtime; the values are kept in sync
+ * by hand instead, checked by test/token-parity.test.ts, which parses both
+ * stylesheets and fails if a value here drifts from its canonical source
+ * without this file being updated to match. A host that sets its own
+ * `--wovyr-ui-*` values (or wraps this component in its own themed
+ * container) still wins, unchanged — nothing here forces the brand
+ * palette on an integrator who wants their own.
+ *
+ * Every mapped pair was re-verified against AA at its actual rendered size,
+ * not assumed to inherit RDR-405's original ratios (some backgrounds moved
+ * along with the border/bg-subtle unification below). One value doesn't
+ * map 1:1: `--wovyr-ui-danger-fg` in dark mode is near-black (`#101014`,
+ * matching `--accent-fg`'s dark value) rather than white — white-on-danger
+ * is only 3.14:1 against this palette's dark danger colour, while
+ * near-black clears 6.04:1. */
 
 .wovyr-ui {
-  --wovyr-ui-font: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --wovyr-ui-fg: #1a1a1a;
-  --wovyr-ui-fg-muted: #595959;
-  --wovyr-ui-bg: #ffffff;
-  --wovyr-ui-bg-subtle: #f5f5f7;
-  --wovyr-ui-border: #d0d0d5;
-  --wovyr-ui-accent: #2955c6;
-  --wovyr-ui-accent-fg: #ffffff;
-  --wovyr-ui-danger: #b3271e;
+  --wovyr-ui-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --wovyr-ui-font-mono: "JetBrains Mono", "Cascadia Code", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --wovyr-ui-fg: #0D1424;
+  --wovyr-ui-fg-muted: #4A5468;
+  --wovyr-ui-bg: #FFFFFF;
+  --wovyr-ui-bg-subtle: #FBFCFD;
+  --wovyr-ui-border: #E6E9EF;
+  --wovyr-ui-accent: #2D54E8;
+  --wovyr-ui-accent-fg: #fff;
+  --wovyr-ui-danger: #CA2E37;
   --wovyr-ui-danger-fg: #ffffff;
-  --wovyr-ui-success: #147d3f;
-  --wovyr-ui-warning: #8a5a00;
-  --wovyr-ui-focus-ring: #2955c6;
-  --wovyr-ui-radius: 8px;
+  --wovyr-ui-success: #147D4D;
+  --wovyr-ui-warning: #9F5E00;
+  --wovyr-ui-focus-ring: #2D54E8;
+  --wovyr-ui-radius: 10px;
   --wovyr-ui-gap: 12px;
-  --wovyr-ui-unknown-bg: #fff6e5;
-  --wovyr-ui-unknown-border: #c98a12;
+  --wovyr-ui-unknown-bg: #FAF0DC;
+  --wovyr-ui-unknown-border: #9F5E00;
 
   font-family: var(--wovyr-ui-font);
   color: var(--wovyr-ui-fg);
@@ -31,55 +53,55 @@
 
 @media (prefers-color-scheme: dark) {
   .wovyr-ui {
-    --wovyr-ui-fg: #f0f0f2;
-    --wovyr-ui-fg-muted: #b0b0b8;
-    --wovyr-ui-bg: #1c1c1f;
-    --wovyr-ui-bg-subtle: #28282c;
-    --wovyr-ui-border: #3d3d42;
-    --wovyr-ui-accent: #7ea6ff;
+    --wovyr-ui-fg: #EAEEF6;
+    --wovyr-ui-fg-muted: #9AA6BC;
+    --wovyr-ui-bg: #121826;
+    --wovyr-ui-bg-subtle: #0F1421;
+    --wovyr-ui-border: #222B3D;
+    --wovyr-ui-accent: #5B7BFF;
     --wovyr-ui-accent-fg: #101014;
-    --wovyr-ui-danger: #ff6b60;
-    --wovyr-ui-danger-fg: #1a0000;
-    --wovyr-ui-success: #4ad182;
-    --wovyr-ui-warning: #e0a940;
-    --wovyr-ui-focus-ring: #7ea6ff;
-    --wovyr-ui-unknown-bg: #332a10;
-    --wovyr-ui-unknown-border: #e0a940;
+    --wovyr-ui-danger: #F26168;
+    --wovyr-ui-danger-fg: #101014;
+    --wovyr-ui-success: #36C586;
+    --wovyr-ui-warning: #E0A33A;
+    --wovyr-ui-focus-ring: #5B7BFF;
+    --wovyr-ui-unknown-bg: #2A2113;
+    --wovyr-ui-unknown-border: #E0A33A;
   }
 }
 
 .wovyr-ui[data-theme="dark"] {
-  --wovyr-ui-fg: #f0f0f2;
-  --wovyr-ui-fg-muted: #b0b0b8;
-  --wovyr-ui-bg: #1c1c1f;
-  --wovyr-ui-bg-subtle: #28282c;
-  --wovyr-ui-border: #3d3d42;
-  --wovyr-ui-accent: #7ea6ff;
+  --wovyr-ui-fg: #EAEEF6;
+  --wovyr-ui-fg-muted: #9AA6BC;
+  --wovyr-ui-bg: #121826;
+  --wovyr-ui-bg-subtle: #0F1421;
+  --wovyr-ui-border: #222B3D;
+  --wovyr-ui-accent: #5B7BFF;
   --wovyr-ui-accent-fg: #101014;
-  --wovyr-ui-danger: #ff6b60;
-  --wovyr-ui-danger-fg: #1a0000;
-  --wovyr-ui-success: #4ad182;
-  --wovyr-ui-warning: #e0a940;
-  --wovyr-ui-focus-ring: #7ea6ff;
-  --wovyr-ui-unknown-bg: #332a10;
-  --wovyr-ui-unknown-border: #e0a940;
+  --wovyr-ui-danger: #F26168;
+  --wovyr-ui-danger-fg: #101014;
+  --wovyr-ui-success: #36C586;
+  --wovyr-ui-warning: #E0A33A;
+  --wovyr-ui-focus-ring: #5B7BFF;
+  --wovyr-ui-unknown-bg: #2A2113;
+  --wovyr-ui-unknown-border: #E0A33A;
 }
 
 .wovyr-ui[data-theme="light"] {
-  --wovyr-ui-fg: #1a1a1a;
-  --wovyr-ui-fg-muted: #595959;
-  --wovyr-ui-bg: #ffffff;
-  --wovyr-ui-bg-subtle: #f5f5f7;
-  --wovyr-ui-border: #d0d0d5;
-  --wovyr-ui-accent: #2955c6;
-  --wovyr-ui-accent-fg: #ffffff;
-  --wovyr-ui-danger: #b3271e;
+  --wovyr-ui-fg: #0D1424;
+  --wovyr-ui-fg-muted: #4A5468;
+  --wovyr-ui-bg: #FFFFFF;
+  --wovyr-ui-bg-subtle: #FBFCFD;
+  --wovyr-ui-border: #E6E9EF;
+  --wovyr-ui-accent: #2D54E8;
+  --wovyr-ui-accent-fg: #fff;
+  --wovyr-ui-danger: #CA2E37;
   --wovyr-ui-danger-fg: #ffffff;
-  --wovyr-ui-success: #147d3f;
-  --wovyr-ui-warning: #8a5a00;
-  --wovyr-ui-focus-ring: #2955c6;
-  --wovyr-ui-unknown-bg: #fff6e5;
-  --wovyr-ui-unknown-border: #c98a12;
+  --wovyr-ui-success: #147D4D;
+  --wovyr-ui-warning: #9F5E00;
+  --wovyr-ui-focus-ring: #2D54E8;
+  --wovyr-ui-unknown-bg: #FAF0DC;
+  --wovyr-ui-unknown-border: #9F5E00;
 }
 
 .wovyr-ui *,
@@ -181,6 +203,9 @@
 .wovyr-ui-keyvalue dd {
   margin: 0;
   font-weight: 500;
+  /* DSY-102: key-value pairs are where a generated frame most often shows an
+   * id/hash/status/amount — the brand's mono role for data positions. */
+  font-family: var(--wovyr-ui-font-mono);
 }
 
 .wovyr-ui-image {

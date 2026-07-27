@@ -15,6 +15,15 @@ export default defineConfig({
       title: 'Wovyr',
       description:
         'Wovyr — Generative UI Trust Runtime, built on an enterprise AI Agent Operating System written in Rust.',
+      // DSY-103: brand continuity between `/` and the docs — the mono-forward
+      // identity used to vanish entirely here (stock Starlight defaults: a
+      // different blue, pure-white background, sans headings, no mark).
+      logo: {
+        light: './src/assets/brand/logo-light.svg',
+        dark: './src/assets/brand/logo-dark.svg',
+        replacesTitle: true,
+      },
+      customCss: ['./src/styles/starlight-brand.css', './src/styles/fonts.css'],
       social: [
         {
           icon: 'github',

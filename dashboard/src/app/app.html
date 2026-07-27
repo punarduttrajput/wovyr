@@ -3,9 +3,13 @@
     <div class="rail-scrim" (click)="navOpen.set(false)" aria-hidden="true"></div>
   }
   <aside class="rail" [class.open]="navOpen()">
+    <!-- DSY-106: unified on the window/scanline mark (a generative-UI frame
+         being verified — matches the product thesis) already used by the
+         landing page and favicon; this used to be a plain triangle, a
+         different mark entirely. See DESIGN-system.md §4. -->
     <div class="brand">
       <span class="mark">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M12 3L21 19H3L12 3Z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect class="mk-win" x="3.5" y="4.5" width="17" height="15" rx="2.6"/><circle class="mk-dot" cx="6.6" cy="8" r="0.9"/><circle class="mk-dot" cx="9.2" cy="8" r="0.9"/><path class="mk-scan" d="M6.4 14H18"/><circle class="mk-node" cx="14.6" cy="14" r="1.7"/></svg>
       </span>
       <b>Wovyr</b>
       <span class="env">v0.3</span>

@@ -35,6 +35,9 @@
             ],
             "styles": [
               "node_modules/@wovyr/ui-react/dist/src/styles.css",
+              "node_modules/@fontsource/jetbrains-mono/latin-400.css",
+              "node_modules/@fontsource/jetbrains-mono/latin-700.css",
+              "../packages/tokens/wovyr-tokens.css",
               "src/styles.scss"
             ]
           },
@@ -93,6 +96,7 @@
               }
             ],
             "styles": [
+              "../packages/tokens/wovyr-tokens.css",
               "src/styles.scss"
             ]
           }

@@ -1,0 +1,33 @@
+/* WEB-303: self-hosts JetBrains Mono — DESIGN-system.md §3 says "Production
+ * self-hosts JetBrains Mono," but nothing did; the --mono stack fell through
+ * to whatever the OS provided (different faces on Windows/macOS/Linux, and
+ * in a different fallback order between the landing page and the dashboard).
+ *
+ * Two static weights only (400 regular, 700 bold) — JetBrains Mono isn't
+ * shipped as a variable font by Fontsource, and headings use font-weight:650
+ * (see the canonical token file's h1-h3 rule); 650 has no exact registered
+ * face, but per the CSS font-matching algorithm the browser resolves it to
+ * the nearest available registered weight (700 here), so a discrete 700
+ * face is sufficient — no synthetic/faux-bold fallback occurs.
+ *
+ * `latin` subset only — Starlight's own build reports "Discovered 1
+ * language: en" for this docs site, and the landing page is English-only.
+ * Box-drawing/block glyphs (used in the hero canvas and code chips,
+ * e.g. ┌─┐│└┘▤▦▁▃▅▂▇▄▆░▓◹⌁) are NOT guaranteed present in Fontsource's latin
+ * subset — deliberately NOT verified further, and deliberately not blocking:
+ * per-glyph font fallback is standard cross-browser behaviour, so any glyph
+ * this face lacks silently falls through to the next entry in --mono's
+ * stack (Cascadia Code, SF Mono, ui-monospace, ...), which is exactly the
+ * documented, acceptable fallback path WEB-303's own acceptance criteria
+ * allows ("or the canvas explicitly keeps a system fallback with that
+ * decision documented").
+ *
+ * Consumed by both website/src/pages/index.astro (landing) and, via
+ * Starlight's customCss, the docs site — see astro.config.mjs. The
+ * dashboard loads the identical two files directly from node_modules via
+ * angular.json's global styles array, so both surfaces render the exact
+ * same font bytes, not just the same font name.
+ */
+
+@import "@fontsource/jetbrains-mono/latin-400.css";
+@import "@fontsource/jetbrains-mono/latin-700.css";

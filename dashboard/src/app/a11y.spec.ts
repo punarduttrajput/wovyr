@@ -15,8 +15,14 @@ import { Audit } from './features/audit/audit';
  */
 async function expectNoViolations(root: Element): Promise<void> {
   const results = await axe.run(root, {
-    // Color-contrast needs a fully painted page; Karma renders detached
-    // fixtures, so contrast is checked in review, not here.
+    // A11Y-207: color-contrast still can't be measured reliably here — Karma
+    // renders detached fixtures axe can't paint — but this is no longer the
+    // only place contrast gets checked. a11y-contrast.spec.ts enforces every
+    // documented token pair's WCAG ratio directly from the live resolved
+    // custom-property values (real values, both themes, no detached-fixture
+    // problem since it reads document.documentElement, not a painted
+    // element); DX-502's Playwright suite additionally runs axe with
+    // color-contrast ENABLED against a real, fully painted page.
     rules: { 'color-contrast': { enabled: false } },
   });
   const summary = results.violations

@@ -1,0 +1,77 @@
+/* DSY-103: maps the canonical brand tokens (packages/tokens/wovyr-tokens.css)
+ * onto Starlight's own CSS custom-property surface — the docs site is a
+ * re-skin of Starlight's existing structure/dark-light switching, not a
+ * fork, so this overrides Starlight's *consumed* variables directly
+ * (--sl-color-bg, --sl-color-text, etc.) rather than trying to replicate its
+ * internal gray-scale/hue derivation chain. Starlight defaults its bare
+ * :root to DARK values with a `:root[data-theme="light"]` override (see
+ * node_modules/@astrojs/starlight/style/props.css) — matched here for the
+ * same structural reason.
+ *
+ * Deliberately NOT remapped: the admonition colours (orange/green/purple/red
+ * for tip/note/caution/danger callouts) — DESIGN-system.md doesn't specify
+ * brand values for these, and Starlight tuned their internal low/base/high
+ * contrast relationships as one system; remapping only some of them risked
+ * breaking pairings this file doesn't have the same verified contrast
+ * evidence for. A future ticket can revisit if the design system grows an
+ * opinion here.
+ */
+
+@import "../../../packages/tokens/wovyr-tokens.css";
+
+:root {
+  --sl-color-bg: var(--canvas);
+  --sl-color-bg-nav: var(--surface);
+  --sl-color-bg-sidebar: var(--surface);
+  --sl-color-bg-inline-code: var(--surface-2);
+  --sl-color-bg-accent: var(--accent);
+  --sl-color-text: var(--ink-dim);
+  --sl-color-text-accent: var(--accent);
+  --sl-color-text-invert: var(--accent-fg);
+  --sl-color-white: var(--ink);
+  --sl-color-hairline: var(--line);
+  --sl-color-hairline-light: var(--line);
+  --sl-color-hairline-shade: var(--line);
+  --sl-color-accent: #5B7BFF;
+  --sl-color-accent-high: #99ADFF;
+  --sl-color-accent-low: #001466;
+
+  --sl-font: var(--sans);
+  --sl-font-mono: var(--mono);
+}
+
+:root[data-theme="light"] {
+  --sl-color-bg: var(--canvas);
+  --sl-color-bg-nav: var(--surface);
+  --sl-color-bg-sidebar: var(--surface);
+  --sl-color-bg-inline-code: var(--surface-2);
+  --sl-color-bg-accent: var(--accent);
+  --sl-color-text: var(--ink-dim);
+  --sl-color-text-accent: var(--accent);
+  --sl-color-text-invert: var(--accent-fg);
+  --sl-color-white: var(--ink);
+  --sl-color-hairline: var(--line);
+  --sl-color-hairline-light: var(--line);
+  --sl-color-hairline-shade: var(--line);
+  --sl-color-accent: #2D54E8;
+  --sl-color-accent-high: #0D2273;
+  --sl-color-accent-low: #D1DAFA;
+}
+
+/* Starlight has one font token for all body text (by design — see the
+ * upstream props.css) and no separate heading-face token, so the
+ * mono-forward "the product speaking in its own voice" treatment (
+ * DESIGN-system.md §3) is applied here explicitly rather than via
+ * --sl-font, which would also (wrongly) set paragraph body text to mono. */
+h1:not(:where(.not-content *)),
+h2:not(:where(.not-content *)),
+h3:not(:where(.not-content *)),
+h4:not(:where(.not-content *)),
+h5:not(:where(.not-content *)) {
+  font-family: var(--mono);
+  letter-spacing: -0.01em;
+}
+
+.site-title {
+  font-family: var(--mono);
+}

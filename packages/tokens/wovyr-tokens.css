@@ -1,0 +1,166 @@
+/*
+ * Wovyr design tokens — the single source of truth for brand colours,
+ * radius, and type-face stacks (DSY-101, docs/18-roadmap/v1.5-design-system-
+ * unification.md).
+ *
+ * Consumed directly (not copy-pasted) by:
+ *   - website/src/pages/index.astro (landing) — @import
+ *   - website/astro.config.mjs (docs, via Starlight's customCss) — DSY-103
+ *   - dashboard/angular.json (global styles array) + dashboard/src/styles.scss
+ *
+ * `@wovyr/ui-react` (sdks/ui-react) does NOT import this file — it is a
+ * published, dependency-free SDK that must render correctly standalone with
+ * no host tokens present (styles.css's own doc comment). Its `--wovyr-ui-*`
+ * defaults are instead kept value-equal to this file by hand (DSY-102),
+ * checked by sdks/ui-react/test/token-parity.test.ts so a future edit here
+ * that isn't mirrored there fails that package's own test suite.
+ *
+ * Values changed from what was previously hardcoded independently in each
+ * surface, and why:
+ *   - `--line`/`--line-2`, `--surface-2` etc. unify on the dashboard's
+ *     values where the two surfaces had drifted, per DESIGN-system.md's own
+ *     stated precedence ("the dashboard already defines Wovyr's visual
+ *     language ... the landing extends that system").
+ *   - `--ink-3`, `--ok`, `--warn`, `--crit`/`--block`, `--accent-2` (violet
+ *     text usage) are DARKENED in light mode from their original values —
+ *     A11Y-201/A11Y-203 fixes, folded in here rather than as a separate
+ *     pass, since this file is the one place that needed editing anyway.
+ *     Each was verified against its actual rendered background pair (not
+ *     just `--surface`/`--surface-2` in the abstract) — see
+ *     dashboard/src/app/a11y-contrast.spec.ts for the enforced assertions.
+ *   - `--accent-fg` (A11Y-202, already shipped in Phase 1) is included here
+ *     for completeness — the fix that made white-on-accent legible on a
+ *     filled dark-theme button.
+ *
+ * A different surface's naming convention for the same semantic slot is
+ * preserved rather than forced into one name (`--block` on the landing page,
+ * `--crit`/`--crit-bg` on the dashboard, both meaning "fail-closed / blocked
+ * / destructive") — DSY-101's acceptance criteria is value agreement, not a
+ * cross-codebase variable rename; that would be a separate, much larger
+ * refactor of every dashboard component `.scss` file, not this ticket's
+ * scope. Both names are defined here, aliased to the identical value.
+ */
+
+:root {
+  /* ---- surfaces ---- */
+  --canvas: #F6F7F9;
+  --surface: #FFFFFF;
+  --surface-2: #FBFCFD;
+  --line: #E6E9EF;
+  --line-2: #EEF0F4;
+
+  /* ---- ink (text) ---- */
+  --ink: #0D1424;
+  --ink-dim: #55617A;   /* landing's single secondary tier */
+  --ink-2: #4A5468;      /* dashboard's secondary tier */
+  --ink-3: #616B80;      /* dashboard's tertiary tier — darkened, A11Y-201: was #8A93A6 (3.09:1 on --surface); #6A758C (4.63:1 on --surface) was tried first and shipped, but DX-502's e2e suite caught it failing on plain --canvas (4.31:1, e.g. the .eyebrow breadcrumb text) — corrected again to clear canvas/surface/surface-2 all at once (4.99/5.35/5.21) */
+
+  /* ---- accent (cobalt = verified/passed the gate) ---- */
+  --accent: #2D54E8;
+  --accent-fg: #fff;     /* A11Y-202: foreground for a FILLED accent surface (buttons) */
+  --accent-weak: #EAEEFD;
+  --accent-ink: #1B3BB8;
+  --accent-soft: rgba(45, 84, 232, .10);
+  --accent-line: rgba(45, 84, 232, .30);
+
+  /* ---- violet (human-decision accent, sparingly) ---- */
+  --accent-2: #6A4DFF;   /* landing's name — A11Y-203: was #7B61FF (3.71:1 on surface-2), now 5.10:1 */
+  --violet: #7050FF;     /* dashboard's name for the same role, used only in the .ava/.plug .logo gradient badges — a separate, already-fixed contrast story (see app.scss/marketplace.scss); kept distinct from --accent-2 because that badge gradient's math depends on this exact value against --accent, not against text directly */
+
+  /* ---- semantic status ---- */
+  --ok: #147D4D;         /* A11Y-203: was #18935A (3.45:1 on surface-2 pill bg), now 4.55:1 on ok-bg / 5.09:1 on surface-2 */
+  --ok-bg: #E6F4EC;
+  --warn: #9F5E00;       /* A11Y-203: was #B26A00 (3.75:1), now 4.55:1 on warn-bg */
+  --warn-bg: #FAF0DC;
+  --crit: #CA2E37;       /* A11Y-203: was #D23B43 (4.04:1 on crit-bg), now 4.52:1 on crit-bg / 5.31:1 on surface */
+  --crit-bg: #FBE9EA;
+  --block: #CA2E37;      /* landing's name for the identical --crit value/role */
+  --neutral-bg: #EEF1F5;
+
+  /* ---- shape ---- */
+  --r: 10px;
+  --r-sm: 7px;
+
+  /* ---- type ---- */
+  --mono: "JetBrains Mono", "Cascadia Code", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* ---- elevation (dashboard-only; landing uses borders, not shadows) ---- */
+  --shadow: 0 1px 2px rgba(13, 20, 36, .04), 0 1px 3px rgba(13, 20, 36, .06);
+  --shadow-lg: 0 8px 28px rgba(13, 20, 36, .12);
+}
+
+:root[data-theme="dark"] {
+  --canvas: #0A0E18;
+  --surface: #121826;
+  --surface-2: #0F1421;
+  --line: #222B3D;
+  --line-2: #1A2233;
+
+  --ink: #EAEEF6;
+  --ink-dim: #9AA6BF;
+  --ink-2: #9AA6BC;
+  --ink-3: #758294;      /* A11Y-201: was #697587 (3.80:1 on --surface), now 4.53:1 */
+
+  --accent: #5B7BFF;
+  --accent-fg: #101014;
+  --accent-weak: #19233F;
+  --accent-ink: #9DB1FF;
+  --accent-soft: rgba(91, 123, 255, .14);
+  --accent-line: rgba(91, 123, 255, .42);
+
+  --accent-2: #9B87FF;   /* dark-theme values were already AA (5.45-7.9:1 measured); unchanged */
+  --violet: #8570FF;     /* dashboard badge-gradient dark value — see app.scss's comment */
+
+  --ok: #36C586;
+  --ok-bg: #10271E;
+  --warn: #E0A33A;
+  --warn-bg: #2A2113;
+  --crit: #F26168;
+  --crit-bg: #2C1517;
+  --block: #FF5C6A;      /* landing's dark-theme block value — already AA, unchanged */
+  --neutral-bg: #1A2233;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 2px 6px rgba(0, 0, 0, .3);
+  --shadow-lg: 0 12px 36px rgba(0, 0, 0, .5);
+}
+
+:root[data-theme="light"] {
+  /* Explicit re-statement of the light block above, for surfaces (the
+   * landing page) that toggle via an explicit data-theme="light"/"dark"
+   * attribute rather than relying on the bare :root fallback. Kept
+   * byte-for-byte identical to the base :root block — see
+   * sdks/ui-react/test/token-parity.test.ts's cross-block check. */
+  --canvas: #F6F7F9;
+  --surface: #FFFFFF;
+  --surface-2: #FBFCFD;
+  --line: #E6E9EF;
+  --line-2: #EEF0F4;
+
+  --ink: #0D1424;
+  --ink-dim: #55617A;
+  --ink-2: #4A5468;
+  --ink-3: #616B80;
+
+  --accent: #2D54E8;
+  --accent-fg: #fff;
+  --accent-weak: #EAEEFD;
+  --accent-ink: #1B3BB8;
+  --accent-soft: rgba(45, 84, 232, .10);
+  --accent-line: rgba(45, 84, 232, .30);
+
+  --accent-2: #6A4DFF;
+  --violet: #7050FF;
+
+  --ok: #147D4D;
+  --ok-bg: #E6F4EC;
+  --warn: #9F5E00;
+  --warn-bg: #FAF0DC;
+  --crit: #CA2E37;
+  --crit-bg: #FBE9EA;
+  --block: #CA2E37;
+  --neutral-bg: #EEF1F5;
+
+  --shadow: 0 1px 2px rgba(13, 20, 36, .04), 0 1px 3px rgba(13, 20, 36, .06);
+  --shadow-lg: 0 8px 28px rgba(13, 20, 36, .12);
+}

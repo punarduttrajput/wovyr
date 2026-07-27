@@ -1,6 +1,14 @@
 ---
 // Wovyr marketing landing — the site root (/). Docs keep their section routes.
 // Ported from website/landing/prototypes/wovyr-landing-v1.html (reviewed).
+
+// WEB-303: preload the two self-hosted JetBrains Mono weights actually used
+// (400/700 — see src/styles/fonts.css) so the mono display face — this
+// page's headline typeface — doesn't wait for CSSOM discovery before the
+// browser starts fetching it, reducing the swap-in layout shift `font-
+// display: swap` alone doesn't eliminate.
+import fontRegularUrl from '@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2?url';
+import fontBoldUrl from '@fontsource/jetbrains-mono/files/jetbrains-mono-latin-700-normal.woff2?url';
 ---
 <!doctype html>
 <html lang="en">
@@ -8,6 +16,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="preload" href={fontRegularUrl} as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href={fontBoldUrl} as="font" type="font/woff2" crossorigin />
   <meta property="og:type" content="website" />
   <meta property="og:title" content="Wovyr — The trust layer for AI-generated interfaces" />
   <meta property="og:description" content="Validate, record, and durably run every interface an AI agent shows a human — on a Rust runtime that survives crashes, restarts, and time." />
@@ -21,62 +31,53 @@
        could possibly fail, so it's a separate, minimal, first script — not
        folded into the larger IIFE further down the page. */
     document.documentElement.classList.add("js");
-    /* DSY-104: set the theme before first paint to avoid a flash — reads the
-       SAME "starlight-theme" key the docs site's `ThemeProvider.astro` uses
-       (this page and the docs are the same Astro build/origin per
-       astro.config.mjs's `site`, so this is real cross-page continuity, not
-       just a matching name). Starlight stores "" for "follow system" and
-       "light"/"dark" for an explicit choice — `if (m)` already treats ""
-       as "no explicit preference," matching its own ThemeProvider exactly. */
-    try { var m = localStorage.getItem("starlight-theme"); if (m) document.documentElement.setAttribute("data-theme", m); } catch (e) {}
+    /* DSY-104/DSY-101: set the theme before first paint to avoid a flash —
+       reads the SAME "starlight-theme" key the docs site's
+       `ThemeProvider.astro` uses (this page and the docs are the same Astro
+       build/origin per astro.config.mjs's `site`, so this is real cross-page
+       continuity, not just a matching name). Starlight stores "" for "follow
+       system" and "light"/"dark" for an explicit choice.
+       DSY-101: data-theme is now ALWAYS set explicitly (falling back to
+       matchMedia when no stored preference exists), matching the dashboard's
+       ThemeService.apply() pattern exactly — the canonical token file
+       (packages/tokens/wovyr-tokens.css) only defines attribute-scoped
+       :root[data-theme="light"]/"dark" blocks, not an ambient bare :root
+       default, so every surface must set the attribute rather than lean on a
+       CSS-only fallback. (The one deliberate exception is the no-JS case:
+       with JS disabled data-theme is never set, and the canonical file's
+       bare :root block — light values — is what a no-JS visitor sees
+       regardless of OS preference. That's an accepted, minor trade-off, not
+       a WEB-302 regression: content stays fully visible and legible either
+       way, just always in light mode without JS.) */
+    try {
+      var m = localStorage.getItem("starlight-theme");
+      var explicit = (m === "light" || m === "dark") ? m : null;
+      var theme = explicit || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.setAttribute("data-theme", theme);
+    } catch (e) {
+      document.documentElement.setAttribute("data-theme", matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    }
   </script>
   <title>Wovyr — The trust layer for AI-generated interfaces</title>
   <meta name="description" content="Wovyr validates, records, and durably runs every interface an AI agent shows a human — built on a Rust agent runtime that survives crashes, restarts, and time." />
 
 <style is:global>
-  /* ============================================================= TOKENS */
+  /* ============================================================= TOKENS
+     DSY-101: brand colours, radius, and type stacks are no longer defined
+     here — they come from the single canonical source at
+     packages/tokens/wovyr-tokens.css (also consumed by the docs site's
+     Starlight config and the dashboard's Angular build; see that file's own
+     header comment). Only this page's own type SCALE and layout constants
+     (--f0.."--f7", --maxw, --pad) stay local — they're a landing-specific
+     numeric scale, not a cross-surface brand token. */
+  @import "../../../packages/tokens/wovyr-tokens.css";
+  /* WEB-303: self-hosted JetBrains Mono — see fonts.css's own header comment. */
+  @import "../styles/fonts.css";
+
   :root{
-    --canvas:#0A0E18; --surface:#121826; --surface-2:#0E1420;
-    --ink:#EAEEF6; --ink-dim:#9AA6BF; --line:#1E2740;
-    --accent:#5B7BFF; --accent-2:#9B87FF;
-    /* A11Y-202: white-on-accent is only 3.67:1 in dark mode (cobalt can't
-       carry white text) — a near-black foreground on filled buttons clears
-       AA (5.17:1) while --accent itself stays unchanged for links/borders/
-       focus, where it already clears AA against canvas/surface. Matches the
-       --wovyr-ui-accent-fg convention sdks/ui-react/src/styles.css already
-       uses for the identical problem. */
-    --accent-fg:#101014;
-    --block:#FF5C6A; --ok:#3FBF86;
-    --accent-soft:rgba(91,123,255,.14); --accent-line:rgba(91,123,255,.42);
-
-    --mono:"Cascadia Code","SF Mono","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
-    --sans:ui-sans-serif,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-
     --f0:.75rem; --f1:.875rem; --f2:1rem; --f3:1.25rem; --f4:1.6rem;
     --f5:2.1rem; --f6:2.9rem; --f7:4rem;
     --maxw:1200px; --pad:clamp(20px,5vw,64px);
-    --r:10px; --r-sm:7px;
-  }
-  @media (prefers-color-scheme:light){
-    :root{
-      --canvas:#F6F7F9; --surface:#FFFFFF; --surface-2:#EEF1F6;
-      --ink:#0D1424; --ink-dim:#55617A; --line:#E2E7F0;
-      --accent:#2D54E8; --accent-2:#7B61FF; --accent-fg:#fff;
-      --block:#D23B43; --ok:#18935A;
-      --accent-soft:rgba(45,84,232,.10); --accent-line:rgba(45,84,232,.30);
-    }
-  }
-  :root[data-theme="dark"]{
-    --canvas:#0A0E18; --surface:#121826; --surface-2:#0E1420;
-    --ink:#EAEEF6; --ink-dim:#9AA6BF; --line:#1E2740;
-    --accent:#5B7BFF; --accent-2:#9B87FF; --accent-fg:#101014; --block:#FF5C6A; --ok:#3FBF86;
-    --accent-soft:rgba(91,123,255,.14); --accent-line:rgba(91,123,255,.42);
-  }
-  :root[data-theme="light"]{
-    --canvas:#F6F7F9; --surface:#FFFFFF; --surface-2:#EEF1F6;
-    --ink:#0D1424; --ink-dim:#55617A; --line:#E2E7F0;
-    --accent:#2D54E8; --accent-2:#7B61FF; --accent-fg:#fff; --block:#D23B43; --ok:#18935A;
-    --accent-soft:rgba(45,84,232,.10); --accent-line:rgba(45,84,232,.30);
   }
 
   /* ============================================================= BASE */
@@ -94,6 +95,16 @@
   p{margin:0}
   ::selection{background:var(--accent); color:#fff}
   :focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:4px}
+
+  /* A11Y-204: visually hidden until keyboard-focused, then pinned to the
+     top-left corner above everything else. */
+  .skip-link{
+    position:absolute; top:-100%; left:12px; z-index:100;
+    background:var(--surface); color:var(--ink); font-family:var(--mono);
+    font-size:var(--f1); padding:10px 16px; border-radius:var(--r-sm);
+    border:1px solid var(--accent-line);
+  }
+  .skip-link:focus{top:12px}
 
   .wrap{max-width:var(--maxw); margin:0 auto; padding-inline:var(--pad)}
   .eyebrow{font-family:var(--mono); font-size:var(--f0); letter-spacing:.14em;
@@ -289,7 +300,10 @@
   footer{padding-block:52px 40px; background:var(--surface-2)}
   .foot{display:grid; grid-template-columns:1.4fr 1fr 1fr 1fr; gap:30px}
   @media(max-width:760px){.foot{grid-template-columns:1fr 1fr}}
-  .foot h4{font-family:var(--mono); font-size:var(--f0); letter-spacing:.12em;
+  /* A11Y-205: these are link-group labels, not content headings in the page
+   outline (the section H2s already end at H2/H3 depth) — restructured as
+   <nav aria-label> below rather than kept as a skipped-to-H4 heading. */
+.foot .foot-h{font-family:var(--mono); font-size:var(--f0); letter-spacing:.12em;
     text-transform:uppercase; color:var(--ink-dim); margin:0 0 14px; font-weight:600}
   .foot a{display:block; color:var(--ink-dim); font-size:var(--f1); margin-bottom:9px}
   .foot a:hover{color:var(--accent)}
@@ -302,6 +316,11 @@
 </style>
 </head>
 <body>
+
+<!-- A11Y-204: first focusable element on the page — WCAG 2.4.1 (Bypass
+     Blocks). Visually hidden until focused (see .skip-link below), jumps
+     straight past the nav to <main>. -->
+<a class="skip-link" href="#main">Skip to content</a>
 
 <!-- ================================================================ NAV -->
 <header class="nav" id="nav">
@@ -323,13 +342,17 @@
 
 <a id="top"></a>
 
+<!-- A11Y-204: every section below was previously outside any landmark —
+     axe's landmark-one-main/region rules both flagged this. -->
+<main id="main">
+
 <!-- ================================================================ HERO -->
-<section id="hero">
+<section id="hero" aria-labelledby="hero-heading">
   <canvas id="gate" aria-hidden="true"></canvas>
   <div class="hero-scrim"></div>
   <div class="wrap hero-in">
     <span class="hero-tag"><span class="dot"></span> Generative UI Trust Runtime · Rust</span>
-    <h1>The trust layer for<br><span class="b">AI-generated interfaces.</span></h1>
+    <h1 id="hero-heading">The trust layer for<br><span class="b">AI-generated interfaces.</span></h1>
     <p class="hero-sub">
       Wovyr validates, records, and durably runs every interface an AI agent shows a
       human — on a Rust runtime that survives crashes, restarts, and time.
@@ -356,11 +379,11 @@
 </div></div>
 
 <!-- ================================================================ SHIFT -->
-<section class="band" id="shift">
+<section class="band" id="shift" aria-labelledby="shift-heading">
   <div class="wrap">
     <div class="sec-head reveal">
       <span class="eyebrow">01 · Why now</span>
-      <h2>Interfaces are moving from pages to <span class="accent">runtime output.</span></h2>
+      <h2 id="shift-heading">Interfaces are moving from pages to <span class="accent">runtime output.</span></h2>
       <p>When an AI generates the UI at runtime, the web's security assumptions break.
         The interface is no longer authored, reviewed, or trusted — it's emitted.</p>
     </div>
@@ -385,11 +408,11 @@
 </section>
 
 <!-- ================================================================ HOW -->
-<section class="band" id="how">
+<section class="band" id="how" aria-labelledby="how-heading">
   <div class="wrap">
     <div class="sec-head reveal">
       <span class="eyebrow">02 · How it works</span>
-      <h2>Every frame passes the gate — <span class="accent">fail-closed.</span></h2>
+      <h2 id="how-heading">Every frame passes the gate — <span class="accent">fail-closed.</span></h2>
       <p>The path from an agent's intent to a human's decision, recorded end to end.</p>
     </div>
     <div class="pipe reveal">
@@ -429,11 +452,11 @@ resume ✓</pre>
 </section>
 
 <!-- ================================================================ PLATFORM -->
-<section class="band" id="platform">
+<section class="band" id="platform" aria-labelledby="platform-heading">
   <div class="wrap">
     <div class="sec-head reveal">
       <span class="eyebrow">03 · The platform underneath</span>
-      <h2>A complete agent runtime, <span class="accent">not just an SDK.</span></h2>
+      <h2 id="platform-heading">A complete agent runtime, <span class="accent">not just an SDK.</span></h2>
       <p>The trust layer rides on a full AI Agent Operating System — eight engines,
         one Rust binary.</p>
     </div>
@@ -451,11 +474,11 @@ resume ✓</pre>
 </section>
 
 <!-- ================================================================ TRUST -->
-<section class="band" id="trust">
+<section class="band" id="trust" aria-labelledby="trust-heading">
   <div class="wrap">
     <div class="sec-head reveal">
       <span class="eyebrow">04 · Trust &amp; security</span>
-      <h2>Built to be <span class="accent">provable,</span> not just careful.</h2>
+      <h2 id="trust-heading">Built to be <span class="accent">provable,</span> not just careful.</h2>
     </div>
     <div class="two reveal">
       <div class="tlist">
@@ -496,11 +519,11 @@ resume <span class="o">durable ✓</span></div>
 </section>
 
 <!-- ================================================================ RUST -->
-<section class="band" id="rust">
+<section class="band" id="rust" aria-labelledby="rust-heading">
   <div class="wrap">
     <div class="sec-head reveal">
       <span class="eyebrow">05 · Built in Rust</span>
-      <h2>Memory-safe, deterministic, <span class="accent">one binary.</span></h2>
+      <h2 id="rust-heading">Memory-safe, deterministic, <span class="accent">one binary.</span></h2>
       <p>A 22-crate workspace on edition 2024. The core is deterministic — no ambient
         clocks or randomness — so behavior is testable and reproducible.</p>
     </div>
@@ -523,11 +546,11 @@ resume <span class="o">durable ✓</span></div>
 </section>
 
 <!-- ================================================================ QUICKSTART -->
-<section class="band" id="quickstart">
+<section class="band" id="quickstart" aria-labelledby="quickstart-heading">
   <div class="wrap">
     <div class="sec-head reveal">
       <span class="eyebrow">06 · Quickstart</span>
-      <h2>Running in <span class="accent">five minutes,</span> fully offline.</h2>
+      <h2 id="quickstart-heading">Running in <span class="accent">five minutes,</span> fully offline.</h2>
       <p>No API key. A deterministic mock provider answers so you can see the whole loop
         before wiring a real model.</p>
     </div>
@@ -556,11 +579,11 @@ resume <span class="o">durable ✓</span></div>
 </section>
 
 <!-- ================================================================ ECOSYSTEM -->
-<section class="band" id="ecosystem">
+<section class="band" id="ecosystem" aria-labelledby="ecosystem-heading">
   <div class="wrap">
     <div class="sec-head reveal">
       <span class="eyebrow">07 · Adopt anywhere</span>
-      <h2>An embeddable runtime, <span class="accent">not a walled garden.</span></h2>
+      <h2 id="ecosystem-heading">An embeddable runtime, <span class="accent">not a walled garden.</span></h2>
       <p>Drop the trust layer in front of any agent stack — Wovyr-native or external.</p>
     </div>
     <div class="eco reveal">
@@ -572,10 +595,10 @@ resume <span class="o">durable ✓</span></div>
 </section>
 
 <!-- ================================================================ CTA -->
-<section class="band" id="cta">
+<section class="band" id="cta" aria-labelledby="cta-heading">
   <div class="wrap reveal" id="docs-link">
     <span class="eyebrow">Get started</span>
-    <h2>Put a trust layer between<br>your agents and your users.</h2>
+    <h2 id="cta-heading">Put a trust layer between<br>your agents and your users.</h2>
     <p>Read the architecture, run it offline in five minutes, or read the source.
       It's Apache-2.0, all the way down.</p>
     <div class="cta-row">
@@ -584,6 +607,8 @@ resume <span class="o">durable ✓</span></div>
     </div>
   </div>
 </section>
+
+</main>
 
 <!-- ================================================================ FOOTER -->
 <footer>
@@ -597,21 +622,21 @@ resume <span class="o">durable ✓</span></div>
         <p class="blurb">The trust layer for AI-generated interfaces, built on a Rust
           agent operating system.</p>
       </div>
-      <div>
-        <h4>Product</h4>
+      <nav aria-label="Product">
+        <p class="foot-h">Product</p>
         <a href="#how">How it works</a><a href="#platform">Platform</a>
         <a href="#trust">Trust &amp; security</a><a href="#quickstart">Quickstart</a>
-      </div>
-      <div>
-        <h4>Docs</h4>
+      </nav>
+      <nav aria-label="Docs">
+        <p class="foot-h">Docs</p>
         <a href="/00-executive/vision/">Executive &amp; vision</a><a href="/02-architecture/c4-context/">Architecture</a>
         <a href="/09-api/">API &amp; SDKs</a><a href="/18-roadmap/">Roadmap</a>
-      </div>
-      <div>
-        <h4>Project</h4>
+      </nav>
+      <nav aria-label="Project">
+        <p class="foot-h">Project</p>
         <a href="https://github.com/punarduttrajput/Wovyr">GitHub ↗</a><a href="https://github.com/punarduttrajput/Wovyr/blob/main/SECURITY.md">Security policy</a>
         <a href="https://github.com/punarduttrajput/Wovyr/blob/main/CHANGELOG.md">Changelog</a><a href="https://github.com/punarduttrajput/Wovyr/blob/main/LICENSE">License · Apache-2.0</a>
-      </div>
+      </nav>
     </div>
     <div class="foot-base">
       <span>© 2026 Wovyr</span><span>·</span>
@@ -652,13 +677,14 @@ resume <span class="o">durable ✓</span></div>
      and picking a theme in the docs' own selector (light/dark/auto) is
      respected back here too. Always stores an explicit "light"/"dark" —
      this toggle has no third "auto" state of its own, so it never writes
-     Starlight's "" (auto) encoding. */
+     Starlight's "" (auto) encoding.
+     DSY-101: the head script (see <head>, runs before this) already set
+     data-theme unconditionally, so root.getAttribute("data-theme") is
+     never null/empty by the time a click can happen — no fallback needed
+     here anymore. */
   var root=document.documentElement;
-  var stored=null; try{stored=localStorage.getItem("starlight-theme")}catch(e){}
-  if(stored) root.setAttribute("data-theme",stored);
   document.getElementById("tgl").addEventListener("click",function(){
     var cur=root.getAttribute("data-theme");
-    if(!cur){ cur = matchMedia("(prefers-color-scheme: dark)").matches ? "dark":"light"; }
     var next=cur==="dark"?"light":"dark";
     root.setAttribute("data-theme",next);
     try{localStorage.setItem("starlight-theme",next)}catch(e){}

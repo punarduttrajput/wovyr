@@ -7,10 +7,10 @@ Document ID: RM-INDEX-001
 
 **Document ID:** RM-INDEX-001  
 **File Path:** `docs/18-roadmap/index.md`  
-**Version:** 1.7.0  
+**Version:** 1.8.0  
 **Status:** Active  
 **Owner:** Product Team  
-**Last Updated:** 2026-07-26
+**Last Updated:** 2026-07-27
 
 ---
 
@@ -26,10 +26,10 @@ see [v1.0.md](v1.0.md); **v1.1 is complete** (all three phases, 2026-07-19);
 shipped**. **v1.4 (Audit Remediation & Truth Reconciliation) is planned** — a
 truth-and-hardening milestone (not features) scoped by
 [PRD-007](../01-product/prd-audit-remediation.md) from a 2026-07-23 four-lens
-audit. **v1.5 (Design System Unification & UI Truth) Phase 1 is done** (all 9
-ship-blocker tickets, 2026-07-26); Phases 2/3 remain planned — the equivalent
-remediation pass for the three user-facing surfaces, from a 2026-07-26 UI/UX
-audit.
+audit. **v1.5 (Design System Unification & UI Truth) Phases 1 & 2 are done**
+(all 20 tickets, 2026-07-27, incl. the first browser e2e harness in this
+workspace); Phase 3 remains planned — the equivalent remediation pass for
+the three user-facing surfaces, from a 2026-07-26 UI/UX audit.
 
 ---
 
@@ -45,7 +45,7 @@ audit.
 | v1.2 | **Generative UI Trust Runtime** — the product milestone: frame protocol, trust/policy engine, durable interaction loop, renderer SDK, internal-tools beachhead | [v1.2-generative-ui.md](v1.2-generative-ui.md) |
 | v1.3 | **MCP Connection Management** — a persisted, UI-managed layer over the shipped MCP client: connection store, agent-manifest wiring, dashboard panel | [v1.3-mcp-connections.md](v1.3-mcp-connections.md) |
 | v1.4 | **Audit Remediation & Truth Reconciliation** — a truth-and-hardening milestone: day-one security fixes (SSRF, cross-tenant authz, audit MAC, KMS fail-closed), AI-core correctness (Anthropic embeddings, bounded caches, default retrieval), CI/claim honesty, and a sustainability scope freeze | [v1.4-audit-remediation.md](v1.4-audit-remediation.md) |
-| v1.5 | **Design System Unification & UI Truth** — a unification-and-truth milestone for the three user-facing surfaces: one token source across landing/docs/dashboard/renderer, WCAG AA remediation with a CI gate, dashboard identity truth, and the first browser e2e harness. Phase 1 (ship blockers) done | [v1.5-design-system-unification.md](v1.5-design-system-unification.md) |
+| v1.5 | **Design System Unification & UI Truth** — a unification-and-truth milestone for the three user-facing surfaces: one token source across landing/docs/dashboard/renderer, WCAG AA remediation with a CI gate, dashboard identity truth, and the first browser e2e harness. Phases 1 & 2 done | [v1.5-design-system-unification.md](v1.5-design-system-unification.md) |
 | Future | Beyond 1.0 — research bets | [future.md](future.md) |
 
 **v1.1 (AI Platform Maturity)** is scoped by [PRD-004](../01-product/prd-ai-platform-maturity.md)
@@ -135,6 +135,7 @@ learning. ADRs ([section 17](../17-adr/index.md)) record decisions that reshape 
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.8.0 | 2026-07-27 | v1.5 Phase 2 (one product — token unification + CI-gated a11y + first browser e2e harness) marked done — all 11 tickets shipped and verified; Phase 3 remains planned |
 | 1.7.0 | 2026-07-26 | v1.5 Phase 1 (ship blockers) marked done — all 9 tickets shipped and verified same-day; Phases 2/3 remain planned |
 | 1.6.0 | 2026-07-26 | Added v1.5 (Design System Unification & UI Truth, RM-DSU-001) — 31 tickets across three phases remediating the 2026-07-26 UI/UX audit of the landing page, docs site, and dashboard; requirement IDs defined in-document (no PRD, since the findings are the requirements) |
 | 1.5.0 | 2026-07-23 | Added v1.4 (Audit Remediation & Truth Reconciliation, PRD-007/RM-AR-001) — a truth-and-hardening milestone from the 2026-07-23 four-lens audit; not a feature release |

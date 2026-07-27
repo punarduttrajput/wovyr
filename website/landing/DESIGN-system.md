@@ -76,8 +76,20 @@ Mono-forward, matching the dashboard. Two roles + a display treatment:
   accent-bar-on-rounded-card motif.
 - **Numbered markers:** ONLY on the How-it-works pipeline — it's a true ordered sequence
   (emit → validate → record → decide). Nowhere else.
-- **Brand mark:** the existing triangle (`M12 3L21 19H3L12 3Z`), stroked in `--accent`,
-  as favicon/wordmark lockup. Wordmark set in mono, letter-spaced.
+- **Brand mark (DSY-106, corrected 2026-07-27):** the window/scanline mark — a UI
+  frame (`.mk-win`, rounded rect stroked in `--ink`) with two title-bar dots
+  (`.mk-dot`, `--ink-2`/`--ink-dim`), a cobalt scanline (`.mk-scan`) and a
+  verified node (`.mk-node`, both `--accent`) passing through it — encodes the
+  product thesis directly (a rendered interface being verified), not a generic
+  shape. Used everywhere: favicon, landing nav/footer, OG image, and the
+  dashboard rail. This entry previously named a plain triangle
+  (`M12 3L21 19H3L12 3Z`) as canonical — that was the dashboard's mark at the
+  time, before this unification; the triangle is retired, not a second valid
+  option. Source: `website/landing/assets/wovyr-logo.svg` (full wordmark
+  lockup) and the inline SVG in `website/src/pages/index.astro`/
+  `dashboard/src/app/app.html` (icon only, `.mk-*` classes carry the same
+  styling in each surface's own stylesheet). Wordmark set in mono,
+  letter-spaced.
 - **Code chips:** `--surface-2`, mono, copy button; the 3-command quickstart is real,
   copyable, and offline-true.
 

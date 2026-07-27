@@ -397,7 +397,7 @@ Directional, per-release evolution of the platform.
 | [v1.2 — Generative UI Trust Runtime](18-roadmap/v1.2-generative-ui.md) | Done (all 3 phases, 2026-07-15) |
 | [v1.3 — MCP Connection Management](18-roadmap/v1.3-mcp-connections.md) | Done (all 3 phases, 2026-07-15) |
 | [v1.4 — Audit Remediation & Truth Reconciliation](18-roadmap/v1.4-audit-remediation.md) | Planned (RM-AR-P1..P3) |
-| [v1.5 — Design System Unification & UI Truth](18-roadmap/v1.5-design-system-unification.md) | Phase 1 done, Phase 2/3 planned (RM-DSU-P1..P3) |
+| [v1.5 — Design System Unification & UI Truth](18-roadmap/v1.5-design-system-unification.md) | Phase 1 & 2 done, Phase 3 planned (RM-DSU-P1..P3) |
 | [Future — Beyond 1.0](18-roadmap/future.md) | Available |
 | [Future Research Bets (Tier B) — Index](18-roadmap/future/index.md) | Available |
 | [FUT-001 — Autonomous Multi-Agent Systems](18-roadmap/future/B1-multi-agent-systems.md) | Exploratory |

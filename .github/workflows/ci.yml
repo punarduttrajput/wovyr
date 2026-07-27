@@ -769,6 +769,54 @@ jobs:
         if: always()
         run: kill "$(cat wovyr-dev.pid)" 2>/dev/null || true
 
+  # DX-502: the first browser e2e harness in this workspace. Playwright's own
+  # `webServer` config (e2e/playwright.config.ts) boots a real built website
+  # (Astro `build` + `preview`) and a real dashboard dev server — no
+  # `wovyr-server` needed here, every assertion is scoped to what's true
+  # without a live backend (see each spec file's own header comment). Runs
+  # axe with `color-contrast` ENABLED against real painted pages — the exact
+  # gap A11Y-207 names (`dashboard/src/app/a11y.spec.ts`'s Karma-rendered
+  # fixtures can't be measured for paint, so that suite disables the rule).
+  e2e:
+    name: e2e (Playwright + axe, real painted pages)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # sdks/ui-react (dashboard's file: dependency) and the dashboard itself
+      # both get built via the dashboard's own prestart hook — see DX-501 —
+      # when Playwright's webServer runs `npm start` there; installing the
+      # dashboard's deps here is what makes that hook able to run at all.
+      - name: Install website deps
+        working-directory: website
+        run: npm ci
+
+      - name: Install dashboard deps
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Install e2e deps + Chromium
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run e2e suite
+        working-directory: e2e
+        run: npx playwright test
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          retention-days: 14
+
   security:
     name: dependency + secret scanning
     runs-on: ubuntu-latest
