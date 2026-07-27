@@ -7,7 +7,7 @@ Document ID: RM-INDEX-001
 
 **Document ID:** RM-INDEX-001  
 **File Path:** `docs/18-roadmap/index.md`  
-**Version:** 1.8.0  
+**Version:** 1.9.0  
 **Status:** Active  
 **Owner:** Product Team  
 **Last Updated:** 2026-07-27
@@ -26,10 +26,12 @@ see [v1.0.md](v1.0.md); **v1.1 is complete** (all three phases, 2026-07-19);
 shipped**. **v1.4 (Audit Remediation & Truth Reconciliation) is planned** — a
 truth-and-hardening milestone (not features) scoped by
 [PRD-007](../01-product/prd-audit-remediation.md) from a 2026-07-23 four-lens
-audit. **v1.5 (Design System Unification & UI Truth) Phases 1 & 2 are done**
-(all 20 tickets, 2026-07-27, incl. the first browser e2e harness in this
-workspace); Phase 3 remains planned — the equivalent remediation pass for
-the three user-facing surfaces, from a 2026-07-26 UI/UX audit.
+audit. **v1.5 (Design System Unification & UI Truth) is complete** — all three
+phases, 31 tickets, 2026-07-27, incl. the first browser e2e harness in this
+workspace. **v1.6 (Pentest Remediation) is planned** — four small, independent
+fixes (RES-601/SBX-305/GUI-501/VAL-401) from the 2026-07-27 internal red-team
+assessment; everything else in that report was a verified PASS with no action
+item.
 
 ---
 
@@ -45,7 +47,8 @@ the three user-facing surfaces, from a 2026-07-26 UI/UX audit.
 | v1.2 | **Generative UI Trust Runtime** — the product milestone: frame protocol, trust/policy engine, durable interaction loop, renderer SDK, internal-tools beachhead | [v1.2-generative-ui.md](v1.2-generative-ui.md) |
 | v1.3 | **MCP Connection Management** — a persisted, UI-managed layer over the shipped MCP client: connection store, agent-manifest wiring, dashboard panel | [v1.3-mcp-connections.md](v1.3-mcp-connections.md) |
 | v1.4 | **Audit Remediation & Truth Reconciliation** — a truth-and-hardening milestone: day-one security fixes (SSRF, cross-tenant authz, audit MAC, KMS fail-closed), AI-core correctness (Anthropic embeddings, bounded caches, default retrieval), CI/claim honesty, and a sustainability scope freeze | [v1.4-audit-remediation.md](v1.4-audit-remediation.md) |
-| v1.5 | **Design System Unification & UI Truth** — a unification-and-truth milestone for the three user-facing surfaces: one token source across landing/docs/dashboard/renderer, WCAG AA remediation with a CI gate, dashboard identity truth, and the first browser e2e harness. Phases 1 & 2 done | [v1.5-design-system-unification.md](v1.5-design-system-unification.md) |
+| v1.5 | **Design System Unification & UI Truth** — a unification-and-truth milestone for the three user-facing surfaces: one token source across landing/docs/dashboard/renderer, WCAG AA remediation with a CI gate, dashboard identity truth, and the first browser e2e harness. Complete (all 3 phases) | [v1.5-design-system-unification.md](v1.5-design-system-unification.md) |
+| v1.6 | **Pentest Remediation** — four small fixes from the 2026-07-27 internal red-team assessment: a `for_each` fan-out cost/token ceiling, an explicit opt-in for privileged `--local` tools, schema-constrained UI-frame generation, and documenting the agent manifest's unknown-field tolerance | [v1.6-pentest-remediation.md](v1.6-pentest-remediation.md) |
 | Future | Beyond 1.0 — research bets | [future.md](future.md) |
 
 **v1.1 (AI Platform Maturity)** is scoped by [PRD-004](../01-product/prd-ai-platform-maturity.md)
@@ -104,6 +107,18 @@ harness whose absence is why several shipped UI claims are still qualified
 [v1.5-design-system-unification.md](v1.5-design-system-unification.md)
 (RM-DSU-P1..P3). No PRD — the findings are the requirements; requirement IDs are
 defined in that document's §3.
+
+**v1.6 (Pentest Remediation)** is scoped by the **2026-07-27 internal
+red-team / abuse-resistance assessment** (`Wovyr-Pentest-Report.xlsx`) — an
+authorized engagement against the platform's own CLI/workflow execution, tool
+sandbox, multi-agent orchestration, UI-frame protocol, secrets/KMS/audit, and
+server auth floor. Verdict: **STRONG** (541 security tests passed, 0 Critical/
+High findings). Only 4 of the report's 20 dynamic cases needed follow-up —
+everything else was a verified PASS with "No action" already recorded in the
+report itself. Like v1.4/v1.5, no PRD: the report's findings are the
+requirements. Tickets:
+[v1.6-pentest-remediation.md](v1.6-pentest-remediation.md) (RES-601, SBX-305,
+GUI-501, VAL-401).
 
 ---
 
