@@ -86,17 +86,18 @@ fn workflows_dir() -> wovyr_common::Result<std::path::PathBuf> {
 /// [`FileTimerStore`] is attached so wall-clock `wait` timers fire across `tick`s.
 /// `agents_dir` is where `agent`-typed activities resolve `name` against; commands
 /// without an `--agents-dir` flag of their own pass `"."`.
-fn engine(agents_dir: &str) -> wovyr_common::Result<Engine> {
+fn engine(agents_dir: &str, allow_privileged: bool) -> wovyr_common::Result<Engine> {
     let dir = workflows_dir()?;
     let store = FileStore::new(dir.clone())?;
     let events: Arc<dyn EventLog> = Arc::new(store.clone());
     let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
     let timers: Arc<dyn TimerStore> = Arc::new(FileTimerStore::new(dir)?);
     let executor = Arc::new(PlatformActivityExecutor::new(
-        // `workflows run --local` is a trusted, first-party/local context (SEC-301's
-        // documented escape hatch) — shell stays available here, unlike the server's
-        // default registry.
-        ToolRegistry::with_privileged_builtins(),
+        // SBX-305: `--local` is SEC-301's documented trusted-first-party escape hatch,
+        // but the privileged builtins now require an explicit per-run opt-in rather
+        // than being inferred from `--local` alone. See
+        // `crate::privileged_tools_enabled`.
+        crate::local_registry(allow_privileged),
         Arc::new(Gateway::from_env()),
         Arc::new(FileAgentResolver {
             agents_dir: agents_dir.to_string(),
@@ -142,6 +143,37 @@ pub fn validate_cmd(file: &str) -> wovyr_common::Result<()> {
     Ok(())
 }
 
+/// Every tool id a definition's activities name, including the bodies of
+/// `for_each`/`map` fan-outs (whose per-item activity template lives inside the
+/// parent's raw `inputs.activity`, so a `shell` hidden there would otherwise slip
+/// past SBX-305's gate).
+///
+/// `function` is included alongside `tool` deliberately: `PlatformActivityExecutor`
+/// dispatches both through `ToolRegistry::execute` (RM-GA-P4 HLTH-901), so a
+/// `function` activity named `shell` is a shell invocation.
+fn declared_tool_ids(def: &Definition) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut push = |activity_type: &str, name: Option<&str>| {
+        if matches!(activity_type, "tool" | "function")
+            && let Some(name) = name
+        {
+            ids.push(name.to_string());
+        }
+    };
+    for activity in &def.spec.activities {
+        push(&activity.activity_type, activity.name.as_deref());
+        if wovyr_workflow::is_for_each(&activity.activity_type) {
+            let body = activity.inputs.get("activity");
+            let body_type = body.and_then(|b| b.get("type")).and_then(Value::as_str);
+            let body_name = body.and_then(|b| b.get("name")).and_then(Value::as_str);
+            if let Some(body_type) = body_type {
+                push(body_type, body_name);
+            }
+        }
+    }
+    ids
+}
+
 /// `wovyr workflows run --local -f <file> --input <json> [--id <id>] [--agents-dir <dir>]`.
 pub async fn run_cmd(
     file: &str,
@@ -149,6 +181,7 @@ pub async fn run_cmd(
     local: bool,
     id: Option<String>,
     agents_dir: &str,
+    allow_privileged_tools: bool,
 ) -> wovyr_common::Result<()> {
     if !local {
         return Err(wovyr_common::Error::config(
@@ -157,11 +190,18 @@ pub async fn run_cmd(
     }
 
     let def = Definition::from_file(file)?;
+    // SBX-305: fail closed before anything runs when the definition names a privileged
+    // tool this invocation didn't opt into.
+    let allow_privileged = crate::privileged_tools_enabled(allow_privileged_tools);
+    let declared = declared_tool_ids(&def);
+    crate::reject_privileged_tools(declared.iter().map(String::as_str), allow_privileged)?;
     let input_value: Value =
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
     let exec_id = id.unwrap_or_else(|| format!("wf-{}", def.metadata.name));
 
-    let (outcome, state) = engine(agents_dir)?.run(&def, &exec_id, input_value).await?;
+    let (outcome, state) = engine(agents_dir, allow_privileged)?
+        .run(&def, &exec_id, input_value)
+        .await?;
     report(&def, &exec_id, &outcome, &state);
 
     if let RunOutcome::Failed(_) = outcome {
@@ -194,7 +234,9 @@ pub async fn approve_cmd(
     store.save(&snapshot).await?;
     println!("recorded decision '{decision}' for task '{task}' on execution '{id}'");
 
-    let (outcome, state) = engine(".")?.resume(&def, id).await?;
+    let (outcome, state) = engine(".", crate::privileged_tools_enabled(false))?
+        .resume(&def, id)
+        .await?;
     report(&def, id, &outcome, &state);
 
     if let RunOutcome::Failed(_) = outcome {
@@ -213,7 +255,7 @@ pub async fn signal_cmd(
     payload: &str,
 ) -> wovyr_common::Result<()> {
     let def = Definition::from_file(file)?;
-    let engine = engine(".")?;
+    let engine = engine(".", crate::privileged_tools_enabled(false))?;
 
     let (outcome, state) = match (event, timer) {
         (Some(name), None) => {
@@ -240,9 +282,12 @@ pub async fn signal_cmd(
 /// `wovyr workflows status --id <id>` — read an execution's live state without
 /// resuming it (a side-effect-free query, G3).
 pub async fn status_cmd(id: &str) -> wovyr_common::Result<()> {
-    let summary = engine(".")?.status(id).await?.ok_or_else(|| {
-        wovyr_common::Error::NotFound(format!("no execution `{id}`; run the workflow first"))
-    })?;
+    let summary = engine(".", crate::privileged_tools_enabled(false))?
+        .status(id)
+        .await?
+        .ok_or_else(|| {
+            wovyr_common::Error::NotFound(format!("no execution `{id}`; run the workflow first"))
+        })?;
     println!(
         "execution '{}' — workflow '{}' v{} — {:?}",
         summary.execution_id, summary.workflow_name, summary.workflow_version, summary.status
@@ -290,7 +335,9 @@ pub async fn list_cmd(
         status: status.as_deref().map(parse_status).transpose()?,
         limit,
     };
-    let executions = engine(".")?.list(&filter).await?;
+    let executions = engine(".", crate::privileged_tools_enabled(false))?
+        .list(&filter)
+        .await?;
     if executions.is_empty() {
         println!("no executions found");
         return Ok(());
@@ -312,7 +359,7 @@ pub async fn list_cmd(
 /// `wovyr workflows show --id <id>` — show an execution's status plus its full event
 /// timeline (G4 visibility).
 pub async fn show_cmd(id: &str) -> wovyr_common::Result<()> {
-    let engine = engine(".")?;
+    let engine = engine(".", crate::privileged_tools_enabled(false))?;
     let summary = engine.status(id).await?.ok_or_else(|| {
         wovyr_common::Error::NotFound(format!("no execution `{id}`; run the workflow first"))
     })?;
@@ -336,7 +383,7 @@ pub async fn show_cmd(id: &str) -> wovyr_common::Result<()> {
 /// Caller-driven: run it on a cron/interval to advance time-based work.
 pub async fn tick_cmd(file: &str) -> wovyr_common::Result<()> {
     let def = Definition::from_file(file)?;
-    let engine = engine(".")?;
+    let engine = engine(".", crate::privileged_tools_enabled(false))?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let resolver = resolver_for(&def);
 

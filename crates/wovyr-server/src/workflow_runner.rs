@@ -636,7 +636,7 @@ mod tests {
     /// both the engine (so a `wait` activity actually schedules into it) and
     /// `AppState.timers` (so `spawn_dispatch_loops` polls that same store).
     async fn isolated_state() -> Arc<AppState> {
-        let state = AppState::from_env().await;
+        let state = AppState::for_test().await;
         let agents = Arc::new(AgentStore::new(None));
         // An isolated, in-memory UI runtime sharing the state's audit log —
         // handed to both the engine's executor and (via `with_ui`) the routes,
@@ -670,7 +670,7 @@ mod tests {
     }
 
     async fn test_app() -> axum::Router {
-        crate::router(Arc::new(AppState::from_env().await))
+        crate::router(Arc::new(AppState::for_test().await))
     }
 
     /// The default identity these test helpers act as (RM-GA-P4/GA-003): since the
@@ -799,7 +799,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
     /// unknown execution is `404`.
     ///
     /// Uses `isolated_state()` rather than the shared `~/.wovyr/workflows`
-    /// `AppState::from_env()`: this fixed execution id has been reused by this
+    /// `AppState::for_test()`: this fixed execution id has been reused by this
     /// test across many sessions, and its real on-disk event log now mixes
     /// pre-API-702 (PascalCase) and post-API-702 (snake_case) `WorkflowEvent`
     /// JSON — the event log is append-only and is never rewritten by `start()`,
@@ -893,7 +893,7 @@ metadata:\n  name: suspends-forever\nspec:\n  activities:\n    - {id: hold, type
         use wovyr_audit::{AuditFilter, AuditLog};
         use wovyr_workflow::{CheckpointStore, EventLog, InMemoryStore};
 
-        let base = AppState::from_env().await;
+        let base = AppState::for_test().await;
         let agents = Arc::new(AgentStore::new(None));
         let ui = Arc::new(crate::ui::UiRuntime::in_memory(base.audit.clone()));
         let executor = Arc::new(server_executor(
@@ -1065,7 +1065,7 @@ metadata:\n  name: exe601-timer\nspec:\n  activities:\n    - {id: wait_a, type: 
         // takes): `b` now succeeds — the transient condition that interrupted it
         // has cleared, the same as a real worker restarting cleanly. ---
         let state2 = {
-            let base = AppState::from_env().await;
+            let base = AppState::for_test().await;
             let store = FileStore::new(&dir).unwrap();
             let events: Arc<dyn EventLog> = Arc::new(store.clone());
             let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
@@ -1273,7 +1273,7 @@ metadata:\n  name: human-approval-wf\nspec:\n  activities:\n    - {id: review, t
     /// nothing was actually consumed.
     ///
     /// Uses `isolated_state()` (an in-memory event log/checkpoint store), not the
-    /// shared `~/.wovyr/workflows` `AppState::from_env()` most of this file's other
+    /// shared `~/.wovyr/workflows` `AppState::for_test()` most of this file's other
     /// tests use for a fixed execution id: `wait_for_interrupted_event` polls the
     /// *accumulated* event history, and a prior run's `WorkflowInterrupted` event
     /// for the same id/activity would satisfy that poll immediately on a repeat

@@ -108,17 +108,18 @@ harness whose absence is why several shipped UI claims are still qualified
 (RM-DSU-P1..P3). No PRD — the findings are the requirements; requirement IDs are
 defined in that document's §3.
 
-**v1.6 (Pentest Remediation)** is scoped by the **2026-07-27 internal
-red-team / abuse-resistance assessment** (`Wovyr-Pentest-Report.xlsx`) — an
-authorized engagement against the platform's own CLI/workflow execution, tool
-sandbox, multi-agent orchestration, UI-frame protocol, secrets/KMS/audit, and
-server auth floor. Verdict: **STRONG** (541 security tests passed, 0 Critical/
-High findings). Only 4 of the report's 20 dynamic cases needed follow-up —
-everything else was a verified PASS with "No action" already recorded in the
-report itself. Like v1.4/v1.5, no PRD: the report's findings are the
-requirements. Tickets:
+**v1.6 (Pentest Remediation)** — **complete (2026-07-28)** — is scoped by an
+**internal red-team / abuse-resistance assessment** (2026-07-27), an authorized
+engagement against the platform's own CLI/workflow execution, tool sandbox,
+multi-agent orchestration, UI-frame protocol, secrets/KMS/audit, and server auth
+floor. Verdict: **STRONG** (541 security-invariant tests passed, 0 Critical and
+0 High findings). Only 4 of the 20 dynamic cases needed follow-up — everything
+else was a verified PASS with no action item — and **all four are now fixed**,
+each with regression tests in the ordinary `cargo test --workspace`. Like
+v1.4/v1.5, no PRD: the findings are the requirements. Tickets:
 [v1.6-pentest-remediation.md](v1.6-pentest-remediation.md) (RES-601, SBX-305,
-GUI-501, VAL-401).
+GUI-501, VAL-401). Reproduction detail is held internally rather than published
+here; that document's §4 carries the operator-facing guidance.
 
 ---
 

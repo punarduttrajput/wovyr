@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DOCS = path.resolve(ROOT, '../docs');
 const OUT = path.join(ROOT, 'src/content/docs');
-const GITHUB_BLOB = 'https://github.com/punarduttrajput/Wovyr/blob/main/';
+const GITHUB_BLOB = 'https://github.com/punarduttrajput/wovyr/blob/main/';
 
 // Manual overrides for pages the Status heuristic misclassifies.
 // Keys are docs-relative paths, e.g. '12-deployment/docker-compose.md'.

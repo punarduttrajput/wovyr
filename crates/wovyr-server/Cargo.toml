@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Single-node HTTP server exposing the Wovyr Platform API (v0.1: agent runs)."
+description = "Single-node HTTP server for the Wovyr Platform API: agent runs (sync/streaming/async), durable workflows, generative-UI trust runtime, memory, secrets, KMS, tamper-evident audit, plugins, marketplace, and multi-tenancy."
 
 [features]
 # Execute plugin tool capabilities in the WASM sandbox (with secret injection) on the

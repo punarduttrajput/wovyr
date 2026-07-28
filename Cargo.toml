@@ -28,41 +28,41 @@ members = [
 
 [workspace.package]
 # Kept in lockstep with the latest release tag (RM-AIM-P1 DX-101) — see CHANGELOG.md.
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"
 # The one canonical repository URL (DX-101) — every manifest (this, both SDKs, the
 # Helm chart) must agree with it.
-repository = "https://github.com/punarduttrajput/Wovyr"
+repository = "https://github.com/punarduttrajput/wovyr"
 
 [workspace.dependencies]
 # Internal crates — `version` is required alongside `path` so `cargo publish`
 # emits manifests that resolve against the published crates.io versions rather
 # than local paths (which don't exist on the registry). Kept in lockstep with
 # the workspace `version` (RM-AIM-P1 DX-101) — see CHANGELOG.md.
-wovyr-common = { path = "crates/wovyr-common", version = "0.3.0" }
-wovyr-provider = { path = "crates/wovyr-provider", version = "0.3.0" }
-wovyr-tools = { path = "crates/wovyr-tools", version = "0.3.0" }
-wovyr-tool-macros = { path = "crates/wovyr-tool-macros", version = "0.3.0" }
-wovyr-agent = { path = "crates/wovyr-agent", version = "0.3.0" }
-wovyr-workflow = { path = "crates/wovyr-workflow", version = "0.3.0" }
-wovyr-runtime = { path = "crates/wovyr-runtime", version = "0.3.0" }
-wovyr-memory = { path = "crates/wovyr-memory", version = "0.3.0" }
-wovyr-telemetry = { path = "crates/wovyr-telemetry", version = "0.3.0" }
-wovyr-plugin = { path = "crates/wovyr-plugin", version = "0.3.0" }
-wovyr-plugin-sdk = { path = "crates/wovyr-plugin-sdk", version = "0.3.0" }
-wovyr-marketplace = { path = "crates/wovyr-marketplace", version = "0.3.0" }
-wovyr-tenancy = { path = "crates/wovyr-tenancy", version = "0.3.0" }
-wovyr-events = { path = "crates/wovyr-events", version = "0.3.0" }
-wovyr-secrets = { path = "crates/wovyr-secrets", version = "0.3.0" }
-wovyr-audit = { path = "crates/wovyr-audit", version = "0.3.0" }
-wovyr-kms = { path = "crates/wovyr-kms", version = "0.3.0" }
-wovyr-config = { path = "crates/wovyr-config", version = "0.3.0" }
-wovyr-eval = { path = "crates/wovyr-eval", version = "0.3.0" }
-wovyr-ui = { path = "crates/wovyr-ui", version = "0.3.0" }
-wovyr-ui-guard = { path = "crates/wovyr-ui-guard", version = "0.3.0" }
-wovyr-server = { path = "crates/wovyr-server", version = "0.3.0" }
+wovyr-common = { path = "crates/wovyr-common", version = "0.3.1" }
+wovyr-provider = { path = "crates/wovyr-provider", version = "0.3.1" }
+wovyr-tools = { path = "crates/wovyr-tools", version = "0.3.1" }
+wovyr-tool-macros = { path = "crates/wovyr-tool-macros", version = "0.3.1" }
+wovyr-agent = { path = "crates/wovyr-agent", version = "0.3.1" }
+wovyr-workflow = { path = "crates/wovyr-workflow", version = "0.3.1" }
+wovyr-runtime = { path = "crates/wovyr-runtime", version = "0.3.1" }
+wovyr-memory = { path = "crates/wovyr-memory", version = "0.3.1" }
+wovyr-telemetry = { path = "crates/wovyr-telemetry", version = "0.3.1" }
+wovyr-plugin = { path = "crates/wovyr-plugin", version = "0.3.1" }
+wovyr-plugin-sdk = { path = "crates/wovyr-plugin-sdk", version = "0.3.1" }
+wovyr-marketplace = { path = "crates/wovyr-marketplace", version = "0.3.1" }
+wovyr-tenancy = { path = "crates/wovyr-tenancy", version = "0.3.1" }
+wovyr-events = { path = "crates/wovyr-events", version = "0.3.1" }
+wovyr-secrets = { path = "crates/wovyr-secrets", version = "0.3.1" }
+wovyr-audit = { path = "crates/wovyr-audit", version = "0.3.1" }
+wovyr-kms = { path = "crates/wovyr-kms", version = "0.3.1" }
+wovyr-config = { path = "crates/wovyr-config", version = "0.3.1" }
+wovyr-eval = { path = "crates/wovyr-eval", version = "0.3.1" }
+wovyr-ui = { path = "crates/wovyr-ui", version = "0.3.1" }
+wovyr-ui-guard = { path = "crates/wovyr-ui-guard", version = "0.3.1" }
+wovyr-server = { path = "crates/wovyr-server", version = "0.3.1" }
 
 # External
 # Cross-process advisory file locking (RM-GA-P2 DUR-403) — flock/LockFileEx via a

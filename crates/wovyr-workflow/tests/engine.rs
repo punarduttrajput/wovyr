@@ -843,6 +843,154 @@ async fn for_each_fails_closed_when_the_collection_exceeds_max_items() {
     }
 }
 
+/// RES-601: `max_items` bounds item *count* only. When each item is itself model
+/// work, a fan-out that stays under `max_items` can still burn an unbounded amount of
+/// money inside one execution — the 2026-07-27 red-team run drove 200 agent-spawning
+/// items to completion this way. An aggregate `max_total_cost_usd` must stop launching
+/// new items once crossed, and fail the activity closed, rather than running all of
+/// them.
+///
+/// Uses 60 items (over the ticket's 50+ bar) with a cap that only 3 items' worth of
+/// reported cost can cross, and counts real executions: the assertion is that far
+/// fewer than 60 items ever ran, which is the property that actually saves money.
+#[tokio::test]
+async fn for_each_fails_closed_once_the_aggregate_cost_budget_is_crossed() {
+    let items: Vec<i64> = (0..60).collect();
+    let def = Definition::from_yaml(&format!(
+        "metadata:\n  name: foreach-budget\nspec:\n  activities:\n    - {{id: spendy, type: for_each, inputs: {{items: {items:?}, max_concurrent: 1, max_total_cost_usd: 0.25, activity: {{type: function}}}}}}\n"
+    ))
+    .unwrap();
+
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // A handler per possible instance id (`spendy[0]`..`spendy[59]`): every item is
+    // *registered*, so a failure to stop launching would run — and be counted — rather
+    // than erroring for the unrelated "no handler" reason.
+    let mut executor = ClosureExecutor::new();
+    for index in 0..items.len() {
+        let counter = ran.clone();
+        executor = executor.on(format!("spendy[{index}]"), move |_| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Each item reports $0.10, so the $0.25 cap is crossed on the third.
+                Ok(json!({ "ok": true, "__usage": { "cost_usd": 0.10, "total_tokens": 10 } }))
+            }
+        });
+    }
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, _) = engine
+        .run(&def, "wf-foreach-budget-1", json!({}))
+        .await
+        .unwrap();
+
+    match outcome {
+        RunOutcome::Failed(msg) => {
+            assert!(
+                msg.contains("max_total_cost_usd"),
+                "the failure must name the budget that stopped it: {msg}"
+            );
+        }
+        other => panic!("expected Failed(..) once the budget was crossed, got {other:?}"),
+    }
+    let ran = ran.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        ran < 10,
+        "crossing the budget must stop launching new items — expected only a few of the \
+         60 items to run, but {ran} did (this is the money the cap exists to save)"
+    );
+}
+
+/// The token twin of the cost budget: a local model bills $0/token but still burns
+/// real capacity, so `max_total_tokens` must gate independently of cost.
+#[tokio::test]
+async fn for_each_fails_closed_once_the_aggregate_token_budget_is_crossed() {
+    let items: Vec<i64> = (0..60).collect();
+    let def = Definition::from_yaml(&format!(
+        "metadata:\n  name: foreach-tokens\nspec:\n  activities:\n    - {{id: chatty, type: for_each, inputs: {{items: {items:?}, max_concurrent: 1, max_total_tokens: 250, activity: {{type: function}}}}}}\n"
+    ))
+    .unwrap();
+
+    // cost_usd stays 0.0 throughout — only tokens accumulate, so a cost-only
+    // implementation would run all 60 items and never trip.
+    let mut executor = ClosureExecutor::new();
+    for index in 0..items.len() {
+        executor = executor.on(format!("chatty[{index}]"), |_| async {
+            Ok(json!({ "ok": true, "__usage": { "cost_usd": 0.0, "total_tokens": 100 } }))
+        });
+    }
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, _) = engine
+        .run(&def, "wf-foreach-tokens-1", json!({}))
+        .await
+        .unwrap();
+
+    match outcome {
+        RunOutcome::Failed(msg) => assert!(msg.contains("max_total_tokens"), "{msg}"),
+        other => panic!("expected Failed(..) once the token budget was crossed, got {other:?}"),
+    }
+}
+
+/// Omitting the budget must be behavior-identical to before RES-601 — no regression
+/// for existing `for_each` workflows, even ones whose items report real usage.
+#[tokio::test]
+async fn for_each_without_a_budget_runs_every_item_as_before() {
+    let items: Vec<i64> = (0..60).collect();
+    let def = Definition::from_yaml(&format!(
+        "metadata:\n  name: foreach-nobudget\nspec:\n  activities:\n    - {{id: free, type: for_each, inputs: {{items: {items:?}, activity: {{type: function}}}}}}\n"
+    ))
+    .unwrap();
+
+    let mut executor = ClosureExecutor::new();
+    for index in 0..items.len() {
+        executor = executor.on(format!("free[{index}]"), |_| async {
+            Ok(json!({ "ok": true, "__usage": { "cost_usd": 1.0, "total_tokens": 1000 } }))
+        });
+    }
+    let engine = engine_with(InMemoryStore::new(), executor);
+    let (outcome, state) = engine
+        .run(&def, "wf-foreach-nobudget-1", json!({}))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, RunOutcome::Completed),
+        "no budget set must mean no cap: {outcome:?}"
+    );
+    let joined = state
+        .variables
+        .get("free")
+        .and_then(|v| v.as_array().map(|a| a.len()));
+    assert_eq!(
+        joined,
+        Some(60),
+        "every item must still run and join when no budget is configured"
+    );
+}
+
+/// A budget of `0` (or a negative/non-finite cost) is a definition bug, not a request
+/// for "unlimited" — rejected at load, the same fail-closed treatment
+/// `max_items`/`max_concurrent` already get.
+#[test]
+fn for_each_rejects_a_nonsensical_aggregate_budget_at_load() {
+    let zero_cost = Definition::from_yaml(
+        "metadata:\n  name: bad-cost\nspec:\n  activities:\n    - {id: x, type: for_each, inputs: {items: [1], max_total_cost_usd: 0, activity: {type: function}}}\n",
+    );
+    assert!(
+        zero_cost.is_err(),
+        "max_total_cost_usd: 0 must be a load error, not silently unlimited"
+    );
+
+    let negative_cost = Definition::from_yaml(
+        "metadata:\n  name: bad-cost2\nspec:\n  activities:\n    - {id: x, type: for_each, inputs: {items: [1], max_total_cost_usd: -5, activity: {type: function}}}\n",
+    );
+    assert!(negative_cost.is_err(), "a negative budget must be rejected");
+
+    let zero_tokens = Definition::from_yaml(
+        "metadata:\n  name: bad-tokens\nspec:\n  activities:\n    - {id: x, type: for_each, inputs: {items: [1], max_total_tokens: 0, activity: {type: function}}}\n",
+    );
+    assert!(zero_tokens.is_err(), "max_total_tokens: 0 must be rejected");
+}
+
 /// `items` resolving to something other than an array (an object, here) fails
 /// closed with a clear message rather than silently treating it as zero/one item.
 #[tokio::test]

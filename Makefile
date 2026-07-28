@@ -1,8 +1,27 @@
 # Task runner for the Wovyr AI Platform.
 # See docs/19-implementation-guide/build-system.md.
 
-.PHONY: build test lint fmt run-hello docker-build docker-run-hello compose-up compose-down clean \
+.PHONY: setup dev build test lint fmt run-hello docker-build docker-run-hello compose-up compose-down clean \
 	dashboard-build dashboard-test dashboard-dev
+
+# One-time contributor setup. Everything here is idempotent — safe to re-run.
+# `wasm32-wasip1` is needed only for plugin-SDK work (`wovyr plugin new|build`)
+# and by the scaffold round-trip test, which skips cleanly without it; it is
+# installed here so a contributor's first `make test` matches CI.
+setup:
+	rustup component add rustfmt clippy
+	rustup target add wasm32-wasip1
+	cargo build --workspace
+	@echo
+	@echo "Setup complete. Next: 'make dev' (server) or 'make run-hello' (one agent)."
+	@echo "Both run offline against the deterministic mock provider — no API key needed."
+
+# Run the all-in-one local server on 127.0.0.1:8080.
+# WOVYR_ALLOW_ANONYMOUS=1 skips credential setup for local development; it only
+# works on a loopback bind (the server refuses to start otherwise), so it cannot
+# reach the network. See docs/12-deployment/ for a real deployment's auth setup.
+dev:
+	WOVYR_ALLOW_ANONYMOUS=1 cargo run -p wovyr-cli -- dev
 
 build:
 	cargo build --workspace

@@ -11,16 +11,100 @@ each release links its own.
 
 ## [Unreleased]
 
-v1.0 "GA hardening" (PRD-003, complete), v1.1 "AI Platform Maturity" (PRD-004,
-Phases 1–2 complete), v1.2 "Generative UI Trust Runtime" (PRD-005/ADR-0011,
-**all three phases complete**), and v1.3 "MCP Connection Management"
-(PRD-006/ADR-0012, **all three phases complete**) — see
-[docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
-[docs/18-roadmap/v1.1/](docs/18-roadmap/v1.1/),
-[docs/18-roadmap/v1.2-generative-ui.md](docs/18-roadmap/v1.2-generative-ui.md), and
-[docs/18-roadmap/v1.3-mcp-connections.md](docs/18-roadmap/v1.3-mcp-connections.md).
+## [0.3.1] — 2026-07-28
 
-### Added
+Open-source launch readiness. Everything below is either a security fix, a
+correctness fix, or a docs-vs-reality correction; no new product surface.
+
+Roadmap milestones **v1.4** (audit remediation), **v1.5** (design-system
+unification), and **v1.6** (pentest remediation) all completed in this window —
+see [docs/18-roadmap/v1.4-audit-remediation.md](docs/18-roadmap/v1.4-audit-remediation.md),
+[v1.5-design-system-unification.md](docs/18-roadmap/v1.5-design-system-unification.md),
+and [v1.6-pentest-remediation.md](docs/18-roadmap/v1.6-pentest-remediation.md).
+(Milestone names are roadmap labels, not package versions — see the README's
+"Two version numbers" section.)
+
+### Security
+
+- **RES-601 — `for_each` fan-out now accepts an aggregate cost/token ceiling.**
+  `max_items` bounded item *count* only, and a per-item body may be a full
+  `agent` activity, so one fan-out could expand into an unbounded number of
+  billable model calls inside a single execution — the server's per-project
+  budget is a *daily rate*, not a per-execution cap, and does not apply to CLI
+  `--local` runs at all. `inputs.max_total_cost_usd` / `inputs.max_total_tokens`
+  are enforced as items land: crossing one stops launching further items and
+  fails the activity closed, while in-flight items still commit durably.
+  Validated fail-closed at load (`0`/negative/non-finite is an error, not
+  "unlimited"). Omitting them is behavior-identical to 0.3.0.
+- **SBX-305 — privileged tools need an explicit opt-in under `--local`.**
+  `wovyr agents run --local` and `wovyr workflows run --local` registered
+  `shell`/`fs_write`/`code_execute` unconditionally, treating "the operator typed
+  `--local`" as consent — indistinguishable between a trusted workstation and a
+  shared or CI host. Now requires `--allow-privileged-tools` (or
+  `WOVYR_LOCAL_PRIVILEGED=1`, which the `approve`/`signal`/`tick` resume paths
+  also honor). A manifest or definition naming a privileged tool — including
+  inside a `for_each` body — fails closed with an error naming the flag, instead
+  of running with the tool silently absent. Documented in
+  [security-isolation §5.2](docs/07-tool-runtime/security-isolation.md#52-privileged-builtins-need-an-explicit-opt-in-under---local).
+- **VAL-401 — the agent manifest's unknown-field tolerance is documented** as
+  the deliberate exception it is, alongside a statement that the manifest is
+  therefore not a place to detect tampering
+  ([agent-definition §5.1](docs/04-agent-framework/agent-definition.md)).
+
+### Fixed
+
+- **`cargo test --workspace` is deterministic.** Server tests built state via
+  `AppState::from_env()`, which resolves durable stores under the developer's
+  real `~/.wovyr` — so tests raced each other (and any prior `wovyr dev` run)
+  through shared files, making `agents_are_isolated_per_tenant` fail
+  intermittently with a name that read like a tenant-isolation breach.
+  Added `AppState::for_test()` and routed every test call site through it.
+- **Nested `cargo build` no longer inherits the outer cargo's jobserver.**
+  `wovyr plugin build` passed `CARGO_MAKEFLAGS` (and host `RUSTFLAGS`, target,
+  and target-dir settings) through to the `wasm32-wasip1` child build, which
+  intermittently failed partway through compiling dependencies. Build failures
+  now also report the exit status, stdout, and — when cargo exits without
+  printing a compile error — that the process was terminated rather than the
+  code failing to build.
+
+### Changed
+
+- **Package metadata:** the `repository` URL now matches the real repository
+  name in all 15 places that carried the wrong casing (this reached crates.io,
+  npm, and PyPI metadata for every published package), and
+  `wovyr-server`'s crates.io description no longer claims "v0.1: agent runs".
+- **README rewritten around one positioning line**, with a
+  vs-LangChain/Temporal/E2B comparison table, a precise security-posture table
+  that scopes each claim, a real (not illustrative) command transcript, and an
+  explicit explanation of why the package version (`0.3.1`) and the roadmap
+  milestone names (`v1.6`) differ.
+- **`CONTRIBUTING.md` commands exist now.** It documented `make setup` and
+  `make dev`, neither of which was a Makefile target; both are implemented, and
+  the guide gained a "finding something to work on" section and the
+  offline-cargo workaround.
+- **`docs/19-implementation-guide/development-environment.md` rewritten** — it
+  required a NestJS BFF, `pnpm`, `cargo nextest`, a devcontainer, Git hooks, a
+  `.env.example`, `make run-svc`, `wovyr doctor`, and `sccache`, none of which
+  exist in this repository.
+- **`docs/03-workflow-engine/workflow-dsl.md` §13 rewritten** — it specified a
+  `loop: {while, until, foreach}` block with a `collection:` key that was never
+  implemented. It now documents the real `for_each`/`map` activity, the new
+  aggregate ceilings, and a table making explicit that a `for_each` ceiling is
+  the only per-execution budget that applies under `--local`.
+- Internal go-to-market and landing-page requirement documents are no longer
+  tracked in the repository.
+
+### Earlier in this window (pre-0.3.1, previously unreleased)
+
+Everything from here to the `[0.3.0]` heading below shipped after the `v0.3.0`
+tag and had accumulated under `[Unreleased]`: v1.0 "GA hardening" (PRD-003),
+v1.1 "AI Platform Maturity" (PRD-004), v1.2 "Generative UI Trust Runtime"
+(PRD-005/ADR-0011), and v1.3 "MCP Connection Management" (PRD-006/ADR-0012) —
+all complete. See [docs/18-roadmap/v1.0/](docs/18-roadmap/v1.0/),
+[v1.1/](docs/18-roadmap/v1.1/),
+[v1.2-generative-ui.md](docs/18-roadmap/v1.2-generative-ui.md), and
+[v1.3-mcp-connections.md](docs/18-roadmap/v1.3-mcp-connections.md).
+
 - **MCP Connection Management (RM-MCX, PRD-006/ADR-0012):** a persisted,
   API/dashboard-managed layer over the already-shipped, programmatic-only MCP
   client (`wovyr-tools::mcp`, ECO-301) — connect an external MCP server once,
@@ -271,7 +355,8 @@ The runnable foundation slice ([docs/18-roadmap/v0.1.md](docs/18-roadmap/v0.1.md
 - The `docs/` specification tree (product → architecture → per-subsystem specs →
   ADRs → roadmap) that the codebase implements spec-first.
 
-[Unreleased]: https://github.com/punarduttrajput/Wovyr/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/punarduttrajput/Wovyr/releases/tag/v0.3.0
-[0.2.0]: https://github.com/punarduttrajput/Wovyr/tree/v0.3.0/docs/18-roadmap/v0.2.md
-[0.1.0]: https://github.com/punarduttrajput/Wovyr/tree/v0.3.0/docs/18-roadmap/v0.1.md
+[Unreleased]: https://github.com/punarduttrajput/wovyr/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.1
+[0.3.0]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.0
+[0.2.0]: https://github.com/punarduttrajput/wovyr/tree/v0.3.0/docs/18-roadmap/v0.2.md
+[0.1.0]: https://github.com/punarduttrajput/wovyr/tree/v0.3.0/docs/18-roadmap/v0.1.md

@@ -1289,18 +1289,14 @@ mod tests {
     }
 
     async fn state() -> Arc<AppState> {
-        let mut st = AppState::from_env()
-            .await
-            .with_tenancy(Arc::new(wovyr_tenancy::InMemoryTenancyStore::new()));
-        // `AppState::from_env()` otherwise points the idempotency cache at the real
-        // `~/.wovyr/server/idempotency.jsonl` (DUR-404) shared by every process on this
-        // machine — including a previous `cargo test` run. A fixed key like this
-        // module's `idempotency_key_replays_...` test uses would then replay a
-        // *prior run's* cached response instead of exercising the fresh in-memory
-        // tenancy store this helper just built, exactly as `duplicate_org_is_conflict`
-        // and friends already assume a clean slate. Swap in a purely in-memory store.
-        st.idempotency = crate::hardening::IdempotencyStore::default();
-        Arc::new(st)
+        // `for_test()` (not `from_env()`) already gives this module the in-memory
+        // idempotency cache its fixed-`Idempotency-Key` test needs, plus the
+        // non-accumulating agent store — see `AppState::for_test`'s own doc comment.
+        Arc::new(
+            AppState::for_test()
+                .await
+                .with_tenancy(Arc::new(wovyr_tenancy::InMemoryTenancyStore::new())),
+        )
     }
 
     #[tokio::test]
@@ -1739,7 +1735,7 @@ mod tests {
         use wovyr_audit::{AuditFilter, AuditLog};
 
         unsafe { std::env::set_var("WOVYR_PLATFORM_ADMINS", "root") };
-        let mut st = AppState::from_env()
+        let mut st = AppState::for_test()
             .await
             .with_tenancy(Arc::new(wovyr_tenancy::InMemoryTenancyStore::new()));
         st.idempotency = crate::hardening::IdempotencyStore::default();

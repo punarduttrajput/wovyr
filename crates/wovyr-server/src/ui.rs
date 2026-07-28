@@ -1089,7 +1089,7 @@ mod tests {
         ui: &Arc<UiRuntime>,
         audit: &Arc<AuditLog>,
     ) -> Arc<AppState> {
-        let base = AppState::from_env().await.with_audit_arc(audit.clone());
+        let base = AppState::for_test().await.with_audit_arc(audit.clone());
         let agents = Arc::new(AgentStore::new(None));
         let executor = Arc::new(crate::workflow_runner::server_executor(
             base.gateway.clone(),

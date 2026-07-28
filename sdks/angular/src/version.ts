@@ -11,7 +11,7 @@ export const SDK_VERSION = "0.1.0";
 
 /** The platform (`wovyr-server`) release this SDK targets. Same major.minor as
  * the server means the same API surface (DX-303). */
-export const TARGET_SERVER_VERSION = "0.3.0";
+export const TARGET_SERVER_VERSION = "0.3.1";
 
 /** Human-readable warning when the SDK and server disagree on major.minor —
  * `null` when they agree (patch-level differences are compatible by policy)

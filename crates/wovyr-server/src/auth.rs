@@ -941,7 +941,7 @@ mod tests {
         let keys = InMemoryApiKeyStore::new();
         keys.insert("alice-key", "alice");
         let state = Arc::new(
-            crate::AppState::from_env()
+            crate::AppState::for_test()
                 .await
                 .with_tenancy(tenancy)
                 .with_api_keys(Arc::new(keys))

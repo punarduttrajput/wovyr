@@ -831,6 +831,44 @@ impl AppState {
         self
     }
 
+    /// The constructor **every test in this crate** should use instead of
+    /// [`AppState::from_env`].
+    ///
+    /// `from_env` resolves its durable stores through `wovyr_config::paths::*`, which
+    /// read `HOME`/`USERPROFILE` — so a test calling it directly shares real files
+    /// under `~/.wovyr` with every *other* test in the same binary, with a previous
+    /// `cargo test` run, and with any `wovyr dev` the developer has ever started on
+    /// this machine. Two of those stores accumulate rows that later tests then assert
+    /// exact contents against, which made `cargo test --workspace` fail
+    /// intermittently rather than deterministically:
+    ///
+    /// - **`agents`** (`~/.wovyr/workflows/agents.json`) — `agents_are_isolated_per_tenant`
+    ///   asserts a tenant's agent list is *exactly* `["secret-agent"]`. Any concurrently
+    ///   running test that creates an agent in the same tenant, or a prior run that died
+    ///   before its cleanup `DELETE`, adds an entry and fails the assertion — with a
+    ///   name that reads like a tenant-isolation breach when the isolation logic is
+    ///   in fact fine.
+    /// - **`idempotency`** (`~/.wovyr/server/idempotency.jsonl`) — a fixed
+    ///   `Idempotency-Key` would replay a *previous run's* cached response instead of
+    ///   exercising the store the test just built. (This swap started as a local
+    ///   workaround inside `tenancy::tests::state`; it lives here now so every test
+    ///   gets it.)
+    ///
+    /// Deliberately scoped to those two: the remaining `from_env` stores are either
+    /// already overridden per-test (`with_tenancy`/`with_workflows`/`with_timers`/…)
+    /// or are only ever read, never asserted against for exact contents. This is an
+    /// isolation fix, not a claim that no test touches `~/.wovyr` at all — a full
+    /// redirect of the config root is a larger change that would have to thread a
+    /// state-root parameter through every `crate::config::*_dir()` helper.
+    #[cfg(test)]
+    pub(crate) async fn for_test() -> Self {
+        let mut st = Self::from_env()
+            .await
+            .with_agents(Arc::new(AgentStore::new(None)));
+        st.idempotency = crate::hardening::IdempotencyStore::default();
+        st
+    }
+
     /// Override the timer store (RM-GA-P2 EXE-601) — tests that exercise the
     /// background dispatcher against an isolated engine (`with_workflows`) must
     /// point `spawn_dispatch_loops`'s `state.timers` at the *same* store the
@@ -882,6 +920,35 @@ impl AppState {
             Some(owner) => owner == tenant,
             None => tenant == tenancy::DEFAULT_TENANT,
         }
+    }
+}
+
+#[cfg(test)]
+mod test_isolation_tests {
+    use super::*;
+
+    /// `AppState::for_test()` must not share its agent store with the real
+    /// `~/.wovyr/workflows/agents.json`, or tests that assert an exact agent list
+    /// (`tests::agents_are_isolated_per_tenant`) fail intermittently depending on
+    /// what a concurrent test, a prior `cargo test`, or a `wovyr dev` run left
+    /// behind on the developer's machine. Encoded as a property rather than
+    /// re-proven per test: two independently built `for_test()` states must not see
+    /// each other's agents, which can only hold if neither is file-backed.
+    #[tokio::test]
+    async fn for_test_state_never_shares_the_real_agent_store() {
+        let manifest = "metadata:\n  name: leaky\nspec:\n  instructions: Be terse.\n";
+        let a = AppState::for_test().await;
+        a.agents
+            .create("acme", manifest.to_string())
+            .expect("valid manifest");
+        assert_eq!(a.agents.list("acme"), vec!["leaky".to_string()]);
+
+        let b = AppState::for_test().await;
+        assert!(
+            b.agents.list("acme").is_empty(),
+            "a second for_test() state saw the first's agent — the store is file-backed \
+             again, so exact-agent-list assertions will flake"
+        );
     }
 }
 

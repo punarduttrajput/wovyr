@@ -1,7 +1,7 @@
 """DX-303: SDK ↔ server version awareness.
 
 The SDK's version tracks the platform release it was written against
-(`0.3.0` ↔ wovyr-server 0.3.0) — same major.minor means same API surface.
+(`0.3.x` ↔ wovyr-server 0.3.x) — same major.minor means same API surface.
 At runtime the version comes from package metadata when installed; the
 fallback constant covers source-checkout use and is asserted against
 `pyproject.toml` by the unit suite so drift can't ship."""
@@ -12,7 +12,7 @@ import re
 from importlib import metadata
 from typing import Optional
 
-_FALLBACK_VERSION = "0.3.0"
+_FALLBACK_VERSION = "0.3.1"
 
 
 def sdk_version() -> str:

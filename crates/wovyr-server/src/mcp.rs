@@ -491,7 +491,7 @@ mod tests {
     /// runtime (never the real `~/.wovyr/mcp`) — `stdio_enabled` lets each
     /// test control MCX-103's gate independently of the RBAC scope check.
     async fn test_state(stdio_enabled: bool) -> Arc<AppState> {
-        let base = AppState::from_env().await;
+        let base = AppState::for_test().await;
         let mcp = Arc::new(McpRuntime::in_memory().with_stdio_enabled(stdio_enabled));
         Arc::new(base.with_mcp(mcp))
     }

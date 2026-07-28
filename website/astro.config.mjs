@@ -53,7 +53,7 @@ export default defineConfig({
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/punarduttrajput/Wovyr',
+          href: 'https://github.com/punarduttrajput/wovyr',
         },
       ],
       sidebar: [

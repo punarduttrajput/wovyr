@@ -42,7 +42,7 @@ mod timer;
 mod worker;
 
 pub use cron::Cron;
-pub use definition::{ActivityDef, Definition};
+pub use definition::{ActivityDef, ActivityUsage, Definition, USAGE_OUTPUT_KEY, is_for_each};
 pub use engine::{Engine, ExecutionFilter, ExecutionState, ExecutionSummary, RunOutcome};
 pub use event::WorkflowEvent;
 pub use executor::{ActivityContext, ActivityError, ActivityExecutor, ClosureExecutor};

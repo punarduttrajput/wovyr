@@ -30,7 +30,7 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt; // for `oneshot`
 
 async fn test_app() -> Router {
-    router(Arc::new(AppState::from_env().await))
+    router(Arc::new(AppState::for_test().await))
 }
 
 #[tokio::test]
@@ -61,7 +61,7 @@ async fn workflow_app() -> Router {
     )
     .unwrap();
     engine.run(&def, "demo-1", json!({})).await.unwrap();
-    router(Arc::new(AppState::from_env().await.with_workflows(engine)))
+    router(Arc::new(AppState::for_test().await.with_workflows(engine)))
 }
 
 #[tokio::test]
@@ -171,7 +171,7 @@ async fn run_returns_agent_output() {
 /// output shape the synchronous path returns inline.
 #[tokio::test]
 async fn async_run_returns_immediately_then_polling_reflects_completion() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let body = json!({
         "manifest": "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
         "input": { "message": "ping" }
@@ -227,7 +227,7 @@ async fn async_run_returns_immediately_then_polling_reflects_completion() {
 /// run that never started.
 #[tokio::test]
 async fn async_run_quota_rejection_returns_no_run_id() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     state
         .tenancy
         .set_quota(
@@ -261,7 +261,7 @@ async fn async_run_quota_rejection_returns_no_run_id() {
 /// in this crate uses (never a `403` that would confirm the run exists).
 #[tokio::test]
 async fn async_run_polling_is_tenant_scoped_and_404s_on_unknown() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
 
     let (st, _) = req(
         &state,
@@ -304,7 +304,7 @@ async fn async_run_polling_is_tenant_scoped_and_404s_on_unknown() {
 /// model turn, so it must fail instead of silently running with the default budget.
 #[tokio::test]
 async fn max_steps_override_is_honored() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let manifest = "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n";
 
     let (st, body) = req(
@@ -340,7 +340,7 @@ async fn max_steps_override_is_honored() {
 /// resolves the definition server-side rather than trusting a request field.
 #[tokio::test]
 async fn agent_level_max_steps_is_a_default_not_a_floor() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let manifest =
         "metadata:\n  name: zero-budget\nspec:\n  instructions: Be friendly.\n  max_steps: 0\n";
 
@@ -394,7 +394,7 @@ async fn agent_level_max_steps_is_a_default_not_a_floor() {
 #[tokio::test]
 async fn metrics_endpoint_reflects_a_run() {
     // Share one state across two routers so the run's metrics are visible.
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let body = json!({
         "manifest": "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n",
         "input": { "message": "ping" }
@@ -491,7 +491,7 @@ async fn metrics_endpoint_reflects_a_run() {
 
 #[tokio::test]
 async fn metrics_endpoint_serves_openmetrics_when_accepted() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let resp = router(state)
         .oneshot(
             Request::builder()
@@ -526,7 +526,7 @@ async fn metrics_endpoint_serves_openmetrics_when_accepted() {
 /// when it drains — rather than drifting like inc/dec bookkeeping would.
 #[tokio::test]
 async fn operability_gauges_move_with_load() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
 
     async fn scrape(state: &Arc<AppState>) -> String {
         let resp = router(state.clone())
@@ -760,7 +760,7 @@ async fn agents_are_isolated_per_tenant() {
     tenancy
         .add_membership(member("bob", Role::OrgAdmin, &org_b.id))
         .unwrap();
-    let state = Arc::new(AppState::from_env().await.with_tenancy(tenancy));
+    let state = Arc::new(AppState::for_test().await.with_tenancy(tenancy));
 
     let manifest = "metadata:\n  name: secret-agent\nspec:\n  instructions: Be terse.\n";
 
@@ -878,7 +878,7 @@ async fn agents_are_isolated_per_tenant() {
 /// cross-tenant leakage — workflows surface.)
 ///
 /// Uses an isolated in-memory workflow engine rather than the shared
-/// `~/.wovyr/workflows` `AppState::from_env()` default: the `GET
+/// `~/.wovyr/workflows` `AppState::for_test()` default: the `GET
 /// /api/v1/workflows` list route scans *every* checkpoint in that directory
 /// (not just this test's own execution), and real accumulated checkpoints
 /// written before API-702's `snake_case` `WorkflowState`/`ActivityState`
@@ -910,7 +910,7 @@ async fn workflows_are_isolated_per_tenant() {
     let executor = ClosureExecutor::new().on("echo-step", |_| async { Ok(json!("ok")) });
     let engine = Engine::new(events, checkpoints, Arc::new(executor));
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_tenancy(tenancy)
             .with_workflows(engine),
@@ -1057,7 +1057,7 @@ async fn memory_is_isolated_per_tenant() {
     let store: Arc<dyn wovyr_memory::MemoryStore> = Arc::new(InMemoryStore::new());
     let engine = MemoryEngine::new(Gateway::from_env(), store.clone());
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_tenancy(tenancy)
             .with_memory(engine, store),
@@ -1216,7 +1216,7 @@ async fn sensitive_memory_record_is_ciphertext_on_disk_and_plaintext_over_the_ap
         })
         .unwrap();
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_tenancy(tenancy)
             .with_memory(engine, store),
@@ -1332,7 +1332,7 @@ async fn secrets_are_isolated_masked_and_rbac_gated() {
         .add_membership(m("bob", Role::OrgAdmin, &org_b.id))
         .unwrap();
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_tenancy(tenancy)
             .with_secrets(Vault::new(Arc::new(InMemorySecretStore::new()))),
@@ -1453,7 +1453,7 @@ async fn secret_mutations_are_audited() {
     tenancy.add_membership(m("alice", &org_a.id)).unwrap();
     tenancy.add_membership(m("bob", &org_b.id)).unwrap();
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_tenancy(tenancy)
             .with_secrets(Vault::new(Arc::new(InMemorySecretStore::new())))
@@ -1531,7 +1531,7 @@ async fn audit_route_time_range_and_cursor_page_through_the_window() {
         })
         .unwrap();
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_tenancy(tenancy)
             .with_audit(AuditLog::in_memory()),
@@ -1616,7 +1616,7 @@ async fn kms_rotate_is_routine_but_destroy_needs_a_higher_tier() {
     tenancy.add_membership(m("edna", Role::Editor)).unwrap();
     tenancy.add_membership(m("alice", Role::OrgAdmin)).unwrap();
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_tenancy(tenancy)
             .with_kms(test_kms()),
@@ -1714,7 +1714,7 @@ async fn agent_mutations_are_audited() {
         })
         .unwrap();
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_tenancy(tenancy)
             .with_audit(AuditLog::in_memory()),
@@ -1789,7 +1789,7 @@ async fn kms_tenant_key_mutations_are_audited() {
     tenancy.add_membership(m("alice", &org_a.id)).unwrap();
     tenancy.add_membership(m("bob", &org_b.id)).unwrap();
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_tenancy(tenancy)
             .with_kms(test_kms())
@@ -1857,7 +1857,7 @@ async fn kms_tenant_key_mutations_are_audited() {
 #[tokio::test]
 async fn anonymous_default_tenant_caller_reaches_kms_admin_only_up_to_the_auth_layer_now() {
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_kms(test_kms())
             .with_anonymous_allowed(true),
@@ -1904,7 +1904,7 @@ async fn anonymous_default_tenant_caller_reaches_kms_admin_only_up_to_the_auth_l
 #[tokio::test]
 async fn anonymous_default_tenant_caller_is_denied_when_the_flag_is_off() {
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_kms(test_kms())
             .with_anonymous_allowed(false),
@@ -1923,7 +1923,7 @@ async fn anonymous_default_tenant_caller_is_denied_when_the_flag_is_off() {
 
 #[tokio::test]
 async fn tools_endpoint_lists_builtins_with_descriptions() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let (st, body) = req(&state, "GET", "/api/v1/tools", Value::Null).await;
     assert_eq!(st, StatusCode::OK);
     let tools = body["data"].as_array().unwrap();
@@ -1947,7 +1947,7 @@ async fn tools_endpoint_lists_builtins_with_descriptions() {
 #[tokio::test]
 async fn shell_tool_opt_in_env_var_re_enables_it() {
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_registry(ToolRegistry::with_privileged_builtins()),
     );
@@ -2004,7 +2004,7 @@ async fn agent_persistence_lifecycle() {
     // which would accumulate agents from every prior test run and break this
     // test's exact-list assertions below).
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_agents(Arc::new(AgentStore::new(None))),
     );
@@ -2063,7 +2063,7 @@ async fn agent_persistence_lifecycle() {
 
 #[tokio::test]
 async fn streaming_endpoint_emits_sse_event_frames() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let resp = router(state)
             .oneshot(
                 Request::builder()
@@ -2109,7 +2109,7 @@ async fn streaming_endpoint_emits_sse_event_frames() {
 
 #[tokio::test]
 async fn create_agent_rejects_invalid_manifest() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let (st, body) = req(
         &state,
         "POST",
@@ -2148,7 +2148,7 @@ async fn raw(
 
 #[tokio::test]
 async fn request_id_is_generated_and_honored() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     // Generated when absent.
     let resp = raw(&state, "GET", "/healthz", &[], Value::Null).await;
     assert!(resp.headers().get("x-request-id").is_some());
@@ -2167,7 +2167,7 @@ async fn request_id_is_generated_and_honored() {
 #[tokio::test]
 async fn error_envelope_carries_request_id() {
     ensure_admin_env();
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let resp = raw(
         &state,
         "GET",
@@ -2189,7 +2189,7 @@ async fn error_envelope_carries_request_id() {
 
 #[tokio::test]
 async fn run_is_idempotent_per_key() {
-    let state = Arc::new(AppState::from_env().await);
+    let state = Arc::new(AppState::for_test().await);
     let body = json!({
         "manifest": "metadata:\n  name: idem\nspec:\n  instructions: Hi.\n",
         "input": { "message": "hi" }
@@ -2221,7 +2221,7 @@ async fn run_is_idempotent_per_key() {
 async fn agent_list_is_cursor_paginated() {
     // A fresh in-memory agent store — see agent_persistence_lifecycle's comment.
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_agents(Arc::new(AgentStore::new(None))),
     );
@@ -2256,7 +2256,7 @@ fn default_limits() -> HttpLimits {
 
 #[tokio::test]
 async fn oversized_body_is_rejected_with_413() {
-    let state = Arc::new(AppState::from_env().await.with_http_limits(HttpLimits {
+    let state = Arc::new(AppState::for_test().await.with_http_limits(HttpLimits {
         max_body_bytes: 10,
         ..default_limits()
     }));
@@ -2446,7 +2446,7 @@ async fn tls_config_serves_https_end_to_end() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = router(Arc::new(AppState::from_env().await));
+    let app = router(Arc::new(AppState::for_test().await));
     let server = tokio::spawn(async move {
         axum_server::from_tcp_rustls(listener, config)
             .unwrap()
@@ -2555,7 +2555,7 @@ async fn graceful_shutdown_drains_in_flight_then_refuses_new_connections() {
 #[tokio::test]
 async fn standard_tier_rate_limit_returns_429_with_retry_after_then_isolates_by_principal() {
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_rate_limiter_standard(rate_limit::RateLimiter::new(2, 2)),
     );
@@ -2600,7 +2600,7 @@ async fn standard_tier_rate_limit_returns_429_with_retry_after_then_isolates_by_
 #[tokio::test]
 async fn tenant_rate_tier_is_shared_across_principals_and_isolated_by_tenant() {
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             // Generous per-principal buckets: only the tenant ceiling binds.
             .with_rate_limiter_standard(rate_limit::RateLimiter::new(100, 100))
@@ -2657,7 +2657,7 @@ async fn rate_limit_keys_off_the_verified_principal_not_a_spoofed_header() {
     let keys = InMemoryApiKeyStore::new();
     keys.insert("alice-key", "alice");
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_api_keys(Arc::new(keys))
             .with_auth_mode(AuthMode::ApiKey)
@@ -2701,7 +2701,7 @@ async fn configured_origin_passes_preflight_but_unlisted_origin_gets_no_allow_he
     use axum::body::Body;
 
     let state = Arc::new(
-        AppState::from_env()
+        AppState::for_test()
             .await
             .with_cors_allowed_origins(vec!["https://dashboard.example.com".to_string()]),
     );
@@ -2739,7 +2739,7 @@ async fn configured_origin_passes_preflight_but_unlisted_origin_gets_no_allow_he
 /// all, so no CORS headers appear on any response — same-origin only.
 #[tokio::test]
 async fn no_configured_origins_means_no_cors_headers_at_all() {
-    let state = Arc::new(AppState::from_env().await.with_cors_allowed_origins(vec![]));
+    let state = Arc::new(AppState::for_test().await.with_cors_allowed_origins(vec![]));
     let resp = raw(
         &state,
         "GET",

@@ -18,7 +18,7 @@
 
 [Unit]
 Description=Wovyr AI Platform server (single-node appliance)
-Documentation=https://github.com/punarduttrajput/Wovyr
+Documentation=https://github.com/punarduttrajput/wovyr
 After=network-online.target
 Wants=network-online.target
 

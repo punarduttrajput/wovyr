@@ -88,6 +88,44 @@ createdAt:
 updatedAt:
 ```
 
+## 5.1 Unknown fields are tolerated here — and only here (VAL-401)
+
+The agent manifest parser (`AgentDefinition`, `crates/wovyr-agent/src/definition.rs`)
+deliberately **does not** set `#[serde(deny_unknown_fields)]`. An unrecognized key is
+silently ignored rather than rejected.
+
+This is intentional, not an oversight: this document specifies a richer schema than the
+implementation currently consumes (see §7–§12), and tolerating the difference lets a
+manifest written against the full spec load and run against a build that only
+understands part of it.
+
+**It is also the single exception in this codebase.** Every other YAML/JSON DSL here
+rejects unknown fields fail-closed:
+
+| Surface | Unknown fields |
+|---|---|
+| Agent manifest (`AgentDefinition`) | **tolerated** (this section) |
+| Workflow DSL (`Definition`) | rejected |
+| UI frame protocol (`UiFrame`/`UiNode`, `crates/wovyr-ui/src/frame.rs`) | rejected |
+| MCP connections (`McpConnection`, `crates/wovyr-tools/src/mcp_store.rs`) | rejected |
+| UI trust policies (`UiPolicy`, `crates/wovyr-ui-guard`) | rejected |
+
+The practical consequence, confirmed by the 2026-07-27 internal red-team assessment:
+an attacker-supplied manifest carrying an extra field parses and runs, with that field
+ignored. That is not itself an escalation — the ignored key grants nothing — but it does
+mean **the manifest is not a place to detect tampering**. Authorization decisions must
+come from the fields the runtime actually reads (`spec.tools`, `spec.permissions`,
+`spec.mcp_servers`), enforced at the points that read them:
+
+- tool availability — the registry's permission check (SEC-303), which defaults to
+  deny-all for a hosted run;
+- privileged local tools — the explicit opt-in described in
+  [security-isolation §5.2](../07-tool-runtime/security-isolation.md#52-privileged-builtins-need-an-explicit-opt-in-under---local) (SBX-305);
+- MCP tools — the per-connection allow-list resolved at run time.
+
+If you need strict manifest validation for your own deployment, validate before
+submission; the loader will not do it for you.
+
 ---
 
 # 6. Instructions Layer

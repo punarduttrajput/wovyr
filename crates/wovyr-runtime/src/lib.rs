@@ -139,6 +139,21 @@ fn classify_gateway_error(e: wovyr_common::Error) -> ActivityError {
     }
 }
 
+/// A model step's usage in the shape [`wovyr_workflow::ActivityUsage`] reads back out
+/// of an activity output (RES-601), so a `for_each` wrapping model work can enforce an
+/// aggregate cost/token ceiling.
+///
+/// The engine can't obtain this itself: `wovyr-workflow` deliberately does not depend
+/// on the LLM gateway (keeping the core DAG/checkpoint engine free of the provider
+/// stack), so the executor — the one layer that *has* the `Usage` — reports it under
+/// the reserved output key instead.
+fn usage_json(usage: &wovyr_common::Usage) -> Value {
+    json!({
+        "cost_usd": usage.cost_usd,
+        "total_tokens": usage.total_tokens,
+    })
+}
+
 /// A [`RunEventSink`] that surfaces a sub-agent run's lifecycle as structured
 /// `tracing` events (target `wovyr.runtime.agent`), keyed by the workflow activity
 /// that owns the run (RM-AIM-P2 RUN-202). Previously sub-agent runs went to a
@@ -340,7 +355,13 @@ impl ActivityExecutor for PlatformActivityExecutor {
                     request.response_format = Some(parsed);
                 }
                 match self.gateway.chat(request).await {
-                    Ok(resp) => Ok(json!({ "message": resp.message.content.unwrap_or_default() })),
+                    Ok(resp) => Ok(json!({
+                        "message": resp.message.content.unwrap_or_default(),
+                        // RES-601: report this step's model usage so a `for_each`
+                        // wrapping it can enforce an aggregate budget. Additive —
+                        // `${activity.message}` references are unaffected.
+                        wovyr_workflow::USAGE_OUTPUT_KEY: usage_json(&resp.usage),
+                    })),
                     Err(e) => Err(classify_gateway_error(e)),
                 }
             }
@@ -403,7 +424,15 @@ impl ActivityExecutor for PlatformActivityExecutor {
                     .await
                     .map_err(classify_gateway_error)?;
                 self.agents.record(ctx, &output.usage);
-                Ok(json!({ "message": output.text, "steps": output.steps }))
+                Ok(json!({
+                    "message": output.text,
+                    "steps": output.steps,
+                    // RES-601: the aggregate-budget signal a wrapping `for_each`
+                    // enforces on. This is the case the budget exists for — one
+                    // `for_each` item can be a whole agent loop, so item *count*
+                    // alone says nothing about spend.
+                    wovyr_workflow::USAGE_OUTPUT_KEY: usage_json(&output.usage),
+                }))
             }
 
             // `human` activities suspend until a decision is injected. Checked
@@ -775,7 +804,17 @@ mod tests {
             ))
             .await
             .expect("ai step should succeed");
-        assert_eq!(out, json!({ "message": "42" }));
+        assert_eq!(
+            out["message"], "42",
+            "the answer must stay reachable at the same key `${{activity.message}}` \
+             references use"
+        );
+        // RES-601 added a reserved `__usage` sibling; assert it is *additive* rather
+        // than pinning the whole object, so `message` stays a stable contract.
+        assert!(
+            out.get(wovyr_workflow::USAGE_OUTPUT_KEY).is_some(),
+            "an `ai` step must report usage so a wrapping for_each can budget: {out}"
+        );
 
         let requests = seen.lock().unwrap();
         assert_eq!(requests.len(), 1);

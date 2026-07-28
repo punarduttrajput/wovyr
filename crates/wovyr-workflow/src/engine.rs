@@ -1440,15 +1440,34 @@ impl Engine {
                 spawn_instance(&mut set, index);
             }
         }
+        // RES-601: the running aggregate across this fan-out's items. Accumulated
+        // here — as each instance lands, before the next is launched — because that
+        // is the only point where stopping actually saves anything: enforcing during
+        // the phase-2 commit loop below would come after every item had already run
+        // and been billed. Items already in flight are left to finish and commit
+        // durably (WFL-301/302's per-item guarantee); only *new* launches stop.
+        let mut spent = crate::definition::ActivityUsage::default();
+        let mut over_budget: Option<String> = None;
         let mut slots: BTreeMap<usize, IsolatedOutcome> = BTreeMap::new();
         while let Some(joined) = set.join_next().await {
             let (index, outcome) =
                 joined.map_err(|e| Error::Runtime(format!("for_each item task panicked: {e}")))?;
+            if let IsolatedResult::Completed(output) = &outcome.result {
+                spent.add(crate::definition::ActivityUsage::from_output(output));
+            }
             slots.insert(index, outcome);
-            if let Some(next) = queue.next() {
+            if over_budget.is_none() {
+                over_budget = spent.exceeds(spec.max_total_cost_usd, spec.max_total_tokens);
+            }
+            // Stop launching once over budget; the drain continues so in-flight
+            // instances still join and commit.
+            if over_budget.is_none()
+                && let Some(next) = queue.next()
+            {
                 spawn_instance(&mut set, next);
             }
         }
+        let launched = slots.len();
 
         // Phase 2: commit deterministically in item order.
         let mut failure: Option<String> = None;
@@ -1501,6 +1520,21 @@ impl Engine {
 
         if let Some(msg) = failure {
             let attempt = state.activities[&id].attempts + 1;
+            return self
+                .terminal_activity_failure(state, &id, attempt, msg)
+                .await;
+        }
+        // RES-601: fail closed *after* the loop above committed every launched item's
+        // result, so crossing a budget never discards work already paid for. Ordered
+        // after `failure` so a genuine item error still reports as itself rather than
+        // being masked by the budget message.
+        if let Some(msg) = over_budget {
+            let attempt = state.activities[&id].attempts + 1;
+            let msg = format!(
+                "for_each `{id}`: {msg} after {launched} of {} items — raise the budget \
+                 if this fan-out is intended (the remaining items were never started)",
+                items.len()
+            );
             return self
                 .terminal_activity_failure(state, &id, attempt, msg)
                 .await;

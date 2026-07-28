@@ -82,7 +82,7 @@ misconfigure away.
 ### 3.1 Run a server (≈5 min)
 
 ```bash
-git clone https://github.com/punarduttrajput/Wovyr.git
+git clone https://github.com/punarduttrajput/wovyr.git
 cd Wovyr
 cargo build -p wovyr-cli
 ```
@@ -297,7 +297,7 @@ letting them surface as a surprise later:
 ## 8. Getting help
 
 File issues against
-[github.com/punarduttrajput/Wovyr](https://github.com/punarduttrajput/Wovyr) —
+[github.com/punarduttrajput/wovyr](https://github.com/punarduttrajput/wovyr) —
 include the `policy_ref` and `frame_id` from the relevant `PendingUiFrame` or
 `DecidedOutcome`, and (if it's a block you didn't expect) the audit entry
 from `GET /api/v1/audit` naming the rule that fired.

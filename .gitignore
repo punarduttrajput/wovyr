@@ -13,17 +13,23 @@ Cargo.lock.orig
 .DS_Store
 Thumbs.db
 
-# Local-only AI-assistant context (kept out of the public repo)
+# Local-only AI-assistant context
 /CLAUDE.md
 /CLAUDE.full.md
 
-# Local-only MCP server config (personal connectors — not for the public repo)
+# Local-only MCP server config (personal connectors)
 /.mcp.json
 
-# Internal / business docs (design-partner, pentest, outreach — not for the public repo)
-/DesignPartner-NCR.md
-/DesignPartner-Outreach-NCR.xlsx
-/Wovyr-Pentest-Report.xlsx
+# Local-only working files. Anything under /internal/ is never published — put
+# unpublished notes there rather than adding new patterns below. The remaining
+# entries cover files that predate that convention.
+/internal/
+/DISTRIBUTION.md
+/DesignPartner-*
+/*.xlsx
+/*.log
+/website/landing/PRD-landing.md
+/website/landing/TRD-landing.md
 
 # DX-503: Lighthouse CI's local scratch output
 .lighthouseci/

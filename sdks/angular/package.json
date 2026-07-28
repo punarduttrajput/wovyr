@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/punarduttrajput/Wovyr.git",
+    "url": "git+https://github.com/punarduttrajput/wovyr.git",
     "directory": "sdks/angular"
   },
   "type": "module",

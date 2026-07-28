@@ -233,26 +233,84 @@ Execution continues after all branches complete unless configured otherwise.
 
 ---
 
-# 13. Loops
+# 13. Loops (`for_each` / `map`)
 
-Supported loop types:
-
-```yaml
-loop:
-  while:
-  until:
-  foreach:
-```
-
-Example:
+**Implemented (WFL-301/302):** fan-out over a collection, as an engine-native
+activity *type*. `while`/`until` loops are **not implemented** — earlier revisions of
+this section described a `loop: {while, until, foreach}` block with a `collection:`
+key that never existed in code.
 
 ```yaml
-foreach:
-  collection: orders
-  activity: processOrder
+- id: summarize_all
+  type: for_each                 # `map` is an alias
+  inputs:
+    items: "${fetch.docs}"       # a ${...} reference, or a literal array
+    max_concurrent: 4            # optional; default 8
+    max_items: 500               # optional; default 1000 (fail-closed bound)
+    max_total_cost_usd: 5.00     # optional; no aggregate spend cap by default
+    max_total_tokens: 2000000    # optional; no aggregate token cap by default
+    activity:                    # the per-item body template
+      type: tool
+      name: summarize
+      inputs: { doc: "${item}" } # `item` / `item_index` injected per instance
 ```
 
-Loop execution is deterministic.
+Each item becomes its own durable `ActivityRecord` with the reserved instance id
+`<parent_id>[<index>]` (declared activity ids therefore may not contain `[` or `]`).
+Outputs join in **item order** regardless of completion timing, so the persisted
+history stays deterministic. The resolved collection is pinned into the checkpoint on
+first encounter and never recomputed on resume; a resume re-drives only the instances
+that never reached `Completed`. Engine-native body types (`wait`, `workflow`,
+`for_each`, `map`) cannot nest and are rejected at load.
+
+## 13.1 Aggregate cost and token ceilings (RES-601)
+
+`max_items` bounds item **count** only. Because a body may be a full `agent`
+activity — its own model + tool loop — a fan-out that stays comfortably under
+`max_items` can still expand into an unbounded number of billable model calls inside
+a *single* execution. An internal red-team run drove a 200-item fan-out, each item
+spawning a researcher agent, to 200 completed children under one
+`wovyr workflows run --local` invocation.
+
+`max_total_cost_usd` and `max_total_tokens` bound the fan-out's total. Both are
+optional and independent — a local model bills $0/token but still consumes real
+capacity, so the token ceiling matters even at zero cost.
+
+Semantics:
+
+- Usage accumulates **as each item lands**, before the next is launched. Crossing a
+  ceiling stops launching further items and fails the `for_each` activity closed
+  (which fails the workflow through the normal saga path).
+- Items **already in flight** are allowed to finish and commit durably — the ceiling
+  changes when new items stop *starting*, never the per-item durability guarantee.
+- Omitting both is behavior-identical to before this feature existed.
+- A ceiling of `0`, a negative cost, or a non-finite cost is a **load error**, not a
+  request for "unlimited".
+- Activities that report no usage (`tool`, `function`, `human`) contribute zero, so
+  non-model fan-outs need no configuration.
+
+The engine obtains per-item usage from a reserved `__usage` key
+(`{cost_usd, total_tokens}`) that the platform executor adds to `ai` and `agent`
+activity outputs. `wovyr-workflow` deliberately does not depend on the LLM gateway, so
+the executor — the one layer holding the `Usage` — reports it rather than the engine
+querying for it. The key is additive: `${activity.message}` references are unaffected.
+
+## 13.2 A `for_each` ceiling is the *only* per-execution budget under `--local`
+
+Worth stating plainly, because the server-side protection does not apply here:
+
+| | `wovyr dev` / hosted server | `wovyr … run --local` |
+|---|---|---|
+| Per-project daily LLM spend / tokens | enforced (`X-Wovyr-Project`, SRV-202/203) | **not enforced** — no `AgentResolver::admit` hook exists on the CLI path |
+| Concurrent agent runs | enforced (optionally fleet-shared) | **not enforced** |
+| Per-execution ceiling | **none** — the project budget is a *daily rate*, not a per-run cap | **none** |
+| `for_each` aggregate ceiling | enforced (§13.1) | enforced (§13.1) |
+
+So a single submission can stay entirely inside one day's server-side budget and still
+fan out without limit within that one execution, and a `--local` run has no
+project-level quota at all. Set `max_total_cost_usd` / `max_total_tokens` on any
+`for_each` whose body performs model work. A per-execution budget spanning the whole
+workflow (not just one fan-out) is not implemented.
 
 ---
 

@@ -535,6 +535,18 @@ enum AgentsCommand {
         /// activity is — see `wovyr-tools`' `ui_present` module docs.
         #[arg(long)]
         interactive_ui: bool,
+
+        /// Register the privileged builtins (`shell`, `fs_write`, `code_execute`) for
+        /// this local run (SBX-305). They execute arbitrary commands, write arbitrary
+        /// files, and run arbitrary code as your user with full host access, driven by
+        /// whatever the model decides — so they are off by default and a manifest that
+        /// names one fails closed without this flag. Intended for a single-operator
+        /// trusted workstation, not a shared or multi-tenant host. Set
+        /// `WOVYR_LOCAL_PRIVILEGED=1` to enable them for a whole session instead
+        /// (that env var is also what the `workflows approve`/`signal`/`tick` resume
+        /// paths honor, since they take no flag of their own).
+        #[arg(long)]
+        allow_privileged_tools: bool,
     },
 }
 
@@ -571,6 +583,16 @@ enum WorkflowsCommand {
         /// the CLI's file-based equivalent for local dev.
         #[arg(long, default_value = ".")]
         agents_dir: String,
+
+        /// Register the privileged builtins (`shell`, `fs_write`, `code_execute`) for
+        /// this local run (SBX-305). Off by default: they execute arbitrary commands,
+        /// write arbitrary files, and run arbitrary code as your user with full host
+        /// access, and a definition naming one (including inside a `for_each` body)
+        /// fails closed without this flag. Intended for a single-operator trusted
+        /// workstation. `WOVYR_LOCAL_PRIVILEGED=1` enables them for a whole session,
+        /// including the `approve`/`signal`/`tick` resume paths, which take no flag.
+        #[arg(long)]
+        allow_privileged_tools: bool,
     },
 
     /// Approve a suspended human task and resume the execution.
@@ -794,6 +816,7 @@ async fn run(cli: Cli) -> wovyr_common::Result<()> {
                 max_steps,
                 provider,
                 interactive_ui,
+                allow_privileged_tools,
             } => {
                 run_agent_cmd(
                     &file,
@@ -805,6 +828,7 @@ async fn run(cli: Cli) -> wovyr_common::Result<()> {
                     max_steps,
                     &provider,
                     interactive_ui,
+                    allow_privileged_tools,
                 )
                 .await
             }
@@ -817,7 +841,18 @@ async fn run(cli: Cli) -> wovyr_common::Result<()> {
                 local,
                 id,
                 agents_dir,
-            } => workflow::run_cmd(&file, &input, local, id, &agents_dir).await,
+                allow_privileged_tools,
+            } => {
+                workflow::run_cmd(
+                    &file,
+                    &input,
+                    local,
+                    id,
+                    &agents_dir,
+                    allow_privileged_tools,
+                )
+                .await
+            }
             WorkflowsCommand::Approve {
                 file,
                 id,
@@ -1030,6 +1065,7 @@ async fn run_agent_cmd(
     max_steps: Option<usize>,
     provider: &str,
     interactive_ui: bool,
+    allow_privileged_tools: bool,
 ) -> wovyr_common::Result<()> {
     // Accept JSON input, or fall back to treating the argument as plain text.
     let input_value: Value =
@@ -1044,8 +1080,15 @@ async fn run_agent_cmd(
             max_steps,
             provider,
             interactive_ui,
+            allow_privileged_tools,
         )
         .await;
+    }
+    if allow_privileged_tools {
+        eprintln!(
+            "note: --allow-privileged-tools is local-only; ignoring for a remote run \
+             (the server gates shell with WOVYR_ENABLE_SHELL_TOOL)"
+        );
     }
     if provider != "auto" {
         eprintln!("note: --provider is local-only; ignoring for a remote run");
@@ -1054,6 +1097,86 @@ async fn run_agent_cmd(
         eprintln!("note: --interactive-ui is local-only; ignoring for a remote run");
     }
     run_remote(file, input_value, server, stream, max_steps).await
+}
+
+/// The tool ids [`ToolRegistry::with_privileged_builtins`] registers on top of
+/// [`ToolRegistry::with_builtins`] (SBX-305): arbitrary command execution, arbitrary
+/// filesystem writes, and arbitrary code execution — all as the invoking user, with
+/// whatever host access that user has.
+pub(crate) const PRIVILEGED_TOOL_IDS: [&str; 3] = ["shell", "fs_write", "code_execute"];
+
+/// The env-var opt-in that `--allow-privileged-tools` mirrors, honored by every
+/// `--local` execution path including the resume commands (`workflows approve`,
+/// `workflows signal`, `workflows tick`) that have no flag of their own.
+const PRIVILEGED_ENV_VAR: &str = "WOVYR_LOCAL_PRIVILEGED";
+
+/// Whether a `--local` run may register the privileged builtins (SBX-305).
+///
+/// Before this gate, *choosing `--local` at all* was treated as the operator's
+/// acknowledgement: every local run silently handed `shell`/`fs_write`/`code_execute`
+/// to whatever the model decided to do, with nothing but a WARN line in the way. That
+/// is materially weaker than SEC-404's hosted confinement floor, which demands an
+/// explicit acknowledgement (or a real sandbox) before any unsandboxed native run —
+/// and it could not distinguish the single-operator workstation where this is the
+/// documented, accepted design (SEC-301) from a shared or multi-tenant host where the
+/// identical command grants full host access to anyone who can supply a manifest.
+///
+/// Opt in per-run with `--allow-privileged-tools`, or for a whole session by setting
+/// `WOVYR_LOCAL_PRIVILEGED=1`. Absent both, a `--local` run gets only the safe
+/// builtins (echo/fs_read/http_get) and a manifest that *names* a privileged tool
+/// fails closed via [`reject_privileged_tools`] rather than running with the tool
+/// silently missing.
+pub(crate) fn privileged_tools_enabled(flag: bool) -> bool {
+    flag || std::env::var(PRIVILEGED_ENV_VAR)
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// The registry a `--local` run starts from (SBX-305). Privileged builtins are added
+/// only on an explicit opt-in; otherwise this is the same safe-by-default set the
+/// hosted server uses.
+pub(crate) fn local_registry(allow_privileged: bool) -> ToolRegistry {
+    if allow_privileged {
+        ToolRegistry::with_privileged_builtins()
+    } else {
+        ToolRegistry::with_builtins()
+    }
+}
+
+/// Fail closed, naming the opt-in, when `declared` asks for a privileged tool this run
+/// did not enable (SBX-305).
+///
+/// Without this the run would still fail — `resolve_tools` rejects a tool that isn't in
+/// the registry — but with a bare "unknown tool" error that reads like a typo rather
+/// than a deliberate security gate, giving the operator no idea a flag exists.
+pub(crate) fn reject_privileged_tools<'a>(
+    declared: impl IntoIterator<Item = &'a str>,
+    allow_privileged: bool,
+) -> wovyr_common::Result<()> {
+    if allow_privileged {
+        return Ok(());
+    }
+    let mut blocked: Vec<&str> = declared
+        .into_iter()
+        .filter(|t| PRIVILEGED_TOOL_IDS.contains(t))
+        .collect();
+    if blocked.is_empty() {
+        return Ok(());
+    }
+    blocked.sort_unstable();
+    blocked.dedup();
+    Err(wovyr_common::Error::config(format!(
+        "privileged tools not enabled: this run declares {}, which can execute \
+         arbitrary commands, write arbitrary files, and run arbitrary code as your \
+         user with full host access. Pass --allow-privileged-tools (or set \
+         {PRIVILEGED_ENV_VAR}=1) to enable them, and only on a host where you trust \
+         everything this agent may decide to do.",
+        blocked
+            .iter()
+            .map(|t| format!("`{t}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 /// Build the gateway a local run uses. `auto` mirrors `Gateway::from_env()`; other
@@ -1097,13 +1220,18 @@ async fn run_local(
     max_steps: Option<usize>,
     provider: &str,
     interactive_ui: bool,
+    allow_privileged_tools: bool,
 ) -> wovyr_common::Result<()> {
     let mut def = AgentDefinition::from_file(file)?;
     let gateway = std::sync::Arc::new(build_local_gateway(provider).await?);
-    // `agents run --local` is a trusted, first-party/local context (SEC-301's
-    // documented escape hatch) — shell stays available here, unlike the server's
-    // default registry.
-    let mut registry = ToolRegistry::with_privileged_builtins();
+    // SBX-305: `--local` is SEC-301's documented trusted-first-party escape hatch, but
+    // that trust is now stated explicitly per run rather than inferred from `--local`
+    // alone. Without the opt-in this is the same safe builtin set the hosted server
+    // uses, and a manifest naming a privileged tool errors below instead of running
+    // with the tool quietly absent.
+    let allow_privileged = privileged_tools_enabled(allow_privileged_tools);
+    reject_privileged_tools(def.spec.tools.iter().map(String::as_str), allow_privileged)?;
+    let mut registry = local_registry(allow_privileged);
     // image_generate needs a real, billed API key, so it's only registered when one is
     // configured — same signal build_local_gateway/Gateway::from_env use to pick a real
     // vs. mock provider.

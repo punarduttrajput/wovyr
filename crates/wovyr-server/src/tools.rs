@@ -131,7 +131,7 @@ mod tests {
     /// A real server state with an isolated, scratch-directory-backed MCP
     /// runtime (never the real `~/.wovyr/mcp`).
     async fn test_state() -> Arc<AppState> {
-        let base = AppState::from_env().await;
+        let base = AppState::for_test().await;
         let mcp = Arc::new(McpRuntime::in_memory());
         Arc::new(base.with_mcp(mcp))
     }

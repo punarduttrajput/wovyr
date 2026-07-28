@@ -521,7 +521,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         });
         let state = Arc::new(
-            AppState::from_env()
+            AppState::for_test()
                 .await
                 .with_tenancy(Arc::new(wovyr_tenancy::InMemoryTenancyStore::new()))
                 .with_webhooks(store)
@@ -571,7 +571,7 @@ mod tests {
 
         unsafe { std::env::set_var("WOVYR_PLATFORM_ADMINS", "root") };
         let state = Arc::new(
-            AppState::from_env()
+            AppState::for_test()
                 .await
                 .with_tenancy(Arc::new(wovyr_tenancy::InMemoryTenancyStore::new()))
                 .with_webhooks(Arc::new(InMemoryWebhookStore::new()))
@@ -650,7 +650,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         });
         let state = Arc::new(
-            AppState::from_env()
+            AppState::for_test()
                 .await
                 .with_webhooks(Arc::new(store))
                 .with_webhook_sender(sender.clone())
@@ -699,7 +699,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         });
         let state = Arc::new(
-            AppState::from_env()
+            AppState::for_test()
                 .await
                 .with_webhooks(Arc::new(store))
                 .with_webhook_sender(sender.clone())

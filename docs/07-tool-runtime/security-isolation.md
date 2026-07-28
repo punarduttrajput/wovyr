@@ -142,6 +142,56 @@ The native path now has a **confinement floor**, not parity with the container p
   untrusted or filesystem-sensitive run should select the container/gVisor backend
   instead, via trust classification or a policy floor — see §3).
 
+## 5.2 Privileged builtins need an explicit opt-in under `--local` (SBX-305)
+
+§5.1's confinement floor governs *how* a native tool call runs. This section governs
+*whether the privileged tools are registered at all* for a local CLI run.
+
+`shell`, `fs_write`, and `code_execute` are not default builtins
+(`ToolRegistry::with_builtins()`); they are added only by
+`with_privileged_builtins()`. A hosted server requires the operator to set
+`WOVYR_ENABLE_SHELL_TOOL=1` before `shell` appears at all (SEC-301). The CLI's
+`--local` paths used to call `with_privileged_builtins()` **unconditionally**,
+treating "the operator typed `--local`" as the acknowledgement. That is materially
+weaker than §5.1's floor, and it could not distinguish the two cases it was applied
+to identically:
+
+- a **single-operator trusted workstation**, where full host access to your own
+  machine is the documented, accepted design; and
+- a **shared, CI, or multi-tenant host**, where the same command grants full host
+  access to whatever a model decides to do, for anyone who can supply a manifest.
+
+The 2026-07-27 internal red-team assessment confirmed the consequence concretely: a
+real model, driven only by an agent manifest that listed the `shell` tool, read a
+host file outside the run's working directory, with nothing but a WARN line in the
+way.
+
+Both privileged registration paths now require an explicit signal:
+
+| Command | Opt-in |
+|---|---|
+| `wovyr agents run --local` | `--allow-privileged-tools` |
+| `wovyr workflows run --local` | `--allow-privileged-tools` |
+| `wovyr workflows approve` / `signal` / `tick` | `WOVYR_LOCAL_PRIVILEGED=1` (no flag — these resume an existing execution) |
+
+`WOVYR_LOCAL_PRIVILEGED=1` also satisfies the two `run` commands, for a session that
+needs privileged tools throughout. Absent any signal, a `--local` run gets exactly the
+safe builtins (`echo`, `fs_read`, `http_get`) — the same set the hosted server
+defaults to.
+
+**Fail closed, not fail quiet.** A manifest or definition that *names* a privileged
+tool is rejected before anything runs, with an error naming the flag. Without that, the
+run would still fail (`resolve_tools` rejects a tool missing from the registry) but
+with a bare "unknown tool" message that reads like a typo and gives no hint that an
+opt-in exists. The workflow-side check inspects `for_each`/`map` bodies too, since a
+fan-out's per-item activity template is where a privileged tool would otherwise hide.
+
+**This flag is a scope decision, not a sandbox.** Enabling it does not weaken §5.1 —
+an enabled `shell` call still goes through the same confinement floor and still logs
+the same loud warning on an unsandboxed native run. It is meant for a host where you
+trust everything the agent may decide to do. On a shared host, prefer trust
+classification (§3) so the call selects a container/gVisor backend instead.
+
 ---
 
 # 6. Filesystem Isolation

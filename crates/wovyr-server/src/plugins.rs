@@ -728,7 +728,7 @@ capabilities:
                 scope: MemberScope::Organization(org.id.clone()),
             })
             .unwrap();
-        let state = Arc::new(crate::AppState::from_env().await.with_tenancy(tenancy));
+        let state = Arc::new(crate::AppState::for_test().await.with_tenancy(tenancy));
 
         // A non-admin principal cannot trust a publisher key. (Deliberately not
         // exercised for the org admin here too: unlike enable/disable/rollback on an

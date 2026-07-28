@@ -1,41 +1,105 @@
-# Wovyr — Generative UI Trust Runtime
+# Wovyr — the trust layer for AI-generated interfaces
 
-> The infrastructure that lets AI agents render rich, interactive interfaces to
-> humans **safely, auditable, and with durable human-in-the-loop decisions** —
-> built on an enterprise AI Agent Operating System written in Rust.
+> **Self-hosted runtime, one Rust binary.** When an AI agent generates an
+> interface for a human, Wovyr validates it against declarative policy
+> (fail-closed), records it in a tamper-evident audit chain, and keeps the
+> human's decision durable across crashes and restarts. Runs air-gapped.
 
-![Version](https://img.shields.io/badge/version-0.3.0-blue)
+![Version](https://img.shields.io/badge/version-0.3.1-blue)
 ![Rust](https://img.shields.io/badge/Rust-Edition%202024-orange)
 ![License](https://img.shields.io/badge/license-Apache%202.0-green)
+[![Website](https://img.shields.io/badge/website-wovyr.com-black)](https://wovyr.com)
 
 ---
 
 ## Quickstart (5 minutes)
 
-Everything below runs offline with a deterministic mock provider — no API key
-needed. You need Rust 1.85+ (edition 2024).
+Everything below runs **offline against a deterministic mock provider — no API
+key, no Docker, no cloud account.** You need Rust 1.85+ (edition 2024).
 
 ```bash
-git clone https://github.com/punarduttrajput/Wovyr && cd Wovyr
+git clone https://github.com/punarduttrajput/wovyr && cd wovyr
 
-# 1. Start the all-in-one local server (builds on first run).
-WOVYR_ALLOW_ANONYMOUS=1 cargo run -p wovyr-cli -- dev
-#    → listening on http://127.0.0.1:8080
-
-# 2. In a second terminal: is it up?
-curl http://127.0.0.1:8080/healthz
-#    → {"status":"ok","version":"0.3.0"}
-
-# 3. Run your first agent (mock provider answers deterministically).
+# Run your first agent (builds on first run).
 cargo run -p wovyr-cli -- agents run --local \
-  -f examples/agents/hello.yaml --input '{"message":"Hi"}' --stream
+  -f examples/agents/hello.yaml --input '{"message":"Hi, who are you?"}' --stream
+```
+
+Real output from that command, verbatim:
+
+```text
+INFO wovyr_provider::gateway: llm gateway: no API key set, using mock provider
+start  · model: mock-chat-fast (provider: mock)
+delta  · "Hello! I'm an Wo"
+delta  · "vyr agent (mock "
+delta  · "provider). You s"
+…
+done   · tokens: 82, cost_usd: 0.000041
+```
+
+Then start the server and talk to it over HTTP:
+
+```bash
+WOVYR_ALLOW_ANONYMOUS=1 cargo run -p wovyr-cli -- dev   # → 127.0.0.1:8080
+curl http://127.0.0.1:8080/healthz                      # → {"status":"ok","version":"0.3.1"}
 ```
 
 From there: set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for a real model,
-`cd dashboard && npm ci && npx ng serve` for the UI (proxies to the server),
-or `pip install wovyr-sdk` / `sdks/typescript` to call the API from code.
-The full picture lives in [docs/](docs/SUMMARY.md); the runnable examples in
-[examples/](examples/).
+`make dashboard-dev` for the Angular UI, or `pip install wovyr-sdk` /
+`npm i @wovyr/sdk` to call the API from code. The full picture lives in
+[docs/](docs/SUMMARY.md); runnable examples in [examples/](examples/).
+
+---
+
+## Why not just use X?
+
+Wovyr overlaps three categories without being any of them. The honest
+comparison:
+
+| | **LangChain / LangGraph** | **Temporal** | **E2B / Firecracker sandboxes** | **Wovyr** |
+|---|---|---|---|---|
+| **Primary job** | Compose LLM calls and agents | Durable workflow execution | Run untrusted code in isolation | Agent runtime whose **human-facing output** is policy-checked and provable |
+| **Durable human-in-the-loop** | Ad hoc / app's problem | Yes (generic signals) | n/a | Yes — a frame pends durably; the decision survives a kill -9 |
+| **Agent-generated UI** | Renders whatever the model emits | n/a | n/a | Constrained component vocabulary; **no raw model-authored HTML/JS**, no credential inputs, fail-closed parse |
+| **Tamper-evident audit** | No | Event history (not tamper-evident) | No | Keyed HMAC hash chain + head anchor; detects interior edits *and* tail truncation |
+| **Tool sandboxing** | Trust the process | n/a | Yes — that's the product | Native → container → gVisor → microVM → WASI, selected by trust class, default-deny egress |
+| **Deployment** | Library in your app | Server + workers + DB | Hosted service / VM host | **One binary**, file-backed state, air-gappable |
+| **Encryption at rest** | n/a | Your DB's problem | n/a | Envelope encryption w/ per-tenant keys + crypto-shredding |
+
+**Use LangChain** to build the agent. **Use Temporal** if you need
+planet-scale generic workflows. **Use E2B** if isolated code execution is the
+whole job. **Use Wovyr** when an agent's output reaches a human or an auditor
+and someone will eventually ask *"prove what it showed them, and prove nothing
+else could have happened."*
+
+If you don't have that requirement, Wovyr is probably more machinery than you
+need — and that's a fine answer.
+
+---
+
+## Security posture
+
+Stated precisely, because vague security claims are worse than none. Each row
+links the spec and is covered by tests in `cargo test --workspace`.
+
+| Property | What actually holds |
+|---|---|
+| **Auth** | Enforced by default. JWT (HS256/RS256) or hashed API keys, verified *before* any handler; the verified principal overwrites client-supplied identity headers. Anonymous mode requires an explicit opt-in **and** refuses to bind a non-loopback address. |
+| **Transport** | A non-loopback bind without TLS fails to start, unless you declare a terminating proxy. |
+| **Authorization** | Default-deny RBAC over `domain:action` scopes, tenant-scoped on every route. Cross-tenant access returns 404, never 403 (no existence leak). |
+| **Tool sandboxing** | Container/gVisor isolation for untrusted code with **L3 default-deny egress** (host-side `iptables`/`nsenter`, not just `HTTPS_PROXY`). The native backend is *scoped*: a Linux egress floor via unprivileged netns; elsewhere it runs only as an explicitly-acknowledged unsandboxed run, or fails closed. Filesystem confinement on the native path is a [documented gap](docs/07-tool-runtime/security-isolation.md#51-the-native-backends-isolation-is-scoped-not-universal-sec-404). |
+| **Privileged local tools** | `shell`/`fs_write`/`code_execute` need an explicit per-run opt-in even locally ([§5.2](docs/07-tool-runtime/security-isolation.md#52-privileged-builtins-need-an-explicit-opt-in-under---local)). |
+| **SSRF** | `http_get` and the MCP transport resolve and pin the target IP, reject loopback/link-local/private/CGNAT/metadata ranges (including IPv4-in-IPv6 encodings), and re-run the full guard on every redirect hop. |
+| **Secrets at rest** | Encrypted by default via envelope encryption; values are non-serializable and masked in `Debug`/`Display`. Missing durable key material **fails startup** rather than silently using an ephemeral key. |
+| **Audit** | Append-only, keyed-HMAC hash chain with a monotonic head anchor — an attacker with write access to the log cannot forge it or truncate its tail undetected. |
+| **Generated UI** | No raw-HTML/script node and no credential-input component *exist* in the protocol — a structural guarantee, not a filter. Interactive frames are denied by default absent a policy. |
+| **Crash safety** | Every single-document store uses atomic write + `fsync` + cross-process file locking; append-only logs `fsync` file *and* directory. |
+
+Not yet done: no external penetration test, no SOC 2, no formal verification.
+An internal red-team assessment (2026-07-27) found 0 Critical and 0 High
+findings; all four lower-severity findings are fixed — see
+[v1.6](docs/18-roadmap/v1.6-pentest-remediation.md). Report vulnerabilities via
+[SECURITY.md](SECURITY.md), never a public issue.
 
 ---
 
@@ -55,25 +119,28 @@ can prove what an AI actually showed a user. Wovyr is the missing layer:
 - **Durable interaction** — "agent shows an interface → human decides → agent
   continues" runs on an event-sourced workflow engine: the decision loop survives
   crashes, restarts, and time.
-- **Embeddable runtime** — an SSE/pull frame protocol + a React renderer SDK
-  (`@wovyr/ui-react`; a web-component build is a later slice) + MCP surface,
-  adoptable as middleware by *any* agent stack; generative **enterprise
-  internal tools** are the beachhead use case. Execution is phased in
-  the [v1.2 roadmap](docs/18-roadmap/v1.2-generative-ui.md).
+- **Embeddable runtime** — an SSE/pull frame protocol, a React renderer SDK
+  (`@wovyr/ui-react`) plus a framework-agnostic `<wovyr-ui-frame>` web
+  component, and an MCP surface — adoptable as middleware by *any* agent stack;
+  generative **enterprise internal tools** are the beachhead use case.
+  Execution is phased in the
+  [v1.2 roadmap](docs/18-roadmap/v1.2-generative-ui.md).
 
-**The engine**: Wovyr is a next-generation AI Agent Operating System designed for building, deploying, and orchestrating intelligent autonomous agents at enterprise scale.
+**The engine underneath.** That trust layer is only credible if the runtime
+carrying it is real, so Wovyr also ships the platform an agent needs end to
+end — and it is the platform, not just an LLM-orchestration library:
 
-Unlike traditional AI frameworks that focus only on LLM orchestration, Wovyr provides a complete runtime platform featuring:
+| Subsystem | Crate |
+|---|---|
+| Agent runtime (model + tool loop, context budgeting, guardrails) | `wovyr-agent` |
+| Durable, event-sourced workflow engine (checkpoints, sagas, timers, cron) | `wovyr-workflow` |
+| Tool execution + sandboxing (native → container → gVisor → microVM → WASI) | `wovyr-tools` |
+| Memory engine (hybrid BM25 + vector retrieval, MMR, ABAC) | `wovyr-memory` |
+| Multi-provider LLM gateway (retry, failover, breakers, caching, cost metering) | `wovyr-provider` |
+| Plugin framework + signed marketplace | `wovyr-plugin`, `wovyr-marketplace` |
+| Multi-tenancy, secrets, KMS, tamper-evident audit | `wovyr-tenancy`, `wovyr-secrets`, `wovyr-kms`, `wovyr-audit` |
 
-- AI Agent Runtime
-- Durable Workflow Engine
-- Tool Execution Engine
-- Memory Engine
-- Plugin Framework
-- Multi-LLM Gateway
-- Visual Workflow Studio
-- Enterprise Security
-- Cloud Native Deployment
+Written in Rust for performance, memory safety, and a single deployable binary.
 
 > **GA ships as a single-node appliance** ([ADR-0010](docs/17-adr/ADR-0010-ga-deployment-topology.md),
 > ratified Path A): one `wovyr` binary, file-backed durable state by default,
@@ -411,7 +478,7 @@ phases** — security floor, durability & execution, scale & distribution
 [ADR-0010](docs/17-adr/ADR-0010-ga-deployment-topology.md)), and contract &
 operability. The **v1.1 "AI Platform Maturity" milestone**
 ([PRD-004](docs/01-product/prd-ai-platform-maturity.md),
-[tickets](docs/18-roadmap/v1.1/index.md)) is in progress:
+[tickets](docs/18-roadmap/v1.1/index.md)) is likewise complete:
 [Phase 1](docs/18-roadmap/v1.1/phase1-production-truth-tickets.md) (make
 production claims true — real per-model cost, context-window management,
 sandbox activation on the run path, graceful shutdown, durable async
@@ -445,9 +512,22 @@ non-durable path for bare agent runs (`ui_present` tool +
 **zero workflow or agent adoption**), a public conformance suite any
 deployer can gate their own policy on (`wovyr_ui_guard::conformance`), a real
 dashboard Surfaces panel dogfooding the whole loop under an operator's own
-session, and a [design-partner onboarding
-guide](docs/01-product/design-partner-onboarding.md) with its quickstart run
-live end-to-end.
+session.
+
+Three milestones have landed since:
+**[v1.3 "MCP Connection Management"](docs/18-roadmap/v1.3-mcp-connections.md)**
+([ADR-0012](docs/17-adr/ADR-0012-mcp-connection-trust-boundary.md)) — persisted,
+API/dashboard-managed MCP connections with a real trust boundary (`Stdio`
+transport needs both an RBAC scope and an operator opt-in);
+**[v1.4 "Audit Remediation"](docs/18-roadmap/v1.4-audit-remediation.md)** —
+closing the redirect-SSRF hole, an org-level cross-tenant authz gap, keyed
+audit MACs with a tail-truncation anchor, a native sandbox confinement floor,
+fail-closed KMS key sourcing, and bounded caches;
+**[v1.5 "Design System Unification"](docs/18-roadmap/v1.5-design-system-unification.md)**
+— one token system across all four UI surfaces, WCAG AA contrast gated in CI,
+and a real Playwright + axe browser e2e harness;
+**[v1.6 "Pentest Remediation"](docs/18-roadmap/v1.6-pentest-remediation.md)** —
+all four findings of an internal red-team assessment (0 Critical, 0 High).
 
 The implemented surface spans: an agent runtime with a real model/tool loop,
 an LLM gateway (chat + streaming + embeddings, mock/OpenAI-compatible/native
@@ -464,12 +544,25 @@ dashboard, TypeScript/Python SDKs, and the `wovyr` CLI. The per-crate doc
 comments and each `docs/` section's status header are the kept-current
 description of what each crate actually does.
 
-Current Version
+## Two version numbers, and why
 
-Crate version `0.3.0`, in lockstep with the latest release tag (`v0.3.0`) —
-reconciled by RM-AIM-P1 DX-101 after drifting since inception. Release history
-lives in [`CHANGELOG.md`](CHANGELOG.md); the roadmap milestones ("v0.1"…"v1.1")
-are tracked in [`docs/18-roadmap/`](docs/18-roadmap/).
+This trips people up, so plainly:
+
+- **Crate/package version `0.3.1`** — the semver of the published artifacts
+  (crates.io, npm, PyPI) and of the git release tag. Still `0.x`: the HTTP API
+  and wire formats may change, and have.
+- **Milestone names `v0.1`…`v1.6`** — the *roadmap* units in
+  [`docs/18-roadmap/`](docs/18-roadmap/). These are planning labels, not package
+  versions, and they are ahead of the semver number by design.
+
+So "v1.6 complete" and "version 0.3.1" are both true and describe different
+things. Release history lives in [`CHANGELOG.md`](CHANGELOG.md).
+
+**Milestone status:** v0.1–v0.3 shipped and tagged. v1.0 (GA hardening), v1.1
+(AI platform maturity), v1.2 (generative UI trust runtime), v1.3 (MCP
+connections), v1.4 (audit remediation), v1.5 (design-system unification), and
+v1.6 (pentest remediation) are all **complete**. Nothing is in flight; the next
+milestone is not yet scoped.
 
 ## Quickstart (code)
 
@@ -513,24 +606,45 @@ listed a generic 8-phase plan that no longer matched how the project is
 actually tracked and has been removed to avoid two conflicting sources of
 truth. See:
 
-- [`docs/18-roadmap/v0.1.md`](docs/18-roadmap/v0.1.md) ·
-  [`v0.2.md`](docs/18-roadmap/v0.2.md) ·
-  [`v0.3.md`](docs/18-roadmap/v0.3.md) — shipped milestones
-- [`docs/18-roadmap/v1.0.md`](docs/18-roadmap/v1.0.md) — the GA hardening
-  effort in progress now, with per-phase ticket docs under
-  [`docs/18-roadmap/v1.0/`](docs/18-roadmap/v1.0/)
+- [`docs/18-roadmap/index.md`](docs/18-roadmap/index.md) — start here; the
+  milestone-by-milestone status table
+- [`v0.1.md`](docs/18-roadmap/v0.1.md) · [`v0.2.md`](docs/18-roadmap/v0.2.md) ·
+  [`v0.3.md`](docs/18-roadmap/v0.3.md) — the foundation, workflow engine, and
+  ecosystem milestones
+- [`v1.0.md`](docs/18-roadmap/v1.0.md) (GA hardening, complete) ·
+  [`v1.1/`](docs/18-roadmap/v1.1/index.md) (AI platform maturity, complete) ·
+  [`v1.2`](docs/18-roadmap/v1.2-generative-ui.md) ·
+  [`v1.3`](docs/18-roadmap/v1.3-mcp-connections.md) ·
+  [`v1.4`](docs/18-roadmap/v1.4-audit-remediation.md) ·
+  [`v1.5`](docs/18-roadmap/v1.5-design-system-unification.md) ·
+  [`v1.6`](docs/18-roadmap/v1.6-pentest-remediation.md) — all complete
+- [`docs/18-roadmap/future/`](docs/18-roadmap/future.md) — larger ideas that
+  have not graduated to a milestone
+
+Each ticket states the problem with file:line evidence, the change, acceptance
+criteria, and a size estimate — so they double as the contributor backlog.
 
 ---
 
 # Contributing
 
-See CONTRIBUTING.md
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the build,
+where to find scoped work, the DCO sign-off requirement, and the "honest docs"
+rule this project holds itself to.
+
+Two things worth knowing before you start:
+
+- `make lint` is exactly what CI gates on — run it before pushing.
+- A fix ships with a test that fails against the pre-fix code. That's the house
+  convention, not a formality.
+
+Security issues go through [SECURITY.md](SECURITY.md), never a public issue.
 
 ---
 
 # License
 
-Apache License 2.0
+Apache License 2.0 — see [LICENSE](LICENSE).
 
 ---
 

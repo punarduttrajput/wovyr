@@ -12,6 +12,6 @@ appVersion: "0.3.0"
 keywords:
   - wovyr
   - agent-platform
-home: https://github.com/punarduttrajput/Wovyr
+home: https://github.com/punarduttrajput/wovyr
 sources:
-  - https://github.com/punarduttrajput/Wovyr
+  - https://github.com/punarduttrajput/wovyr

@@ -1146,7 +1146,7 @@ metadata: { name: bare, version: 1.0.0, publisher: acme }
                 scope: MemberScope::Organization(org.id.clone()),
             })
             .unwrap();
-        let state = Arc::new(crate::AppState::from_env().await.with_tenancy(tenancy));
+        let state = Arc::new(crate::AppState::for_test().await.with_tenancy(tenancy));
 
         for uri in [
             "/api/v1/marketplace/listings/nonexistent%2Flisting/verify",

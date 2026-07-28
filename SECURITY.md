@@ -8,7 +8,7 @@ reports as first-class work, and we appreciate the time it takes to make one.
 **Please do not open a public issue for security vulnerabilities.**
 
 Report privately via **GitHub's private vulnerability reporting**:
-[Security → Report a vulnerability](https://github.com/punarduttrajput/Wovyr/security/advisories/new)
+[Security → Report a vulnerability](https://github.com/punarduttrajput/wovyr/security/advisories/new)
 on this repository. This is the fastest path to the maintainers and keeps the
 report confidential while a fix is prepared.
 

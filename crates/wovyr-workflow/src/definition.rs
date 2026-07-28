@@ -117,6 +117,8 @@ pub const DEFAULT_FOR_EACH_MAX_ITEMS: usize = 1000;
 ///     items: "${fetch.docs}"        # a ${...} reference, or a literal array
 ///     max_concurrent: 4             # optional; default 8
 ///     max_items: 500                # optional; default 1000 (fail-closed bound)
+///     max_total_cost_usd: 5.00      # optional; no aggregate spend cap by default
+///     max_total_tokens: 2000000     # optional; no aggregate token cap by default
 ///     activity:                     # the per-item body template
 ///       type: tool
 ///       name: summarize
@@ -134,6 +136,103 @@ pub struct ForEachSpec {
     pub max_concurrent: usize,
     /// Fail-closed bound on the resolved collection's size.
     pub max_items: usize,
+    /// Optional aggregate spend ceiling across *all* of this fan-out's items, in
+    /// USD (RES-601). `None` (the default) means no aggregate cap — behavior
+    /// identical to before this field existed.
+    ///
+    /// `max_items` bounds item *count* only, and each item can itself be a full
+    /// `agent` activity running its own model + tool loop, so a single `for_each`
+    /// could fan out into an unbounded number of billable model calls within one
+    /// execution. The server's per-project quota doesn't close this: it's a *daily*
+    /// rate keyed by `X-Wovyr-Project`, not a per-execution ceiling, and it doesn't
+    /// apply at all to CLI `--local` runs.
+    pub max_total_cost_usd: Option<f64>,
+    /// Optional aggregate token ceiling across all of this fan-out's items
+    /// (RES-601) — the vendor-bill-independent twin of `max_total_cost_usd`, since
+    /// a local model costs $0/token but still burns real capacity.
+    pub max_total_tokens: Option<u64>,
+}
+
+/// The reserved activity-output key an executor reports a step's model usage under,
+/// so the engine can enforce [`ForEachSpec::max_total_cost_usd`]/
+/// [`ForEachSpec::max_total_tokens`] without depending on the LLM gateway (RES-601).
+///
+/// Double-underscored to match this crate's other engine-internal variable markers
+/// (`__execution_id`, and the server's `__tenant`/`__project`) and to keep it clear
+/// of any user-meaningful output field. Reported as
+/// `{"cost_usd": <f64>, "total_tokens": <u64>}`; an activity that reports nothing
+/// contributes zero, so non-model activities need no changes.
+pub const USAGE_OUTPUT_KEY: &str = "__usage";
+
+/// One activity's model usage, parsed out of [`USAGE_OUTPUT_KEY`] in its output.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ActivityUsage {
+    /// Dollar cost this activity reported.
+    pub cost_usd: f64,
+    /// Total tokens this activity reported.
+    pub total_tokens: u64,
+}
+
+impl ActivityUsage {
+    /// Read usage out of an activity output, tolerating its absence.
+    ///
+    /// Deliberately lenient rather than fail-closed: an activity that reports no
+    /// usage (every `tool`/`function`/`human` step) is genuinely zero-cost from the
+    /// budget's point of view, and a malformed report is an executor bug that must
+    /// not fail an otherwise-successful workflow. A non-finite or negative cost is
+    /// discarded for the same reason — it would poison the running total and could
+    /// make a budget check nonsensical in either direction.
+    pub fn from_output(output: &Value) -> Self {
+        let Some(usage) = output.get(USAGE_OUTPUT_KEY) else {
+            return Self::default();
+        };
+        let cost_usd = usage
+            .get("cost_usd")
+            .and_then(Value::as_f64)
+            .filter(|c| c.is_finite() && *c >= 0.0)
+            .unwrap_or(0.0);
+        let total_tokens = usage
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        Self {
+            cost_usd,
+            total_tokens,
+        }
+    }
+
+    /// Accumulate another activity's usage into this running total (saturating on
+    /// tokens, so a pathological report can't wrap the counter back under budget).
+    pub fn add(&mut self, other: Self) {
+        self.cost_usd += other.cost_usd;
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+    }
+
+    /// Whether this total has crossed either ceiling, and which — `None` while the
+    /// fan-out is still within budget (or has no budget set).
+    pub fn exceeds(
+        &self,
+        max_total_cost_usd: Option<f64>,
+        max_total_tokens: Option<u64>,
+    ) -> Option<String> {
+        if let Some(cap) = max_total_cost_usd
+            && self.cost_usd > cap
+        {
+            return Some(format!(
+                "aggregate cost ${:.6} crossed the max_total_cost_usd budget of ${cap:.6}",
+                self.cost_usd
+            ));
+        }
+        if let Some(cap) = max_total_tokens
+            && self.total_tokens > cap
+        {
+            return Some(format!(
+                "aggregate usage of {} tokens crossed the max_total_tokens budget of {cap}",
+                self.total_tokens
+            ));
+        }
+        None
+    }
 }
 
 /// The per-item activity a `for_each` runs: an inline activity template
@@ -165,6 +264,10 @@ struct ForEachInputs {
     max_concurrent: Option<u64>,
     #[serde(default)]
     max_items: Option<u64>,
+    #[serde(default)]
+    max_total_cost_usd: Option<f64>,
+    #[serde(default)]
+    max_total_tokens: Option<u64>,
 }
 
 impl ForEachSpec {
@@ -217,11 +320,31 @@ impl ForEachSpec {
             Some(n) => n as usize,
             None => DEFAULT_FOR_EACH_MAX_ITEMS,
         };
+        // RES-601: validated the same fail-closed way as max_concurrent/max_items —
+        // a budget of 0 (or a negative/NaN one) is a definition bug, and silently
+        // treating it as "unlimited" would be the opposite of what the author meant.
+        if let Some(cap) = parsed.max_total_cost_usd
+            && (!cap.is_finite() || cap <= 0.0)
+        {
+            return Err(Error::invalid(format!(
+                "for_each activity `{}`: max_total_cost_usd must be a finite value \
+                 greater than 0 (got {cap})",
+                activity.id
+            )));
+        }
+        if parsed.max_total_tokens == Some(0) {
+            return Err(Error::invalid(format!(
+                "for_each activity `{}`: max_total_tokens must be at least 1",
+                activity.id
+            )));
+        }
         Ok(Self {
             items: parsed.items,
             body: parsed.activity,
             max_concurrent,
             max_items,
+            max_total_cost_usd: parsed.max_total_cost_usd,
+            max_total_tokens: parsed.max_total_tokens,
         })
     }
 }

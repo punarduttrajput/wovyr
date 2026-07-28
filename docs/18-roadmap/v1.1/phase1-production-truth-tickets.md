@@ -630,7 +630,7 @@ idempotent; sealed records never clobbered).
 **Problem.** `Cargo.toml` version is `0.1.0` (`Cargo.toml:26`), README badge `0.1.0`,
 both SDKs `0.1.0` — while the repo is tagged `v0.3.0`; there is no root `CHANGELOG.md`.
 The `repository` URL also diverges (`Cargo.toml` → `wovyr-ai/wovyr`; Python
-`pyproject.toml` → `punarduttrajput/Wovyr`). (PRD-004 R-J.1; audit High/Low.)
+`pyproject.toml` → `punarduttrajput/wovyr`). (PRD-004 R-J.1; audit High/Low.)
 
 **Change.** Bump workspace/badge/SDK versions to match the tag; add a maintained root
 `CHANGELOG.md` (Keep-a-Changelog); unify the `repository` URL across all manifests.
@@ -647,7 +647,7 @@ propagates to `/healthz` and the backup manifest automatically), the README badg
 "Current Version" note, both SDK manifests (`package.json` + lockfile,
 `pyproject.toml`), the Helm `Chart.yaml` (`version`/`appVersion`), and
 `openapi.yaml`'s `info.version`. Canonical repository URL unified to
-`https://github.com/punarduttrajput/Wovyr` (the actual remote — the old
+`https://github.com/punarduttrajput/wovyr` (the actual remote — the old
 `wovyr-ai/wovyr` in `Cargo.toml` was fictional); the TS SDK gained the `repository`
 field it never had. Root `CHANGELOG.md` added (Keep-a-Changelog): `0.1.0`/`0.2.0`/
 `0.3.0` entries dated from the roadmap docs' own records, plus an `[Unreleased]`

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "wovyr-sdk"
-version = "0.3.0"
+version = "0.3.1"
 description = "Python client for the Wovyr AI Platform API."
 readme = "README.md"
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ requires-python = ">=3.9"
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/punarduttrajput/Wovyr"
+Repository = "https://github.com/punarduttrajput/wovyr"
 
 [tool.hatch.build.targets.wheel]
 packages = ["wovyr_sdk"]
