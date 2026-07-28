@@ -54,9 +54,12 @@ required-features = ["mistralrs"]
 # `rt` to actually execute `#[tokio::test]`s; `test-util` for the paused-clock hedging
 # tests (`start_paused = true`).
 tokio = { workspace = true, features = ["rt", "test-util"] }
-# For the mistralrs_research example only (a dev-dependency cycle back to
-# wovyr-provider is fine — Cargo excludes dev-deps from the graph it resolves
-# for downstream consumers).
+# NOTE: `wovyr-agent`/`wovyr-tools` dev-deps are intentionally omitted from the
+# published manifest. They form a dev-dependency cycle (provider <-> agent) that
+# `cargo publish` cannot resolve against the registry at package time, so they
+# are stripped only for the crates.io upload and restored in source afterwards.
+# (The mistralrs_research example that used them is dev-only and unaffected by
+# the published artifact's dependency surface.)
 wovyr-agent.workspace = true
 wovyr-tools.workspace = true
 # DX-302: criterion benchmarks over the budgeting hot path (benches/tokenizer.rs).
