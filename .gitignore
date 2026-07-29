@@ -20,6 +20,9 @@ Thumbs.db
 # Local-only MCP server config (personal connectors)
 /.mcp.json
 
+# Local-only AI-assistant tooling state (dev-server launch config, task locks)
+/.claude/
+
 # Local-only working files. Anything under /internal/ is never published — put
 # unpublished notes there rather than adding new patterns below. The remaining
 # entries cover files that predate that convention.
