@@ -11,6 +11,28 @@ each release links its own.
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-07-29
+
+Build fix only — no behavior, API, or wire-format change.
+
+### Fixed
+
+- **macOS release binaries compile again.** `wovyr-tools`' native sandbox spelled
+  `setrlimit`'s `resource` argument as `libc::__rlimit_resource_t` — a **glibc-only**
+  type alias; musl and the BSDs (macOS included) use a plain `c_int`. The
+  `#[cfg(unix)]` block therefore built fine on Linux and was never exercised on
+  Windows, and only the `aarch64-apple-darwin` leg of the release pipeline failed,
+  with `E0425: cannot find type __rlimit_resource_t in crate libc` — which took the
+  whole v0.3.1 release with it, since the GitHub Release job needs all three binary
+  jobs. The `set` helper is now a closure rather than a named `fn`, so it infers the
+  argument type from the `libc::setrlimit` call itself and every Unix target gets its
+  own with no `cfg` matrix to keep in sync
+  ([`crates/wovyr-tools/src/sandbox/native.rs`](crates/wovyr-tools/src/sandbox/native.rs)).
+  Type-checked for both `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`
+  (the full workspace can't be cross-checked from Windows — `ring`'s build script
+  needs a darwin C toolchain — so the affected function was checked in isolation
+  against real `libc` headers for both targets).
+
 ## [0.3.1] — 2026-07-28
 
 Open-source launch readiness. Everything below is either a security fix, a
@@ -355,7 +377,8 @@ The runnable foundation slice ([docs/18-roadmap/v0.1.md](docs/18-roadmap/v0.1.md
 - The `docs/` specification tree (product → architecture → per-subsystem specs →
   ADRs → roadmap) that the codebase implements spec-first.
 
-[Unreleased]: https://github.com/punarduttrajput/wovyr/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/punarduttrajput/wovyr/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.2
 [0.3.1]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.1
 [0.3.0]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.0
 [0.2.0]: https://github.com/punarduttrajput/wovyr/tree/v0.3.0/docs/18-roadmap/v0.2.md

@@ -5,6 +5,11 @@ The SDK's version tracks the platform release it targets: same major.minor as
 fixes. `health()` warns (once per client) when it detects a server whose
 major.minor differs.
 
+## 0.3.2 — 2026-07-29
+
+- Version-only bump to stay in lockstep with the platform's 0.3.2 release (a
+  macOS build fix). No SDK code change; the API surface is identical to 0.3.1.
+
 ## 0.3.1 — 2026-07-27
 
 - Docs: removed the stale "Known gaps" note claiming the package was not yet

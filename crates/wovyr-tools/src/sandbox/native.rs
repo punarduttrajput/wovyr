@@ -267,7 +267,14 @@ pub(super) fn terminating_signal(_status: &std::process::ExitStatus) -> (Option<
 /// only stack memory and `setrlimit` syscalls.
 #[cfg(unix)]
 fn apply_rlimits(limits: &ResourceLimits) -> std::io::Result<()> {
-    fn set(resource: libc::__rlimit_resource_t, soft: u64, hard: u64) -> std::io::Result<()> {
+    // A **closure**, not a named `fn`, deliberately: `setrlimit`'s `resource`
+    // argument type isn't portable across Unix targets — glibc declares it as the
+    // enum-backed `__rlimit_resource_t`, while musl and the BSDs (incl. macOS) use
+    // a plain `c_int`. A named helper has to spell that type out, and spelling
+    // glibc's broke the macOS build (E0425: no `__rlimit_resource_t` in `libc`);
+    // a closure infers it from the `libc::setrlimit` call itself, so every target
+    // gets the right one with no `cfg` matrix to keep in sync.
+    let set = |resource, soft: u64, hard: u64| -> std::io::Result<()> {
         let lim = libc::rlimit {
             rlim_cur: soft as libc::rlim_t,
             rlim_max: hard as libc::rlim_t,
@@ -277,7 +284,7 @@ fn apply_rlimits(limits: &ResourceLimits) -> std::io::Result<()> {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
-    }
+    };
 
     if let Some(bytes) = limits.memory_bytes {
         set(libc::RLIMIT_AS, bytes, bytes)?;

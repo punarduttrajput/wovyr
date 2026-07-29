@@ -8882,7 +8882,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-agent"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -8898,7 +8898,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-audit"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -8910,7 +8910,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "clap",
@@ -8943,7 +8943,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-common"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "fs2",
  "serde",
@@ -8953,7 +8953,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-config"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "tracing",
  "wovyr-common",
@@ -8963,7 +8963,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-eval"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -8981,7 +8981,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-events"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -8993,7 +8993,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-kms"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "hex",
  "ring",
@@ -9005,7 +9005,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-marketplace"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "postgres",
  "refinery",
@@ -9023,7 +9023,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-memory"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "refinery",
@@ -9040,7 +9040,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-plugin"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "proptest",
@@ -9061,7 +9061,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-plugin-sdk"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -9069,7 +9069,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-provider"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -9091,7 +9091,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-runtime"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -9106,7 +9106,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-secrets"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -9117,7 +9117,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-server"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -9162,7 +9162,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-telemetry"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -9175,7 +9175,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-tenancy"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -9184,7 +9184,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-tool-macros"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9193,7 +9193,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-tools"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "libc",
@@ -9218,7 +9218,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-ui"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "schemars 1.2.1",
  "semver",
@@ -9230,7 +9230,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-ui-guard"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -9241,7 +9241,7 @@ dependencies = [
 
 [[package]]
 name = "wovyr-workflow"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "proptest",

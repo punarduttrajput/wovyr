@@ -4,7 +4,7 @@
  * (`0.3.x` ↔ wovyr-server 0.3.x) — same major.minor means same API surface.
  * `SDK_VERSION` is kept in lockstep with `package.json` by the release
  * process, and the unit suite asserts the two match so drift can't ship. */
-export const SDK_VERSION = "0.3.1";
+export const SDK_VERSION = "0.3.2";
 
 /** Human-readable warning when the SDK and server disagree on major.minor —
  * `null` when they agree (patch-level differences are compatible by policy)
