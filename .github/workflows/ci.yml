@@ -923,6 +923,12 @@ jobs:
 
       - name: Build the wovyr image
         uses: docker/build-push-action@v6
+        env:
+          # Same reason as release.yml's image job: the buildx build record is
+          # uploaded as a malformed artifact that breaks any download-artifact
+          # call in the same run (docker/build-push-action#1334). Nothing
+          # consumes it here either, so don't upload it on every push.
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           file: deployment/docker/Dockerfile

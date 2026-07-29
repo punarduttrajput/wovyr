@@ -130,6 +130,14 @@ jobs:
 
       - name: Build (and push on a real release)
         uses: docker/build-push-action@v6
+        env:
+          # Don't upload the buildx build record as a GitHub artifact. It's
+          # uploaded uncompressed while being declared gzip, so any
+          # actions/download-artifact call that sees it fails to extract it
+          # (docker/build-push-action#1334, closed as kind/upstream) — which is
+          # exactly what broke the `release` job's "Download all artifacts"
+          # step for v0.3.2. Nothing in this pipeline consumes the record.
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           file: deployment/docker/Dockerfile
@@ -208,11 +216,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      # Download only the artifacts this workflow's own jobs uploaded, by name.
+      # A bare "download everything" also picks up artifacts uploaded as a side
+      # effect by third-party actions (see DOCKER_BUILD_RECORD_UPLOAD above),
+      # which both breaks this step and would attach stray files to the release
+      # via the `files: artifacts/**` glob below.
+      - name: Download binary archives
         uses: actions/download-artifact@v4
         with:
+          pattern: wovyr-*
           path: artifacts
           merge-multiple: true
+
+      - name: Download SDK packages
+        uses: actions/download-artifact@v4
+        with:
+          name: sdk-packages
+          path: artifacts
 
       - name: Extract this version's CHANGELOG section
         shell: bash
