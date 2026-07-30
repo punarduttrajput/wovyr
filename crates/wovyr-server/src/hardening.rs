@@ -32,8 +32,46 @@ pub(crate) const MAX_LIMIT: usize = 100;
 /// `?limit=&cursor=` query parameters for a list endpoint.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct PageQuery {
+    #[serde(default, deserialize_with = "de_opt_usize")]
     pub limit: Option<usize>,
     pub cursor: Option<String>,
+}
+
+/// Deserialize `limit` from either a JSON number or a string.
+///
+/// A query string carries every value as text, and `serde_urlencoded` normally
+/// coerces `limit=10` into a `usize` transparently. But when `PageQuery` is
+/// pulled into an enclosing query struct with `#[serde(flatten)]` — which
+/// `GET /api/v1/workflows` and `GET /api/v1/marketplace/listings` both do to add
+/// their own filters — serde buffers the flattened map into its internal
+/// `Content` representation first, where the value stays a `String`. The
+/// `usize` field then failed with *"invalid type: string \"10\", expected
+/// usize"*, so `?limit=` was rejected outright on exactly those two routes
+/// while the non-flattened ones worked. Accepting both forms fixes them
+/// centrally and keeps any future flattened use correct by construction.
+fn de_opt_usize<'de, D>(deserializer: D) -> std::result::Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumberOrString {
+        Number(usize),
+        String(String),
+    }
+
+    match Option::<NumberOrString>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(NumberOrString::Number(n)) => Ok(Some(n)),
+        // An empty `?limit=` means "unset" rather than a parse failure, matching
+        // how an omitted parameter behaves.
+        Some(NumberOrString::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(NumberOrString::String(s)) => s.trim().parse::<usize>().map(Some).map_err(|_| {
+            D::Error::custom(format!("limit must be a non-negative integer, got {s:?}"))
+        }),
+    }
 }
 
 /// A resolved page window (offset + clamped limit).
@@ -1353,6 +1391,61 @@ mod tests {
             .limit,
             MAX_LIMIT
         );
+    }
+
+    /// Regression: `?limit=` used to be rejected outright on the two routes that
+    /// pull `PageQuery` in with `#[serde(flatten)]` (`GET /api/v1/workflows`,
+    /// `GET /api/v1/marketplace/listings`) — serde buffers a flattened map with
+    /// every value still a `String`, so the `usize` field failed with "invalid
+    /// type: string \"10\", expected usize" while the non-flattened routes worked.
+    ///
+    /// Neither SDK integration suite caught it because neither ever sent
+    /// `?limit=` to those two routes, and redocly lint could not: the spec
+    /// declares the parameter correctly, only the deserializer was wrong. It
+    /// reproduces with plain curl against a running server.
+    #[test]
+    fn limit_deserializes_from_a_flattened_query_string() {
+        use axum::extract::Query;
+        use axum::http::Uri;
+
+        #[derive(Debug, Deserialize)]
+        struct Enclosing {
+            #[allow(dead_code)]
+            status: Option<String>,
+            #[serde(flatten)]
+            page: PageQuery,
+        }
+
+        // Driven through the same `Query` extractor the routes use, so this
+        // covers the real deserializer rather than a stand-in.
+        fn parse<T: serde::de::DeserializeOwned>(query: &str) -> Result<T, String> {
+            let uri: Uri = format!("http://test/?{query}")
+                .parse()
+                .expect("a valid test uri");
+            Query::<T>::try_from_uri(&uri)
+                .map(|Query(value)| value)
+                .map_err(|e| e.to_string())
+        }
+
+        // The flattened case — the one that was broken.
+        let flat: Enclosing =
+            parse("status=completed&limit=10&cursor=3137").expect("a flattened limit must parse");
+        assert_eq!(flat.page.limit, Some(10));
+        assert_eq!(flat.page.cursor.as_deref(), Some("3137"));
+
+        // The non-flattened case must keep working.
+        let direct: PageQuery = parse("limit=7").expect("a direct limit must parse");
+        assert_eq!(direct.limit, Some(7));
+
+        // Omitted and empty both mean "unset", not a 400.
+        let omitted: Enclosing = parse("status=running").expect("omitted limit is fine");
+        assert_eq!(omitted.page.limit, None);
+        let empty: Enclosing = parse("limit=").expect("empty limit is fine");
+        assert_eq!(empty.page.limit, None);
+
+        // A genuinely non-numeric limit is still a clean rejection rather than
+        // being silently ignored.
+        assert!(parse::<Enclosing>("limit=abc").is_err());
     }
 
     #[test]
