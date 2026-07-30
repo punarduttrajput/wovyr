@@ -54,7 +54,17 @@ Structured logs are queryable and correlate to traces/metrics via `request_id` /
 | `trace` | Very verbose (opt-in) |
 
 Level is configurable per service via `WOVYR_LOG`
-([deployment config](../12-deployment/docker.md#5-configuration)).
+([deployment config](../12-deployment/docker.md#5-configuration)), falling back to
+`RUST_LOG` and defaulting to `warn`. It accepts the full `EnvFilter` directive syntax,
+so a per-target level works too — `WOVYR_LOG=info,hyper_util=off` keeps the platform's
+own lifecycle lines without the HTTP connection-pool noise. Beware that a bare word
+`EnvFilter` doesn't recognize as a level parses as a *target* directive at `trace`
+(`WOVYR_LOG=Warning` means `Warning=trace`, a firehose — not an error).
+
+The filter applies to **every** sink, OTLP export included. Since the instrumented
+hot-path spans (`agent.run`, `gateway.chat`, `workflow.activity`, `api.*`) are
+`info`-level, an OTLP deployment must set `WOVYR_LOG=info` or nothing is exported at
+the `warn` default.
 
 ---
 

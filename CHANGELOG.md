@@ -13,6 +13,37 @@ each release links its own.
 
 ### Fixed
 
+- **`WOVYR_LOG` works at all now; every binary was logging at `TRACE`.** The level
+  filter had no effect whatsoever — not `WOVYR_LOG`, not `RUST_LOG`, not the
+  documented `warn` default — so every CLI run (and every `wovyr dev` server, which
+  shares the same process and therefore the same subscriber) emitted the full
+  `hyper_util` connection-pool firehose: dozens of `TRACE` lines per HTTP request,
+  drowning the actual output. `init_logging` composed the `EnvFilter` as an *element*
+  of the layer vector (`vec![filter.boxed(), fmt_layer]`), and `Layer for Vec<L>`
+  combines `register_callsite` by returning the **highest** interest across its
+  elements (tracing-subscriber 0.3.23, `src/layer/mod.rs:1788-1801`). `fmt::Layer`
+  uses the default `register_callsite`, which returns `Interest::always()`, so every
+  callsite resolved to `always`, `tracing` cached it as unconditionally enabled, and
+  the vector's own `enabled()` — an `all()` that would have correctly returned false
+  — was never consulted. The filter is now a distinct `Layered` step around the
+  output layers, which short-circuits to `never` as soon as the outer layer says so
+  (`layered.rs:435-450`), in a named `compose` function the regression test drives
+  directly, so the test exercises the production composition rather than a look-alike
+  ([`crates/wovyr-telemetry/src/logging.rs`](crates/wovyr-telemetry/src/logging.rs)).
+  Confirmed to have teeth by temporarily restoring the old composition and watching
+  it fail on the leaked `TRACE`/`DEBUG`/`INFO` events, then verified end to end
+  against the real CLI in all four modes: default (`warn`), `WOVYR_LOG=error`
+  (silent), `WOVYR_LOG=info,hyper_util=off` (gateway `INFO`, no `hyper`), and
+  `WOVYR_LOG_FORMAT=json`. Filter resolution moved into a `resolve_filter(explicit,
+  fallback)` taking values rather than reading the environment, so the documented
+  `WOVYR_LOG` → `RUST_LOG` → `warn` precedence is unit-tested without mutating
+  process-global environment variables. **Note for OTLP deployments:** the filter
+  now applies to the OTLP trace/log layers too (the intent its old doc comment
+  already claimed), and the instrumented hot-path spans (`agent.run`,
+  `gateway.chat`, `workflow.activity`, `api.*`) are `INFO`-level — so at the `warn`
+  default nothing is exported. Set `WOVYR_LOG=info` when exporting traces; before
+  this fix the point was moot, since an inert filter meant OTLP received everything
+  down to `TRACE`.
 - **The release pipeline's GHCR push is no longer denied.** The `container image
   (GHCR)` job built and uploaded every layer, then failed the manifest write with
   `denied: permission_denied: write_package` — pushing
