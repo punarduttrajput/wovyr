@@ -24,6 +24,20 @@
 # build/pack job identically but pushes nothing — no image push, no registry
 # publish, no GitHub Release — so the pipeline can be exercised end to end without
 # minting a release.
+#
+# One-time operator prerequisite for the GHCR push (not fixable from this file):
+# a container package that was first created by a local `docker push` belongs to
+# the *user*, connected to no repository, and therefore grants no write access to
+# this repository's `GITHUB_TOKEN` — `permissions: packages: write` below is
+# necessary but not sufficient, and the push fails with
+# `denied: permission_denied: write_package` (this is exactly how v0.3.2 failed).
+# Fix it once, either way:
+#   - github.com/users/<owner>/packages/container/wovyr/settings →
+#     "Manage Actions access" → add this repository with the **Write** role; or
+#   - delete the package and let this workflow create it, which auto-links it via
+#     the `org.opencontainers.image.source` label stamped below.
+# Every image this workflow (or the Dockerfile) builds now carries that label, so
+# a freshly-created package links itself and no future release needs this step.
 
 name: release
 
@@ -149,6 +163,17 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
             ${{ steps.meta.outputs.image }}:latest
+          # `org.opencontainers.image.source` is what tells GHCR which repository
+          # owns this package; an unlinked package doesn't inherit the repo's
+          # Actions permissions, so `permissions: packages: write` above isn't
+          # enough on its own (see the LABEL block in the Dockerfile). Stamped
+          # here as well as in the Dockerfile so it always names *this* repo
+          # rather than a hardcoded one, and to carry the per-build revision.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
 
   sdks:
     name: pack SDKs (npm + PyPI artifacts)

@@ -47,5 +47,20 @@ WORKDIR /home/wovyr
 COPY --from=build /src/target/release/wovyr /usr/local/bin/wovyr
 COPY --from=build /src/examples ./examples
 
+# OCI image metadata. `org.opencontainers.image.source` is load-bearing here, not
+# cosmetic: GHCR links a pushed package to the repository named by this label, and
+# an *unlinked* package grants no write access to that repository's Actions token —
+# `permissions: packages: write` in the workflow is necessary but not sufficient.
+# That's exactly how the v0.3.2 release failed (`denied: permission_denied:
+# write_package`): the package had first been created by a label-less local
+# `docker push`, so it was owned by the user and connected to no repository at all.
+# Setting it in the Dockerfile (rather than only via the release workflow's
+# `labels:`) means a manual local push links the package the same way CI's does.
+LABEL org.opencontainers.image.title="wovyr" \
+      org.opencontainers.image.description="Wovyr AI Platform — single-binary agent, workflow, and memory runtime" \
+      org.opencontainers.image.source="https://github.com/punarduttrajput/wovyr" \
+      org.opencontainers.image.url="https://github.com/punarduttrajput/wovyr" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 ENTRYPOINT ["wovyr"]
 CMD ["--help"]

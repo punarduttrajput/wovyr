@@ -11,6 +11,29 @@ each release links its own.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release pipeline's GHCR push is no longer denied.** The `container image
+  (GHCR)` job built and uploaded every layer, then failed the manifest write with
+  `denied: permission_denied: write_package` — pushing
+  `ghcr.io/punarduttrajput/wovyr:0.3.2`. The workflow's `permissions: packages:
+  write` was never the problem: the package had first been created by a local,
+  label-less `docker push`, which makes it a *user*-owned package connected to no
+  repository, and an unlinked package grants this repository's `GITHUB_TOKEN` no
+  write access at all. Every image now carries
+  `org.opencontainers.image.source` — the label GHCR uses to link a package to
+  its repository — stamped both in
+  [`deployment/docker/Dockerfile`](deployment/docker/Dockerfile) (so a manual
+  local push links it the same way CI's does) and in
+  [`.github/workflows/release.yml`](.github/workflows/release.yml)'s `labels:`
+  (so it names the pushing repository rather than a hardcoded one, alongside
+  per-build `revision`/`version`). Linking the *already-created* package is a
+  one-time operator step that no label can do retroactively — package settings →
+  "Manage Actions access" → add the repository with the **Write** role, or delete
+  the package and let the next release recreate it auto-linked; both paths are
+  documented in the workflow header and in
+  [`DISTRIBUTION.md`](DISTRIBUTION.md).
+
 ## [0.3.2] — 2026-07-29
 
 Build fix only — no behavior, API, or wire-format change.
