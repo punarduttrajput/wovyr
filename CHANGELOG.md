@@ -13,6 +13,41 @@ each release links its own.
 
 ### Fixed
 
+- **Real cost is recorded behind an OpenAI-compatible gateway that renames the
+  model.** `PriceBook::price` matched a model id only from the *left* (exact, then
+  longest known key that is a prefix), so a vendor-prefixed id matched nothing:
+  OpenRouter answers a request for `gpt-4o-mini` with `openai/gpt-4o-mini`, and cost
+  is deliberately keyed on the model the upstream reports it **billed**, so every
+  call logged `no price for model and no default configured` and reported
+  `cost_usd: 0.000000`. That silently reinstated the failure class RM-AIM-P1 PRV-101
+  existed to remove — `wovyr-server`'s per-project `llm_cost_per_day_usd` budget is
+  fed from this number, so on such a deployment it never accrued and never denied.
+  `price()` now retries the exact-then-longest-prefix lookup against a prefixed id's
+  bare name (`openai/gpt-4o-mini` → `gpt-4o-mini`, `anthropic/claude-sonnet-5` →
+  `claude-sonnet-5`) before falling through to the configured default and the warn.
+  Deliberately a *fallback*, not a rewrite of the primary path, so an operator
+  override keyed on the full prefixed id still wins
+  ([`crates/wovyr-provider/src/pricing.rs`](crates/wovyr-provider/src/pricing.rs)).
+  Verified live: the same run that reported `$0` now reports `cost_usd: 0.000034`
+  with no price override configured and no warn. Three of the four new tests were
+  confirmed to fail against the pre-fix lookup; the fourth (an override on the
+  prefixed id beating the stripped fallback) passes either way by construction and
+  is an ordering guard rather than a regression test. One test also pins the
+  fallback's blast radius: the vendor segment is only *stripped*, and matching after
+  that is the same loose longest-left-prefix rule as always
+  (`vendor/o1-turbo-preview` resolves to the `o1` entry, exactly as the bare id
+  already did). The request path needed no change — OpenRouter accepts the bare ids
+  `resolve_model`/`resolve_embedding_model` already send (`gpt-4o`, `gpt-4o-mini`,
+  `text-embedding-3-small` all verified against the live API) and normalizes them
+  server-side; this was only ever about pricing the response.
+- **The streaming path logs its computed cost too.** PRV-101's notes recorded that
+  `cost_usd` was logged at `debug` (`target: "wovyr.pricing"`) from both
+  `parse_response` and `StreamAccumulator::finish`, but only the non-streaming path
+  ever did — and streaming is the default for `wovyr agents run --stream` and the
+  server's SSE route, so the path an operator most needs to watch cost accrue on was
+  the silent one. The cost itself was always computed and charged; only the
+  observability line was missing
+  ([`crates/wovyr-provider/src/openai.rs`](crates/wovyr-provider/src/openai.rs)).
 - **`WOVYR_LOG` works at all now; every binary was logging at `TRACE`.** The level
   filter had no effect whatsoever — not `WOVYR_LOG`, not `RUST_LOG`, not the
   documented `warn` default — so every CLI run (and every `wovyr dev` server, which

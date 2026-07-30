@@ -566,6 +566,13 @@ impl StreamAccumulator {
         };
         let usage = Usage::new(self.prompt_tokens, self.completion_tokens, 0.0);
         let cost_usd = self.prices.cost(&self.model, &usage);
+        // Same "observe then enforce" debug line `parse_response` emits. PRV-101's
+        // notes claimed both paths logged it, but only the non-streaming one did —
+        // and streaming is the default for the CLI and the server's SSE route, so
+        // the path an operator most needs to watch cost on was the silent one.
+        tracing::debug!(target: "wovyr.pricing", model = %self.model,
+            prompt_tokens = self.prompt_tokens, completion_tokens = self.completion_tokens,
+            cost_usd, "computed llm call cost (streamed)");
         let usage = Usage::new(self.prompt_tokens, self.completion_tokens, cost_usd);
         ChatResponse {
             message: Message {

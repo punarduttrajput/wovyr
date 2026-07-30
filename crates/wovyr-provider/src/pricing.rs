@@ -13,8 +13,10 @@
 //! overridable via `WOVYR_MODEL_PRICES` (inline JSON) or `WOVYR_PRICEBOOK_FILE` (a JSON
 //! file path), so an operator can price models this table doesn't know without a code
 //! change. Lookup is exact-match-then-longest-prefix (so a date-suffixed variant like
-//! `gpt-4o-mini-2024-07-18` resolves to the `gpt-4o-mini` entry), then a configured
-//! default, and finally a loud one-time warn returning `$0` for a genuinely unknown
+//! `gpt-4o-mini-2024-07-18` resolves to the `gpt-4o-mini` entry), then those same two
+//! steps again against a vendor-prefixed id's bare name (so an OpenAI-compatible
+//! gateway answering with `openai/gpt-4o-mini` is priced like `gpt-4o-mini`), then a
+//! configured default, and finally a loud one-time warn returning `$0` for an unknown
 //! model — never a panic ([coding standards §7](../../docs/19-implementation-guide/coding-standards.md):
 //! the computation itself is pure/deterministic; only construction reads config).
 
@@ -186,8 +188,38 @@ impl PriceBook {
     }
 
     /// Resolve a model to its price: exact match, then the longest known key that is
-    /// a prefix of `model` (handles date-/size-suffixed variants), then the default.
+    /// a prefix of `model` (handles date-/size-suffixed variants), then the same two
+    /// steps against a **vendor-prefixed** id's bare model name, then the default.
+    ///
+    /// The vendor-prefix fallback exists because cost is keyed on the model the
+    /// upstream reports it *billed* (see `OpenAiProvider`), and an OpenAI-compatible
+    /// gateway routinely renames that: OpenRouter answers a request for `gpt-4o-mini`
+    /// with `openai/gpt-4o-mini`, which prefix-matches nothing in this table, since
+    /// matching runs left-to-right. Without the fallback every call through such a
+    /// gateway priced at `$0` — reinstating exactly the silent-no-op quota failure
+    /// PRV-101 existed to remove, because the server's `llm_cost_per_day_usd` budget
+    /// is fed from this number. Deliberately a *fallback* rather than a rewrite of
+    /// the primary path, so an operator override keyed on the full prefixed id
+    /// (`{"openai/gpt-4o-mini": …}`) still wins over the stripped form.
     pub fn price(&self, model: &str) -> Option<ModelPrice> {
+        if let Some(p) = self.lookup(model) {
+            return Some(p);
+        }
+        // `rsplit_once` so a multi-segment id keeps only the final component; an id
+        // ending in `/` yields an empty name, which matches nothing and is skipped.
+        if let Some((_vendor, bare)) = model.rsplit_once('/')
+            && !bare.is_empty()
+            && let Some(p) = self.lookup(bare)
+        {
+            return Some(p);
+        }
+        self.default
+    }
+
+    /// Exact match, then the longest known key that is a prefix of `model`. No
+    /// default fallback — that belongs to [`PriceBook::price`], which layers the
+    /// vendor-prefix retry in between.
+    fn lookup(&self, model: &str) -> Option<ModelPrice> {
         if let Some(p) = self.prices.get(model) {
             return Some(*p);
         }
@@ -199,7 +231,7 @@ impl PriceBook {
                 best = Some((key.as_str(), *price));
             }
         }
-        best.map(|(_, p)| p).or(self.default)
+        best.map(|(_, p)| p)
     }
 
     /// Estimated cost in USD for `usage`'s token counts under `model`.
@@ -277,6 +309,79 @@ mod tests {
         assert_eq!(
             book.price("claude-sonnet-5").unwrap(),
             ModelPrice::per_1m(3.00, 15.00)
+        );
+    }
+
+    #[test]
+    fn vendor_prefixed_id_from_a_gateway_resolves_to_the_bare_model_price() {
+        let book = PriceBook::with_defaults();
+        // What OpenRouter actually answers a `gpt-4o-mini` request with. Priced $0
+        // before the vendor-prefix fallback, which silently disabled the server's
+        // per-project daily cost budget on any such deployment.
+        assert_eq!(
+            book.price("openai/gpt-4o-mini").unwrap(),
+            book.price("gpt-4o-mini").unwrap()
+        );
+        assert_eq!(
+            book.price("anthropic/claude-sonnet-5").unwrap(),
+            book.price("claude-sonnet-5").unwrap()
+        );
+    }
+
+    #[test]
+    fn vendor_prefixed_id_still_resolves_through_the_suffix_prefix_match() {
+        let book = PriceBook::with_defaults();
+        // Both fallbacks compose: strip `openai/`, then longest-prefix the date suffix.
+        assert_eq!(
+            book.price("openai/gpt-4o-mini-2024-07-18").unwrap(),
+            ModelPrice::per_1m(0.15, 0.60)
+        );
+    }
+
+    #[test]
+    fn an_override_on_the_prefixed_id_wins_over_the_stripped_fallback() {
+        let mut book = PriceBook::with_defaults();
+        book.merge_json(
+            r#"{"openai/gpt-4o-mini":{"input_per_1m":7.0,"output_per_1m":8.0}}"#,
+            "test",
+        );
+        // The operator priced the gateway's own id explicitly; that must not be
+        // shadowed by stripping the vendor prefix down to the built-in entry.
+        assert_eq!(
+            book.price("openai/gpt-4o-mini").unwrap(),
+            ModelPrice::per_1m(7.0, 8.0)
+        );
+        // The bare id is untouched by that override.
+        assert_eq!(
+            book.price("gpt-4o-mini").unwrap(),
+            ModelPrice::per_1m(0.15, 0.60)
+        );
+    }
+
+    #[test]
+    fn a_prefixed_but_genuinely_unknown_model_is_still_free_not_a_wrong_match() {
+        let book = PriceBook::with_defaults();
+        // Nothing in the table shares a prefix with this, so it stays unpriced and
+        // `cost` takes the warn-and-$0 path rather than inventing a number.
+        assert!(book.price("someone/mystery-model").is_none());
+        assert_eq!(
+            book.cost("someone/mystery-model", &Usage::new(10, 10, 0.0)),
+            0.0
+        );
+        // A trailing-slash id has no bare name to retry with, so it can't match.
+        assert!(book.price("vendor/").is_none());
+        // The vendor prefix is only *stripped*; matching after that is the same
+        // longest-left-prefix rule as always, which is as loose as it already was
+        // for bare ids — `o1-turbo-preview` resolves to the `o1` entry with or
+        // without a vendor segment in front. Pinned here so the fallback's blast
+        // radius is explicit rather than discovered later.
+        assert_eq!(
+            book.price("vendor/o1-turbo-preview"),
+            book.price("o1-turbo-preview")
+        );
+        assert_eq!(
+            book.price("vendor/o1-turbo-preview").unwrap(),
+            ModelPrice::per_1m(15.00, 60.00)
         );
     }
 
