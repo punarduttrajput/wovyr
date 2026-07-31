@@ -1,3 +1,17 @@
+#![doc(hidden)]
+//! **Internal to the Wovyr platform — not a supported public API.**
+//!
+//! This crate exists only so `wovyr-server` and `wovyr-cli` share one
+//! implementation of a few decisions; it is on crates.io purely because a
+//! published crate may only depend on published crates, not because anything
+//! outside this workspace should depend on it. It carries **no semver
+//! guarantee**: items may change or disappear in a patch release. If you want
+//! the platform, depend on `wovyr-server`; if you want a piece of it, see
+//! `wovyr-ui-guard`, `wovyr-workflow`, `wovyr-audit` or `wovyr-kms`, which are
+//! the supported standalone surfaces.
+//!
+//! ---
+//!
 //! Shared `~/.wovyr` directory layout, `WOVYR_*` env-var reading, and KMS/
 //! secrets backend construction for `wovyr-server` and `wovyr-cli` (RM-GA-P4
 //! HLTH-903).

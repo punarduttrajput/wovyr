@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Shared `~/.wovyr` directory layout, WOVYR_* env-var reading, and KMS/secrets backend construction for wovyr-server and wovyr-cli (RM-GA-P4 HLTH-903)."
+description = "INTERNAL to the Wovyr platform — no API stability guarantee. Shared `~/.wovyr` directory layout, WOVYR_* env-var reading, and KMS/secrets backend construction for wovyr-server and wovyr-cli (RM-GA-P4 HLTH-903)."
 
 [dependencies]
 wovyr-common.workspace = true

@@ -6,6 +6,13 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "Deterministic, fixture-based AI evaluation harness with LLM-judge scoring, a quantified CI regression gate, and retrieval metrics (FUT-006 prototype spike)."
+# Not published. This crate is an explicit prototype spike for FUT-006 — its own
+# description says so — and putting a prototype on a permanent crates.io name
+# implies an API stability contract the roadmap has deliberately not made. It is
+# also the only published crate nothing else depends on, so withdrawing it costs
+# nothing: 0.3.1 was yanked on 2026-07-31. Flip this back to true if and when
+# FUT-006 graduates and the API is committed to.
+publish = false
 
 [features]
 # A real, local, non-deterministic model (mistral.rs) as the comparison

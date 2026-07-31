@@ -1,3 +1,16 @@
+#![doc(hidden)]
+//! **Internal to the Wovyr platform — not a supported public API.**
+//!
+//! This crate is a deduplication seam between first-party binaries, not a
+//! library anyone outside this workspace is meant to build on. It is on
+//! crates.io purely because a published crate may only depend on published
+//! crates. It carries **no semver guarantee**: items may change or disappear in
+//! a patch release. For the supported standalone surfaces, see `wovyr-workflow`
+//! (the durable engine this dispatches into), `wovyr-ui-guard`, `wovyr-audit`
+//! or `wovyr-kms`.
+//!
+//! ---
+//!
 //! The one [`ActivityExecutor`] dispatch body shared by the CLI's local workflow
 //! runner, the server's workflow-builder write path, and `wovyr-eval`'s
 //! single-agent-vs-workflow comparison harness (RM-GA-P4 HLTH-901).
