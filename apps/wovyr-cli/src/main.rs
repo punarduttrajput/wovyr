@@ -222,8 +222,8 @@ enum PluginCommand {
         dir: String,
 
         /// Path to a local wovyr-plugin-sdk checkout, emitted as a `path`
-        /// dependency (use `<wovyr-repo>/crates/wovyr-plugin-sdk` until the SDK
-        /// is published to crates.io).
+        /// dependency — for developing against an unreleased SDK. Omit it to
+        /// depend on the published crate, which is the normal case.
         #[arg(long)]
         sdk_path: Option<String>,
     },

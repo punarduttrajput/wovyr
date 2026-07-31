@@ -17,8 +17,10 @@ use wovyr_plugin::{Artifact, PluginManifest};
 /// `wovyr plugin new <name>` — generate a plugin project under `<dir>/<name>`.
 ///
 /// `sdk_path` points the generated project at a local `wovyr-plugin-sdk`
-/// checkout (emitted as a `path` dependency). Without it the project depends
-/// on the published crate version — which requires the SDK to be on crates.io.
+/// checkout (emitted as a `path` dependency), for developing against an
+/// unreleased SDK. Without it the project depends on the published crate
+/// version, which is the normal case — the SDK has been on crates.io since
+/// 0.3.2.
 pub fn new_cmd(name: &str, publisher: &str, dir: &str, sdk_path: Option<&str>) -> Result<()> {
     validate_name(name)?;
     if publisher.trim().is_empty() {
@@ -47,9 +49,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Until wovyr-plugin-sdk is published to crates.io, generate this project with
-# `wovyr plugin new --sdk-path <wovyr-repo>/crates/wovyr-plugin-sdk` so the
-# dependency resolves locally.
+# wovyr-plugin-sdk is on crates.io, so this resolves with no extra setup.
+# Pass `--sdk-path <wovyr-repo>/crates/wovyr-plugin-sdk` to `wovyr plugin new`
+# instead if you are developing against an unreleased SDK checkout.
 wovyr-plugin-sdk = {sdk_dep}
 serde = {{ version = "1", features = ["derive"] }}
 

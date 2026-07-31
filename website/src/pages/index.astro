@@ -423,14 +423,18 @@ const CONTACT = 'contact@wovyr.com';
   <div class="tm">
     <div class="tm-top"><span class="ann">bash — first agent run</span>
       <button class="cpy" id="copy">Copy</button></div>
-    <pre><code id="qs"><span class="c"># clone and start the all-in-one local server</span>
-git clone https://github.com/punarduttrajput/wovyr &amp;&amp; cd wovyr
-WOVYR_ALLOW_ANONYMOUS=1 cargo run -p wovyr-cli -- dev
+    <pre><code id="qs"><span class="c"># install the CLI from crates.io</span>
+cargo install wovyr-cli
+
+<span class="c"># start the all-in-one local server — no API key, no Docker</span>
+WOVYR_ALLOW_ANONYMOUS=1 wovyr dev
 <span class="o">→ listening on http://127.0.0.1:8080</span>
 
-<span class="c"># run your first agent — deterministic, no key</span>
-cargo run -p wovyr-cli -- agents run --local \
-  -f examples/agents/hello.yaml --input '&#123;"message":"Hi"&#125;' --stream</code></pre>
+<span class="c"># run an agent. A deterministic mock provider answers, so this needs
+# no key — the example manifests ship in the repo:</span>
+git clone https://github.com/punarduttrajput/wovyr &amp;&amp; cd wovyr
+wovyr agents run --local -f examples/agents/hello.yaml \
+  --input '&#123;"message":"Hi"&#125;' --stream</code></pre>
   </div>
   <div class="next">
     <a href="/00-executive/vision/">Documentation</a>
@@ -456,7 +460,7 @@ cargo run -p wovyr-cli -- agents run --local \
         <div><h3>It runs on your machine, not ours</h3>
           <p>One binary, offline by default, no account to create. Telemetry exists only if you turn on an OTLP endpoint yourself.</p></div>
         <div><h3>Take one crate, not the platform</h3>
-          <p>All 22 library crates are on crates.io. Want only the trust layer? Depend on <span style="font-family:var(--mono)">wovyr-ui-guard</span> — policy evaluation, pure and deterministic — and leave the runtime behind.</p></div>
+          <p>All 21 library crates are on crates.io. Want only the trust layer? Depend on <span style="font-family:var(--mono)">wovyr-ui-guard</span> — policy evaluation, pure and deterministic — and leave the runtime behind.</p></div>
         <div><h3>The docs are the source of truth</h3>
           <p>Every module links the spec it implements, and specs are marked shipped or planned — so you can tell what is real before you build on it.</p></div>
       </div>
@@ -465,7 +469,8 @@ cargo run -p wovyr-cli -- agents run --local \
       <dl class="colo">
         <div><dt>Licence</dt><dd>Apache-2.0</dd></div>
         <div><dt>Source</dt><dd><a href="https://github.com/punarduttrajput/wovyr">github.com/punarduttrajput/wovyr</a></dd></div>
-        <div><dt>crates.io</dt><dd><a href="https://crates.io/search?q=wovyr">22 library crates</a> <span class="muted">wovyr-*</span></dd></div>
+        <div><dt>crates.io</dt><dd><a href="https://crates.io/search?q=wovyr">21 libraries + CLI</a> <span class="muted">wovyr-*</span></dd></div>
+        <div><dt>Install</dt><dd>cargo install wovyr-cli</dd></div>
         <div><dt>npm</dt><dd><a href="https://www.npmjs.com/package/@wovyr/sdk">@wovyr/sdk</a></dd></div>
         <div><dt>PyPI</dt><dd><a href="https://pypi.org/project/wovyr-sdk/">wovyr-sdk</a></dd></div>
         <div><dt>Also in-repo</dt><dd>Go · React · Angular <span class="muted">clients</span></dd></div>

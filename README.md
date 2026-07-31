@@ -18,12 +18,19 @@ Everything below runs **offline against a deterministic mock provider — no API
 key, no Docker, no cloud account.** You need Rust 1.85+ (edition 2024).
 
 ```bash
+# Install the CLI from crates.io. Installs a `wovyr` binary.
+cargo install wovyr-cli
+
+# The example manifests live in the repo, so clone it for the run below.
 git clone https://github.com/punarduttrajput/wovyr && cd wovyr
 
-# Run your first agent (builds on first run).
-cargo run -p wovyr-cli -- agents run --local \
+# Run your first agent.
+wovyr agents run --local \
   -f examples/agents/hello.yaml --input '{"message":"Hi, who are you?"}' --stream
 ```
+
+Working from a clone and would rather not install anything? Every `wovyr …`
+command below is the same as `cargo run -p wovyr-cli -- …`.
 
 Real output from that command, verbatim:
 
@@ -40,8 +47,8 @@ done   · tokens: 82, cost_usd: 0.000041
 Then start the server and talk to it over HTTP:
 
 ```bash
-WOVYR_ALLOW_ANONYMOUS=1 cargo run -p wovyr-cli -- dev   # → 127.0.0.1:8080
-curl http://127.0.0.1:8080/healthz                      # → {"status":"ok","version":"0.3.2"}
+WOVYR_ALLOW_ANONYMOUS=1 wovyr dev   # → 127.0.0.1:8080
+curl http://127.0.0.1:8080/healthz  # → {"status":"ok","version":"0.3.2"}
 ```
 
 From there: set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for a real model,

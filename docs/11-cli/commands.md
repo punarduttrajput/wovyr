@@ -425,7 +425,7 @@ Arguments:
 Options:
       --publisher <PUBLISHER>  Publisher identity recorded in the manifest (the signing namespace) [default: dev]
       --dir <DIR>              Parent directory to create the project under [default: .]
-      --sdk-path <SDK_PATH>    Path to a local wovyr-plugin-sdk checkout, emitted as a `path` dependency (use `<wovyr-repo>/crates/wovyr-plugin-sdk` until the SDK is published to crates.io)
+      --sdk-path <SDK_PATH>    Path to a local wovyr-plugin-sdk checkout, emitted as a `path` dependency — for developing against an unreleased SDK. Omit it to depend on the published crate, which is the normal case
   -h, --help                   Print help
 ```
 

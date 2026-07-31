@@ -238,10 +238,11 @@ let report = conformance_report(&my_policy);
 assert!(report.all_passed(), "{report}");
 ```
 
-Today this means depending on the `wovyr-ui-guard` crate from a checkout of
-this repo (it isn't published to crates.io yet — see the gap list below);
-wire the assertion above into your own CI so a policy change that silently
-stops blocking sensitive inputs fails your build, not your first incident.
+`wovyr-ui-guard` is on crates.io, so this is a plain `cargo add wovyr-ui-guard`
+— you do not need a checkout of this repo, and you do not pull the runtime with
+it (the crate depends only on `wovyr-common` and `wovyr-ui`). Wire the assertion
+above into your own CI so a policy change that silently stops blocking sensitive
+inputs fails your build, not your first incident.
 
 ---
 
@@ -274,10 +275,12 @@ stops blocking sensitive inputs fails your build, not your first incident.
 Matching this project's own house rule of documenting cut lines rather than
 letting them surface as a surprise later:
 
-- **No public package registry yet.** `@wovyr/ui-react`, `@wovyr/sdk`, and
-  `wovyr-ui-guard` are consumed via a git checkout (`file:` path deps, or a
-  Rust path/git dependency) — not published to npm or crates.io. Budget for
-  vendoring a checkout, not `npm install @wovyr/ui-react`.
+- ~~**No public package registry yet.**~~ **Resolved 2026-07-31.** Everything is
+  on a public registry now: `@wovyr/sdk` (0.3.1), `@wovyr/ui-react` (0.1.0) and
+  `@wovyr/angular` (0.1.0) on npm; `wovyr-sdk` (0.3.2) on PyPI; and all 21
+  library crates plus the `wovyr-cli` binary on crates.io at 0.3.2. Install
+  normally — `npm i @wovyr/ui-react`, `pip install wovyr-sdk`,
+  `cargo add wovyr-ui-guard`, `cargo install wovyr-cli`. No vendoring required.
 - **No MCP server subsystem.** If you were expecting a Model Context
   Protocol server exposing these routes as MCP tools (an earlier roadmap
   item, EMB-702), it does not exist in this codebase at all yet.
