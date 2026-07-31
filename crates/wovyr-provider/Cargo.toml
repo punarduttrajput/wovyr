@@ -54,14 +54,19 @@ required-features = ["mistralrs"]
 # `rt` to actually execute `#[tokio::test]`s; `test-util` for the paused-clock hedging
 # tests (`start_paused = true`).
 tokio = { workspace = true, features = ["rt", "test-util"] }
-# NOTE: `wovyr-agent`/`wovyr-tools` dev-deps are intentionally omitted from the
-# published manifest. They form a dev-dependency cycle (provider <-> agent) that
-# `cargo publish` cannot resolve against the registry at package time, so they
-# are stripped only for the crates.io upload and restored in source afterwards.
-# (The mistralrs_research example that used them is dev-only and unaffected by
-# the published artifact's dependency surface.)
-wovyr-agent.workspace = true
-wovyr-tools.workspace = true
+# Path-only, deliberately NOT `workspace = true`. These form a dev-dependency
+# cycle (provider <-> agent, provider <-> tools): the workspace entries carry a
+# `version` alongside their path, and `cargo publish` insists every versioned
+# dependency — dev-dependencies included — already resolve against the registry.
+# Neither can, because each is published *after* provider.
+#
+# A dev-dependency with no `version` key is stripped from the published manifest
+# by cargo, so declaring the path alone breaks the cycle at package time while
+# keeping the local build, tests and the mistralrs_research example unchanged.
+# This previously required hand-editing this file before every release and
+# restoring it afterwards; it no longer does.
+wovyr-agent = { path = "../wovyr-agent" }
+wovyr-tools = { path = "../wovyr-tools" }
 # DX-302: criterion benchmarks over the budgeting hot path (benches/tokenizer.rs).
 # Default features off — no plotters/HTML reports; CI consumes `--output-format
 # bencher` text and tracks it with github-action-benchmark.
