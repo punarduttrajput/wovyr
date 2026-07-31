@@ -24,6 +24,20 @@ use tower::ServiceExt;
 use wovyr_server::{AppState, AuthMode, InMemoryApiKeyStore};
 use wovyr_tenancy::{InMemoryTenancyStore, TenancyStore};
 
+/// `AppState::from_env`, but against a scratch state root instead of the
+/// developer's real `~/.wovyr`.
+///
+/// This crate's own unit tests get the redirect via the crate-private
+/// `AppState::for_test`, which an integration test can't reach — so it calls the
+/// same `wovyr-config` hook directly. Without it, running this file wrote the
+/// audit chain, tenancy catalog, KMS root key and workflow store into live local
+/// state (the tests below override `tenancy`/`api_keys` per case, but everything
+/// `from_env` builds underneath them still resolved through `HOME`).
+async fn state_from_env() -> AppState {
+    wovyr_config::root::redirect_to_scratch("server-authz");
+    AppState::from_env().await
+}
+
 /// One route under test: `scope` is the exact `tenant_authorize`/`ctx.authorize` scope
 /// the handler requires, or `None` for a route that is open to any authenticated
 /// principal (no RBAC check beyond SEC-101's identity verification) — e.g. the
@@ -472,7 +486,7 @@ async fn send(state: &Arc<AppState>, case: &RouteCase, auth_header: Option<&str>
 #[tokio::test]
 async fn every_route_rejects_a_missing_credential() {
     let state = Arc::new(
-        AppState::from_env()
+        state_from_env()
             .await
             .with_tenancy(Arc::new(InMemoryTenancyStore::new()))
             .with_api_keys(Arc::new(InMemoryApiKeyStore::new()))
@@ -510,7 +524,7 @@ async fn under_scoped_credential_is_denied_by_rbac_not_authentication() {
     let keys = InMemoryApiKeyStore::new();
     keys.insert("poweruser-key", "poweruser");
     let state = Arc::new(
-        AppState::from_env()
+        state_from_env()
             .await
             .with_tenancy(Arc::new(InMemoryTenancyStore::new()))
             .with_api_keys(Arc::new(keys))
@@ -622,7 +636,7 @@ async fn org_admin_cannot_cross_tenants_on_org_level_routes() {
     let keys = InMemoryApiKeyStore::new();
     keys.insert("alice-key", "alice");
     let state = Arc::new(
-        AppState::from_env()
+        state_from_env()
             .await
             .with_tenancy(Arc::new(tenancy))
             .with_api_keys(Arc::new(keys))

@@ -88,3 +88,7 @@ redis = { version = "0.24", default-features = false, features = ["tokio-comp", 
 tokio = { workspace = true, features = ["macros", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 rcgen = "0.13"
+# Integration tests build `AppState::from_env()` directly (they can't reach the
+# crate-private `AppState::for_test`), so they need `root::redirect_to_scratch`
+# to keep the suite off the developer's real `~/.wovyr`.
+wovyr-config.workspace = true

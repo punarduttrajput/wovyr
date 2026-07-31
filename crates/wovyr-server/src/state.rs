@@ -854,14 +854,28 @@ impl AppState {
     ///   workaround inside `tenancy::tests::state`; it lives here now so every test
     ///   gets it.)
     ///
-    /// Deliberately scoped to those two: the remaining `from_env` stores are either
-    /// already overridden per-test (`with_tenancy`/`with_workflows`/`with_timers`/…)
-    /// or are only ever read, never asserted against for exact contents. This is an
-    /// isolation fix, not a claim that no test touches `~/.wovyr` at all — a full
-    /// redirect of the config root is a larger change that would have to thread a
-    /// state-root parameter through every `crate::config::*_dir()` helper.
+    /// Both swaps are kept even though the config root is now redirected
+    /// wholesale (below): they isolate these two stores *per `AppState`*, where
+    /// the root redirect only isolates the whole binary from the real
+    /// `~/.wovyr`. Tests in one binary still share a scratch root, so a test
+    /// asserting an exact agent list still needs its own non-accumulating store.
+    ///
+    /// **The config root itself is redirected** to a per-process scratch
+    /// directory by `wovyr_config::root::redirect_to_scratch`, so `from_env`'s remaining
+    /// stores — the audit chain, tenancy, the workflow store, the KMS root key,
+    /// secrets, the async-run and webhook-outbox files — land there instead of
+    /// in the developer's real `~/.wovyr`. Before that, running the suite left
+    /// test tenancy quotas (`prj-quota-test`) and workflow executions
+    /// (`test-exec-1.*`) sitting in live local state and appended test entries
+    /// to the real tamper-evident audit chain on every run. An earlier version
+    /// of this comment called that redirect "a larger change that would have to
+    /// thread a state-root parameter through every `crate::config::*_dir()`
+    /// helper" — it does not: every one of those helpers already resolves
+    /// through `wovyr_config::root::wovyr_dir()`, so overriding that single
+    /// function covers all of them at once.
     #[cfg(test)]
     pub(crate) async fn for_test() -> Self {
+        wovyr_config::root::redirect_to_scratch("server");
         let mut st = Self::from_env()
             .await
             .with_agents(Arc::new(AgentStore::new(None)));

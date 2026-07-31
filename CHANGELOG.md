@@ -13,6 +13,35 @@ each release links its own.
 
 ### Fixed
 
+- **The test suite no longer reads or writes the developer's real `~/.wovyr`.**
+  `cargo test --workspace` resolved durable stores through
+  `wovyr_config::paths::*`, which read `HOME`/`USERPROFILE` — so every run left
+  test tenancy quotas (`prj-quota-test`, `prj-async-block`) sitting in live local
+  state, wrote workflow checkpoints and event logs (`test-exec-1.*`) into the real
+  workflow store, and **appended test entries to the real tamper-evident audit
+  chain** (found at ~380 KB and growing on the machine this was fixed on). Beyond
+  the pollution, it meant a test run and a `wovyr dev` on the same machine shared
+  files, and pre-existing local state could influence results. `AppState::for_test`
+  already isolated the two stores whose *contents* tests assert on, but everything
+  else `from_env` builds — the audit chain, tenancy, the workflow store, the KMS
+  root key, secrets, the async-run and webhook-outbox files — still landed in the
+  real directory. `wovyr_config::root` gained a process-wide root override
+  (`set_root_override`/`redirect_to_scratch`/`root_override`), which
+  `AppState::for_test` and the `authz_matrix` integration test call before building
+  anything ([`root.rs`](crates/wovyr-config/src/root.rs),
+  [`state.rs`](crates/wovyr-server/src/state.rs)). Overriding one function covers
+  every resource directory, because they all already resolve through
+  `root::wovyr_dir()` — the previous comment on `for_test` called this "a larger
+  change that would have to thread a state-root parameter through every
+  `crate::config::*_dir()` helper", which was not the case; that comment is
+  corrected. Redirection is per **process**, not per test: tests in one binary
+  share a scratch root exactly as they previously shared the real one, isolated
+  from the user rather than from each other, so the two per-`AppState` store swaps
+  stay. Guarded by a test asserting the suite's resolved root is under the temp dir
+  and is not the home-derived path, plus `wovyr-config` unit tests for the
+  override's first-call-wins semantics and its reach across every `paths::*`
+  helper.
+
 - **`wovyr plugin build <project>` works with a relative path.** The documented
   flow — `wovyr plugin new hello-tool` then `wovyr plugin build hello-tool` — failed
   for *every* relative argument with "no build output at hello-tool\target\…".

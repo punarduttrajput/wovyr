@@ -2750,3 +2750,34 @@ async fn no_configured_origins_means_no_cors_headers_at_all() {
     .await;
     assert!(resp.headers().get("access-control-allow-origin").is_none());
 }
+
+/// Guard for the test-isolation fix: this suite must never resolve state paths
+/// into the developer's real `~/.wovyr`.
+///
+/// Before the redirect, `cargo test --workspace` left test tenancy quotas
+/// (`prj-quota-test`) and workflow executions (`test-exec-1.*`) sitting in live
+/// local state and appended test entries to the real tamper-evident audit chain
+/// on every run. If the `redirect_to_scratch` call is ever dropped from
+/// `AppState::for_test`, this fails loudly instead of quietly polluting the
+/// machine it runs on.
+#[tokio::test]
+async fn the_test_suite_never_resolves_paths_into_the_real_state_directory() {
+    let _state = AppState::for_test().await;
+
+    let root = wovyr_config::root::wovyr_dir().expect("a state root must resolve");
+    assert!(
+        wovyr_config::root::root_override().is_some(),
+        "AppState::for_test must redirect the config root; it resolved {root:?}"
+    );
+    assert!(
+        root.starts_with(std::env::temp_dir()),
+        "the test state root must live under the temp dir, got {root:?}"
+    );
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        assert_ne!(
+            root,
+            std::path::PathBuf::from(home).join(".wovyr"),
+            "the suite must not resolve to the real state directory"
+        );
+    }
+}
