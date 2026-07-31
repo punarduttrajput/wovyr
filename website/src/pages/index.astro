@@ -222,6 +222,21 @@ const CONTACT = 'contact@wovyr.com';
     padding:16px 18px; color:var(--ink-2); font-size:.93rem}
   .candor b{color:var(--ink)}
 
+  /* Colophon — a spec sheet of where the project actually lives. Two ruled
+     columns, label left, value right; the value column is mono because every
+     entry is a literal you can paste (a package name, a licence id, a repo). */
+  .colo{border-top:1px solid var(--warp-2)}
+  .colo > div{display:grid; grid-template-columns:minmax(0,.5fr) minmax(0,1fr);
+    gap:clamp(10px,2.5vw,26px); padding:13px 0; border-bottom:1px solid var(--warp);
+    align-items:baseline}
+  .colo dt{font-family:var(--mono); font-size:10.5px; letter-spacing:.13em;
+    text-transform:uppercase; color:var(--ink-2); margin:0}
+  .colo dd{margin:0; font-family:var(--mono); font-size:.9rem; color:var(--ink);
+    overflow-wrap:anywhere}
+  .colo dd a{color:var(--indigo); border-bottom:1px solid var(--warp-2)}
+  .colo dd a:hover{border-color:var(--indigo)}
+  .colo dd .muted{color:var(--ink-2)}
+
   .counts{display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
     gap:1px; background:var(--warp-2); border:1px solid var(--warp-2);
     margin-top:clamp(22px,4vw,38px)}
@@ -277,8 +292,9 @@ const CONTACT = 'contact@wovyr.com';
     <svg viewBox="0 0 100 100" aria-hidden="true"><path fill="currentColor" d="M50 26 L34 30 L18 6 L22 38 L12 52 L22 60 L16 72 L30 74 L36 64 L40 86 L44 94 L50 97 L56 94 L60 86 L64 64 L70 74 L84 72 L78 60 L88 52 L78 38 L82 6 L66 30 Z"/></svg>
     wovyr</a>
   <nav class="nl" aria-label="Primary">
-    <a href="#cloth">The cloth</a><a href="#shuttle">The shuttle</a>
-    <a href="#loom">The loom</a><a href="/00-executive/vision/">Docs</a>
+    <a href="#shuttle">The shuttle</a><a href="#loom">The loom</a>
+    <a href="#open">Open source</a><a href="/00-executive/vision/">Docs</a>
+    <a href="https://github.com/punarduttrajput/wovyr">GitHub</a>
     <a class="keep" href="#start">Start</a>
   </nav>
   <button class="tg" id="tg" aria-label="Switch colour theme">◐</button>
@@ -424,12 +440,54 @@ cargo run -p wovyr-cli -- agents run --local \
   </div>
 </div></section>
 
+<section class="plate" id="open" aria-labelledby="open-h"><div class="w rv">
+  <div class="p-head"><span class="ann">Plate 07 — In the open</span></div>
+  <div class="cols">
+    <div>
+      <h2 id="open-h">Every engine on this page is <span>in the repo.</span></h2>
+      <p class="lede">Not a demo, not an open core with the interesting parts held back.
+        The runtime, the trust layer, the dashboard, the client libraries, the Helm chart
+        and the documentation you are reading are one Apache-2.0 repository.</p>
+      <div class="notes" style="margin-top:22px">
+        <div><h3>Apache-2.0, including the patent grant</h3>
+          <p>Use it commercially, fork it, ship it inside your own product. No usage limits and no separate paid edition.</p></div>
+        <div><h3>A DCO, not a CLA</h3>
+          <p>Sign off your commits and you keep your copyright. Contributing here does not mean assigning your work to anyone.</p></div>
+        <div><h3>It runs on your machine, not ours</h3>
+          <p>One binary, offline by default, no account to create. Telemetry exists only if you turn on an OTLP endpoint yourself.</p></div>
+        <div><h3>The docs are the source of truth</h3>
+          <p>Every module links the spec it implements, and specs are marked shipped or planned — so you can tell what is real before you build on it.</p></div>
+      </div>
+    </div>
+    <div>
+      <dl class="colo">
+        <div><dt>Licence</dt><dd>Apache-2.0</dd></div>
+        <div><dt>Source</dt><dd><a href="https://github.com/punarduttrajput/wovyr">github.com/punarduttrajput/wovyr</a></dd></div>
+        <div><dt>npm</dt><dd><a href="https://www.npmjs.com/package/@wovyr/sdk">@wovyr/sdk</a></dd></div>
+        <div><dt>PyPI</dt><dd><a href="https://pypi.org/project/wovyr-sdk/">wovyr-sdk</a></dd></div>
+        <div><dt>Also in-repo</dt><dd>Go · React · Angular <span class="muted">clients</span></dd></div>
+        <div><dt>Contributing</dt><dd>DCO sign-off <span class="muted">— no CLA</span></dd></div>
+        <div><dt>Language</dt><dd>Rust <span class="muted">edition 2024 · 22 crates</span></dd></div>
+        <div><dt>Version</dt><dd class="tnum">0.3.2</dd></div>
+      </dl>
+      <div class="next" style="margin-top:22px">
+        <a href="https://github.com/punarduttrajput/wovyr/blob/main/CONTRIBUTING.md">Contributing</a>
+        <a href="https://github.com/punarduttrajput/wovyr/blob/main/CODE_OF_CONDUCT.md">Code of conduct</a>
+        <a href="https://github.com/punarduttrajput/wovyr/blob/main/SECURITY.md">Security policy</a>
+        <a href="https://github.com/punarduttrajput/wovyr/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/punarduttrajput/wovyr/blob/main/LICENSE">Licence</a>
+      </div>
+    </div>
+  </div>
+</div></section>
+
 <section class="plate" style="border-bottom:0" aria-labelledby="cta-h"><div class="w rv">
   <div class="cols" style="align-items:center">
     <div>
       <h2 id="cta-h">Put a loom between your agents <span>and your users.</span></h2>
-      <p class="lede" style="margin-bottom:26px">Apache-2.0, all the way down. Questions,
-        security reports or design-partner enquiries — <a href={`mailto:${CONTACT}`}
+      <p class="lede" style="margin-bottom:26px">Apache-2.0, all the way down — clone it,
+        fork it, run it on your own hardware. Questions, security reports or
+        design-partner enquiries — <a href={`mailto:${CONTACT}`}
         style="color:var(--indigo);border-bottom:1px solid var(--warp-2)">{CONTACT}</a>.</p>
       <div class="acts">
         <a class="b b-fill" href="/00-executive/vision/">Read the documentation</a>
@@ -459,13 +517,15 @@ cargo run -p wovyr-cli -- agents run --local \
     <nav aria-label="Docs"><span class="ann">Docs</span>
       <a href="/00-executive/vision/">Vision</a><a href="/02-architecture/c4-context/">Architecture</a>
       <a href="/09-api/">API &amp; SDKs</a><a href="/18-roadmap/">Roadmap</a></nav>
-    <nav aria-label="Project"><span class="ann">Project</span>
+    <nav aria-label="Open source"><span class="ann">Open source</span>
       <a href="https://github.com/punarduttrajput/wovyr">GitHub</a>
+      <a href="https://github.com/punarduttrajput/wovyr/blob/main/CONTRIBUTING.md">Contributing</a>
       <a href="https://github.com/punarduttrajput/wovyr/blob/main/SECURITY.md">Security policy</a>
       <a href="https://github.com/punarduttrajput/wovyr/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/punarduttrajput/wovyr/blob/main/LICENSE">Licence · Apache-2.0</a>
       <a href={`mailto:${CONTACT}`}>Contact</a></nav>
   </div>
-  <div class="ft-base ann"><span>© 2026 Wovyr</span><span class="tnum">v0.3.0</span>
+  <div class="ft-base ann"><span>© 2026 Wovyr</span><span class="tnum">v0.3.2</span>
     <span>Apache-2.0</span><span>Rust edition 2024</span></div>
 </div></footer>
 

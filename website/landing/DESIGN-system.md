@@ -134,6 +134,12 @@ below about 24 px. Reinstating them *only* at small sizes is unresolved.
   weft count is the number of rows the scanner actually produced, and the cut count
   increments each time the animation severs a thread. Structure that encodes true
   content, not decoration.
+- **Colophon** (`.colo`, Plate 07). A two-column ruled spec sheet — label left in mono
+  caps, value right in mono — listing where the project actually lives: licence, repo,
+  npm and PyPI package names, contribution terms, version. The value column is mono
+  because every entry is a literal you can paste. Vanity metrics are deliberately
+  absent: there is no star or download count, because a zero helps nobody and a number
+  that only moves up is not information.
 
 ## 6. Motion
 

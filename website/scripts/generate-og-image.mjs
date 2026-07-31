@@ -120,7 +120,7 @@ const svg = `
   <line x1="64" y1="548" x2="${W - 64}" y2="548" stroke="${WARP_2}" stroke-width="1"/>
 
   <text font-family="${MONO}" font-size="19" letter-spacing="1.6" fill="${INK_2}">
-    <tspan x="64" y="586">v0.3.0</tspan>
+    <tspan x="64" y="586">v0.3.2</tspan>
     <tspan x="176" y="586" fill="${WARP_2}">·</tspan>
     <tspan x="196" y="586">APACHE-2.0</tspan>
     <tspan x="364" y="586" fill="${WARP_2}">·</tspan>
