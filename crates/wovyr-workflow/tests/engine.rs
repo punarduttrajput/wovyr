@@ -160,8 +160,69 @@ async fn failure_rolls_back_completed_activities_in_reverse_order() {
     // Forward work + reverse-order compensation.
     let order = log.lock().unwrap().clone();
     assert_eq!(order, vec!["reserve", "charge", "refund", "release"]);
-    // After a clean rollback the workflow ends Completed (compensating -> completed).
-    assert_eq!(state.status, wovyr_workflow::WorkflowState::Completed);
+    // After a clean rollback the execution is terminally **Failed**: the rollback
+    // succeeded, the workflow did not. It used to be recorded `Completed`, which
+    // made a rolled-back saga invisible to `?status=failed` and — worse — present
+    // under `?status=completed`, contradicting its own `workflow_failed` event.
+    assert_eq!(state.status, wovyr_workflow::WorkflowState::Failed);
+    assert!(state.status.is_terminal());
+}
+
+/// The operator-visible half of the same fix: a saga that rolled back must be
+/// listed by a failure filter and absent from a success filter. `run` returns the
+/// in-memory `RunOutcome::Compensated`, but every durable surface
+/// (`status`/`query`/`list`, and the server's `GET /api/v1/workflows?status=`)
+/// reads the checkpoint instead — which is where the wrong state used to be.
+#[tokio::test]
+async fn a_rolled_back_saga_is_listed_as_failed_not_completed() {
+    let def = Definition::from_yaml(
+        "metadata:\n  name: saga\nspec:\n  activities:\n    - {id: reserve, type: function, compensate: release}\n    - {id: ship, type: function}\n    - {id: release, type: function}\n  transitions:\n    - {from: reserve, to: ship}\n",
+    )
+    .unwrap();
+
+    let mut executor = ClosureExecutor::new();
+    for id in ["reserve", "release"] {
+        executor = executor.on(id, |_| async { Ok(Value::Null) });
+    }
+    executor = executor.on("ship", |_| async {
+        Err(ActivityError::Permanent("carrier rejected shipment".into()))
+    });
+
+    let store = InMemoryStore::new();
+    let engine = engine_with(store, executor);
+    engine.run(&def, "wf-saga-listed", json!({})).await.unwrap();
+
+    // The side-effect-free query reads the checkpoint, not the RunOutcome.
+    let summary = engine
+        .status("wf-saga-listed")
+        .await
+        .unwrap()
+        .expect("the execution exists");
+    assert_eq!(summary.status, wovyr_workflow::WorkflowState::Failed);
+
+    let failed = engine
+        .list(&wovyr_workflow::ExecutionFilter {
+            status: Some(wovyr_workflow::WorkflowState::Failed),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        failed.iter().any(|e| e.execution_id == "wf-saga-listed"),
+        "a rolled-back saga must appear under a failed filter, got {failed:?}"
+    );
+
+    let completed = engine
+        .list(&wovyr_workflow::ExecutionFilter {
+            status: Some(wovyr_workflow::WorkflowState::Completed),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !completed.iter().any(|e| e.execution_id == "wf-saga-listed"),
+        "a rolled-back saga must not be reported as completed, got {completed:?}"
+    );
 }
 
 #[tokio::test]

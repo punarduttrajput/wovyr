@@ -6,22 +6,35 @@ metadata:
 spec:
   # A saga: if `ship` fails, the engine rolls back completed steps in reverse
   # order by running their `compensate` handlers (refund, then release).
+  #
+  # Every step here is a stand-in that just echoes its inputs — `function` and
+  # `tool` are the same dispatch (both invoke the tool named by `name` through the
+  # registry, unified by RM-GA-P4 HLTH-901), so each one names `echo`. Swap in a
+  # real tool to make the steps do real work; point `ship` at a tool that fails to
+  # watch the rollback run for real.
   activities:
     - id: reserve
       type: function
+      name: echo
       inputs: { item: widget }
       compensate: release
     - id: charge
       type: function
+      name: echo
       inputs: { amount: 4200 }
       compensate: refund
     - id: ship
       type: function
+      name: echo
       inputs: { carrier: acme }
     - id: release
       type: function
+      name: echo
+      inputs: { undo: reserve }
     - id: refund
       type: function
+      name: echo
+      inputs: { undo: charge }
   transitions:
     - { from: reserve, to: charge }
     - { from: charge, to: ship }

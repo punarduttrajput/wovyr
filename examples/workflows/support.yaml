@@ -10,8 +10,11 @@ spec:
   #   otherwise              → draft an AI reply → send email
   # `issueRefund` declares compensation so a later failure rolls the refund back.
   activities:
+    # `function` and `tool` are the same dispatch — both invoke the tool named by
+    # `name` (RM-GA-P4 HLTH-901) — so this stand-in step names `echo`.
     - id: triage
       type: function
+      name: echo
       inputs: { ticket: "${input.ticketId}", intent: "${input.intent}" }
 
     - id: approve

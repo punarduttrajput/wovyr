@@ -140,12 +140,33 @@ wovyr plugin run {name}.run --input '{{"name": "Wovyr"}}'
     Ok(())
 }
 
+/// Resolve a `plugin build` project argument into the absolute `(project,
+/// target_dir)` pair the build uses.
+///
+/// Both **must** be absolute, because the build runs cargo with
+/// `current_dir(project)`: a relative `--target-dir` derived from the project
+/// argument would then be resolved a *second* time against that new cwd. That is
+/// what broke `wovyr plugin build hello-tool` — the documented flow straight after
+/// `wovyr plugin new hello-tool` — for every relative path: cargo wrote the module
+/// to `hello-tool/hello-tool/target/...` while the command looked for it in
+/// `hello-tool/target/...` and failed with "no build output". An absolute argument
+/// happened to work, which is why the round-trip test (which uses a scratch temp
+/// dir) never caught it. Resolving once, here, keeps every downstream path
+/// cwd-independent.
+fn build_paths(project: &str) -> Result<(PathBuf, PathBuf)> {
+    let project = std::path::absolute(project)
+        .map_err(|e| Error::config(format!("could not resolve project path `{project}`: {e}")))?;
+    let target_dir = project.join("target");
+    Ok((project, target_dir))
+}
+
 /// `wovyr plugin build <project>` — compile the project to `wasm32-wasip1` and
 /// stage a digest-complete package directory (default `<project>/dist`):
 /// the built module beside a `plugin.yaml` whose `artifacts` carry the
 /// computed `sha256:` digest, ready for `wovyr plugin sign` + `install`.
 pub fn build_cmd(project: &str, out: Option<&str>) -> Result<()> {
-    let project = Path::new(project);
+    let (project, target_dir) = build_paths(project)?;
+    let project = project.as_path();
     let manifest_yaml = std::fs::read_to_string(project.join("plugin.yaml")).map_err(|e| {
         Error::config(format!(
             "could not read {}/plugin.yaml: {e}",
@@ -157,8 +178,8 @@ pub fn build_cmd(project: &str, out: Option<&str>) -> Result<()> {
 
     // Compile. An explicit --target-dir keeps the artifact somewhere this
     // command can find it even when the caller's environment redirects
-    // CARGO_TARGET_DIR.
-    let target_dir = project.join("target");
+    // CARGO_TARGET_DIR. Both paths came from `build_paths`, so they are absolute —
+    // see its doc comment for why that matters here.
     let mut cmd = std::process::Command::new("cargo");
     cmd.args(["build", "--release", "--target", "wasm32-wasip1"])
         .arg("--target-dir")
@@ -444,6 +465,46 @@ capabilities:
         )
         .unwrap();
         assert_eq!(wasm_entry(&shared).unwrap(), "x.wasm");
+    }
+
+    /// The regression test for the relative-path build bug: cargo runs with
+    /// `current_dir(project)`, so a relative `--target-dir` would resolve against
+    /// the project dir a second time and the artifact would land one level too
+    /// deep. Asserted on the resolved paths rather than by running a real build,
+    /// so it stays fast and needs no cwd juggling (the process-global `set_current_dir`
+    /// no concurrently-running test could safely call).
+    #[test]
+    fn build_paths_are_absolute_so_a_relative_project_argument_works() {
+        let (project, target_dir) = build_paths("hello-tool").unwrap();
+        assert!(
+            project.is_absolute(),
+            "project path must be absolute, got {project:?}"
+        );
+        assert!(
+            target_dir.is_absolute(),
+            "--target-dir must be absolute (cargo runs with current_dir(project)), got {target_dir:?}"
+        );
+        assert_eq!(
+            target_dir,
+            project.join("target"),
+            "the target dir must sit directly under the project, not nested a second time"
+        );
+        // The whole defect in one assertion: resolved against the project dir a
+        // second time, this is where the artifact used to be written.
+        assert_ne!(
+            target_dir,
+            project.join("hello-tool").join("target"),
+            "target dir must not be re-resolved against the project directory"
+        );
+    }
+
+    #[test]
+    fn build_paths_leave_an_absolute_argument_alone() {
+        let abs = scratch("abs_paths");
+        let (project, target_dir) = build_paths(abs.to_str().unwrap()).unwrap();
+        assert_eq!(project, abs);
+        assert_eq!(target_dir, abs.join("target"));
+        let _ = std::fs::remove_dir_all(&abs);
     }
 
     #[test]

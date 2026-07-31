@@ -98,10 +98,21 @@ Compensation Scheduled
        ▼
 Compensation Running
        │
- ┌─────┴─────────┐
- ▼               ▼
-Completed     Failed
+ ┌─────┴──────────────────────┐
+ ▼                            ▼
+Rollback completed         Rollback failed
+(CompensationCompleted)    (CompensationStepFailed)
+ │                            │
+ ▼                            ▼
+execution: Failed          execution: Compensating
 ```
+
+**The execution's own terminal state is `Failed` either way** — that branch is about
+the *rollback*, not the workflow. A saga that rolled back cleanly did not succeed, so
+recording it `Completed` would hide it from `?status=failed` and list it among the
+successes; `CompensationCompleted` in the event log is what marks the rollback itself
+as clean. A rollback that could not finish stays `Compensating` (non-terminal, by
+design: it needs an operator).
 
 ---
 

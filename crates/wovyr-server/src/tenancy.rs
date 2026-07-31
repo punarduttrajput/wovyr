@@ -528,13 +528,34 @@ pub(crate) async fn remove_member(
 
 // --- quotas ----------------------------------------------------------------------
 
+/// Fail closed on a quota operation naming a project that doesn't exist.
+///
+/// Quotas are stored in their own map keyed by project id, so without this check
+/// both handlers happily operated on *any* string: `PATCH
+/// /api/v1/projects/does-not-exist/quota` (or even an empty id, from a doubled
+/// slash) returned `200` and persisted a limit under a key no run would ever look
+/// up, while `GET` returned `200 {}` for the same nonexistent project — even though
+/// `GET /api/v1/projects/{id}` itself correctly 404s. An operator who fat-fingered a
+/// project id got a success response for a budget that enforces nothing, which is
+/// the same silent-no-op class of failure as an unpriced model reporting `$0`.
+fn require_project(state: &AppState, id: &str) -> Result<(), ApiError> {
+    state
+        .tenancy
+        .get_project(id)?
+        .map(|_| ())
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found", "project not found"))
+}
+
 /// Get a project's quota limits.
 #[utoipa::path(
     get,
     path = "/api/v1/projects/{id}/quota",
     tag = "tenancy",
     params(("id" = String, Path, description = "The project id.")),
-    responses((status = 200, description = "The project's quota limits.")),
+    responses(
+        (status = 200, description = "The project's quota limits."),
+        (status = 404, description = "No such project.", body = crate::openapi::ApiErrorBody),
+    ),
 )]
 pub(crate) async fn get_quota(
     State(state): State<Arc<AppState>>,
@@ -543,6 +564,7 @@ pub(crate) async fn get_quota(
 ) -> Result<Json<Value>, ApiError> {
     let ctx = context(&state, &headers, Some(id.clone()));
     ctx.authorize("projects:read")?;
+    require_project(&state, &id)?;
     let limits = state.tenancy.get_quota(&id)?.unwrap_or_default();
     Ok(Json(json!({ "scope": "project", "limits": limits })))
 }
@@ -557,6 +579,7 @@ pub(crate) async fn get_quota(
     responses(
         (status = 200, description = "The updated quota limits."),
         (status = 403, description = "Caller lacks org.admin.", body = crate::openapi::ApiErrorBody),
+        (status = 404, description = "No such project.", body = crate::openapi::ApiErrorBody),
     ),
 )]
 pub(crate) async fn set_quota(
@@ -568,6 +591,7 @@ pub(crate) async fn set_quota(
     // Quota changes are an org-level operation (§3 endpoint table).
     let ctx = context(&state, &headers, Some(id.clone()));
     ctx.authorize("org.admin")?;
+    require_project(&state, &id)?;
     state.tenancy.set_quota(&id, limits.clone())?;
     crate::audit::audit(
         &state,
@@ -1402,6 +1426,54 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(q["limits"]["concurrent_agent_runs"], 5);
+    }
+
+    /// A quota operation on a project that doesn't exist must 404, not succeed.
+    ///
+    /// Both handlers used to write/read the quota map by raw id with no existence
+    /// check, so a typo'd (or empty, via a doubled slash) project id returned `200`
+    /// for a budget that no run would ever consult — an operator would believe a
+    /// spend limit was in force when nothing was enforcing it.
+    #[tokio::test]
+    async fn quota_on_a_nonexistent_project_is_not_found() {
+        let st = state().await;
+
+        let (s, _) = req(
+            &st,
+            "PATCH",
+            "/api/v1/projects/prj-does-not-exist/quota",
+            "root",
+            json!({"llm_cost_per_day_usd": 9.0}),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::NOT_FOUND,
+            "setting a quota on a ghost project must 404"
+        );
+
+        let (s, _) = req(
+            &st,
+            "GET",
+            "/api/v1/projects/prj-does-not-exist/quota",
+            "root",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::NOT_FOUND,
+            "reading a ghost project's quota must 404"
+        );
+
+        // And the rejected write must not have persisted anything.
+        assert!(
+            st.tenancy
+                .get_quota("prj-does-not-exist")
+                .unwrap()
+                .is_none(),
+            "a 404'd quota write must leave no stored limits behind"
+        );
     }
 
     #[tokio::test]

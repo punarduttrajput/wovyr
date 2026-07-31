@@ -64,7 +64,14 @@ impl WorkflowState {
                 | (Running, Failed)
                 | (Running, Cancelled)
                 | (Failed, Compensating)
-                | (Compensating, Completed)
+                // A finished rollback returns the execution to `Failed`, not
+                // `Completed`. The *compensation* succeeded; the workflow did not,
+                // and `Completed` is the answer to "did this execution's work
+                // succeed?" — an operator listing `?status=failed` must see a saga
+                // that rolled back, and must not see it under `?status=completed`.
+                // `CompensationCompleted` in the event log is what records that the
+                // rollback itself ran cleanly.
+                | (Compensating, Failed)
         )
     }
 }
@@ -134,6 +141,15 @@ mod tests {
         assert!(WorkflowState::Created.can_transition(WorkflowState::Validated));
         assert!(WorkflowState::Running.can_transition(WorkflowState::Completed));
         assert!(WorkflowState::Failed.can_transition(WorkflowState::Compensating));
+    }
+
+    /// A finished rollback lands back on `Failed`. `Completed` must stay
+    /// unreachable from `Compensating`, or a saga that rolled back would report
+    /// success to every status query built on the checkpoint.
+    #[test]
+    fn a_finished_rollback_returns_to_failed_not_completed() {
+        assert!(WorkflowState::Compensating.can_transition(WorkflowState::Failed));
+        assert!(!WorkflowState::Compensating.can_transition(WorkflowState::Completed));
     }
 
     #[test]

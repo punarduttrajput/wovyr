@@ -256,11 +256,25 @@ impl ActivityExecutor for PlatformActivityExecutor {
         let inputs = resolve_template(&ctx.inputs, ctx);
 
         match ctx.activity_type.as_str() {
-            // `function` and `tool` both invoke a registered tool by `name`. (The
+            // `function` and `tool` both invoke a registered tool by `name`. The
             // DSL spec's original vision of `function` as arbitrary in-process
-            // "Rust code" was never implemented as anything distinct — every real
-            // example/test that uses `type: function` already expects a tool
-            // invocation, so that's the one behavior this dispatches to.)
+            // "Rust code" was never implemented as anything distinct, and the
+            // server had always dispatched it as a tool call, so unifying on that
+            // (RM-GA-P4 HLTH-901) was the only behavior with a real implementation
+            // behind it.
+            //
+            // It is a **breaking** change for a definition that relied on the CLI's
+            // older `function`-as-inert-echo behavior, though: `name` is now
+            // required, and a definition without it fails the activity permanently
+            // instead of passing its inputs through. Three shipped examples
+            // (`greet-and-fetch`, `saga-order`, `support`) were exactly that shape
+            // and broke outright — two of them straight off a README quickstart
+            // line — until they were given an explicit `name: echo`. Note also that
+            // `wovyr-workflow`'s own engine tests still use nameless `function`
+            // activities: they supply their own `ActivityExecutor` and never reach
+            // this dispatch, so they are not evidence about what this branch
+            // accepts. An earlier version of this comment claimed every real
+            // example and test already expected a tool invocation; it did not.
             "function" | "tool" => {
                 let tool_id = ctx.name.as_deref().ok_or_else(|| {
                     ActivityError::Permanent(format!(
@@ -963,5 +977,47 @@ mod tests {
             .await
             .expect_err("unsupported type should fail");
         assert!(matches!(err, ActivityError::Permanent(_)));
+    }
+
+    /// Every shipped example workflow must be runnable by *this* executor.
+    ///
+    /// `Definition::from_yaml` alone does not catch a missing `name`: the DSL
+    /// makes it optional (a `wait`/`human`/`for_each` activity has none), so a
+    /// nameless `function` activity validates cleanly and only fails later, at
+    /// dispatch. Three shipped examples were in exactly that state after
+    /// HLTH-901 made `function` a real tool call — two of them reachable straight
+    /// off a README quickstart line — and nothing failed until a human ran one.
+    /// This closes that gap at the level the breakage actually lives.
+    #[test]
+    fn every_shipped_example_workflow_names_a_tool_for_its_function_and_tool_activities() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("workflows");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("examples/workflows must exist") {
+            let path = entry.expect("readable dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let yaml = std::fs::read_to_string(&path).expect("readable example");
+            let def = wovyr_workflow::Definition::from_yaml(&yaml)
+                .unwrap_or_else(|e| panic!("{} must be a valid definition: {e}", path.display()));
+            for activity in &def.spec.activities {
+                if matches!(activity.activity_type.as_str(), "function" | "tool") {
+                    assert!(
+                        activity.name.is_some(),
+                        "{}: activity `{}` is `type: {}` with no `name`, so it fails at dispatch \
+                         (`function` and `tool` both invoke a registered tool by name)",
+                        path.display(),
+                        activity.id,
+                        activity.activity_type,
+                    );
+                }
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no example workflows were checked");
     }
 }

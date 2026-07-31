@@ -13,6 +13,68 @@ each release links its own.
 
 ### Fixed
 
+- **`wovyr plugin build <project>` works with a relative path.** The documented
+  flow — `wovyr plugin new hello-tool` then `wovyr plugin build hello-tool` — failed
+  for *every* relative argument with "no build output at hello-tool\target\…".
+  `build_cmd` derived a relative `--target-dir` from the project argument and then
+  ran cargo with `current_dir(project)`, so cargo resolved that path a second time
+  against the new cwd and wrote the module to `hello-tool/hello-tool/target/…` while
+  the command looked for it one level up. An absolute argument happened to work,
+  which is why the round-trip test — using a scratch temp dir — never caught it. A
+  new `build_paths` resolves the project once, up front, so every downstream path is
+  cwd-independent ([`apps/wovyr-cli/src/scaffold.rs`](apps/wovyr-cli/src/scaffold.rs)),
+  with unit tests pinning that both resolved paths are absolute and that the target
+  dir is never re-resolved against the project dir. Verified against the real binary:
+  `plugin new hello2 && plugin build hello2` now stages `hello2.wasm` + a
+  digest-complete `plugin.yaml`, with no nested `hello2/hello2/` directory.
+- **Three shipped example workflows run again.** `greet-and-fetch.yaml`,
+  `saga-order.yaml` (all five activities) and `support.yaml` declared
+  `type: function` with no `name`, which RM-GA-P4 HLTH-901 turned into a permanent
+  activity failure when it unified `function` and `tool` onto one tool-invoking
+  dispatch — so each died on its first activity. Two of them are reachable straight
+  off a [README](README.md) quickstart line. All three now name `echo` explicitly.
+  The comment in [`crates/wovyr-runtime/src/lib.rs`](crates/wovyr-runtime/src/lib.rs)
+  that justified the unification claimed "every real example/test that uses
+  `type: function` already expects a tool invocation" — it did not, and that wrong
+  premise is why the breakage shipped; it now records what actually broke, and notes
+  that `wovyr-workflow`'s own engine tests still use nameless `function` activities
+  (they supply their own executor and never reach this dispatch, so they were never
+  evidence either way). A new test walks every `examples/workflows/*.yaml` and fails
+  if a `function`/`tool` activity lacks a `name` — `Definition::from_yaml` can't
+  catch this, since `name` is legitimately absent on `wait`/`human`/`for_each`, so
+  the breakage only ever surfaced when a human ran the example.
+- **A quota set on a nonexistent project is refused instead of silently accepted.**
+  `PATCH /api/v1/projects/{id}/quota` wrote to the quota map by raw id with no
+  existence check, so a typo'd project — or an empty id from a doubled slash —
+  returned `200` and persisted a limit under a key no run would ever consult, while
+  `GET` returned `200 {}` for the same ghost project, even though
+  `GET /api/v1/projects/{id}` itself correctly 404s. An operator got a success
+  response for a budget enforcing nothing: the same silent-no-op class as an unpriced
+  model reporting `$0`. Both handlers now check the project exists first
+  ([`crates/wovyr-server/src/tenancy.rs`](crates/wovyr-server/src/tenancy.rs)), with
+  a regression test asserting both routes 404 and that the rejected write leaves no
+  stored limits behind.
+- **A rolled-back saga is reported as `Failed`, not `Completed`.** After a clean
+  rollback the engine transitioned the execution to `Completed`, so a saga whose
+  activity failed was **missing from `?status=failed`** and **listed among the
+  successes** — while its own event log said `workflow_failed` and the CLI printed
+  "rolled back after failure". Every durable surface (`Engine::status`/`query`/
+  `list`, `GET /api/v1/workflows?status=`, any dashboard over them) reads that
+  checkpoint status, so the wrong value was the one operators actually see. The
+  terminal state is now `Failed` — the *compensation* succeeded, the workflow did
+  not — and `CompensationCompleted` in the event log is what distinguishes "failed,
+  and rolled back cleanly" from a bare failure. `(Compensating, Completed)` is
+  removed from the transition table and `(Compensating, Failed)` added, so the old
+  state is now unreachable by construction rather than merely unused
+  ([`state.rs`](crates/wovyr-workflow/src/state.rs),
+  [`engine.rs`](crates/wovyr-workflow/src/engine.rs)). A failed rollback still stays
+  non-terminal in `Compensating`, by design. Chosen over adding a distinct
+  `Compensated` state, which would have been a breaking wire/on-disk change for a
+  distinction the event log already carries;
+  [compensation-engine.md](docs/03-workflow-engine/compensation-engine.md)'s state
+  diagram — whose ambiguity is arguably what licensed the original behavior — now
+  says so explicitly.
+
 - **Real cost is recorded behind an OpenAI-compatible gateway that renames the
   model.** `PriceBook::price` matched a model id only from the *left* (exact, then
   longest known key that is a prefix), so a vendor-prefixed id matched nothing:

@@ -10,8 +10,12 @@ spec:
     initialDelayMs: 200
     maxDelayMs: 5000
   activities:
+    # `function` and `tool` are the same dispatch: both invoke the tool named by
+    # `name` through the registry (RM-GA-P4 HLTH-901 unified the CLI and server on
+    # this), so a `function` activity must name a tool just like a `tool` one.
     - id: greet
       type: function
+      name: echo
       inputs: { message: "starting workflow" }
     - id: echo
       type: tool

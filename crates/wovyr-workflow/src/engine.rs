@@ -1801,9 +1801,18 @@ impl Engine {
             }
         }
 
+        // Terminal state after a clean rollback is `Failed`, not `Completed`: the
+        // compensation succeeded but the workflow did not, and the persisted status
+        // is what `Engine::status`/`query`/`list(ExecutionFilter)` — and therefore
+        // `GET /api/v1/workflows?status=` and every dashboard built on it — report.
+        // Recording `Completed` meant a rolled-back saga was invisible to
+        // `?status=failed` and *present* under `?status=completed`, while the same
+        // execution's own event log said `workflow_failed` and the CLI printed
+        // "rolled back after failure". `CompensationCompleted` (emitted here) is
+        // what distinguishes "failed, and rolled back cleanly" from a bare failure.
         self.transition(
             state,
-            WorkflowState::Completed,
+            WorkflowState::Failed,
             WorkflowEvent::CompensationCompleted,
         )
         .await?;
