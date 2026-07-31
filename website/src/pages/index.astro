@@ -455,6 +455,8 @@ cargo run -p wovyr-cli -- agents run --local \
           <p>Sign off your commits and you keep your copyright. Contributing here does not mean assigning your work to anyone.</p></div>
         <div><h3>It runs on your machine, not ours</h3>
           <p>One binary, offline by default, no account to create. Telemetry exists only if you turn on an OTLP endpoint yourself.</p></div>
+        <div><h3>Take one crate, not the platform</h3>
+          <p>All 22 library crates are on crates.io. Want only the trust layer? Depend on <span style="font-family:var(--mono)">wovyr-ui-guard</span> — policy evaluation, pure and deterministic — and leave the runtime behind.</p></div>
         <div><h3>The docs are the source of truth</h3>
           <p>Every module links the spec it implements, and specs are marked shipped or planned — so you can tell what is real before you build on it.</p></div>
       </div>
@@ -463,11 +465,12 @@ cargo run -p wovyr-cli -- agents run --local \
       <dl class="colo">
         <div><dt>Licence</dt><dd>Apache-2.0</dd></div>
         <div><dt>Source</dt><dd><a href="https://github.com/punarduttrajput/wovyr">github.com/punarduttrajput/wovyr</a></dd></div>
+        <div><dt>crates.io</dt><dd><a href="https://crates.io/search?q=wovyr">22 library crates</a> <span class="muted">wovyr-*</span></dd></div>
         <div><dt>npm</dt><dd><a href="https://www.npmjs.com/package/@wovyr/sdk">@wovyr/sdk</a></dd></div>
         <div><dt>PyPI</dt><dd><a href="https://pypi.org/project/wovyr-sdk/">wovyr-sdk</a></dd></div>
         <div><dt>Also in-repo</dt><dd>Go · React · Angular <span class="muted">clients</span></dd></div>
         <div><dt>Contributing</dt><dd>DCO sign-off <span class="muted">— no CLA</span></dd></div>
-        <div><dt>Language</dt><dd>Rust <span class="muted">edition 2024 · 22 crates</span></dd></div>
+        <div><dt>Language</dt><dd>Rust <span class="muted">edition 2024</span></dd></div>
         <div><dt>Version</dt><dd class="tnum">0.3.2</dd></div>
       </dl>
       <div class="next" style="margin-top:22px">

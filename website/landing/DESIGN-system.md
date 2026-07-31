@@ -136,10 +136,16 @@ below about 24 px. Reinstating them *only* at small sizes is unresolved.
   content, not decoration.
 - **Colophon** (`.colo`, Plate 07). A two-column ruled spec sheet — label left in mono
   caps, value right in mono — listing where the project actually lives: licence, repo,
-  npm and PyPI package names, contribution terms, version. The value column is mono
-  because every entry is a literal you can paste. Vanity metrics are deliberately
+  crates.io / npm / PyPI package names, contribution terms, version. The value column is
+  mono because every entry is a literal you can paste. Vanity metrics are deliberately
   absent: there is no star or download count, because a zero helps nobody and a number
   that only moves up is not information.
+
+  **Verifying colophon links needs a browser, not `curl`.** crates.io returns 404 and
+  npm returns 403 to scripted user agents even for pages that plainly exist — checking
+  them with a plain HTTP client produces false negatives. Confirm through the registry
+  APIs (`crates.io/api/v1/crates/<name>`, `registry.npmjs.org/<name>`) or by loading the
+  page in a real browser.
 
 ## 6. Motion
 
