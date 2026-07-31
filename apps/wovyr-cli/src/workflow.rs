@@ -92,13 +92,16 @@ fn engine(agents_dir: &str, allow_privileged: bool) -> wovyr_common::Result<Engi
     let events: Arc<dyn EventLog> = Arc::new(store.clone());
     let checkpoints: Arc<dyn CheckpointStore> = Arc::new(store);
     let timers: Arc<dyn TimerStore> = Arc::new(FileTimerStore::new(dir)?);
+    // One gateway for both the registry (so `image_generate` routes through the same
+    // retry/failover/breaker pipeline as every other call) and the executor.
+    let gateway = Arc::new(Gateway::from_env());
     let executor = Arc::new(PlatformActivityExecutor::new(
         // SBX-305: `--local` is SEC-301's documented trusted-first-party escape hatch,
         // but the privileged builtins now require an explicit per-run opt-in rather
         // than being inferred from `--local` alone. See
         // `crate::privileged_tools_enabled`.
-        crate::local_registry(allow_privileged),
-        Arc::new(Gateway::from_env()),
+        crate::local_registry(allow_privileged, &gateway),
+        gateway,
         Arc::new(FileAgentResolver {
             agents_dir: agents_dir.to_string(),
             mcp_store: crate::mcp::store()?,
@@ -540,6 +543,48 @@ mod tests {
     /// is `apps/wovyr-cli`, two levels down from the workspace root).
     fn examples_agents_dir() -> String {
         format!("{}/../../examples/agents", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// `agents run --local` and `workflows run --local` must advertise the *same*
+    /// tools. They drifted once already: `image_generate` was registered inline in
+    /// the agent command's body, so a workflow `tool` activity naming it failed with
+    /// a bare "unknown tool" even with a key configured — while the same activity
+    /// worked against the server, whose one shared registry has it. Both paths now
+    /// build through `crate::local_registry`, and this pins that.
+    ///
+    /// Asserted against the shared constructor rather than by reaching into the
+    /// commands, since `engine()` builds a durable `~/.wovyr/workflows` store that a
+    /// unit test has no business creating.
+    #[test]
+    fn both_local_run_paths_build_the_same_tool_set() {
+        let gateway = Arc::new(Gateway::from_env());
+        for allow_privileged in [false, true] {
+            let agent_side = crate::local_registry(allow_privileged, &gateway);
+            let workflow_side = crate::local_registry(allow_privileged, &gateway);
+            let mut a = agent_side.ids();
+            let mut w = workflow_side.ids();
+            a.sort();
+            w.sort();
+            assert_eq!(a, w, "privileged={allow_privileged}");
+            // The safe builtins are present either way; the privileged ones only on
+            // the opt-in (SBX-305).
+            assert!(a.contains(&"echo".to_string()));
+            assert_eq!(a.contains(&"shell".to_string()), allow_privileged);
+        }
+    }
+
+    /// `image_generate` is keyed off a configured provider key, not off which
+    /// command is running — so whatever the environment says, both paths agree.
+    #[test]
+    fn image_generate_presence_follows_the_key_not_the_command() {
+        let gateway = Arc::new(Gateway::from_env());
+        let registry = crate::local_registry(false, &gateway);
+        let has_key = std::env::var_os("OPENAI_API_KEY").is_some();
+        assert_eq!(
+            registry.ids().contains(&"image_generate".to_string()),
+            has_key,
+            "image_generate must be registered exactly when a provider key is set"
+        );
     }
 
     fn ctx(activity_type: &str, name: Option<&str>, inputs: Value) -> ActivityContext {

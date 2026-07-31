@@ -1132,15 +1132,36 @@ pub(crate) fn privileged_tools_enabled(flag: bool) -> bool {
         .unwrap_or(false)
 }
 
-/// The registry a `--local` run starts from (SBX-305). Privileged builtins are added
-/// only on an explicit opt-in; otherwise this is the same safe-by-default set the
-/// hosted server uses.
-pub(crate) fn local_registry(allow_privileged: bool) -> ToolRegistry {
-    if allow_privileged {
+/// The registry **every** `--local` run starts from (SBX-305) — agent runs and
+/// workflow runs alike. Privileged builtins are added only on an explicit opt-in;
+/// otherwise this is the same safe-by-default set the hosted server uses.
+///
+/// `image_generate` is registered here, taking the run's gateway, rather than by
+/// each caller: it used to be added only in `agents run --local`'s own body, so a
+/// `workflows run --local` whose `tool` activity named `image_generate` failed with
+/// a bare "unknown tool" even with a key configured — while the same activity
+/// worked on the server, whose single shared registry has it. Registering it in the
+/// one place both CLI paths already funnel through makes that asymmetry
+/// unrepresentable, the same argument HLTH-901 made for the executor itself.
+///
+/// It stays conditional on a configured key, because it needs a real, billed API —
+/// the same signal `build_local_gateway`/`Gateway::from_env` use to pick a real
+/// provider over the mock.
+pub(crate) fn local_registry(
+    allow_privileged: bool,
+    gateway: &std::sync::Arc<wovyr_provider::Gateway>,
+) -> ToolRegistry {
+    let mut registry = if allow_privileged {
         ToolRegistry::with_privileged_builtins()
     } else {
         ToolRegistry::with_builtins()
+    };
+    if std::env::var_os("OPENAI_API_KEY").is_some() {
+        registry.register(std::sync::Arc::new(wovyr_tools::ImageGenTool::new(
+            gateway.clone(),
+        )));
     }
+    registry
 }
 
 /// Fail closed, naming the opt-in, when `declared` asks for a privileged tool this run
@@ -1231,15 +1252,9 @@ async fn run_local(
     // with the tool quietly absent.
     let allow_privileged = privileged_tools_enabled(allow_privileged_tools);
     reject_privileged_tools(def.spec.tools.iter().map(String::as_str), allow_privileged)?;
-    let mut registry = local_registry(allow_privileged);
-    // image_generate needs a real, billed API key, so it's only registered when one is
-    // configured — same signal build_local_gateway/Gateway::from_env use to pick a real
-    // vs. mock provider.
-    if std::env::var_os("OPENAI_API_KEY").is_some() {
-        registry.register(std::sync::Arc::new(wovyr_tools::ImageGenTool::new(
-            gateway.clone(),
-        )));
-    }
+    // `local_registry` adds `image_generate` when a key is configured, so this path
+    // and `workflows run --local` advertise the same tools.
+    let mut registry = local_registry(allow_privileged, &gateway);
     // `ui_present` (PRD-005 HIL-304): opt-in only, since it needs a real
     // UiInteraction to reach a human — unrestricted here, matching this
     // command's own trusted-first-party stance (see the flag's help text for

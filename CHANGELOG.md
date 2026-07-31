@@ -13,6 +13,35 @@ each release links its own.
 
 ### Fixed
 
+- **A quota breach reports figures at the scale they actually occur.** The
+  `llm_cost_per_day_usd` message formatted every amount `{:.4}`, so a breach at real
+  per-call scale — a `gpt-4o-mini` reply costs on the order of `$0.000008` — read
+  `llm_cost_per_day_usd: 0.0000 + 0.0000 exceeds limit 0.0000`: it named the metric
+  and then told the operator nothing about what was spent, what was requested, or
+  what the ceiling was. A new `usd_precision` picks the decimal places needed to show
+  three significant digits (two for human-scale money, capped at eight), and the
+  three figures in one message **share** that precision so the comparison lines up
+  digit for digit — the admission check runs before the call, so its delta is `0.0`,
+  and a bare `0.00` beside eight-decimal siblings reads like a different unit
+  ([`crates/wovyr-tenancy/src/quota.rs`](crates/wovyr-tenancy/src/quota.rs)). Live:
+  `llm_cost_per_day_usd: 0.00000420 + 0.00000000 exceeds limit 0.00000100`, with a
+  dollar-scale budget still reading in plain dollars.
+- **`image_generate` is available to `workflows run --local`, not just
+  `agents run --local`.** The tool was registered inline in the agent command's own
+  body, so a workflow `tool` activity naming it failed with a bare `unknown tool`
+  even with a provider key configured — while the *same* activity worked against the
+  server, whose one shared registry has it. Registration moved into
+  `local_registry`, the constructor both CLI paths already funnel through, so the
+  asymmetry is now unrepresentable rather than merely fixed — the argument HLTH-901
+  made for the executor, applied to the registry
+  ([`apps/wovyr-cli/src/main.rs`](apps/wovyr-cli/src/main.rs),
+  [`workflow.rs`](apps/wovyr-cli/src/workflow.rs)). It stays conditional on a
+  configured key (it needs a real, billed API), and the workflow runner now builds
+  one gateway shared by its registry and executor, so `image_generate` routes
+  through the same retry/failover/breaker pipeline as every other call. Guarded by
+  tests asserting both paths produce identical tool sets at each privilege level,
+  and that the tool's presence follows the key rather than the command.
+
 - **The test suite no longer reads or writes the developer's real `~/.wovyr`.**
   `cargo test --workspace` resolved durable stores through
   `wovyr_config::paths::*`, which read `HOME`/`USERPROFILE` — so every run left

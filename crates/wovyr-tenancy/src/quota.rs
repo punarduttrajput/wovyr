@@ -24,10 +24,17 @@ impl QuotaLimits {
     /// Admit `adding` USD of LLM spend given `spent_today` already this rolling day.
     pub fn check_llm_cost(&self, spent_today: f64, adding: f64) -> Result<()> {
         match self.llm_cost_per_day_usd {
-            Some(limit) if spent_today + adding > limit => Err(Error::quota_exceeded(format!(
-                "llm_cost_per_day_usd: {:.4} + {:.4} exceeds limit {:.4}",
-                spent_today, adding, limit
-            ))),
+            Some(limit) if spent_today + adding > limit => {
+                // One precision for all three figures, so the message reads as the
+                // comparison it is. Per-figure precision would print
+                // `0.00000360 + 0.00 exceeds limit 0.00000100` — the admission check
+                // passes `adding = 0.0`, and a bare `0.00` beside eight-decimal
+                // siblings invites the reader to line up digits that don't line up.
+                let p = usd_precision(&[spent_today, adding, limit]);
+                Err(Error::quota_exceeded(format!(
+                    "llm_cost_per_day_usd: {spent_today:.p$} + {adding:.p$} exceeds limit {limit:.p$}"
+                )))
+            }
             _ => Ok(()),
         }
     }
@@ -48,6 +55,38 @@ impl QuotaLimits {
     pub fn check_mcp_connections(&self, current: u64) -> Result<()> {
         check_count("max_mcp_connections", self.max_mcp_connections, current, 1)
     }
+}
+
+/// Decimal places that render every one of `values` readably *at its own scale* —
+/// the widest requirement across the set wins, so a group of related figures is
+/// formatted consistently and can actually be compared digit by digit.
+///
+/// A fixed `{:.4}` turned every figure a real deployment produces into noise: a
+/// single `gpt-4o-mini` reply costs on the order of `$0.000008`, so a breach of a
+/// micro-dollar budget read `llm_cost_per_day_usd: 0.0000 + 0.0000 exceeds limit
+/// 0.0000` — three zeros, and no way to tell what was spent, what was asked for, or
+/// what the ceiling was. Human-scale money stays at two decimals (`0.50`); anything
+/// below a cent gets the places it needs to show three significant digits, capped at
+/// 8 (a tenth of a microdollar, below any real per-call price). Zero carries no
+/// scale of its own and never widens the group.
+///
+/// Pure: `f64` arithmetic only, no clock or config.
+fn usd_precision(values: &[f64]) -> usize {
+    values
+        .iter()
+        .map(|v| {
+            let magnitude = v.abs();
+            if magnitude == 0.0 || magnitude >= 0.01 {
+                2
+            } else {
+                // First significant digit sits at 10^floor(log10(m)); three digits
+                // from there means 0.000008 -> 8 places, 0.005 -> 5.
+                let leading_zeros = -magnitude.log10().floor() as i32;
+                (leading_zeros + 2).clamp(2, 8) as usize
+            }
+        })
+        .max()
+        .unwrap_or(2)
 }
 
 /// Shared count check: `Ok` when unlimited or `current + delta <= limit`.
@@ -90,6 +129,61 @@ mod tests {
         };
         assert!(q.check_llm_cost(9.5, 0.5).is_ok());
         assert!(q.check_llm_cost(9.5, 1.0).is_err());
+    }
+
+    /// A micro-dollar breach must say what was actually spent. Under the old fixed
+    /// `{:.4}` every figure at real per-call scale rendered `0.0000`, so the message
+    /// named the metric and then told the operator nothing.
+    #[test]
+    fn a_micro_dollar_breach_reports_real_figures_not_rounded_zeros() {
+        let q = QuotaLimits {
+            llm_cost_per_day_usd: Some(0.000001),
+            ..Default::default()
+        };
+        let msg = q
+            .check_llm_cost(0.0000078, 0.0000066)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !msg.contains("0.0000 "),
+            "figures must not collapse to rounded zeros: {msg}"
+        );
+        for figure in ["0.00000780", "0.00000660", "0.00000100"] {
+            assert!(msg.contains(figure), "expected {figure} in: {msg}");
+        }
+    }
+
+    /// The admission check runs *before* the call, so `adding` is `0.0`. It must
+    /// still print at the group's precision — `0.00` beside eight-decimal figures
+    /// reads like a different unit.
+    #[test]
+    fn a_zero_delta_is_formatted_at_the_same_scale_as_its_siblings() {
+        let q = QuotaLimits {
+            llm_cost_per_day_usd: Some(0.000001),
+            ..Default::default()
+        };
+        let msg = q.check_llm_cost(0.0000036, 0.0).unwrap_err().to_string();
+        assert!(
+            msg.contains("0.00000360 + 0.00000000 exceeds limit 0.00000100"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn usd_precision_scales_to_the_amount_and_is_shared_across_a_group() {
+        // Human-scale money stays at two decimals.
+        assert_eq!(usd_precision(&[0.0]), 2);
+        assert_eq!(usd_precision(&[12.5]), 2);
+        assert_eq!(usd_precision(&[0.01]), 2);
+        // Below a cent, enough places for three significant digits.
+        assert_eq!(usd_precision(&[0.005]), 5);
+        assert_eq!(usd_precision(&[0.000008]), 8);
+        // Capped, so an absurdly small value can't produce an endless tail.
+        assert_eq!(usd_precision(&[0.00000000001]), 8);
+        // The widest requirement wins, so a group formats consistently — and a zero
+        // (which has no scale of its own) never drags the group back down to 2.
+        assert_eq!(usd_precision(&[0.00000360, 0.0, 0.00000100]), 8);
+        assert_eq!(usd_precision(&[10.0, 0.5]), 2);
     }
 
     #[test]
