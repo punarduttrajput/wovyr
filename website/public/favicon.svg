@@ -1,8 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Wovyr">
-  <rect width="32" height="32" rx="7" fill="#0D1424"/>
-  <rect x="6" y="7" width="20" height="18" rx="3" fill="none" stroke="#5B7BFF" stroke-width="2.2" stroke-linejoin="round"/>
-  <circle cx="10" cy="11.4" r="1.15" fill="#5B7BFF"/>
-  <circle cx="13.6" cy="11.4" r="1.15" fill="#5B7BFF"/>
-  <path d="M9 19H23" stroke="#5B7BFF" stroke-width="2.2" stroke-linecap="round"/>
-  <circle cx="19.6" cy="19" r="2.2" fill="#5B7BFF"/>
+<!-- Wovyr mark: a forward-facing wolf's head cut from flat planes — one path,
+     all straight segments, no curve to soften at favicon size. Kept on a dark
+     tile (as the retired mark was) because a bare silhouette on a transparent
+     ground loses its edge against a light browser chrome at 16px.
+     See website/landing/DESIGN-system.md §4. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"
+     role="img" aria-label="Wovyr">
+  <rect width="32" height="32" rx="7" fill="#0C1115"/>
+  <g transform="translate(3.9,3.55) scale(0.242)">
+    <path fill="#8AA2E8" d="M50 26 L34 30 L18 6 L22 38 L12 52 L22 60 L16 72 L30 74 L36 64 L40 86 L44 94 L50 97 L56 94 L60 86 L64 64 L70 74 L84 72 L78 60 L88 52 L78 38 L82 6 L66 30 Z"/>
+  </g>
 </svg>

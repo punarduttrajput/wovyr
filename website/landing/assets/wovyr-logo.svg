@@ -1,15 +1,18 @@
-<!-- Wovyr wordmark. Mark = a generative-UI window being verified: a UI frame
-     (window + title-bar chrome) with a cobalt scan line and a verified node
-     passing through it — the exact thing the runtime does. The frame stroke +
-     wordmark use currentColor (adapt to light/dark); the scan line + node are
-     cobalt (the "verified" signal). Set `color` on a parent to set the ink. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 32" width="160" height="32"
-     fill="none" role="img" aria-label="Wovyr" style="color:#EAEEF6">
-  <rect x="3" y="6" width="22" height="20" rx="3.4" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
-  <circle cx="7.6" cy="11" r="1.1" fill="currentColor" opacity="0.55"/>
-  <circle cx="11.2" cy="11" r="1.1" fill="currentColor" opacity="0.55"/>
-  <path d="M7 18.6H20" stroke="#5B7BFF" stroke-width="2" stroke-linecap="round"/>
-  <circle cx="16.4" cy="18.6" r="2" fill="#5B7BFF"/>
-  <text x="40" y="22" font-family="'JetBrains Mono','Cascadia Code',ui-monospace,monospace"
-        font-size="17" font-weight="650" letter-spacing="0.4" fill="currentColor">wovyr</text>
+<!-- Wovyr wordmark lockup. Mark = a forward-facing wolf's head cut from flat
+     planes: 22 straight segments on a 100x100 grid, symmetrical about x=50,
+     ears swept back, ruff wider than the ears. One path, one ink — it holds
+     at 16px and prints in a single colour.
+
+     The mark and the wordmark both use `currentColor`, so a host surface sets
+     the ink by setting `color` on a parent; the standalone file falls back to
+     the indigo used on the landing page. The wordmark is always lowercase —
+     Wovyr is a runtime you type, not an institution you address. Clear space
+     equals the height of the ears. See website/landing/DESIGN-system.md §4. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 150 32" width="150" height="32"
+     role="img" aria-label="Wovyr" style="color:#27386B">
+  <g transform="translate(2,3.2) scale(0.262)">
+    <path fill="currentColor" d="M50 26 L34 30 L18 6 L22 38 L12 52 L22 60 L16 72 L30 74 L36 64 L40 86 L44 94 L50 97 L56 94 L60 86 L64 64 L70 74 L84 72 L78 60 L88 52 L78 38 L82 6 L66 30 Z"/>
+  </g>
+  <text x="32" y="23" font-family="'Archivo Variable',Archivo,system-ui,sans-serif"
+        font-size="21" font-weight="700" letter-spacing="-0.4" fill="currentColor">wovyr</text>
 </svg>

@@ -37,3 +37,8 @@ Thumbs.db
 # DX-503: Lighthouse CI's local scratch output
 .lighthouseci/
 lhci-reports/
+
+# Landing-page design prototypes and their throwaway static server — working
+# files, not part of the build. The reviewed prototype is committed under
+# website/landing/prototypes/ instead.
+/.design-scratch/

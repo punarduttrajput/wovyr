@@ -1,125 +1,200 @@
 # Design System — Wovyr Landing
 
-**Status:** Draft (for review)
-**Principle:** *Honor the product's existing identity.* The dashboard (`dashboard/src/styles.scss`)
-already defines Wovyr's visual language — **"cobalt accent, mono-forward, cool neutrals."**
-The landing extends that system to a marketing surface; it does not invent a new one, so
-`/`, the docs, and the dashboard read as one product.
+**Status:** Adopted 2026-07-31, shipped at `/` (`website/src/pages/index.astro`)
+**Supersedes:** the cobalt / mono-forward / "Trust Gate" system this file described
+until 2026-07-31. That direction is retired — see §8 for what still runs on it.
 
 ---
 
 ## 1. Design thesis
 
-Wovyr's world is a **runtime**: terminals, monospace, hash fingerprints, policy gates,
-fail-closed defaults, event-sourced audit chains. The landing's one bold move — the
-place we spend all our boldness — is a living **character-art "Trust Gate"** in the hero,
-built from monospace glyphs, that shows the product's actual thesis: *an AI emits an
-interface → it's validated fail-closed → recorded → a human decides.* Everything around
-that moment stays quiet, precise, and mono-forward.
+Wovyr's name is the design. *Wovyr weaves* — an interface generated at runtime is
+cloth, produced thread by thread for one person, and Wovyr is the loom: it checks each
+thread against policy, cuts the ones that fail before they reach the web, marks the
+selvedge, and holds the work on the beam until a human decides.
 
-This is deliberately **not** any of the current AI-generated landing clichés — no
-cream+serif+terracotta, no purple→blue gradient hero, no acid-green pop, no Inter/Space
-Grotesk, no emoji section markers, no everything-centered. The character-art gate is
-specific to *this* subject and copyable by no competitor.
+The page is therefore a **plate from a weaving atlas**. A warp grid runs behind every
+section; content is organised into numbered plates because an atlas genuinely is
+ordered; and the palette is the two classical dyes — **indigo** for a sound thread,
+**madder** for one that was cut.
 
-## 2. Color (tokens, derived from the dashboard system)
+Boldness is spent in exactly one place: the hero figure, a **wolf's head woven from
+weft threads of light** that assembles row by row, the way cloth comes off a loom.
+Everything else stays quiet, ruled, and technical.
 
-Cool neutrals with a slight blue bias (chosen, not defaulted). Cobalt is the single
-accent and it carries meaning: **cobalt = verified / passed the gate.** Crit-red is
-semantic only: **red = blocked / fail-closed.** Violet is a rare secondary (the human
-decision), never a gradient partner.
+This is deliberately none of the current AI-landing defaults: no warm cream with a
+serif display and terracotta accent, no purple-to-blue gradient hero, no acid-green
+pop, no Inter or Space Grotesk, no emoji section markers, no everything-centered, and
+no particle mesh. The weaving vocabulary is derived from the product's own name, which
+makes it the one thing a competitor cannot lift without also taking the name.
 
-| Token | Dark (primary) | Light | Role |
+## 2. Colour
+
+Cool paper, not cream — the neutral is chosen with a slight blue-grey bias so it never
+reads as the generic warm-cream template. Light is the primary theme; dark gets equal
+care rather than a naive inversion.
+
+| Token | Light (primary) | Dark | Role |
 |---|---|---|---|
-| `--canvas` | `#0A0E18` | `#F6F7F9` | page ground (cool ink / cool paper) |
-| `--surface` | `#121826` | `#FFFFFF` | cards, nav |
-| `--surface-2`| `#0E1420` | `#EEF1F6` | insets, code chips |
-| `--ink` | `#EAEEF6` | `#0D1424` | primary text |
-| `--ink-dim` | `#9AA6BF` | `#55617A` | secondary text, mono eyebrows |
-| `--line` | `#1E2740` | `#E2E7F0` | 1px borders / hairlines |
-| `--accent` (cobalt) | `#5B7BFF` | `#2D54E8` | verified state, links, focus, primary CTA |
-| `--accent-2` (violet)| `#9B87FF` | `#7B61FF` | human-decision accent (sparingly) |
-| `--pass` | = `--accent` | = `--accent` | frame passed the gate |
-| `--block` (crit) | `#FF5C6A` | `#D23B43` | frame blocked / fail-closed |
-| `--ok` | `#3FBF86` | `#18935A` | healthz / positive status only |
+| `--paper` | `#DEE3E7` | `#0C1115` | page ground |
+| `--paper-2` | `#EBEEF0` | `#131920` | raised panels, callouts |
+| `--sunk` | `#D2D9DE` | `#080B0E` | terminal / inset wells |
+| `--ink` | `#0E141A` | `#E7EBEF` | primary text |
+| `--ink-2` | `#53616D` | `#8B98A3` | secondary text, annotations |
+| `--warp` | `#C3CCD3` | `#1D252C` | the warp grid, hairline rules |
+| `--warp-2` | `#AEB9C2` | `#2C3641` | stronger rules, borders |
+| `--indigo` | `#27386B` | `#8AA2E8` | **a sound thread** — links, CTAs, the figure |
+| `--indigo-soft` | `#8FA0CE` | `#3C4C7E` | secondary warp threads in the figure |
+| `--madder` | `#A63A26` | `#E5735C` | **a thread policy cut** — semantic only |
 
-Contrast: verify `--accent` on `--canvas` and `--ink` on `--canvas`/light `--ink` on
-`--surface` all clear WCAG AA. The dark theme is primary (a runtime lives in a terminal);
-the light theme gets equal care, not a naive invert.
+**Madder is never decorative.** It appears only where something was denied: the cut
+thread in the hero, the cut row in the Plate 04 band, the counter under Fig. 1, and the
+left rule on the candour callout. It must not be used as a second accent, a hover
+state, or a highlight. The four segments of the Plate 03 shuttle pass are all indigo
+for exactly this reason — that sequence is the sound path.
+
+Source of truth: the `:root` blocks in `website/src/pages/index.astro`. The OG card
+generator (`website/scripts/generate-og-image.mjs`) duplicates the dark values by hand,
+because it runs standalone under `sharp` before Astro's pipeline exists — **if the
+palette changes, change it in both places.**
 
 ## 3. Typography
 
-Mono-forward, matching the dashboard. Two roles + a display treatment:
+Two families, three roles.
 
-- **Display / headlines:** the **mono** face, set large with tight leading and a hair of
-  negative tracking — a runtime speaking in its own voice. Stack (prototype, system):
-  `"Cascadia Code","SF Mono","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace`.
-  Production self-hosts **JetBrains Mono**.
-- **Body / running text:** clean system sans for readability at paragraph length:
-  `ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`. Column
-  width ~62–66ch.
-- **Utility / eyebrows / data / labels:** mono, uppercase, `letter-spacing: 0.14em`,
-  `--ink-dim`. Used as structural markers (section eyebrows like `02 · HOW IT WORKS`,
-  status-rail text, hash stamps) — structure that encodes real content, not decoration.
-- **Type scale** (rem, 1.25 ratio): 0.75 / 0.875 / 1 / 1.25 / 1.6 / 2.1 / 2.9 / 4.0.
-  Headings `text-wrap: balance`. `tabular-nums` on all data/metrics.
+- **Display and body — Archivo Variable** (`@fontsource-variable/archivo`). A real
+  variable font, so headings at 700 and running text at 400 come from one download.
+  Headings are tight: `letter-spacing: -.021em`, `line-height: 1.06`, `text-wrap:
+  balance`. A technical grotesque set at poster weight, not a neutral delivery vehicle.
+- **Annotations — IBM Plex Mono 400/500** (`@fontsource/ibm-plex-mono`, latin subset).
+  Plate numbers, figure captions, eyebrows, buttons, the terminal, the footer base.
+  Always uppercase with `letter-spacing: .13em` at 11px. These are *plate annotations*,
+  the marks a draftsman leaves on a technical drawing.
+- **Data — the same mono with `tabular-nums`** on every count, version and figure
+  number, so digits line up in a column.
 
-## 4. Layout & components
+Both faces are self-hosted via `website/src/styles/landing-fonts.css`, which is
+imported by the landing page **only**. It is deliberately not merged into
+`src/styles/fonts.css`, which Starlight loads on every docs page and the dashboard
+reads directly from `node_modules` — see §8.
 
-- **Grid:** 12-col, max content width 1200px, generous gutters. **Asymmetric hero**
-  (left-aligned headline, gate canvas full-bleed behind a scrim) — not centered.
-- **Status rail:** a thin monospace bar (top of nav or footer) reading real state —
-  `v0.3.0 · Apache-2.0 · healthz ok · edition 2024`. A terminal status line as a
-  structural device, carrying true info.
-- **Cards:** `--surface`, 1px `--line` border, radius **10px** (brand), no drop shadow in
-  dark (use border + subtle inner glow on hover → border brightens to `--accent`). No
-  accent-bar-on-rounded-card motif.
-- **Numbered markers:** ONLY on the How-it-works pipeline — it's a true ordered sequence
-  (emit → validate → record → decide). Nowhere else.
-- **Brand mark (DSY-106, corrected 2026-07-27):** the window/scanline mark — a UI
-  frame (`.mk-win`, rounded rect stroked in `--ink`) with two title-bar dots
-  (`.mk-dot`, `--ink-2`/`--ink-dim`), a cobalt scanline (`.mk-scan`) and a
-  verified node (`.mk-node`, both `--accent`) passing through it — encodes the
-  product thesis directly (a rendered interface being verified), not a generic
-  shape. Used everywhere: favicon, landing nav/footer, OG image, and the
-  dashboard rail. This entry previously named a plain triangle
-  (`M12 3L21 19H3L12 3Z`) as canonical — that was the dashboard's mark at the
-  time, before this unification; the triangle is retired, not a second valid
-  option. Source: `website/landing/assets/wovyr-logo.svg` (full wordmark
-  lockup) and the inline SVG in `website/src/pages/index.astro`/
-  `dashboard/src/app/app.html` (icon only, `.mk-*` classes carry the same
-  styling in each surface's own stylesheet). Wordmark set in mono,
-  letter-spaced.
-- **Code chips:** `--surface-2`, mono, copy button; the 3-command quickstart is real,
-  copyable, and offline-true.
+## 4. The mark
 
-## 5. Motion
+A forward-facing **wolf's head** cut from flat planes: 22 straight segments on a
+100 × 100 grid, symmetrical about x = 50, ears swept back, the ruff wider than the
+ears. One path, one ink, no curves — so it prints in a single colour and holds at
+16 px.
 
-Spend motion on the hero; keep the rest restrained (over-animation reads as AI-generated).
+The same geometry is rendered in different **materials** depending on surface:
 
-- **Hero:** ambient looping Trust Gate (Canvas, ~30fps, deterministic seed). The one
-  orchestrated moment.
-- **Scroll reveal:** sections fade/rise 12px once on enter (IntersectionObserver), subtle,
-  gated by `prefers-reduced-motion`.
-- **Hover micro-interactions:** card border → cobalt; CTA slight lift; copy-button state.
-- **Reduced motion:** all of the above collapse to static; hero renders one seeded frame.
+| Material | Where |
+|---|---|
+| **Solid** — one filled path | nav, footer, favicon, OG card wordmark |
+| **Woven** — weft threads clipped to the silhouette | the hero figure, the OG card figure |
 
-## 6. Three hero directions (pick one at review)
+Canonical sources: `website/public/favicon.svg` (solid, on a dark tile — a bare
+silhouette loses its edge against light browser chrome at 16 px),
+`website/landing/assets/wovyr-logo.svg` (the wordmark lockup), the inline path in
+`index.astro`, and `website/src/assets/brand/logo-{light,dark}.svg` (the docs-site
+header lockup). All five carry the identical path data and are kept in sync by hand.
 
-The prototype ships **Direction 1** fully built; the other two are described so you can
-redirect cheaply.
+The docs header lockup keeps its **JetBrains Mono** wordmark rather than Archivo: the
+docs site self-hosts that face and has not been migrated (§8). The mark is unified
+across every surface so the site never shows two different logos; the lockup's typeface
+follows whichever system its own surface is on until the migration lands.
 
-1. **The Trust Gate (built).** Char-art frames flow through a validating gate; safe pass
-   with a cobalt hash stamp, unsafe blocked in red. Most literal to the thesis; highest
-   memorability. *Recommended.*
-2. **The Audit Chain.** A horizontally scrolling char-art hash-chain (`░ prev←hash ░`)
-   that assembles block by block as you watch, each block a recorded human decision.
-   Quieter, more "ledger," leans the tamper-evident-audit differentiator.
-3. **The Frame Loom.** Character glyphs weave a UI "frame" into existence row by row,
-   then a policy pass sweeps through it highlighting/removing unsafe nodes. Most
-   "generative," leans the constrained-vocabulary story.
+**No outline and no eyes.** The hero figure is not stroked and carries no eye shapes:
+the weft rows terminate exactly where the silhouette terminates, so the head is read
+from *where the threads end*. This is a deliberate constraint, not an omission — it is
+what makes the figure feel woven rather than drawn.
 
----
+The wordmark is always lowercase — Wovyr is a runtime you type, not an institution you
+address. Clear space equals the height of the ears.
 
-**Deliverable order:** PRD → TRD → this doc → interactive prototype (Direction 1) for
-review → (on approval) port into `website/src/pages/index.astro`.
+**Open question:** the eyes are currently removed from the small solid mark as well as
+the figure. Those two notches are what let the shape read as a wolf rather than a crest
+below about 24 px. Reinstating them *only* at small sizes is unresolved.
+
+## 5. Layout & components
+
+- **Warp grid.** `repeating-linear-gradient(90deg, var(--warp) 0 1px, transparent 1px
+  46px)` on `body::before` at 50% opacity, behind everything. It is the structural
+  device the whole system hangs on.
+- **Plates.** Each section is a numbered plate (`Plate 03 — The pass`) with a rule that
+  runs to the right edge. Numbering is used **only** where order is real: the plate
+  sequence itself, and the four steps of the shuttle pass. Nowhere else.
+- **Selvedge.** The hero copy column carries a dashed left rule (`.sel`) — the finished
+  edge of the cloth.
+- **Rules, not cards.** Content is separated by 1 px hairlines and generous space, not
+  boxed in rounded cards. The only filled surfaces are the terminal well, the Plate 04
+  band, and the candour callout.
+- **Registers.** The eight engines are a ruled register (`44px | .62fr | 2fr`), not a
+  grid of tiles.
+- **Figure captions.** `Fig. 1 — 42 weft · 1 thread cut`. The counts are **real**: the
+  weft count is the number of rows the scanner actually produced, and the cut count
+  increments each time the animation severs a thread. Structure that encodes true
+  content, not decoration.
+
+## 6. Motion
+
+One orchestrated moment, then restraint.
+
+- **The hero weave.** Weft rows converge from scatter and settle top to bottom on a
+  0.035 s per-row stagger, then breathe on a slow sine. Every 3.6–6.8 s policy **cuts**
+  one thread: it turns madder, opens a gap, and re-weaves. Only rows that cross the head
+  in one unbroken run are eligible — on a row already split by the cheek notches, the
+  break reads as dashes rather than as one thread being severed.
+- **Scroll reveal.** Sections fade and rise 12 px once on enter, via
+  `IntersectionObserver`.
+- **Hover.** Border and colour transitions at .18 s. No lifts, no scale.
+- **`prefers-reduced-motion`.** Reveals resolve immediately and the figure renders one
+  settled frame with no assembly, no breathing and no cuts.
+
+**Performance note:** the figure applies `shadowBlur` to the thread *stroke* only. An
+earlier revision also shadowed every dot — roughly 1,000 shadowed fills per frame — and
+that was the single dominant cost in the render with nothing visible to show for it.
+Do not reintroduce it.
+
+## 7. Voice
+
+Plain, concrete, and candid. Name things from the reader's side of the screen. Prefer
+the specific claim to the clever one.
+
+Candour is a stated pillar, not a tone: the page says outright that Wovyr ships as a
+single-node appliance and that the distributed scheduler is tested library code not yet
+in the binary. For a security product that is a credibility move, and it must survive
+future copy edits.
+
+**Contact:** `contact@wovyr.com`, linked from the footer, the footer's Project column,
+and the closing CTA.
+
+## 8. Surfaces still on the retired system
+
+The landing page is the only surface migrated. Flagged plainly rather than quietly
+left inconsistent:
+
+- **`packages/tokens/wovyr-tokens.css`** still defines the cobalt palette and is the
+  canonical token source consumed by the Starlight docs config *and* the dashboard's
+  Angular build. The landing page therefore scopes its palette locally and does **not**
+  import it.
+- **The docs site** (every route other than `/`) renders in cobalt with JetBrains Mono.
+  A visitor clicking "Documentation" crosses a visible style boundary — the wolf mark
+  carries across, the palette and type do not.
+- **The dashboard** (`dashboard/`) is likewise unmigrated.
+- **`website/src/styles/fonts.css`** still self-hosts JetBrains Mono for those two
+  surfaces and is intentionally untouched.
+
+Migrating the tokens file would restyle the docs and the dashboard in one commit, which
+is a separate, larger piece of work with its own review. Until then, treat this document
+as authoritative for `/` and the token file as authoritative for everything else.
+
+## 9. Provenance
+
+Four directions were prototyped and reviewed before this one was adopted: **Sentinel**
+(heraldic seal, gunmetal and amber, Bodoni Moda), **Nocturne** (cinematic night, a wolf
+of light), **Loom** (this system, woven figure), and **Woven Light** (Loom's system with
+Nocturne's assembling hero — adopted).
+
+Rejected in review, recorded so they are not re-proposed: a **particle** hero (tried
+twice), **binary 0/1** as the figure's material (generic, and carries no information
+about what the product actually checks), and the **outline and eyes** on the hero figure.

@@ -1,0 +1,22 @@
+/* Self-hosted faces for the landing page (`/`) only.
+ *
+ * Deliberately NOT merged into src/styles/fonts.css: that file is imported by
+ * Starlight's `customCss` (so it loads on every docs page) *and* read directly
+ * from node_modules by the dashboard's angular.json global styles array. The
+ * landing page is the only surface on the new plate-atlas identity — see
+ * website/landing/DESIGN-system.md — so its faces are scoped here rather than
+ * pushed onto two surfaces that still render the retired cobalt system.
+ *
+ * Archivo ships as a real variable font (weight 100–900 in one file), which is
+ * what the design needs: body at 400 and headings at 700 come from a single
+ * download rather than two discrete faces.
+ *
+ * `latin` only for IBM Plex Mono, matching fonts.css's reasoning — this docs
+ * site builds as English-only. Archivo's variable CSS declares every subset,
+ * but each is gated by `unicode-range`, so a browser rendering English pulls
+ * the latin file and nothing else.
+ */
+
+@import "@fontsource-variable/archivo/wght.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";

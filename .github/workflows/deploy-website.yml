@@ -1,0 +1,118 @@
+# Publishes wovyr.com on every push to `main`.
+#
+# Why a workflow rather than Netlify's own Git integration: the Netlify account
+# behind wovyr.com has no GitHub identity connected (its only linked account is
+# Google), and establishing one requires an interactive OAuth handshake in the
+# browser. Until someone completes that in the Netlify UI, the site has empty
+# `build_settings` and only ever changes when a prebuilt `website/dist` is
+# pushed by the CLI — which meant `main` and the live site could silently drift.
+# This closes that gap without needing the OAuth flow at all.
+#
+# If the native integration is connected later, DELETE this workflow — two
+# systems publishing the same site will race each other.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   NETLIFY_AUTH_TOKEN  a Netlify personal access token with deploy rights
+#   NETLIFY_SITE_ID     c700e3c3-b89f-4e38-b092-a45c83d2b091
+name: deploy-website
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # The landing page and the docs site itself.
+      - "website/**"
+      # `website/scripts/sync-docs.mjs` copies ../docs into src/content/docs at
+      # build time, so a docs edit changes the published site even though
+      # nothing under website/ was touched.
+      - "docs/**"
+      # Consumed by src/styles/starlight-brand.css, which Starlight loads on
+      # every docs page.
+      - "packages/tokens/**"
+      - ".github/workflows/deploy-website.yml"
+  # Lets a deploy be re-run by hand after rotating the token, or to republish
+  # without an intervening commit.
+  workflow_dispatch:
+
+concurrency:
+  # Never let two deploys of the same site overlap: the second to finish wins,
+  # which for a slower earlier run means publishing stale output.
+  group: deploy-website
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches netlify.toml's NODE_VERSION, and satisfies netlify-cli's
+          # own engine requirement (>=22.12) — on 20 it installs but warns.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      # Fail with a clear message rather than letting the Netlify CLI die with
+      # an opaque auth error 3 minutes into the job.
+      - name: Check deploy credentials are configured
+        env:
+          TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          SITE: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          missing=""
+          [ -z "$TOKEN" ] && missing="$missing NETLIFY_AUTH_TOKEN"
+          [ -z "$SITE" ]  && missing="$missing NETLIFY_SITE_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing — add them under" \
+                 "Settings → Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+
+      - name: Install
+        working-directory: website
+        run: npm ci
+
+      # Runs sync-docs (copies ../docs in), generate-og-image, then astro build.
+      - name: Build
+        working-directory: website
+        run: npm run build
+
+      # A build that silently produced no landing page would still deploy
+      # happily, so assert the two things most likely to break: that the page
+      # exists at all, and that it is the current design rather than a stale
+      # artifact left in dist/.
+      - name: Verify build output
+        working-directory: website
+        run: |
+          test -f dist/index.html || { echo "::error::dist/index.html was not built"; exit 1; }
+          grep -q "M50 26 L34 30 L18 6" dist/index.html \
+            || { echo "::error::landing page is missing the wolf mark — wrong or stale build"; exit 1; }
+          echo "built $(find dist -name '*.html' | wc -l) html pages"
+
+      - name: Deploy to Netlify
+        working-directory: website
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        run: |
+          npx netlify deploy \
+            --prod \
+            --dir dist \
+            --site "${{ secrets.NETLIFY_SITE_ID }}" \
+            --message "${GITHUB_SHA::7} — ${GITHUB_REF_NAME} (github actions)"
+
+      # The CLI reports success once the deploy goes live, but not whether the
+      # live origin is actually serving it — check the production URL itself.
+      - name: Verify production is live
+        run: |
+          code=$(curl -sS -o /tmp/live.html -w '%{http_code}' https://wovyr.com)
+          echo "https://wovyr.com → $code"
+          [ "$code" = "200" ] || { echo "::error::production returned $code"; exit 1; }
+          grep -q "M50 26 L34 30 L18 6" /tmp/live.html \
+            || { echo "::error::production is not serving the deployed page"; exit 1; }
+          echo "production verified"
