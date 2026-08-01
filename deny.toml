@@ -6,6 +6,27 @@
 # what those two don't cover: license policy and duplicate-version drift.
 
 [graph]
+# Check the **default** feature set, i.e. what a plain `cargo build` and the
+# published container actually contain.
+#
+# This line was dead config until 2026-08-01: `cargo-deny-action`'s `arguments`
+# input defaults to `--all-features`, which overrides it. CI now passes
+# `arguments: ""` so this governs for real.
+#
+# What that deliberately does NOT cover, stated plainly rather than left implied:
+# the optional feature-gated dependencies (`mistralrs`, `wasi`, `postgres`,
+# `tiered-memory`, `qdrant`, `redis`) are absent from the checked graph, so their
+# transitive licences and duplicate versions are unchecked here. `mistralrs` is
+# the reason this is the right trade rather than a shortcut — it vendors an
+# entire ML + audio stack (candle, tokenizers, symphonia) that contributes dozens
+# of duplicate-version bans plus MPL-2.0, 0BSD, Zlib and NCSA licences. MPL-2.0
+# in particular is weak copyleft and would be a genuine policy decision, not a
+# formality, and `mistralrs` is already excluded from every CI job as too heavy
+# to compile.
+#
+# If an optional backend is ever promoted to shipped-and-audited, add its
+# licences here explicitly and re-run with that feature enabled — don't reach for
+# `--all-features`, which silently drags `mistralrs` back in with it.
 all-features = false
 
 [advisories]
@@ -17,10 +38,24 @@ ignore = []
 confidence-threshold = 0.8
 allow = [
     "Apache-2.0",
+    # The wasmtime/cranelift/cap-std family's license: Apache-2.0 plus the LLVM
+    # linking exception, which *relaxes* Apache-2.0 (it waives the notice
+    # requirement for linked binaries) rather than adding an obligation. SPDX
+    # treats `Apache-2.0 WITH LLVM-exception` as a distinct identifier, so
+    # allowing `Apache-2.0` alone does not cover it — which is why the wasmtime
+    # 47 upgrade surfaced this the first time cargo-deny's licenses check
+    # actually reached those crates.
+    "Apache-2.0 WITH LLVM-exception",
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
+    # `foldhash`, reached via the `hashbrown` version wasmtime pulls. Permissive
+    # and OSI-approved — BSD-like, with no binary-attribution requirement.
+    # Included so `cargo deny --features wasi check licences` passes: the WASI
+    # sandbox is a genuinely shipped build option (`--features plugin-wasi`), so
+    # it should be auditable even though it is not in the default graph.
+    "Zlib",
     "Unicode-3.0",
     # webpki-roots' own license (verified against the real dependency tree,
     # not assumed) — a permissive Mozilla-published data-license, not a
