@@ -29,23 +29,45 @@ test.describe('landing page (website)', () => {
     const context = await browser.newContext({ javaScriptEnabled: false });
     const page = await context.newPage();
     await page.goto('/');
-    // One heading from each of the 8 .band sections below the hero — if
-    // WEB-302 regresses, these stay at opacity:0 and Playwright's default
-    // visibility check (which respects computed style, not just DOM
-    // presence) fails.
+
+    // One heading from each of the 7 `.plate` sections below the hero. These are
+    // the post-2026-07-31 (woven/indigo) headings; the previous list still named
+    // the retired cobalt-era sections, so 7 of its 8 entries no longer existed in
+    // the DOM at all and this test failed on a stale fixture rather than on a
+    // real regression.
     const headings = [
-      'Interfaces are moving from pages',
-      'Every frame passes the gate',
-      'A complete agent runtime',
-      'Built to be',
-      'Memory-safe, deterministic',
-      'Running in',
-      'An embeddable runtime',
-      'Put a trust layer between',
+      'An interface used to be something a person',
+      'One pass of the shuttle',
+      'Fail-closed means the thread',
+      'Eight engines',
+      'Running in five minutes',
+      'Every engine on this page is',
+      'Put a loom between your agents',
     ];
     for (const text of headings) {
       await expect(page.getByRole('heading', { name: new RegExp(text) })).toBeVisible();
     }
+
+    // `toBeVisible()` above is necessary but NOT sufficient for WEB-302, and the
+    // previous version of this test wrongly relied on it alone: Playwright treats
+    // an element as visible when it has a non-empty bounding box and is not
+    // `visibility:hidden`/`display:none` — **`opacity:0` still counts as
+    // visible**. The reveal animation parks every `.rv` section at `opacity:0`
+    // until an IntersectionObserver adds `.in`, so with JS disabled the real
+    // failure mode is fully-laid-out but completely transparent content, which
+    // the check above cannot see. Assert the computed opacity directly.
+    const opacities = await page
+      .locator('.plate .rv')
+      .evaluateAll((els) => els.map((el) => getComputedStyle(el).opacity));
+    expect(opacities.length, 'expected the .rv reveal wrappers to be present').toBeGreaterThan(0);
+    for (const o of opacities) {
+      expect(
+        Number(o),
+        'a .rv section is transparent with JS disabled — the <noscript> WEB-302 ' +
+          'fallback in index.astro is missing or was overridden',
+      ).toBeGreaterThan(0);
+    }
+
     await context.close();
   });
 

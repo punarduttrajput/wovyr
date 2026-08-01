@@ -282,6 +282,18 @@ const CONTACT = 'contact@wovyr.com';
   .rv.in{opacity:1; transform:none}
   @media (prefers-reduced-motion: reduce){ .rv{opacity:1; transform:none; transition:none} }
 </style>
+
+<!--
+  WEB-302: `.rv` starts at opacity:0 and is only revealed by the
+  IntersectionObserver below adding `.in`. Without this fallback, a visitor with
+  JavaScript disabled (or a scraper, or a crawler that doesn't execute JS) sees
+  the hero and nothing else — every section below it stays permanently
+  invisible. Progressive enhancement: the animation is the enhancement, the
+  content is not.
+-->
+<noscript><style>
+  .rv{opacity:1 !important; transform:none !important; transition:none !important}
+</style></noscript>
 </head>
 
 <body>
