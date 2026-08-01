@@ -22,15 +22,24 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BINARY = REPO / "target" / "debug" / "wovyr"
+# `.exe` on Windows; `Path.exists()` below reports which one is actually built.
+BINARY = REPO / "target" / "debug" / ("wovyr.exe" if sys.platform == "win32" else "wovyr")
 DOC = REPO / "docs" / "11-cli" / "commands.md"
 
 
 def help_text(path: list[str]) -> str:
     out = subprocess.run(
-        [str(BINARY), *path, "--help"], capture_output=True, text=True, check=True
+        [str(BINARY), *path, "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
     )
-    return out.stdout.rstrip("\n")
+    # clap derives its `Usage:` line from argv[0], so a Windows host emits
+    # `wovyr.exe ...` where Linux/macOS emit `wovyr ...`. Normalize, or the
+    # committed doc would depend on who last regenerated it and the DX-304
+    # drift check would fail for every contributor on the other platform.
+    return out.stdout.rstrip("\n").replace("wovyr.exe", "wovyr")
 
 
 def subcommands(help_output: str) -> list[str]:
@@ -81,7 +90,8 @@ def render(sections: list[tuple[list[str], str]], version: str) -> str:
         "Every section below is the verbatim `--help` output of a real command —",
         "generated, so the reference can never describe a command that doesn't",
         "exist, nor omit one that does. Conceptual docs live in",
-        "[overview.md](overview.md) and [configuration.md](configuration.md).",
+        "[index.md](index.md), [configuration.md](configuration.md), and",
+        "[examples.md](examples.md).",
         "",
     ]
     for path, text in sections:
@@ -100,7 +110,11 @@ def main() -> int:
         print(f"error: {BINARY} not built — run `cargo build -p wovyr-cli` first", file=sys.stderr)
         return 2
     version_out = subprocess.run(
-        [str(BINARY), "--version"], capture_output=True, text=True, check=True
+        [str(BINARY), "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
     ).stdout.strip()
     version = version_out.split()[-1]
 
@@ -109,7 +123,9 @@ def main() -> int:
     doc = render(sections, version)
 
     if "--check" in sys.argv:
-        current = DOC.read_text() if DOC.exists() else ""
+        # Explicit UTF-8 both ways: the doc contains em-dashes, and Python's
+        # locale default on Windows (cp1252) would mangle them.
+        current = DOC.read_text(encoding="utf-8") if DOC.exists() else ""
         if current != doc:
             print(
                 f"error: {DOC.relative_to(REPO)} is stale — regenerate with "
@@ -120,7 +136,7 @@ def main() -> int:
         print(f"{DOC.relative_to(REPO)} is up to date ({len(sections)} commands)")
         return 0
 
-    DOC.write_text(doc)
+    DOC.write_text(doc, encoding="utf-8")
     print(f"wrote {DOC.relative_to(REPO)} ({len(sections)} commands)")
     return 0
 

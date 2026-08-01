@@ -10,7 +10,7 @@ CI regenerates and diffs this file, so drift fails the build (DX-304).
 
 **Document ID:** CLI-003  
 **File Path:** `docs/11-cli/commands.md`  
-**Version:** generated from `wovyr 0.3.0`  
+**Version:** generated from `wovyr 0.3.2`  
 **Status:** Generated (from the clap command tree)  
 **Owner:** AI Platform Team
 
@@ -19,7 +19,8 @@ CI regenerates and diffs this file, so drift fails the build (DX-304).
 Every section below is the verbatim `--help` output of a real command —
 generated, so the reference can never describe a command that doesn't
 exist, nor omit one that does. Conceptual docs live in
-[overview.md](overview.md) and [configuration.md](configuration.md).
+[index.md](index.md), [configuration.md](configuration.md), and
+[examples.md](examples.md).
 
 ## `wovyr`
 
@@ -117,16 +118,17 @@ Run an agent
 Usage: wovyr agents run [OPTIONS] --file <FILE>
 
 Options:
-  -f, --file <FILE>            Path to the agent YAML definition
-      --input <INPUT>          Run input as JSON (e.g. '{"message":"Hi"}'). Plain text is also accepted [default: {}]
-      --local                  Use the embedded local runtime instead of a server
-      --server <SERVER>        Server base URL for a remote run. Falls back to stored credentials
-      --stream                 Render the run as a live event stream (local mode only in v0.1)
-      --tenant <TENANT>        Tenant the run acts in — scopes any plugin-tool secret resolution to this tenant's vault namespace (local mode; requires the `plugin-wasi` build)
-      --max-steps <MAX_STEPS>  Override the model/tool iteration cap (default: 8). Raise this for tasks that need many tool calls to finish; a run that hits the cap without a final answer errors with "did not finish within N steps"
-      --provider <PROVIDER>    Provider backend for a local run (local mode only). `auto` (default) mirrors `Gateway::from_env()` — OpenAI if `OPENAI_API_KEY` is set, then Anthropic if `ANTHROPIC_API_KEY` is set, else the deterministic mock. `anthropic` selects the native Messages-API provider explicitly (needs `ANTHROPIC_API_KEY`). `mistralrs` runs a real local model in-process via mistral.rs (needs a `--features mistralrs` build; first use downloads GGUF weights — see WOVYR_MISTRALRS_GGUF_REPO/_GGUF_FILE/_TOK_MODEL_ID) [default: auto]
-      --interactive-ui         Register the `ui_present` tool (PRD-005 HIL-304) so the agent can show the human a generative-UI frame via an interactive stdin prompt and get a decision back — local mode only. This is the CLI's trusted-first-party context, so frames render unrestricted (no policy required); a hosted deployment never uses this presenter. Bare agent runs have no checkpoint to resume from at all, so this is not durable the way a workflow `ui` activity is — see `wovyr-tools`' `ui_present` module docs
-  -h, --help                   Print help
+  -f, --file <FILE>             Path to the agent YAML definition
+      --input <INPUT>           Run input as JSON (e.g. '{"message":"Hi"}'). Plain text is also accepted [default: {}]
+      --local                   Use the embedded local runtime instead of a server
+      --server <SERVER>         Server base URL for a remote run. Falls back to stored credentials
+      --stream                  Render the run as a live event stream (local mode only in v0.1)
+      --tenant <TENANT>         Tenant the run acts in — scopes any plugin-tool secret resolution to this tenant's vault namespace (local mode; requires the `plugin-wasi` build)
+      --max-steps <MAX_STEPS>   Override the model/tool iteration cap (default: 8). Raise this for tasks that need many tool calls to finish; a run that hits the cap without a final answer errors with "did not finish within N steps"
+      --provider <PROVIDER>     Provider backend for a local run (local mode only). `auto` (default) mirrors `Gateway::from_env()` — OpenAI if `OPENAI_API_KEY` is set, then Anthropic if `ANTHROPIC_API_KEY` is set, else the deterministic mock. `anthropic` selects the native Messages-API provider explicitly (needs `ANTHROPIC_API_KEY`). `mistralrs` runs a real local model in-process via mistral.rs (needs a `--features mistralrs` build; first use downloads GGUF weights — see WOVYR_MISTRALRS_GGUF_REPO/_GGUF_FILE/_TOK_MODEL_ID) [default: auto]
+      --interactive-ui          Register the `ui_present` tool (PRD-005 HIL-304) so the agent can show the human a generative-UI frame via an interactive stdin prompt and get a decision back — local mode only. This is the CLI's trusted-first-party context, so frames render unrestricted (no policy required); a hosted deployment never uses this presenter. Bare agent runs have no checkpoint to resume from at all, so this is not durable the way a workflow `ui` activity is — see `wovyr-tools`' `ui_present` module docs
+      --allow-privileged-tools  Register the privileged builtins (`shell`, `fs_write`, `code_execute`) for this local run (SBX-305). They execute arbitrary commands, write arbitrary files, and run arbitrary code as your user with full host access, driven by whatever the model decides — so they are off by default and a manifest that names one fails closed without this flag. Intended for a single-operator trusted workstation, not a shared or multi-tenant host. Set `WOVYR_LOCAL_PRIVILEGED=1` to enable them for a whole session instead (that env var is also what the `workflows approve`/`signal`/`tick` resume paths honor, since they take no flag of their own)
+  -h, --help                    Print help
 ```
 
 ## `wovyr workflows`
@@ -177,6 +179,7 @@ Options:
       --local                    Use the embedded local runtime (the only supported mode in v0.2)
       --id <ID>                  Execution id (defaults to `wf-<workflow-name>`). Use to resume/approve
       --agents-dir <AGENTS_DIR>  Directory to resolve `agent`-typed activities' `name` against as `<agents-dir>/<name>.yaml` (defaults to the current directory). The server instead resolves `name` against a *stored* agent id — this is the CLI's file-based equivalent for local dev [default: .]
+      --allow-privileged-tools   Register the privileged builtins (`shell`, `fs_write`, `code_execute`) for this local run (SBX-305). Off by default: they execute arbitrary commands, write arbitrary files, and run arbitrary code as your user with full host access, and a definition naming one (including inside a `for_each` body) fails closed without this flag. Intended for a single-operator trusted workstation. `WOVYR_LOCAL_PRIVILEGED=1` enables them for a whole session, including the `approve`/`signal`/`tick` resume paths, which take no flag
   -h, --help                     Print help
 ```
 
