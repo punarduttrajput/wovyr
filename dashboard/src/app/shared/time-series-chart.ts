@@ -48,7 +48,7 @@ let chartSeq = 0;
     <div #host class="ts-host" role="img" [attr.aria-label]="ariaLabel()"></div>
     <details class="ts-table">
       <summary>View data as table</summary>
-      <div class="table-wrap">
+      <div class="table-wrap" tabindex="0" role="region" [attr.aria-label]="ariaLabel() + ' — data table'">
         <table>
           <thead>
             <tr>

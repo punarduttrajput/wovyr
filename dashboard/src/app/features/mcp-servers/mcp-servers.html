@@ -80,7 +80,7 @@
     <!-- list -->
     <div class="card">
       <div class="card-h"><h2>Configured connections</h2><span class="sub">{{ connections().length }}</span></div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Configured MCP connections"><table>
         <thead><tr><th>Name</th><th>Transport</th><th>Tools</th><th></th></tr></thead>
         <tbody>
           @for (c of connections(); track c.name) {

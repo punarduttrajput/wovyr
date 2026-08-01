@@ -107,7 +107,7 @@
     <div class="card">
       <div class="card-h"><h2>Requests by route</h2><span class="sub">RED · cumulative</span></div>
       @if (metrics()?.routes?.length) {
-        <div class="table-wrap"><table>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Requests by route"><table>
           <thead><tr><th>Route</th><th class="num">Requests</th><th class="num">Errors</th></tr></thead>
           <tbody>
             @for (r of metrics()!.routes; track r.route) {
@@ -165,7 +165,7 @@
       </div>
     </div>
     @if (workflows().length) {
-      <div class="table-wrap"><table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Workflow executions"><table>
         <thead><tr><th>Execution</th><th>Workflow</th><th>Version</th><th>Status</th><th class="num">Activities</th><th>Waiting on</th></tr></thead>
         <tbody>
           @for (w of workflows(); track w.execution_id) {
