@@ -568,7 +568,16 @@ jobs:
             out=$(mktemp)
             "$@" -- --nocapture 2>&1 | tee "$out"
             if grep -q "skipping:" "$out"; then
-              echo "::error::a capability-gated test skipped despite services being up" >&2
+              # Name the command *and* quote the tests' own skip reasons. The bare
+              # "a capability-gated test skipped" this used to emit said nothing
+              # about which of the eleven `run_gated` invocations tripped or why,
+              # so diagnosing it required opening the raw job log — which needs a
+              # token even on a public repo. `::error::` lands in the check-run
+              # annotations, which are readable unauthenticated, so putting the
+              # detail here makes the failure self-describing.
+              local why
+              why=$(grep "skipping:" "$out" | sort -u | paste -sd' | ' -)
+              echo "::error::capability-gated test skipped despite services being up — command: [$*] — reason(s): ${why}" >&2
               exit 1
             fi
           }
@@ -870,6 +879,34 @@ jobs:
           CHROME_PATH: ${{ steps.chrome.outputs.path }}
         run: npx --yes @lhci/cli@0.14 autorun --config=./lighthouserc.cjs
 
+      # Same reasoning as the Trivy annotation step: "exit code 1" is all the API
+      # exposes, and LHCI's own diagnosis (a Chrome launch/crash trace) lives only
+      # in the job log, which needs a token. This surfaces it — including a direct
+      # `CHROME_PATH --version` probe, since every preceding step passed and the
+      # question is specifically whether that binary can start at all on the runner.
+      - name: Surface Lighthouse failure detail
+        if: failure()
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.path }}
+        run: |
+          set +e
+          echo "CHROME_PATH=$CHROME_PATH"
+          "$CHROME_PATH" --version
+          echo "chrome --version exit: $?"
+          "$CHROME_PATH" --headless=new --no-sandbox --disable-dev-shm-usage \
+            --disable-gpu --dump-dom about:blank >/dev/null 2>chrome.err
+          rc=$?
+          echo "headless smoke exit: $rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::chrome headless smoke test failed (exit $rc): $(tr '\n' ' ' < chrome.err | cut -c1-400)"
+          fi
+          for f in .lighthouseci/lhci.log .lighthouseci/*.log; do
+            [ -f "$f" ] || continue
+            echo "--- $f ---"
+            tail -40 "$f"
+            echo "::error::lhci($f): $(tail -6 "$f" | tr '\n' ' ' | cut -c1-400)"
+          done
+
       - name: Upload Lighthouse reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -900,10 +937,26 @@ jobs:
       # upstream action's prebuilt binary (no cargo-deny compile in CI). Config
       # in `deny.toml`; RustSec advisories are already covered by the step above,
       # so this only runs the `bans`/`licenses`/`sources` checks.
+      # `arguments` is set explicitly because the action's *default* is
+      # `--all-features`, which silently overrode `deny.toml`'s
+      # `[graph] all-features = false` — so the config said "check the default
+      # feature set" while CI checked every optional feature, including the
+      # `mistralrs` local-inference provider. That pulls in candle/tokenizers/
+      # symphonia (an entire vendored ML + audio stack), which produces dozens of
+      # duplicate-version bans and drags in MPL-2.0/0BSD/Zlib/NCSA licences that
+      # this project has never had to take a position on. `mistralrs` is
+      # deliberately excluded from every other CI job as too heavy to compile, so
+      # gating the build on its transitive licence and version hygiene was never
+      # the intent.
+      #
+      # This was invisible until now: the cargo-audit step above used to fail
+      # first, so this step never ran. See `deny.toml` for what that means for
+      # coverage.
       - name: License / duplicate-version policy (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check bans licenses sources
+          arguments: ""
 
       # Secret scanning: the standalone gitleaks binary (not the wrapper Action,
       # which gates organizational use behind a license) against the checked-out
@@ -955,6 +1008,24 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
+
+      # The step above only reports "Process completed with exit code 1" through
+      # the API, and the raw job log needs a token even on a public repo — so a
+      # failing scan was undiagnosable without signing in. Re-run it non-fatally
+      # with a Go template that emits each finding as a `::error::` workflow
+      # command, which lands in the check-run annotations (readable
+      # unauthenticated). Purely diagnostic: `exit-code: "0"` so it never decides
+      # the job's outcome, and it only runs when the real gate above already failed.
+      - name: Surface Trivy findings as annotations
+        if: failure()
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          image-ref: wovyr:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+          format: template
+          template: '{{ range . }}{{ range .Vulnerabilities }}::error::{{ .VulnerabilityID }} {{ .Severity }} in {{ .PkgName }} {{ .InstalledVersion }} — fixed in {{ .FixedVersion }}{{ println }}{{ end }}{{ end }}'
 
   systemd-install:
     name: systemd install smoke test (DEP-301)

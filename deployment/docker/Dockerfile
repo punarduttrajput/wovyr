@@ -34,7 +34,15 @@ FROM debian:bookworm-slim AS runtime
 
 # CA certificates so the OpenAI-compatible provider and http_get tool can use
 # TLS; curl so compose/orchestrators can healthcheck `/healthz` over real HTTP.
+#
+# `upgrade` is not redundant with `install`. The base image is a point-in-time
+# snapshot, so the packages it already ships (libc, zlib, openssl, apt itself)
+# keep whatever CVEs were current when it was published — `install` only fetches
+# the two packages named below. CI's Trivy gate runs with `ignore-unfixed: true`,
+# i.e. it reports HIGH/CRITICAL findings that *have* a fix available, which is
+# exactly this class. Applying the security updates is the fix.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
