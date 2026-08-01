@@ -11,6 +11,12 @@ each release links its own.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-01
+
+A minor bump rather than a patch: the Wasmtime upgrade below changes the
+`wovyr-tools` `wasi` feature's public surface, and this project follows semver
+from `0.3.0` onward.
+
 ### Fixed
 
 - **A quota breach reports figures at the scale they actually occur.** The
@@ -586,7 +592,8 @@ The runnable foundation slice ([docs/18-roadmap/v0.1.md](docs/18-roadmap/v0.1.md
 - The `docs/` specification tree (product → architecture → per-subsystem specs →
   ADRs → roadmap) that the codebase implements spec-first.
 
-[Unreleased]: https://github.com/punarduttrajput/wovyr/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/punarduttrajput/wovyr/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.4.0
 [0.3.2]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.2
 [0.3.1]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.1
 [0.3.0]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.0

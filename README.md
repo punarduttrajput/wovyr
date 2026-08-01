@@ -5,7 +5,7 @@
 > (fail-closed), records it in a tamper-evident audit chain, and keeps the
 > human's decision durable across crashes and restarts. Runs air-gapped.
 
-![Version](https://img.shields.io/badge/version-0.3.2-blue)
+![Version](https://img.shields.io/badge/version-0.4.0-blue)
 ![Rust](https://img.shields.io/badge/Rust-Edition%202024-orange)
 ![License](https://img.shields.io/badge/license-Apache%202.0-green)
 [![Website](https://img.shields.io/badge/website-wovyr.com-black)](https://wovyr.com)
@@ -48,7 +48,7 @@ Then start the server and talk to it over HTTP:
 
 ```bash
 WOVYR_ALLOW_ANONYMOUS=1 wovyr dev   # → 127.0.0.1:8080
-curl http://127.0.0.1:8080/healthz  # → {"status":"ok","version":"0.3.2"}
+curl http://127.0.0.1:8080/healthz  # → {"status":"ok","version":"0.4.0"}
 ```
 
 From there: set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for a real model,
@@ -565,14 +565,14 @@ description of what each crate actually does.
 
 This trips people up, so plainly:
 
-- **Crate/package version `0.3.2`** — the semver of the published artifacts
+- **Crate/package version `0.4.0`** — the semver of the published artifacts
   (crates.io, npm, PyPI) and of the git release tag. Still `0.x`: the HTTP API
   and wire formats may change, and have.
 - **Milestone names `v0.1`…`v1.6`** — the *roadmap* units in
   [`docs/18-roadmap/`](docs/18-roadmap/). These are planning labels, not package
   versions, and they are ahead of the semver number by design.
 
-So "v1.6 complete" and "version 0.3.2" are both true and describe different
+So "v1.6 complete" and "version 0.4.0" are both true and describe different
 things. Release history lives in [`CHANGELOG.md`](CHANGELOG.md).
 
 **Milestone status:** v0.1–v0.3 shipped and tagged. v1.0 (GA hardening —

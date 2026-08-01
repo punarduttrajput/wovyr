@@ -5,6 +5,14 @@ The SDK's version tracks the platform release it targets: same major.minor as
 fixes. `health()` warns (once per client) when it detects a server whose
 major.minor differs.
 
+## 0.4.0 — 2026-08-01
+
+- Version-only bump to stay in lockstep with the platform's 0.4.0 release. No
+  SDK code change: the API surface is identical to 0.3.2, and the platform's
+  minor bump is a `wovyr-tools` `wasi`-feature break that no client sees. The
+  major.minor tracking rule (DX-303) is what forces the bump — a 0.3.x SDK
+  talking to a 0.4.x server would otherwise warn about skew that isn't real.
+
 ## 0.3.2 — 2026-07-29
 
 - Version-only bump to stay in lockstep with the platform's 0.3.2 release (a
