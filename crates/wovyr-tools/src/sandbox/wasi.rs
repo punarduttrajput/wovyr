@@ -32,7 +32,11 @@ pub struct WasiSandbox {
 }
 
 struct WasiState {
-    wasi: wasmtime_wasi::WasiCtx,
+    /// WASIp1 (`wasi_snapshot_preview1`) context. Modules built for
+    /// `wasm32-wasip1` import that interface, so p1 remains the target even
+    /// though `wasmtime-wasi` now also ships p2/p3 — see [`run_module`]'s
+    /// linker setup.
+    wasi: wasmtime_wasi::p1::WasiP1Ctx,
     limits: wasmtime::StoreLimits,
 }
 
@@ -56,45 +60,54 @@ impl WasiSandbox {
     ) -> Result<CommandOutcome, SandboxError> {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
-        use wasi_common::pipe::{ReadPipe, WritePipe};
         use wasmtime::{Linker, Module, Store, StoreLimitsBuilder, Trap};
-        use wasmtime_wasi::{Dir, WasiCtxBuilder, ambient_authority};
+        use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
+        use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
         let module = Module::from_file(&self.engine, &cmd.program)
             .map_err(|e| SandboxError::Spawn(format!("load wasm `{}`: {e}", cmd.program)))?;
 
         // Capture stdout/stderr into in-memory pipes (cloned handles share the buffer).
-        let stdout = WritePipe::new_in_memory();
-        let stderr = WritePipe::new_in_memory();
+        //
+        // `MemoryOutputPipe` is *bounded*, unlike the retired
+        // `wasi_common::pipe::WritePipe::new_in_memory()` it replaces — so a guest
+        // can no longer make the host allocate without limit by writing endlessly.
+        // Sized one byte over the caller's cap so `cap()` below still observes an
+        // over-long buffer and reports `truncated` exactly as before; a guest that
+        // writes past that now gets a write error instead of silently succeeding
+        // and having the excess discarded, which is the safer failure.
+        let capacity = cmd.limits.max_output_bytes.saturating_add(1);
+        let stdout = MemoryOutputPipe::new(capacity);
+        let stderr = MemoryOutputPipe::new(capacity);
 
         let mut builder = WasiCtxBuilder::new();
         let argv: Vec<String> = std::iter::once(cmd.program.clone())
             .chain(cmd.args.iter().cloned())
             .collect();
-        builder
-            .args(&argv)
-            .map_err(|e| SandboxError::Internal(format!("wasi args: {e}")))?;
-        builder.stdout(Box::new(stdout.clone()));
-        builder.stderr(Box::new(stderr.clone()));
+        // `args`/`env`/`stdio` are infallible on the current builder (they returned
+        // `Result` in 14.x).
+        builder.args(&argv);
+        builder.stdout(stdout.clone());
+        builder.stderr(stderr.clone());
         // Feed the request bytes to the guest's stdin (empty → no input available).
-        builder.stdin(Box::new(ReadPipe::from(stdin.to_vec())));
-        if !cmd.workdir.is_empty() {
-            // Preopen the workdir as the guest's sole filesystem capability. A
-            // missing dir is non-fatal — the module simply gets no preopens.
-            if let Ok(dir) = Dir::open_ambient_dir(&cmd.workdir, ambient_authority()) {
-                builder
-                    .preopened_dir(dir, ".")
-                    .map_err(|e| SandboxError::Internal(format!("wasi preopen: {e}")))?;
-            }
+        builder.stdin(MemoryInputPipe::new(stdin.to_vec()));
+        // Preopen the workdir as the guest's sole filesystem capability. A missing
+        // dir stays non-fatal — the module simply gets no preopens — but a dir that
+        // exists and still fails to open is a real error rather than a silent
+        // capability downgrade. (`preopened_dir` now opens the host path itself;
+        // 14.x needed a `Dir::open_ambient_dir` first, whose failure was the case
+        // being swallowed here.)
+        if !cmd.workdir.is_empty() && std::path::Path::new(&cmd.workdir).is_dir() {
+            builder
+                .preopened_dir(&cmd.workdir, ".", DirPerms::all(), FilePerms::all())
+                .map_err(|e| SandboxError::Internal(format!("wasi preopen: {e}")))?;
         }
         // Inject environment variables (e.g. resolved secrets) into the guest. They
         // live only for this in-memory execution and are dropped with the command.
         for (key, value) in &cmd.env {
-            builder
-                .env(key, value)
-                .map_err(|e| SandboxError::Internal(format!("wasi env: {e}")))?;
+            builder.env(key, value);
         }
-        let wasi = builder.build();
+        let wasi = builder.build_p1();
 
         let mut limits = StoreLimitsBuilder::new();
         if let Some(bytes) = cmd.limits.memory_bytes {
@@ -116,7 +129,7 @@ impl WasiSandbox {
             .map(|m| (m as u64).saturating_mul(WASI_FUEL_PER_MILLI))
             .unwrap_or(u64::MAX);
         store
-            .add_fuel(fuel)
+            .set_fuel(fuel)
             .map_err(|e| SandboxError::Internal(format!("wasi fuel: {e}")))?;
 
         // Wall-clock budget via epoch interruption: a watchdog ticks the engine's
@@ -142,7 +155,9 @@ impl WasiSandbox {
         };
 
         let mut linker = Linker::new(&self.engine);
-        wasmtime_wasi::add_to_linker(&mut linker, |s: &mut WasiState| &mut s.wasi)
+        // Synchronous WASIp1 bindings: this whole function runs on a blocking
+        // thread (see `execute_with_stdin`), so the guest's host calls may block.
+        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |s: &mut WasiState| &mut s.wasi)
             .map_err(|e| SandboxError::Internal(format!("wasi linker: {e}")))?;
         let instance = linker
             .instantiate(&mut store, &module)
@@ -174,11 +189,13 @@ impl WasiSandbox {
             }
         };
 
-        // Drop the store so the sandbox's stdout/stderr clones are the sole holders
-        // before we reclaim the captured bytes.
+        // Drop the store first so the guest's memory is released before the captured
+        // bytes are copied out. (`contents()` only borrows, so unlike 14.x's
+        // `try_into_inner` this is no longer a *correctness* requirement — the clone
+        // no longer has to be the sole holder.)
         drop(store);
-        let out = pipe_bytes(stdout);
-        let err = pipe_bytes(stderr);
+        let out = stdout.contents();
+        let err = stderr.contents();
         let (stdout_s, t1) = cap(&out, cmd.limits.max_output_bytes);
         let (stderr_s, t2) = cap(&err, cmd.limits.max_output_bytes);
 
@@ -219,14 +236,6 @@ impl Sandbox for WasiSandbox {
     async fn execute(&self, cmd: &SandboxCommand) -> Result<CommandOutcome, SandboxError> {
         self.execute_with_stdin(cmd, Vec::new()).await
     }
-}
-
-/// Reclaim the bytes written to an in-memory WASI pipe (sole-owner after the store
-/// is dropped).
-fn pipe_bytes(pipe: wasi_common::pipe::WritePipe<std::io::Cursor<Vec<u8>>>) -> Vec<u8> {
-    pipe.try_into_inner()
-        .map(std::io::Cursor::into_inner)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

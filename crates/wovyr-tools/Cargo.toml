@@ -10,7 +10,7 @@ description = "Tool framework: the Tool trait, registry, and built-in tools for 
 [features]
 # The WASI/WASM sandbox backend. Off by default: it pulls Wasmtime, a heavy
 # dependency, so only builds/tests that exercise the backend pay the compile cost.
-wasi = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasi-common"]
+wasi = ["dep:wasmtime", "dep:wasmtime-wasi"]
 # Gates `tests/sandbox_backends.rs` (RM-AR-P1 QA-401) — a test-only marker feature
 # with no dependency of its own. That file's tests are runtime-capability-gated
 # (they skip cleanly when Docker/gVisor/Firecracker is absent), but a *present*
@@ -48,10 +48,18 @@ reqwest.workspace = true
 # timeouts (RM-GA-P4 HLTH-904).
 tokio = { workspace = true, features = ["net", "io-util", "fs", "process", "sync", "rt", "time"] }
 tracing.workspace = true
-# Pinned to 14.x to reuse the warm offline cache (wasmtime 14.0.4 is already vendored).
-wasmtime = { version = "14", optional = true }
-wasmtime-wasi = { version = "14", optional = true }
-wasi-common = { version = "14", optional = true }
+# Kept current, deliberately. The previous `14` pin existed only "to reuse the warm
+# offline cache", and that expedient cost 21 of this workspace's 23 RustSec
+# advisories — including two 9.0 sandbox escapes (RUSTSEC-2026-0095/0096) and a 7.5
+# WASI `FilePerms::WRITE` bypass (RUSTSEC-2026-0149), in the very crate used to
+# sandbox untrusted plugin capabilities. 47.0.3 is the minimum release that clears
+# all of them (RUSTSEC-2026-0222 requires >=47.0.3). Do not re-pin backwards for
+# build-convenience reasons; run `cargo audit` before changing this.
+#
+# `wasi-common` is intentionally absent: it was retired upstream. WASI preview1
+# support now lives in `wasmtime-wasi`'s own `p1` module.
+wasmtime = { version = "47.0.3", optional = true }
+wasmtime-wasi = { version = "47.0.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
