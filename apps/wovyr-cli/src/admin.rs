@@ -177,7 +177,7 @@ pub async fn migrate_cmd(target: &str, database_url: &str) -> Result<()> {
     match target {
         "workflow" => run_workflow_migrations(database_url).await,
         "memory" => run_memory_migrations(database_url).await,
-        "marketplace" => run_marketplace_migrations(database_url),
+        "marketplace" => run_marketplace_migrations(database_url).await,
         other => Err(Error::invalid(format!(
             "unknown migration target `{other}` (expected one of: workflow, memory, marketplace)"
         ))),
@@ -210,14 +210,27 @@ async fn run_memory_migrations(_database_url: &str) -> Result<()> {
     ))
 }
 
+/// Unlike the workflow/memory backends above, `wovyr-marketplace` is deliberately
+/// synchronous and its `run_migrations` reaches the sync `postgres` crate, which
+/// drives its own internal Tokio runtime. Calling it directly from this `async fn`
+/// panics with "Cannot start a runtime from within a runtime" — so it has to go
+/// through `spawn_blocking`, exactly like `wovyr-server`'s `with_registry` and the
+/// CLI's own `plugin::blocking` (RM-GA-P4 HLTH-902). That ticket fixed the seven
+/// `plugin` marketplace commands but never covered `admin migrate`, which is only
+/// reachable from CI's `--features postgres` service-container job.
 #[cfg(feature = "postgres")]
-fn run_marketplace_migrations(database_url: &str) -> Result<()> {
-    wovyr_marketplace::PostgresRegistryStore::run_migrations(database_url)?;
+async fn run_marketplace_migrations(database_url: &str) -> Result<()> {
+    let url = database_url.to_string();
+    tokio::task::spawn_blocking(move || {
+        wovyr_marketplace::PostgresRegistryStore::run_migrations(&url)
+    })
+    .await
+    .unwrap_or_else(|e| Err(Error::Runtime(format!("blocking task panicked: {e}"))))?;
     println!("marketplace schema migrated");
     Ok(())
 }
 #[cfg(not(feature = "postgres"))]
-fn run_marketplace_migrations(_database_url: &str) -> Result<()> {
+async fn run_marketplace_migrations(_database_url: &str) -> Result<()> {
     Err(Error::config(
         "migrating the marketplace schema needs a --features postgres build",
     ))
