@@ -16,6 +16,61 @@ import monoRegularUrl from '@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-
 import monoMediumUrl from '@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-500-normal.woff2?url';
 
 const CONTACT = 'contact@wovyr.com';
+
+const SITE = 'https://wovyr.com';
+const REPO = 'https://github.com/punarduttrajput/wovyr';
+const OG_IMAGE = `${SITE}/og.png`;
+const TITLE = 'Wovyr — The trust layer for AI-generated interfaces';
+const DESCRIPTION =
+  'Wovyr checks every interface an AI agent generates against policy, cuts what fails before it renders, records what was shown in a tamper-evident chain, and holds the work until a human decides. Apache-2.0, self-hosted, one Rust binary.';
+
+/**
+ * GEO-103: the FAQ is the source for both the rendered section and the
+ * FAQPage JSON-LD below — one array, so the two can never disagree. A
+ * structured-data answer that is not present in the visible page is a
+ * spam signal, not a ranking one.
+ *
+ * The questions are the ones actually asked about a project like this
+ * (what is it, do I need it, what does it cost, is it production-ready),
+ * and the answers stay inside what the repo genuinely ships — including
+ * the honest "not yet" on the distributed scheduler. An answer engine
+ * will repeat these verbatim; an overclaim here becomes an overclaim in
+ * every future answer about Wovyr.
+ */
+const FAQ = [
+  {
+    q: 'What is Wovyr?',
+    a: 'Wovyr is an open-source trust layer for interfaces that AI agents generate at runtime. An agent composes a screen from a constrained component vocabulary; Wovyr evaluates that frame against policy before anything renders, refuses anything the policy does not recognise, records the frame and the verdict in a tamper-evident hash chain, and durably pauses the run until a human decides. It runs on a complete AI agent operating system written in Rust and ships as a single binary.',
+  },
+  {
+    q: 'Why do AI-generated interfaces need a trust layer?',
+    a: 'Because the assumption that a person reviewed the screen no longer holds. A model can compose a convincing payment form or a mislabelled confirm button for one user, once, and nobody reviewed it. Prompt injection does not have to change the answer to be dangerous — it only has to change the button. And when a user later says the interface told them to approve something, you need the exact frame they saw, which is only possible if something kept it.',
+  },
+  {
+    q: 'How is Wovyr different from an LLM guardrail or content filter?',
+    a: 'Content guardrails inspect text. Wovyr inspects interface structure: which components a frame uses, what inputs it asks for, whether an action label matches the action class behind it, and where its images come from. It is also structurally constrained rather than only filtered — the component vocabulary has no raw-HTML or script node and no credential-input component, so an entire class of generated interface cannot be expressed in the first place.',
+  },
+  {
+    q: 'What does "fail-closed" mean in Wovyr?',
+    a: 'Anything the policy does not explicitly recognise is denied rather than allowed with a warning. A frame containing a password field is not logged and passed through — it is refused, the refusal is recorded with the rule that fired, and the human never sees the frame. With no policy configured at all, display-only frames pass and interactive frames are denied, so an unconfigured deployment is restrictive rather than permissive.',
+  },
+  {
+    q: 'Is Wovyr free and open source?',
+    a: 'Yes — Apache-2.0, including the patent grant, with no paid edition and no usage limits. The runtime, the trust layer, the dashboard, the client SDKs, the Helm chart and the documentation are one repository. Contributions use a DCO sign-off rather than a CLA, so contributors keep their copyright. All 21 library crates are published on crates.io, so you can depend on just the trust layer (wovyr-ui-guard) without adopting the runtime.',
+  },
+  {
+    q: 'Can I self-host Wovyr, and does it need an API key?',
+    a: 'Wovyr is self-hosted by default and has no hosted service to sign up for. Install the CLI with cargo install wovyr-cli and run wovyr dev to get the whole platform on localhost. No API key is required to try it: a deterministic mock provider answers, so you can watch a full agent and tool loop offline before wiring a real model. Telemetry is sent only if you configure an OTLP endpoint yourself.',
+  },
+  {
+    q: 'Which LLM providers does Wovyr support?',
+    a: 'OpenAI and any OpenAI-compatible endpoint, Anthropic through the native Messages API with prompt caching, and local models via mistral.rs. The gateway is provider-neutral and adds failover between providers, a circuit breaker, response caching, retries with jitter and per-model cost accounting, so switching or adding a provider does not change calling code.',
+  },
+  {
+    q: 'Is Wovyr production-ready?',
+    a: 'It ships today as a single-node appliance: authentication, TLS, RBAC, multi-tenancy, quotas, KMS envelope encryption, a keyed audit chain, crash-safe durable workflows and backup/restore are implemented and tested. The distributed scheduler and multi-node work queue are tested library code that is not yet wired into the shipped binary. Every documentation page is marked shipped or planned so you can tell which is which before building on it.',
+  },
+];
 ---
 <!doctype html>
 <html lang="en">
@@ -27,12 +82,40 @@ const CONTACT = 'contact@wovyr.com';
   <link rel="preload" href={monoRegularUrl} as="font" type="font/woff2" crossorigin />
   <link rel="preload" href={monoMediumUrl} as="font" type="font/woff2" crossorigin />
   <title>Wovyr — The trust layer for AI-generated interfaces</title>
-  <meta name="description" content="Your agents compose screens at runtime, reviewed by nobody. Wovyr checks every thread against policy, cuts the ones that fail, records what was shown, and holds the work until a human decides." />
+  <meta name="description" content={DESCRIPTION} />
+  <link rel="canonical" href={`${SITE}/`} />
+  <link rel="sitemap" href="/sitemap-index.xml" />
+  {/* Opt into full-length snippets and large image previews; both default to
+      something shorter, and a truncated snippet on the one page that explains
+      what the project is costs more here than anywhere else on the site. */}
+  <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
+
+  {/* SEO-105: og:image was a root-relative `/og.png`. Facebook, LinkedIn and
+      Slack's scrapers do not reliably resolve a relative og:image, so the card
+      silently fell back to no image on exactly the surfaces the image exists
+      for. Absolute URL, with the dimensions declared so a scraper can lay the
+      card out before it has fetched the file. */}
   <meta property="og:type" content="website" />
-  <meta property="og:title" content="Wovyr — The trust layer for AI-generated interfaces" />
-  <meta property="og:description" content="Wovyr checks every interface an AI agent generates against policy, cuts what fails, records what was shown, and holds the work until a human decides — on a Rust runtime that survives crashes and restarts." />
-  <meta property="og:image" content="/og.png" />
+  <meta property="og:site_name" content="Wovyr" />
+  <meta property="og:locale" content="en" />
+  <meta property="og:url" content={`${SITE}/`} />
+  <meta property="og:title" content={TITLE} />
+  <meta property="og:description" content={DESCRIPTION} />
+  <meta property="og:image" content={OG_IMAGE} />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Wovyr — the trust layer for AI-generated interfaces" />
   <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={TITLE} />
+  <meta name="twitter:description" content={DESCRIPTION} />
+  <meta name="twitter:image" content={OG_IMAGE} />
+  <meta name="twitter:image:alt" content="Wovyr — the trust layer for AI-generated interfaces" />
+
+  {/* Matches the docs' Head override, so the browser chrome does not change
+      colour when a visitor crosses from `/` into `/00-executive/…`. */}
+  <meta name="theme-color" content="#0C1115" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#DEE3E7" media="(prefers-color-scheme: light)" />
   <script is:inline>
     /* Set the theme before first paint to avoid a flash, reading the SAME
        "starlight-theme" key the docs site's ThemeProvider.astro uses — this
@@ -193,6 +276,19 @@ const CONTACT = 'contact@wovyr.com';
   .notes h3{font-size:1.08rem; margin-bottom:6px}
   .notes p{color:var(--ink-2); font-size:.94rem}
 
+  /* ================================================================== FAQ
+     GEO-103. Deliberately plain, always-visible prose rather than a
+     JS accordion: these answers exist to be read and to be quoted, and
+     collapsed-by-default content is both a weaker extraction signal and
+     one more thing that breaks with JS off (see WEB-302). Two columns on
+     wide viewports only — an answer measured at 90ch is unreadable. */
+  .faq{display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:0 clamp(28px,5vw,68px); margin-top:clamp(24px,4vw,40px)}
+  @media(max-width:880px){ .faq{grid-template-columns:1fr} }
+  .faq > div{padding:22px 0; border-top:1px solid var(--warp)}
+  .faq h3{font-size:1.06rem; margin-bottom:8px; max-width:34ch}
+  .faq p{color:var(--ink-2); font-size:.94rem; max-width:56ch}
+
   /* A real ordered sequence, so it is numbered. Every segment is indigo —
      madder is reserved for a thread that was actually cut. */
   .pass{display:grid; grid-template-columns:repeat(4,1fr); margin-top:clamp(28px,4vw,46px)}
@@ -294,6 +390,94 @@ const CONTACT = 'contact@wovyr.com';
 <noscript><style>
   .rv{opacity:1 !important; transform:none !important; transition:none !important}
 </style></noscript>
+
+{/* ─────────────────────────────────────────── SEO-106 / GEO-103: structured data
+    One `@graph` rather than several separate <script> blocks, so the nodes can
+    reference each other by @id (the software is `about` the site, the FAQ is
+    part of the page) instead of repeating themselves as unlinked islands.
+
+    Every claim here is checkable against the repository: the licence, the
+    language, the crates.io install, the price. SoftwareApplication carries
+    `offers: price 0` because that is the field an answer engine reads to say
+    whether something is free — omitting it invites the guess. No aggregateRating
+    or review markup: there are no real ratings to report, and inventing them is
+    both a policy violation and a lie. */}
+<script type="application/ld+json" is:inline set:html={JSON.stringify({
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'Organization',
+      '@id': `${SITE}/#organization`,
+      name: 'Wovyr',
+      url: `${SITE}/`,
+      logo: { '@type': 'ImageObject', url: `${SITE}/og.png`, width: 1200, height: 630 },
+      description: 'Open-source trust layer for AI-generated interfaces, on a Rust AI agent runtime.',
+      email: CONTACT,
+      sameAs: [REPO, 'https://crates.io/search?q=wovyr', 'https://pypi.org/project/wovyr-sdk/'],
+    },
+    {
+      '@type': 'WebSite',
+      '@id': `${SITE}/#website`,
+      url: `${SITE}/`,
+      name: 'Wovyr',
+      description: DESCRIPTION,
+      inLanguage: 'en',
+      publisher: { '@id': `${SITE}/#organization` },
+      license: 'https://www.apache.org/licenses/LICENSE-2.0',
+    },
+    {
+      '@type': 'WebPage',
+      '@id': `${SITE}/#webpage`,
+      url: `${SITE}/`,
+      name: TITLE,
+      description: DESCRIPTION,
+      isPartOf: { '@id': `${SITE}/#website` },
+      about: { '@id': `${SITE}/#software` },
+      primaryImageOfPage: { '@type': 'ImageObject', url: OG_IMAGE },
+      inLanguage: 'en',
+    },
+    {
+      '@type': ['SoftwareApplication', 'SoftwareSourceCode'],
+      '@id': `${SITE}/#software`,
+      name: 'Wovyr',
+      description: DESCRIPTION,
+      url: `${SITE}/`,
+      applicationCategory: 'DeveloperApplication',
+      applicationSubCategory: 'AI agent runtime',
+      operatingSystem: 'Linux, macOS, Windows',
+      softwareVersion: '0.3.2',
+      programmingLanguage: 'Rust',
+      runtimePlatform: 'Rust (edition 2024)',
+      codeRepository: REPO,
+      license: 'https://www.apache.org/licenses/LICENSE-2.0',
+      isAccessibleForFree: true,
+      installUrl: 'https://crates.io/crates/wovyr-cli',
+      downloadUrl: `${REPO}/releases`,
+      offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      author: { '@id': `${SITE}/#organization` },
+      featureList: [
+        'Policy evaluation for AI-generated user interfaces, fail-closed by default',
+        'Tamper-evident keyed HMAC audit chain with a head anchor',
+        'Durable event-sourced workflow engine that resumes mid-approval after a crash',
+        'Sandboxed tool execution across native, container, gVisor and microVM backends',
+        'Provider-neutral LLM gateway with failover, caching and circuit breaking',
+        'Hybrid vector and keyword memory retrieval with re-ranking',
+        'Multi-tenancy, RBAC, KMS envelope encryption and per-project quotas',
+        'Signed, sandboxed WASM plugins and a governed marketplace',
+      ],
+    },
+    {
+      '@type': 'FAQPage',
+      '@id': `${SITE}/#faq`,
+      isPartOf: { '@id': `${SITE}/#webpage` },
+      mainEntity: FAQ.map(({ q, a }) => ({
+        '@type': 'Question',
+        name: q,
+        acceptedAnswer: { '@type': 'Answer', text: a },
+      })),
+    },
+  ],
+})} />
 </head>
 
 <body>
@@ -305,7 +489,8 @@ const CONTACT = 'contact@wovyr.com';
     wovyr</a>
   <nav class="nl" aria-label="Primary">
     <a href="#shuttle">The shuttle</a><a href="#loom">The loom</a>
-    <a href="#open">Open source</a><a href="/00-executive/vision/">Docs</a>
+    <a href="#open">Open source</a><a href="#faq">FAQ</a>
+    <a href="/00-executive/vision/">Docs</a>
     <a href="https://github.com/punarduttrajput/wovyr">GitHub</a>
     <a class="keep" href="#start">Start</a>
   </nav>
@@ -501,6 +686,25 @@ wovyr agents run --local -f examples/agents/hello.yaml \
   </div>
 </div></section>
 
+<section class="plate" id="faq" aria-labelledby="faq-h"><div class="w rv">
+  <div class="p-head"><span class="ann">Plate 08 — Questions</span></div>
+  <h2 id="faq-h">The questions people actually <span>ask first.</span></h2>
+  <p class="lede">Answered here rather than buried in the specs — and answered to
+    the same standard as the rest of the page, which means the "not yet" is stated
+    as plainly as the "yes".</p>
+  {/* Rendered from the same FAQ array the FAQPage JSON-LD in <head> is built
+      from, so the markup and the structured data are the same text by
+      construction — not two copies kept in sync by hand. */}
+  <div class="faq">
+    {FAQ.map(({ q, a }) => (
+      <div>
+        <h3>{q}</h3>
+        <p>{a}</p>
+      </div>
+    ))}
+  </div>
+</div></section>
+
 <section class="plate" style="border-bottom:0" aria-labelledby="cta-h"><div class="w rv">
   <div class="cols" style="align-items:center">
     <div>
@@ -533,7 +737,8 @@ wovyr agents run --local -f examples/agents/hello.yaml \
     </div>
     <nav aria-label="Product"><span class="ann">Product</span>
       <a href="#cloth">The cloth</a><a href="#shuttle">The shuttle</a>
-      <a href="#loom">The loom</a><a href="#start">Start</a></nav>
+      <a href="#loom">The loom</a><a href="#start">Start</a>
+      <a href="#faq">FAQ</a></nav>
     <nav aria-label="Docs"><span class="ann">Docs</span>
       <a href="/00-executive/vision/">Vision</a><a href="/02-architecture/c4-context/">Architecture</a>
       <a href="/09-api/">API &amp; SDKs</a><a href="/18-roadmap/">Roadmap</a></nav>

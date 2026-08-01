@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { sitemapLastmod } from './scripts/sitemap-lastmod.mjs';
 
 const section = (label, directory) => ({
   label,
@@ -46,6 +47,13 @@ export default defineConfig({
         replacesTitle: true,
       },
       customCss: ['./src/styles/starlight-brand.css', './src/styles/fonts.css'],
+      // SEO-104/GEO-102: adds the per-page og:image, the explicit twitter:*
+      // pair, and TechArticle + BreadcrumbList JSON-LD that Starlight's own
+      // Head does not emit. See src/components/Head.astro for why this is a
+      // component override rather than static `head:` entries.
+      components: {
+        Head: './src/components/Head.astro',
+      },
       expressiveCode: {
         shiki: { langs: [cronGrammar] },
       },
@@ -79,5 +87,8 @@ export default defineConfig({
         section('19 · Implementation Guide', '19-implementation-guide'),
       ],
     }),
+    // Must come after starlight() — it rewrites the sitemap Starlight's own
+    // @astrojs/sitemap instance emits.
+    sitemapLastmod(),
   ],
 });

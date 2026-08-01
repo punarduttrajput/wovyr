@@ -1,0 +1,93 @@
+# wovyr.com — https://github.com/punarduttrajput/wovyr
+#
+# Everything here is public Apache-2.0 documentation for an open-source project,
+# so the policy is simply: crawl all of it. Nothing on this origin is gated,
+# personalised, or user-generated, and there is no login — so there is no
+# section that needs excluding, and no crawl-rate concern for a static site.
+#
+# The AI/answer-engine crawlers below are listed EXPLICITLY rather than left to
+# the wildcard. That is deliberate: being cited accurately in an answer engine
+# is the point for a project whose documentation is its interface, and several
+# of these agents treat an absent, specific rule differently from an explicit
+# allow. Listing them also documents the intent, so nobody later "tightens"
+# robots.txt without realising it opts the docs out of AI citation.
+#
+# Machine-readable summaries for LLM consumption live at:
+#   /llms.txt        index — every page with a one-line description
+#   /llms-full.txt   the complete documentation corpus in a single file
+
+User-agent: *
+Allow: /
+
+# ── Search engines ────────────────────────────────────────────────────────────
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: DuckDuckBot
+Allow: /
+
+# ── AI training and retrieval ─────────────────────────────────────────────────
+# Google-Extended governs Gemini/Vertex grounding (it is not a crawler of its
+# own — it only opts Googlebot-fetched content in or out).
+User-agent: Google-Extended
+Allow: /
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: Claude-User
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Perplexity-User
+Allow: /
+
+User-agent: Applebot
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: MistralAI-User
+Allow: /
+
+User-agent: Meta-ExternalAgent
+Allow: /
+
+User-agent: cohere-ai
+Allow: /
+
+User-agent: YouBot
+Allow: /
+
+User-agent: Amazonbot
+Allow: /
+
+# CCBot feeds Common Crawl, which in turn feeds many open training corpora.
+User-agent: CCBot
+Allow: /
+
+Sitemap: https://wovyr.com/sitemap-index.xml

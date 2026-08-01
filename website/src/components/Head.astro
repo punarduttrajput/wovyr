@@ -1,0 +1,142 @@
+---
+/**
+ * SEO-104 / GEO-102: docs-page `<head>` additions.
+ *
+ * Starlight's own Head already emits title, canonical, `og:title`/`type`/`url`/
+ * `locale`/`description`/`site_name`, `twitter:card` and the meta description.
+ * Three things it does not, all of which mattered here:
+ *
+ *  1. **No `og:image` at all.** The default head sets
+ *     `twitter:card=summary_large_image` regardless, so every one of the 202
+ *     docs pages advertised a large-image card and then supplied no image —
+ *     a blank card on every share, on every platform.
+ *  2. **No `twitter:title`/`description`/`image`.** X/Twitter falls back to the
+ *     `og:*` equivalents, but LinkedIn, Slack and Discord each prefer the
+ *     explicit pair, and there is no cost to being unambiguous.
+ *  3. **No structured data.** A `TechArticle` gives an answer engine the
+ *     page's subject, date and licence as facts rather than as inference, and a
+ *     `BreadcrumbList` is what produces the section path in a search result
+ *     instead of a bare URL.
+ *
+ * Implemented as a component override rather than `head:` entries in
+ * astro.config.mjs because every value here is per-page: the config array is
+ * static, so it could only have supplied one shared image and no per-page
+ * JSON-LD — which is the duplicate-metadata problem this pass is fixing.
+ */
+import Default from '@astrojs/starlight/components/Head.astro';
+import { getCollection } from 'astro:content';
+import { sectionTitle } from '../lib/doc-sections.mjs';
+
+const SITE = 'https://wovyr.com';
+const OG_IMAGE = `${SITE}/og.png`;
+const REPO = 'https://github.com/punarduttrajput/wovyr';
+
+const { entry } = Astro.locals.starlightRoute;
+const { title, description, lastUpdated } = entry.data;
+
+const canonical = new URL(Astro.url.pathname, SITE).href;
+
+// Starlight renders its built-in 404 through this same Head. Without this guard
+// the page shipped `robots: index, follow` plus TechArticle/BreadcrumbList
+// structured data describing a document that does not exist — actively inviting
+// indexing of the error page. Netlify already serves it with a real 404 status
+// (netlify.toml's catch-all), which is the authoritative signal; the meta below
+// just stops the markup from contradicting it.
+const isNotFound = Astro.url.pathname.replace(/\/$/, '') === '/404';
+
+// Starlight's frontmatter schema types `lastUpdated` as `Date | boolean`; only
+// a real Date carries a usable timestamp (`true` means "derive from git", which
+// is not wired up for these generated copies).
+const modified = lastUpdated instanceof Date ? lastUpdated.toISOString() : undefined;
+
+// Breadcrumbs from the route: `/05-llm-gateway/overview/` → Home › LLM gateway.
+// Only the section segment is named — the leaf is the page itself, added last
+// from its real title, so the trail never shows a raw slug.
+//
+// The section crumb is included only when that section index route genuinely
+// exists. Not every numbered directory has an index page (`/00-executive/` and
+// `/01-product/` do not), and a breadcrumb whose `item` 404s is worse than a
+// shorter trail — Google treats an unreachable breadcrumb URL as a
+// structured-data error, so this is checked against the real collection rather
+// than assumed from the path shape.
+const routes = new Set((await getCollection('docs')).map((e) => e.id.replace(/\/$/, '')));
+const segments = Astro.url.pathname.split('/').filter(Boolean);
+const crumbs = [{ name: 'Wovyr', item: `${SITE}/` }];
+if (segments.length > 1 && routes.has(segments[0])) {
+  crumbs.push({ name: sectionTitle(segments[0]), item: `${SITE}/${segments[0]}/` });
+}
+crumbs.push({ name: title, item: canonical });
+
+const techArticle = {
+  '@context': 'https://schema.org',
+  '@type': 'TechArticle',
+  headline: title,
+  name: title,
+  description,
+  url: canonical,
+  inLanguage: 'en',
+  ...(modified ? { dateModified: modified } : {}),
+  isPartOf: {
+    '@type': 'WebSite',
+    name: 'Wovyr',
+    url: `${SITE}/`,
+  },
+  about: {
+    '@type': 'SoftwareApplication',
+    name: 'Wovyr',
+    applicationCategory: 'DeveloperApplication',
+    operatingSystem: 'Linux, macOS, Windows',
+  },
+  author: { '@type': 'Organization', name: 'Wovyr', url: `${SITE}/` },
+  publisher: { '@type': 'Organization', name: 'Wovyr', url: `${SITE}/` },
+  license: 'https://www.apache.org/licenses/LICENSE-2.0',
+  isAccessibleForFree: true,
+  codeRepository: REPO,
+};
+
+const breadcrumbs = {
+  '@context': 'https://schema.org',
+  '@type': 'BreadcrumbList',
+  itemListElement: crumbs.map((c, i) => ({
+    '@type': 'ListItem',
+    position: i + 1,
+    name: c.name,
+    item: c.item,
+  })),
+};
+---
+
+<Default><slot /></Default>
+
+{/* Social card. Absolute URL: og:image is one of the few properties where the
+    major scrapers do not reliably resolve a root-relative path. */}
+<meta property="og:image" content={OG_IMAGE} />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content="Wovyr — the trust layer for AI-generated interfaces" />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={OG_IMAGE} />
+<meta name="twitter:image:alt" content="Wovyr — the trust layer for AI-generated interfaces" />
+
+{/* `max-snippet:-1` and `max-image-preview:large` opt into full-length snippets
+    and large previews. Both default to something shorter, and for reference
+    documentation a truncated snippet is the difference between being quoted
+    usefully and being quoted uselessly. */}
+{isNotFound ? (
+  <meta name="robots" content="noindex, follow" />
+) : (
+  <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
+)}
+{modified && <meta property="article:modified_time" content={modified} />}
+
+<meta name="theme-color" content="#0A0E18" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#F6F7F9" media="(prefers-color-scheme: light)" />
+
+{!isNotFound && (
+  <>
+    <script type="application/ld+json" is:inline set:html={JSON.stringify(techArticle)} />
+    <script type="application/ld+json" is:inline set:html={JSON.stringify(breadcrumbs)} />
+  </>
+)}

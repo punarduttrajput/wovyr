@@ -10,11 +10,19 @@ import AxeBuilder from '@axe-core/playwright';
  */
 
 test.describe('landing page (website)', () => {
-  test('WEB-301: og:image resolves and is the right size', async ({ page, request }) => {
+  test('WEB-301/SEO-105: og:image is absolute, resolves, and is the right size', async ({ page, request }) => {
     await page.goto('/');
     const ogImage = await page.locator('meta[property="og:image"]').getAttribute('content');
-    expect(ogImage).toBe('/og.png');
-    const res = await request.get(ogImage!);
+    // SEO-105: this asserted the root-relative `/og.png` it used to be. og:image
+    // is one of the few properties the major scrapers (Facebook, LinkedIn, Slack)
+    // do not reliably resolve relative to the page, so a relative value meant an
+    // imageless card on exactly the surfaces the image is generated for. Must be
+    // an absolute https URL now — the resolve check below still fetches it.
+    expect(ogImage).toBe('https://wovyr.com/og.png');
+
+    // Fetch from the local preview server rather than production, so this tests
+    // the artifact this run built.
+    const res = await request.get(new URL(ogImage!).pathname);
     expect(res.status()).toBe(200);
     expect(res.headers()['content-type']).toContain('image/png');
     // 1200x630 PNG: width/height are big-endian uint32 at bytes 16/20 (IHDR).
