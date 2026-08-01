@@ -286,6 +286,21 @@ impl Tool for FsWriteTool {
             file.write_all(content.as_bytes())
                 .await
                 .map_err(|e| ToolError::Internal(format!("could not write {path}: {e}")))?;
+            // `flush` is load-bearing, not ceremony. `tokio::fs::File::write_all`
+            // only fills tokio's internal buffer and dispatches a background
+            // blocking op; dropping the handle does *not* wait for it, so without
+            // this the append could be silently discarded while `execute` still
+            // returned a successful `bytes_written`. Timing-dependent, which is why
+            // it surfaced as a Linux-only CI failure while passing on Windows. The
+            // overwrite branch below is unaffected: `tokio::fs::write` is a single
+            // `spawn_blocking` that has completed by the time it returns.
+            //
+            // `flush` (not `sync_all`) deliberately — it gets the bytes to the OS,
+            // matching `tokio::fs::write`'s durability, rather than silently making
+            // one branch fsync and the other not.
+            file.flush()
+                .await
+                .map_err(|e| ToolError::Internal(format!("could not flush {path}: {e}")))?;
         } else {
             tokio::fs::write(&confined, content)
                 .await
