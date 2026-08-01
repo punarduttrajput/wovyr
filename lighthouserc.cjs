@@ -14,7 +14,14 @@ module.exports = {
       staticDistDir: './website/dist',
       url: ['/index.html', '/00-executive/mission/index.html'],
       numberOfRuns: 3,
-      chromeFlags: '--no-sandbox --headless=new',
+      // `--disable-dev-shm-usage` and `--disable-gpu` are not cosmetic here.
+      // The GitHub runner gives a container-ish /dev/shm that recent Chromium
+      // builds exhaust, and the renderer then dies *after* launching — which
+      // LHCI surfaces as the misleading "Unable to connect to Chrome" (it is a
+      // crash, not a connection refusal; the log carries a full Chromium stack
+      // trace with register dump immediately before it). The flag moves shared
+      // memory to /tmp instead.
+      chromeFlags: '--no-sandbox --headless=new --disable-dev-shm-usage --disable-gpu',
     },
     assert: {
       assertions: {

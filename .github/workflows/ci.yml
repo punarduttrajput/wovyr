@@ -942,8 +942,14 @@ jobs:
 
       # Container scanning: fail the build on known HIGH/CRITICAL vulnerabilities
       # in the OS packages and Rust dependencies baked into the image.
+      # Upstream renamed its release tags to a `v` prefix, so the bare `0.28.0`
+      # this used to pin stopped resolving and the job failed at "Set up job",
+      # before Trivy ever ran — a scan that silently never happens. Pinned to a
+      # current `v`-prefixed release; `image-ref`/`severity`/`exit-code`/
+      # `ignore-unfixed` are unchanged, and it is a composite (not Node) action,
+      # so it is unaffected by the Node 20 runner deprecation.
       - name: Scan image for vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: wovyr:ci
           severity: HIGH,CRITICAL
