@@ -854,8 +854,8 @@ fn route_label(method: &Method, path: &str) -> &'static str {
 
 /// Every route this server actually mounts (`lib.rs::router` and each route
 /// module's `routes()`), labeled for RED metrics. Keep in sync with the router —
-/// `route_labels_cover_every_mounted_route` (in `lib.rs`'s test module, which can
-/// see the real `router()`) fails if a mounted route has no entry here.
+/// [`route_labels_cover_every_documented_route`](tests::route_labels_cover_every_documented_route)
+/// fails if a route reaches the generated OpenAPI document without an entry here.
 const ROUTE_LABELS: &[RouteLabel] = &[
     RouteLabel {
         method: Method::GET,
@@ -866,6 +866,11 @@ const ROUTE_LABELS: &[RouteLabel] = &[
         method: Method::GET,
         template: "/metrics",
         label: "metrics",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/openapi.json",
+        label: "openapi_json",
     },
     // agents:run / :stream / stored run (lib.rs `run_routes`)
     RouteLabel {
@@ -1060,6 +1065,11 @@ const ROUTE_LABELS: &[RouteLabel] = &[
         label: "webhooks_create",
     },
     RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/webhooks/dead-letters",
+        label: "webhooks_dead_letters",
+    },
+    RouteLabel {
         method: Method::DELETE,
         template: "/api/v1/webhooks/{id}",
         label: "webhooks_delete",
@@ -1213,6 +1223,59 @@ const ROUTE_LABELS: &[RouteLabel] = &[
         method: Method::GET,
         template: "/api/v1/tools",
         label: "tools_list",
+    },
+    // ui.rs (PRD-005 — the workflow `ui` activity's pull/decide surface plus
+    // EMB-701's standalone present/decide middleware mode)
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/ui/present",
+        label: "ui_present",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/ui/frames",
+        label: "ui_frames_list",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/ui/frames/{frame_id}",
+        label: "ui_frames_get",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/ui/decisions/{frame_id}",
+        label: "ui_decision_submit",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/ui/decisions/{frame_id}",
+        label: "ui_decision_get",
+    },
+    // mcp.rs (PRD-006 — user-managed MCP connections)
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/mcp/connections",
+        label: "mcp_connections_create",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/mcp/connections",
+        label: "mcp_connections_list",
+    },
+    RouteLabel {
+        method: Method::GET,
+        template: "/api/v1/mcp/connections/{name}",
+        label: "mcp_connections_get",
+    },
+    RouteLabel {
+        method: Method::DELETE,
+        template: "/api/v1/mcp/connections/{name}",
+        label: "mcp_connections_delete",
+    },
+    RouteLabel {
+        method: Method::POST,
+        template: "/api/v1/mcp/connections/{name}/refresh",
+        label: "mcp_connections_refresh",
     },
 ];
 
@@ -1702,6 +1765,103 @@ mod tests {
         assert!(deprecation_for(TABLE, &Method::DELETE, "/api/v1/legacy/123").is_some());
         // An unrelated route never matches.
         assert!(deprecation_for(TABLE, &Method::GET, "/api/v1/unrelated").is_none());
+    }
+
+    /// The tripwire [`ROUTE_LABELS`]'s doc comment has always promised and never
+    /// actually had: a route added to a router module without a matching label
+    /// entry silently records its RED metrics under `route="unmatched"`, which
+    /// `deployment/observability/alerts.yml` treats as contract drift and pages on.
+    ///
+    /// Derived, not a second hand-maintained list — that would just move the drift
+    /// somewhere else (the way `authz_matrix`'s literal endpoint count does). The
+    /// source of truth is the *generated* OpenAPI document, which
+    /// [`crate::openapi::tests::served_spec_covers_every_mounted_route`] separately
+    /// pins to the real `router()`. So: spec ⊇ router (that test) ∧ labels ⊇ spec
+    /// (this test) ⟹ every mounted route has a label.
+    ///
+    /// One-directional by design. `GET /workflows` (the read-only HTML execution
+    /// view) is mounted and labeled but deliberately absent from the API spec, so
+    /// the reverse containment doesn't hold and isn't asserted.
+    #[test]
+    fn route_labels_cover_every_documented_route() {
+        use utoipa::OpenApi as _;
+
+        let spec = crate::openapi::ApiDoc::openapi();
+        let mut unlabeled = Vec::new();
+
+        for (template, item) in &spec.paths.paths {
+            // `route_label` matches concrete request paths, so fill every `{param}`
+            // segment with an arbitrary literal.
+            let concrete = template
+                .split('/')
+                .map(|seg| {
+                    if seg.starts_with('{') && seg.ends_with('}') {
+                        "x"
+                    } else {
+                        seg
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+
+            for (method, present) in [
+                (Method::GET, item.get.is_some()),
+                (Method::POST, item.post.is_some()),
+                (Method::PUT, item.put.is_some()),
+                (Method::PATCH, item.patch.is_some()),
+                (Method::DELETE, item.delete.is_some()),
+            ] {
+                if present && route_label(&method, &concrete) == "unmatched" {
+                    unlabeled.push(format!("{method} {template}"));
+                }
+            }
+        }
+
+        unlabeled.sort();
+        assert!(
+            unlabeled.is_empty(),
+            "these routes reach the generated OpenAPI document with no `ROUTE_LABELS` \
+             entry, so their RED metrics land under route=\"unmatched\" — add one per \
+             route to `ROUTE_LABELS`:\n  {}",
+            unlabeled.join("\n  ")
+        );
+    }
+
+    /// Every label is distinct, so two routes can never silently share a metric
+    /// series — and no entry is shadowed by an earlier, more permissive template
+    /// (`route_label` returns the *first* match, so ordering is load-bearing).
+    #[test]
+    fn route_labels_are_unique_and_unshadowed() {
+        let mut seen = HashSet::new();
+        for r in ROUTE_LABELS {
+            assert!(
+                seen.insert(r.label),
+                "duplicate route label {:?} — every route needs its own series",
+                r.label
+            );
+        }
+
+        for (i, r) in ROUTE_LABELS.iter().enumerate() {
+            let concrete = r
+                .template
+                .split('/')
+                .map(|seg| {
+                    if seg.starts_with('{') && seg.ends_with('}') {
+                        "x"
+                    } else {
+                        seg
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            let resolved = route_label(&r.method, &concrete);
+            assert_eq!(
+                resolved, r.label,
+                "entry #{i} ({} {}) is shadowed by an earlier template that also \
+                 matches — reorder so the more specific template comes first",
+                r.method, r.template
+            );
+        }
     }
 
     #[tokio::test]

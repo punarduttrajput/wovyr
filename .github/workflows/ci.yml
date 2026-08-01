@@ -97,7 +97,10 @@ jobs:
       # RM-GA-P1 SEC-105 negative-authorization gate: fails if any protected route
       # accepts a missing/unknown credential (401 expected) or an authenticated-but-
       # under-scoped principal (403 expected), or if the route table's hand-maintained
-      # coverage count has drifted from the server's actual route registrations.
+      # size no longer matches its hand-maintained expected total (a reminder to
+      # extend the table, not a derivation from the router — the checks that *are*
+      # derived from real route registrations are `served_spec_covers_every_mounted_route`
+      # and `route_labels_cover_every_documented_route`, both in the `Test` step above).
       - name: Negative-authorization gate (SEC-105)
         run: cargo test -p wovyr-server --test authz_matrix -- --nocapture
 
