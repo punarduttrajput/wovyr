@@ -1,0 +1,54 @@
+# cargo-audit configuration (RustSec).
+#
+# Read by `cargo audit` locally and by CI's `rustsec/audit-check` step, which
+# runs cargo-audit from the repo root.
+#
+# ## Policy
+#
+# Ignore entries are for advisories that are **verifiably not reachable in this
+# codebase**, or that have no fix and no reachable path. Every entry states the
+# reason and what would invalidate it. An advisory that is merely inconvenient to
+# fix does not belong here — it belongs in a ticket.
+#
+# The `unmaintained`/`unsound`/`yanked` informational warnings are deliberately
+# **not** listed. cargo-audit already treats them as non-fatal ("allowed
+# warnings"), so suppressing them would hide them without changing the exit
+# status. As of 2026-08-01 those are: bincode 1.3.3, fxhash 0.2.1, mach 0.3.2,
+# number_prefix 0.4.0 and paste 1.0.15 (unmaintained), wasmtime-jit-debug 14.0.4
+# (unsound), and spin 0.9.8 (yanked). `mach` and `wasmtime-jit-debug` are
+# wasmtime-tree crates and clear with the wasmtime upgrade.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack: potential key recovery through timing
+    # sidechannels" in `rsa` 0.9.10. Severity 5.9 (medium). **No fixed upgrade is
+    # available** — the advisory has been open since 2023-11-22 with no patched
+    # release.
+    #
+    # Not reachable here. `rsa` arrives transitively:
+    #
+    #     rsa 0.9.10 <- jsonwebtoken 10.3.0 <- wovyr-server
+    #
+    # The Marvin attack is a timing sidechannel against RSA **private-key**
+    # operations (decryption / signing) that an attacker can observe and time.
+    # This workspace never performs one:
+    #
+    #   * `wovyr-server`'s only RSA use is JWT *verification* —
+    #     `crates/wovyr-server/src/auth.rs`'s `jwt_decoding_key` builds a
+    #     `DecodingKey::from_rsa_pem` from the **public** key in
+    #     `WOVYR_JWT_RS_PUBLIC_KEY`, and `jwt_validation`/`decode` verify an
+    #     RS256 signature with it. Verification is a public-key operation and
+    #     does not exercise the vulnerable code path.
+    #   * There is no RSA signing anywhere in the workspace. Tokens are minted by
+    #     an external IdP, never by this platform — there is no token-issuance
+    #     endpoint (see `docs/09-api/openapi.yaml`'s divergence note). Grepping
+    #     the tree for `EncodingKey::from_rsa`, `RsaPrivateKey`, `rsa::`,
+    #     `Pkcs1v15` and `Oaep` returns zero matches.
+    #
+    # **Invalidated if** this platform ever signs or decrypts with RSA — e.g. it
+    # grows a token-issuance endpoint, or something starts using
+    # `EncodingKey::from_rsa_pem`. At that point drop this entry and either move
+    # off `rsa` (an Ed25519/ECDSA JWT algorithm avoids it entirely) or accept the
+    # risk explicitly.
+    "RUSTSEC-2023-0071",
+]
