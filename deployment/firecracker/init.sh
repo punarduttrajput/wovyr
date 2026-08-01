@@ -1,7 +1,7 @@
 #!/bin/sh
 # Wovyr Firecracker guest agent — runs as PID 1 (init) inside the microVM.
 #
-# One-shot execution protocol over block devices (see crates/wovyr-tools/src/sandbox.rs
+# One-shot execution protocol over block devices (see crates/wovyr-tools/src/sandbox/firecracker.rs
 # `FirecrackerSandbox`):
 #   - /dev/vdb (input, read-only): the raw shell command, zero-padded.
 #   - /dev/vdc (output, writable): the result, written as:

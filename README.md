@@ -521,20 +521,30 @@ deployer can gate their own policy on (`wovyr_ui_guard::conformance`), a real
 dashboard Surfaces panel dogfooding the whole loop under an operator's own
 session.
 
-Three milestones have landed since:
+Since then:
 **[v1.3 "MCP Connection Management"](docs/18-roadmap/v1.3-mcp-connections.md)**
 ([ADR-0012](docs/17-adr/ADR-0012-mcp-connection-trust-boundary.md)) — persisted,
 API/dashboard-managed MCP connections with a real trust boundary (`Stdio`
-transport needs both an RBAC scope and an operator opt-in);
-**[v1.4 "Audit Remediation"](docs/18-roadmap/v1.4-audit-remediation.md)** —
-closing the redirect-SSRF hole, an org-level cross-tenant authz gap, keyed
-audit MACs with a tail-truncation anchor, a native sandbox confinement floor,
-fail-closed KMS key sourcing, and bounded caches;
+transport needs both an RBAC scope and an operator opt-in) — **done**;
 **[v1.5 "Design System Unification"](docs/18-roadmap/v1.5-design-system-unification.md)**
 — one token system across all four UI surfaces, WCAG AA contrast gated in CI,
-and a real Playwright + axe browser e2e harness;
+and a real Playwright + axe browser e2e harness — **done**;
 **[v1.6 "Pentest Remediation"](docs/18-roadmap/v1.6-pentest-remediation.md)** —
-all four findings of an internal red-team assessment (0 Critical, 0 High).
+all four findings of an internal red-team assessment (0 Critical, 0 High) —
+**done**.
+
+**[v1.4 "Audit Remediation"](docs/18-roadmap/v1.4-audit-remediation.md)** is
+**partly done — 11 of its 20 tickets.** Shipped: the redirect-SSRF hole and the
+encapsulated/CGNAT range gap, an org-level cross-tenant authz gap, keyed audit
+MACs with a tail-truncation anchor, a native sandbox confinement floor,
+fail-closed KMS key sourcing, bounded caches, fail-loud embeddings, and the CI
+work (QA-401/402/403). **Still outstanding:** the version/maturity
+reconciliation and claim-honesty pass (STR-501/502), and all of Phase 3 —
+default-config retrieval quality, multimodal token counting, reasoning-model
+parameter compatibility, load-time `${...}` reference validation, subsystem
+freeze/experimental labeling, de-risking hand-rolled security code, and
+wiring-or-cutting the built-but-unwired features (AIC-303/304/305, WFL-309,
+STR-503/504/505). Each ticket in that document carries its own status marker.
 
 The implemented surface spans: an agent runtime with a real model/tool loop,
 an LLM gateway (chat + streaming + embeddings, mock/OpenAI-compatible/native
@@ -565,11 +575,16 @@ This trips people up, so plainly:
 So "v1.6 complete" and "version 0.3.2" are both true and describe different
 things. Release history lives in [`CHANGELOG.md`](CHANGELOG.md).
 
-**Milestone status:** v0.1–v0.3 shipped and tagged. v1.0 (GA hardening), v1.1
-(AI platform maturity), v1.2 (generative UI trust runtime), v1.3 (MCP
-connections), v1.4 (audit remediation), v1.5 (design-system unification), and
-v1.6 (pentest remediation) are all **complete**. Nothing is in flight; the next
-milestone is not yet scoped.
+**Milestone status:** v0.1–v0.3 shipped and tagged. v1.0 (GA hardening —
+engineering scope), v1.1 (AI platform maturity), v1.2 (generative UI trust
+runtime), v1.3 (MCP connections), v1.5 (design-system unification), and v1.6
+(pentest remediation) are **complete**.
+
+Two tracks remain **open**: v1.4 (audit remediation) at 11 of 20 tickets, and
+v1.0's Tier-A validation work (GA-001…GA-005 — scale/performance validation,
+reliability, external security validation, marketplace economics, SDK
+distribution), which is separate from the GA *engineering* scope above and was
+never claimed complete.
 
 ## Quickstart (code)
 

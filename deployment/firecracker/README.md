@@ -1,6 +1,6 @@
 # Firecracker microVM sandbox assets
 
-The [`FirecrackerSandbox`](../../crates/wovyr-tools/src/sandbox.rs) runs a command
+The [`FirecrackerSandbox`](../../crates/wovyr-tools/src/sandbox/firecracker.rs) runs a command
 inside a [Firecracker](https://github.com/firecracker-microvm/firecracker) microVM. It
 needs two host assets — a guest **kernel** and a **rootfs** carrying the Wovyr guest
 agent (`init.sh`) as `/init`. Neither is checked in (they are large binaries); build

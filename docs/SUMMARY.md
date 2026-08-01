@@ -3,11 +3,13 @@
 > Wovyr — the Generative UI Trust Runtime, built on an enterprise AI agent
 > platform written in Rust
 
-Version: **1.18.0**
-Status: **Active** — v0.3.0 tagged; the v1.0 GA-hardening engineering scope is
-complete (Tier-A validation work open — see the
-[roadmap index](18-roadmap/index.md)); v1.1 in progress; v1.2 (Generative UI
-Trust Runtime) and v1.3 (MCP Connection Management) shipped
+Version: **1.19.0**
+Status: **Active** — released `v0.3.2`. Roadmap milestones v0.1–v0.3, v1.0
+(engineering scope), v1.1, v1.2, v1.3, v1.5, and v1.6 are complete. **Still
+open:** v1.0's Tier-A validation track (GA-001…GA-005) and v1.4, which is 11 of
+20 tickets done — see the [roadmap index](18-roadmap/index.md). Milestone names
+run ahead of the package version by design; the
+[README](../README.md#two-version-numbers-and-why) explains the split.
 
 ---
 
@@ -66,6 +68,7 @@ New contributors should follow the [Reading Order](#reading-order) at the bottom
 | [Generative UI Trust Runtime PRD (the product repositioning — PRD-005)](01-product/prd-generative-ui-runtime.md) | Available |
 | [MCP Connection Management PRD (PRD-006)](01-product/prd-mcp-connections.md) | Available |
 | [Audit Remediation & Truth Reconciliation PRD (PRD-007)](01-product/prd-audit-remediation.md) | Available |
+| [Design Partner Onboarding](01-product/design-partner-onboarding.md) | Ready (describes shipped behavior) |
 | [System Overview](01-product/system-overview.md) | Available |
 | [Personas](01-product/personas.md) | Available |
 | [User Stories](01-product/user-stories.md) | Available |
@@ -230,6 +233,8 @@ own sections (LLM Gateway, Memory Engine, Tool Runtime).
 |----------|--------|
 | [Index](09-api/index.md) | Available |
 | [Overview & Conventions](09-api/overview.md) | Available |
+| [OpenAPI specification](09-api/openapi.yaml) | Snapshot — the **authoritative** contract is the generated document the server serves at `GET /openapi.json` (SRV-303) |
+| [Deprecation Policy](09-api/deprecation-policy.md) | Active policy, mechanically enforced |
 | [Authentication & Authorization](09-api/authentication.md) | Available |
 | [Agents](09-api/agents.md) | Available |
 | [Workflows](09-api/workflows.md) | Available |
@@ -288,7 +293,10 @@ Practical, artifact-level deployment guides that operationalize the
 | [Docker Compose](12-deployment/docker-compose.md) | Available |
 | [Kubernetes](12-deployment/kubernetes.md) | Available |
 | [Helm](12-deployment/helm.md) | Available |
-| [Terraform](12-deployment/terraform.md) | Available |
+| [systemd (bare metal)](12-deployment/systemd.md) | Active — CI-verified install path |
+| [Terraform](12-deployment/terraform.md) | Draft — spec-only, zero artifacts |
+| [Backup & Restore](12-deployment/backup-and-restore.md) | Active — RPO/RTO validated by drill |
+| [Upgrade & Migration](12-deployment/upgrade-and-migration.md) | Active — every command CI-tested |
 
 ---
 
@@ -307,6 +315,7 @@ implemented across the platform and centered on the
 | [Encryption](13-security/encryption.md) | Available |
 | [Secret Management](13-security/secret-management.md) | Available |
 | [Audit Logging](13-security/audit.md) | Available |
+| [Compliance Mapping](13-security/compliance-mapping.md) | Draft — first pass, scoped to encryption/key management |
 
 ---
 
@@ -372,8 +381,12 @@ The *why* behind major architectural choices, in standard ADR format.
 | [ADR-0005 — NATS](17-adr/ADR-0005-nats.md) | Accepted, not implemented |
 | [ADR-0006 — Clean Architecture + DDD](17-adr/ADR-0006-clean-architecture.md) | Accepted |
 | [ADR-0007 — Plugin system](17-adr/ADR-0007-plugin-system.md) | Accepted |
+| [ADR-0008 — Child workflows as activities](17-adr/ADR-0008-subworkflows.md) | Accepted |
+| [ADR-0009 — Wovyr-native keyless signing](17-adr/ADR-0009-keyless-signing.md) | Accepted |
+| [ADR-0010 — GA deployment topology (single-node appliance)](17-adr/ADR-0010-ga-deployment-topology.md) | Accepted (Path A ratified) |
 | [ADR-0011 — Generative UI Trust Runtime repositioning](17-adr/ADR-0011-generative-ui-repositioning.md) | Accepted |
 | [ADR-0012 — Trust boundary for user-managed MCP connections](17-adr/ADR-0012-mcp-connection-trust-boundary.md) | Accepted |
+| [ADR-0013 — Client SDK languages (TypeScript + Python)](17-adr/ADR-0013-client-sdk-languages.md) | Accepted |
 
 ---
 
@@ -387,17 +400,26 @@ Directional, per-release evolution of the platform.
 | [v0.1 — Foundations](18-roadmap/v0.1.md) | Available |
 | [v0.2 — Memory, Tools & Gateway](18-roadmap/v0.2.md) | Available |
 | [v0.3 — Plugins, Dashboard & Multi-Tenancy](18-roadmap/v0.3.md) | Available |
-| [v1.0 — General Availability](18-roadmap/v1.0.md) | Available |
+| [v1.0 — General Availability](18-roadmap/v1.0.md) | Engineering scope complete (all four RM-GA phases) |
+| [v1.0 P1 — Security Floor (tickets)](18-roadmap/v1.0/phase1-security-floor-tickets.md) | Done — 15 tickets |
+| [v1.0 P2 — Durability & Execution (tickets)](18-roadmap/v1.0/phase2-durability-execution-tickets.md) | Done — 12 tickets |
+| [v1.0 P3 — Scale & Distribution (tickets)](18-roadmap/v1.0/phase3-scale-distribution-tickets.md) | Track A (GA) done |
+| [v1.0 P4 — Contract & Operability (tickets)](18-roadmap/v1.0/phase4-contract-operability-tickets.md) | Done |
 | [GA-Completion Work (Tier A) — Index](18-roadmap/v1.0/index.md) | Available |
 | [GA-001 — Scale & Performance Validation](18-roadmap/v1.0/A1-scale-performance.md) | Planned |
 | [GA-002 — Reliability: HA, DR & Deployment](18-roadmap/v1.0/A2-reliability-ha-dr.md) | In progress |
 | [GA-003 — Security: Root-of-Trust, PII & External Validation](18-roadmap/v1.0/A3-security-completion.md) | In progress |
 | [GA-004 — Marketplace Economics & Safety](18-roadmap/v1.0/A4-marketplace-economics.md) | In progress (abuse workflow shipped) |
 | [GA-005 — SDK Distribution & Migration Guides](18-roadmap/v1.0/A5-sdk-distribution.md) | In progress |
+| [v1.1 — AI Platform Maturity — Index](18-roadmap/v1.1/index.md) | Complete (all 3 phases, 2026-07-19) |
+| [v1.1 P1 — Production Truth (tickets)](18-roadmap/v1.1/phase1-production-truth-tickets.md) | Done (WFL-104 lease-token fencing deferred) |
+| [v1.1 P2 — Credible AI Product (tickets)](18-roadmap/v1.1/phase2-credible-ai-product-tickets.md) | Done |
+| [v1.1 P3 — Ecosystem & Scale (tickets)](18-roadmap/v1.1/phase3-ecosystem-scale-tickets.md) | Complete (2026-07-19) |
 | [v1.2 — Generative UI Trust Runtime](18-roadmap/v1.2-generative-ui.md) | Done (all 3 phases, 2026-07-15) |
 | [v1.3 — MCP Connection Management](18-roadmap/v1.3-mcp-connections.md) | Done (all 3 phases, 2026-07-15) |
-| [v1.4 — Audit Remediation & Truth Reconciliation](18-roadmap/v1.4-audit-remediation.md) | Planned (RM-AR-P1..P3) |
-| [v1.5 — Design System Unification & UI Truth](18-roadmap/v1.5-design-system-unification.md) | Phase 1 & 2 done, Phase 3 planned (RM-DSU-P1..P3) |
+| [v1.4 — Audit Remediation & Truth Reconciliation](18-roadmap/v1.4-audit-remediation.md) | In progress — 11 of 20 tickets done (all of P1 + the security/QA half of P2); STR-501/502 and all of P3 outstanding |
+| [v1.5 — Design System Unification & UI Truth](18-roadmap/v1.5-design-system-unification.md) | Done (all 3 phases, 2026-07-27) |
+| [v1.6 — Pentest Remediation](18-roadmap/v1.6-pentest-remediation.md) | Complete (2026-07-28) |
 | [Future — Beyond 1.0](18-roadmap/future.md) | Available |
 | [Future Research Bets (Tier B) — Index](18-roadmap/future/index.md) | Available |
 | [FUT-001 — Autonomous Multi-Agent Systems](18-roadmap/future/B1-multi-agent-systems.md) | Exploratory |
@@ -470,6 +492,7 @@ New contributors should read the documentation in the following sequence:
 
 | Version | Date       | Description                                              |
 | ------- | ---------- | ------------------------------------------------------- |
+| 1.19.0  | 2026-08-01 | Docs↔code sync pass: indexed 20 documents that existed on disk but had never been listed (design-partner onboarding; the OpenAPI spec + deprecation policy; systemd / backup-restore / upgrade-migration; compliance mapping; ADR-0008/0009/0010/0013; the four v1.0 phase-ticket docs; all four v1.1 docs; v1.6). Corrected stale milestone statuses — v1.1 was absent entirely though complete, v1.4 read Planned though shipped, v1.5 read "Phase 3 planned" though complete — and rewrote the header, which still claimed v1.1 was in progress |
 | 1.18.0  | 2026-07-15 | Status-truth pass: header no longer claims "Planning phase (v0.1.0)" — reflects v0.3.0 tagged / v1.1 in progress / v1.2+v1.3 shipped; v1.3 row Planned → Done; GA-004 row → In progress (abuse workflow); temporal-gap row → Substantially done; legend clarified (work status vs document availability) |
 | 1.17.0  | 2026-07-15 | Added PRD-006 (MCP Connection Management), ADR-0012, and the v1.3 roadmap milestone; marked v1.2 (Generative UI Trust Runtime) Done — all 3 phases shipped |
 | 1.16.0  | 2026-07-14 | Added PRD-005 (Generative UI Trust Runtime), ADR-0011, and the v1.2 roadmap milestone |

@@ -7,10 +7,10 @@ Document ID: CLI-INDEX-001
 
 **Document ID:** CLI-INDEX-001  
 **File Path:** `docs/11-cli/index.md`  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Active  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-08-01
 
 ---
 
@@ -30,13 +30,20 @@ diagnostics) — see the CLI Service in
 
 | Mode | Examples |
 |------|----------|
-| Remote management | `wovyr agents run`, `wovyr workflows publish`, `wovyr plugins install` |
-| Local development | `wovyr init`, `wovyr plugin new`, `wovyr workflow run --local` |
-| Authoring/build | `wovyr plugin build`, `wovyr plugin sign` |
-| Operations | `wovyr deploy`, `wovyr doctor`, `wovyr logs` |
+| Remote management | `wovyr agents run`, `wovyr auth create-key` |
+| Local development | `wovyr dev`, `wovyr plugin new`, `wovyr workflows run --local` |
+| Authoring/build | `wovyr plugin build`, `wovyr plugin sign`, `wovyr plugin publish` |
+| Operations | `wovyr admin backup`, `wovyr admin migrate`, `wovyr kms rotate` |
 
-It mirrors the [Platform API](../09-api/index.md) resource model so anything doable
-in the [Dashboard](../10-dashboard/index.md) is scriptable from the terminal.
+The [command reference](commands.md) is the authority here — it is generated
+from the real command tree and diffed in CI, so it can never list a command that
+doesn't exist.
+
+**The CLI is not at parity with the Platform API**, and isn't trying to be: it
+covers local development, plugin authoring, and node operations. Managing remote
+resources (registering agents, submitting workflows, projects, quotas, webhooks,
+audit) is done through the [API](../09-api/index.md) or an
+[SDK](../../sdks), not the terminal.
 
 ---
 
@@ -45,11 +52,12 @@ in the [Dashboard](../10-dashboard/index.md) is scriptable from the terminal.
 ```text
 wovyr (Rust binary)
    │
-   ├── command parser + help
-   ├── config + profiles (~/.wovyr/config)
-   ├── auth (OAuth device flow / API key)
-   ├── API client (REST/gRPC → API Gateway)
-   └── local engine (embedded runtime for --local)
+   ├── command parser + help (clap)
+   ├── credential store (~/.wovyr/credentials.json)
+   ├── auth (bearer token; `auth` mints the server's API keys)
+   ├── HTTP client (REST → the server)
+   ├── local engine (embedded agent/workflow runtime for --local)
+   └── local stores (~/.wovyr: kms, secrets, memory, workflows, plugins, ...)
 ```
 
 The CLI is a single self-contained Rust binary
@@ -61,21 +69,27 @@ The CLI is a single self-contained Rust binary
 
 | Document | Responsibility |
 |----------|----------------|
-| [installation.md](installation.md) | Install methods, platforms, updates, shell completion |
-| [configuration.md](configuration.md) | Config file, profiles/contexts, auth, env vars |
-| [commands.md](commands.md) | Full command reference |
+| [installation.md](installation.md) | Install methods, platforms, updates |
+| [configuration.md](configuration.md) | State directory, auth, environment variables |
+| [commands.md](commands.md) | Full command reference (generated, CI-diffed) |
 | [examples.md](examples.md) | Task-oriented recipes and CI usage |
 
 ---
 
 # 5. Design Principles
 
-1. **API parity** — anything in the Dashboard is doable from the CLI.
-2. **Scriptable** — stable output, `--output json`, predictable exit codes.
-3. **Secure** — same authn/authz as every client; no privileged backdoor.
-4. **Context-aware** — profiles bind a server, tenant, and project.
-5. **Local-first dev** — scaffold, build, and run without a remote.
-6. **Helpful** — rich `--help`, completion, and `wovyr doctor` diagnostics.
+1. **Local-first dev** — scaffold, build, and run with no remote at all; with no
+   provider key set, runs use a deterministic mock so they work offline.
+2. **Secure by default** — same authn/authz as every client, no privileged
+   backdoor, and the privileged builtins (`shell`, `fs_write`, `code_execute`)
+   fail closed without an explicit per-run or per-session opt-in (SBX-305).
+3. **Generated reference** — `commands.md` comes from the clap tree, so the docs
+   cannot drift from the binary.
+4. **Helpful** — rich `--help` on every subcommand.
+
+Deliberately *not* principles today: full API parity (§2), a machine-readable
+`--output json` mode, graded exit codes, and shell completion. See
+[configuration §6](configuration.md#6-output--exit-codes).
 
 ---
 
@@ -90,8 +104,8 @@ The CLI is a single self-contained Rust binary
 # 7. Related Documents
 
 - [`10-dashboard/index.md`](../10-dashboard/index.md) — the other primary client
-- [`12-deployment`](../SUMMARY.md) *(planned: `wovyr deploy` targets)*
-- [`19-implementation-guide`](../SUMMARY.md) *(planned: dev environment)*
+- [`12-deployment/index.md`](../12-deployment/index.md) — deploying the server the CLI talks to
+- [`19-implementation-guide/development-environment.md`](../19-implementation-guide/development-environment.md)
 
 ---
 

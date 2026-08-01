@@ -7,10 +7,14 @@ Document ID: PRD-007
 
 **Document ID:** PRD-007
 **File Path:** `docs/01-product/prd-audit-remediation.md`
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.1.0
+**Status:** In delivery — the derived ticket doc
+([v1.4](../18-roadmap/v1.4-audit-remediation.md)) is 11 of 20 tickets done: all
+of WS-SEC's P0/P1 work plus WS-QA, with WS-STR's reconciliation pair
+(STR-501/502) and all of WS-AIC's Phase-3 items outstanding. That document's
+per-ticket markers are authoritative.
 **Owner:** Product / Founder
-**Last Updated:** 2026-07-23
+**Last Updated:** 2026-08-01
 
 ---
 

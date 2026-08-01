@@ -7,153 +7,181 @@ Document ID: CLI-001
 
 **Document ID:** CLI-001  
 **File Path:** `docs/11-cli/installation.md`  
-**Version:** 1.0.0  
-**Status:** Draft  
+**Version:** 2.0.0  
+**Status:** Shipped — every install method below is a real, published artifact.  
 **Owner:** AI Platform Team  
-**Last Updated:** 2026-06-27
+**Last Updated:** 2026-08-01
 
 ---
 
 # 1. Purpose
 
-This document describes how to install, update, and verify the `wovyr` CLI across platforms.
+How to install, update, and verify the `wovyr` CLI.
+
+> **Scope note.** Version 1.0.0 of this document described an install script at
+> `get.wovyr.example.com`, a Homebrew tap, winget/Scoop packages, a
+> `ghcr.io/wovyr-ai/cli` image, release channels, and the commands `wovyr
+> upgrade`, `verify`, `completion`, `version`, `doctor`, and `uninstall` — none of
+> which exist. It was rewritten to describe what actually ships.
 
 ---
 
 # 2. Supported Platforms
 
-| OS | Architectures |
-|----|---------------|
-| Linux | x86_64, aarch64 |
-| macOS | x86_64 (Intel), aarch64 (Apple Silicon) |
-| Windows | x86_64 |
+Release binaries are built for:
 
-The CLI is a single statically-linked Rust binary with no runtime dependencies.
+| OS | Architecture | Artifact |
+|----|--------------|----------|
+| Linux | x86_64 | `wovyr-linux-x86_64.tar.gz` |
+| macOS | aarch64 (Apple Silicon) | `wovyr-macos-aarch64.tar.gz` |
+| Windows | x86_64 | `wovyr-windows-x86_64.zip` |
+
+Other targets (Linux aarch64, Intel macOS) are not pre-built — install from
+source with `cargo`, which works anywhere the Rust toolchain does.
+
+The CLI is a single Rust binary. Optional features (`mistralrs`, `tiered-memory`,
+`postgres`, `plugin-wasi`, `otlp`, `redis`) are compile-time and therefore only
+available via a `cargo` install or a source build.
 
 ---
 
 # 3. Install Methods
 
-## 3.1 Install script (Linux/macOS)
+## 3.1 crates.io (recommended)
 
 ```bash
-curl -fsSL https://get.wovyr.example.com/install.sh | sh
+cargo install wovyr-cli          # installs a `wovyr` binary
 ```
 
-Installs the latest stable release to `~/.wovyr/bin` and adds it to `PATH`.
+Requires Rust 1.85+ (edition 2024). This is the path the
+[README quickstart](../../README.md) uses.
 
-## 3.2 Homebrew (macOS/Linux)
+With optional features:
 
 ```bash
-brew install wovyr-ai/tap/wovyr
+cargo install wovyr-cli --features tiered-memory,postgres
 ```
 
-## 3.3 Windows
+## 3.2 Release binaries
 
-```powershell
-winget install Wovyr.CLI
-# or Scoop:
-scoop install wovyr
-```
+Each `v*` tag publishes the archives in §2 to the
+[GitHub Releases page](https://github.com/punarduttrajput/wovyr/releases), each
+with a `.sha256` companion file. Download, verify (§5), extract, and put `wovyr`
+on your `PATH`.
 
-## 3.4 Container image
+## 3.3 Container image
 
 ```bash
-docker run --rm -v "$PWD:/work" ghcr.io/wovyr-ai/cli:latest version
+docker run --rm ghcr.io/punarduttrajput/wovyr:latest --version
 ```
 
-## 3.5 Direct download
+Tagged with both the release version and `latest`. This image runs the server
+too — see [docker.md](../12-deployment/docker.md).
 
-Signed binaries and checksums are published per release; verify the signature
-before use (see [§6](#6-verifying-the-download)).
+## 3.4 From a clone
+
+```bash
+git clone https://github.com/punarduttrajput/wovyr && cd wovyr
+cargo build -p wovyr-cli                 # target/debug/wovyr
+```
+
+Every `wovyr …` invocation in the docs is equivalent to
+`cargo run -p wovyr-cli -- …`, so a clone needs no install step at all.
 
 ---
 
-# 4. Versioning & Channels
+# 4. Versioning
 
-| Channel | Use |
-|---------|-----|
-| `stable` | Production (default) |
-| `beta` | Pre-release testing |
+There are no release channels. The CLI version is the workspace version, kept in
+lockstep with the release tag (DX-101) — see [CHANGELOG.md](../../CHANGELOG.md).
 
-The CLI follows the platform [API versioning](../09-api/overview.md#3-base-url--versioning)
-and warns when it is older than the target server's API.
+```bash
+wovyr --version
+```
+
+Note that the roadmap milestone names (`v1.0`…`v1.6`) are planning labels and run
+ahead of the package version by design; the
+[README](../../README.md#two-version-numbers-and-why) explains the split. The CLI
+does **not** currently check its version against a target server's API version.
 
 ---
 
-# 5. Updating
+# 5. Verifying a Download
+
+Release archives ship a SHA-256 checksum. Compare it yourself:
 
 ```bash
-wovyr upgrade            # self-update to latest on the current channel
-wovyr upgrade --channel beta
+sha256sum -c wovyr-linux-x86_64.tar.gz.sha256      # Linux
+shasum -a 256 -c wovyr-macos-aarch64.tar.gz.sha256 # macOS
+Get-FileHash wovyr-windows-x86_64.zip -Algorithm SHA256   # Windows
 ```
 
-Package-manager installs update through their package manager
-(`brew upgrade wovyr`, `winget upgrade Wovyr.CLI`).
+There is no `wovyr verify` command and release binaries are **not** signed today.
+The Sigstore-shaped keyless signing described in
+[ADR-0009](../17-adr/ADR-0009-keyless-signing.md) applies to **plugin packages**
+(`wovyr plugin keyless-sign`), not to the CLI binary itself.
 
 ---
 
-# 6. Verifying the Download
+# 6. Updating
 
-Releases are signed (Sigstore-style, consistent with
-[plugin signing](../08-plugin-sdk/distribution.md#3-signing)):
+Re-run the install method you used:
 
 ```bash
-wovyr verify ./wovyr                 # verifies the running binary's signature
-# or manually compare the published SHA-256 checksum
+cargo install wovyr-cli --force      # crates.io
+docker pull ghcr.io/punarduttrajput/wovyr:latest
 ```
+
+There is no `wovyr upgrade` self-update command.
 
 ---
 
-# 7. Shell Completion
+# 7. First Run
 
 ```bash
-wovyr completion bash   > /etc/bash_completion.d/wovyr
-wovyr completion zsh    > "${fpath[1]}/_wovyr"
-wovyr completion fish   > ~/.config/fish/completions/wovyr.fish
-wovyr completion powershell | Out-String | Invoke-Expression
+wovyr --version                      # confirm the install
+wovyr agents run --local -f examples/agents/hello.yaml --input '{"message":"Hi"}'
 ```
+
+The local run needs no server, no API key, and no login — it falls back to a
+deterministic mock provider. To talk to a server, see
+[configuration §4](configuration.md#4-authentication).
+
+There is no `wovyr doctor`. If a local run misbehaves, set `WOVYR_LOG=debug`.
 
 ---
 
-# 8. First Run
+# 8. Shell Completion
 
-```bash
-wovyr version           # confirm install
-wovyr login             # authenticate (see Configuration)
-wovyr doctor            # environment diagnostics
-```
-
-`wovyr doctor` checks connectivity, auth, version compatibility, and local toolchain
-prerequisites for `--local` execution and plugin builds.
+Not implemented — there is no `wovyr completion` command.
 
 ---
 
 # 9. Uninstall
 
 ```bash
-wovyr uninstall         # removes the binary; prompts about ~/.wovyr config
-# package managers: brew uninstall wovyr / winget uninstall Wovyr.CLI
+cargo uninstall wovyr-cli            # or just delete the extracted binary
 ```
 
----
-
-# 10. Dependencies
-
-- [`11-cli/configuration.md`](configuration.md)
-- [`08-plugin-sdk/distribution.md`](../08-plugin-sdk/distribution.md#3-signing)
+This leaves `~/.wovyr` in place. That directory holds real data — KMS root key,
+secrets, memory, workflow checkpoints, installed plugins — so remove it only
+deliberately, and take a [backup](../12-deployment/backup-and-restore.md) first
+if any of it matters. There is no `wovyr uninstall` command.
 
 ---
 
-# 11. Related Documents
+# 10. Related Documents
 
 - [`11-cli/index.md`](index.md)
+- [`11-cli/configuration.md`](configuration.md)
 - [`11-cli/commands.md`](commands.md)
+- [`19-implementation-guide/release-process.md`](../19-implementation-guide/release-process.md)
 
 ---
 
-# 12. Revision History
+# 11. Revision History
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.0.0 | 2026-06-27 | Initial CLI Installation |
+| 2.0.0 | 2026-08-01 | Rewritten against real artifacts: `cargo install wovyr-cli`, the three published release archives, and `ghcr.io/punarduttrajput/wovyr`. Removed the fictional install script, Homebrew tap, winget/Scoop packages, release channels, and the `upgrade`/`verify`/`completion`/`version`/`doctor`/`uninstall` commands; corrected the signing claim to scope it to plugin packages |
+| 1.0.0 | 2026-06-27 | Initial CLI Installation (target-state, largely unimplemented) |

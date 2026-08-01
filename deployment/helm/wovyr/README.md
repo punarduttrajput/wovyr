@@ -45,7 +45,7 @@ exactly that, honestly.
   platform to support sharding/multi-region first (not built yet).
 - **No image registry wired up.** `values.yaml`'s `wovyr.image.repository`/
   `tag` are placeholders (`wovyr:dev`) — push
-  [`deployment/docker/Dockerfile`](../docker/Dockerfile)'s image (built with
+  [`deployment/docker/Dockerfile`](../../docker/Dockerfile)'s image (built with
   `--build-arg FEATURES=tiered-memory,postgres` to match this chart's
   Postgres/Qdrant wiring) to a real registry and set these before deploying.
 - **TLS: fronting proxy by default, optional in-process (RM-AIM-P3
