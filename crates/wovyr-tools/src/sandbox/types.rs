@@ -237,9 +237,20 @@ impl SandboxManager {
     /// Probe the host for available backends ([sandbox runtime §3, step 5](../../../docs/07-tool-runtime/sandbox-runtime.md)).
     ///
     /// Native is always present. Container is added when a `docker` daemon is
-    /// reachable; gVisor when `runsc` is additionally registered as a docker
-    /// runtime; Firecracker when the `firecracker` binary and `/dev/kvm` are
-    /// present. This is the only ambient-I/O entry point in the module.
+    /// reachable **and running Linux containers**; gVisor when `runsc` is
+    /// additionally registered as a docker runtime; Firecracker when the
+    /// `firecracker` binary and `/dev/kvm` are present. This is the only
+    /// ambient-I/O entry point in the module.
+    ///
+    /// The Linux-container requirement is not incidental. [`ContainerSandbox`]
+    /// builds every run around a read-only rootfs, a bind-mounted workspace, and
+    /// cgroup limits, and defaults to a Linux image (`alpine:3.20`) — none of
+    /// which a daemon in **Windows-container** mode supports (`docker: invalid
+    /// option: read-only mode is not supported for Windows containers`). Probing
+    /// only for a reachable daemon therefore reported a capability the node
+    /// cannot actually deliver, so a Windows host with Docker Desktop would
+    /// *select* the Container backend for an untrusted run and then fail at
+    /// execution time instead of failing closed at selection.
     pub async fn detect() -> Self {
         let mut capabilities = vec![SandboxBackend::Native];
 
@@ -247,8 +258,7 @@ impl SandboxManager {
         #[cfg(feature = "wasi")]
         capabilities.push(SandboxBackend::Wasi);
 
-        let docker = command_succeeds("docker", &["info"]).await;
-        if docker {
+        if docker_runs_linux_containers().await {
             capabilities.push(SandboxBackend::Container);
             if binary_exists("runsc").await && docker_info_mentions("runsc").await {
                 capabilities.push(SandboxBackend::Gvisor);
@@ -333,6 +343,28 @@ async fn command_succeeds(program: &str, args: &[&str]) -> bool {
 /// Whether `name` resolves on `PATH`.
 async fn binary_exists(name: &str) -> bool {
     command_succeeds("sh", &["-c", &format!("command -v {name}")]).await
+}
+
+/// Whether a `docker` daemon is reachable *and* serving **Linux** containers —
+/// the only mode [`ContainerSandbox`] can drive (see [`SandboxManager::detect`]).
+///
+/// `docker version --format {{.Server.Os}}` is the canonical query: it fails
+/// outright when no daemon is reachable, and otherwise prints the daemon's OS,
+/// which is `windows` for a Docker Desktop installation switched to
+/// Windows-container mode.
+async fn docker_runs_linux_containers() -> bool {
+    let out = Command::new("docker")
+        .args(["version", "--format", "{{.Server.Os}}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .eq_ignore_ascii_case("linux"),
+        _ => false,
+    }
 }
 
 /// Whether `docker info` reports a runtime/feature mentioning `needle` (e.g. `runsc`).
