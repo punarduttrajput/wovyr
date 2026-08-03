@@ -4,8 +4,10 @@
 # Automated security scanning (docs/15-testing/security-testing.md §8) gates the
 # same pipeline: SAST is the `rust` job's clippy step (`-D warnings`); `security`
 # below adds the rest — dependency CVEs (SCA) and secret scanning — and
-# `container-scan` builds the single-binary Docker image and scans it for
-# vulnerabilities (also the image's first real CI build).
+# `container-scan` builds both shipped Docker images (the single-binary `wovyr`
+# one and the dashboard SPA + nginx one) and scans each for vulnerabilities, then
+# smoke-runs the dashboard image to prove its envsubst-rendered nginx config
+# actually boots and proxies — a build alone never exercises that.
 # The `rust` job's later steps are named regression gates, run and reported
 # explicitly even though they already execute as part of `cargo test --workspace`
 # above — so a failure reads as a specific, legible finding rather than being buried
@@ -969,15 +971,29 @@ jobs:
           gitleaks detect --source . --no-git --redact --exit-code 1
 
   container-scan:
-    name: container image scan
+    name: container image scan (${{ matrix.image }})
     runs-on: ubuntu-latest
+    # Both shipped images are built and scanned. `deployment/docker/dashboard.Dockerfile`
+    # had no CI reference at all until 2026-08-03 and was, at that point, unbuildable:
+    # its build stage copied only `dashboard/`, so the `prebuild` hook could not resolve
+    # the `file:../sdks/ui-react` dependency and `npm run build` exited 1. The
+    # `dashboard` job above builds the SPA directly via npx and so never exercised the
+    # Dockerfile. fail-fast is off so one image's findings don't mask the other's.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: wovyr
+            file: deployment/docker/Dockerfile
+          - image: wovyr-dashboard
+            file: deployment/docker/dashboard.Dockerfile
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build the wovyr image
+      - name: Build the ${{ matrix.image }} image
         uses: docker/build-push-action@v6
         env:
           # Same reason as release.yml's image job: the buildx build record is
@@ -987,11 +1003,62 @@ jobs:
           DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
-          file: deployment/docker/Dockerfile
-          tags: wovyr:ci
+          file: ${{ matrix.file }}
+          tags: ${{ matrix.image }}:ci
           load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      # Building the dashboard image proves its COPY layout resolves, but not that
+      # the image *runs*: the nginx site config is a template rendered by the base
+      # image's envsubst entrypoint at container start, so a malformed directive or
+      # an unsubstituted variable fails there and nowhere earlier.
+      #
+      # WOVYR_UPSTREAM points at loopback with nothing listening. That is deliberate:
+      # envsubst bakes a literal address into proxy_pass, so nginx only needs to
+      # *resolve* the upstream at boot (127.0.0.1 always does) and starts cleanly,
+      # while a request to /api/ still reaches the proxy and returns 502. Asserting
+      # 502 rather than merely "not 500" is the point — it distinguishes an active
+      # proxy rule from the `try_files ... /index.html` SPA fallback silently
+      # swallowing /api/ and answering 200 with the app shell, which is exactly how
+      # a same-origin deployment breaks in a way that looks fine.
+      - name: Smoke-run the dashboard image
+        if: matrix.image == 'wovyr-dashboard'
+        run: |
+          set -euo pipefail
+          docker run -d --name dash --network host \
+            -e WOVYR_UPSTREAM=127.0.0.1:8080 -e WOVYR_LISTEN=127.0.0.1:8081 \
+            wovyr-dashboard:ci
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8081/; then break; fi
+            if [ "$i" = 30 ]; then
+              echo "::error::dashboard image never served / — nginx config likely rejected"
+              docker logs dash || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "SPA served OK"
+
+          spa_ct=$(curl -sS -o /dev/null -w '%{content_type}' http://127.0.0.1:8081/)
+          case "$spa_ct" in
+            text/html*) echo "index.html content-type OK ($spa_ct)" ;;
+            *) echo "::error::expected text/html at /, got '$spa_ct'"; exit 1 ;;
+          esac
+
+          deep=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/workflows)
+          [ "$deep" = 200 ] || { echo "::error::SPA fallback broken: /workflows returned $deep, want 200"; exit 1; }
+          echo "SPA deep-link fallback OK"
+
+          api=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/v1/tools)
+          [ "$api" = 502 ] || { echo "::error::/api/ did not reach the proxy: got $api, want 502 (200 means the SPA fallback swallowed it)"; docker logs dash || true; exit 1; }
+          echo "API proxy rule active (502 from an absent upstream, not a 200 app shell)"
+
+          health=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/healthz)
+          [ "$health" = 502 ] || { echo "::error::/healthz did not reach the proxy: got $health, want 502"; exit 1; }
+          echo "healthz proxy rule active"
+
+          docker rm -f dash
 
       # Container scanning: fail the build on known HIGH/CRITICAL vulnerabilities
       # in the OS packages and Rust dependencies baked into the image.
