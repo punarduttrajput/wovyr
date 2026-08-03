@@ -3,16 +3,31 @@
     <div class="rail-scrim" (click)="navOpen.set(false)" aria-hidden="true"></div>
   }
   <aside class="rail" [class.open]="navOpen()">
-    <!-- DSY-106: unified on the window/scanline mark (a generative-UI frame
-         being verified — matches the product thesis) already used by the
-         landing page and favicon; this used to be a plain triangle, a
-         different mark entirely. See DESIGN-system.md §4. -->
+    <!-- The Wovyr wolf-head mark. Superseded the window/scanline mark here on
+         2026-08-03: the 2026-07-31 identity redesign replaced that mark with
+         this one everywhere on the website, but this rail was never updated —
+         so the dashboard kept rendering a retired mark, and DSY-106's comment
+         claiming it matched "the landing page and favicon" had quietly become
+         false. Path is character-identical to website/public/favicon.svg and
+         website/src/assets/brand/logo-{light,dark}.svg (source of truth:
+         website/landing/DESIGN-system.md §4).
+
+         Treated as the website's own wordmark treats it — bare path, no tile,
+         inheriting a theme token — rather than copied from the favicon, whose
+         hardcoded dark tile exists only so a 16px silhouette holds its edge
+         against light browser chrome. Here the rail supplies the surface. -->
     <div class="brand">
       <span class="mark">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect class="mk-win" x="3.5" y="4.5" width="17" height="15" rx="2.6"/><circle class="mk-dot" cx="6.6" cy="8" r="0.9"/><circle class="mk-dot" cx="9.2" cy="8" r="0.9"/><path class="mk-scan" d="M6.4 14H18"/><circle class="mk-node" cx="14.6" cy="14" r="1.7"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><g transform="translate(1,0.7) scale(0.22)"><path class="mk-wolf" d="M50 26 L34 30 L18 6 L22 38 L12 52 L22 60 L16 72 L30 74 L36 64 L40 86 L44 94 L50 97 L56 94 L60 86 L64 64 L70 74 L84 72 L78 60 L88 52 L78 38 L82 6 L66 30 Z"/></g></svg>
       </span>
       <b>Wovyr</b>
-      <span class="env">v0.3</span>
+      <!-- DX-101 reconciliation target: this is the *client* version badge and is
+           hardcoded, so it must be bumped with the release tag alongside every
+           other manifest. It read `v0.3` against a 0.4.0 server until 2026-08-03 —
+           a stale version string in an operator console undermines the rest of what
+           the console claims. The *server's* version is reported authoritatively by
+           the Monitoring panel, which reads it from the API rather than guessing. -->
+      <span class="env">v0.4</span>
     </div>
 
     <!-- DASH-403: this used to be a styled, non-functional button (no click

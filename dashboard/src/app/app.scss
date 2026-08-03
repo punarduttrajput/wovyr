@@ -8,16 +8,18 @@
 }
 
 .brand { display:flex; align-items:center; gap:10px; padding:18px 18px 14px; }
-/* DSY-106: the window/scanline mark (unified with the landing page/favicon)
- * is self-contained — a frame with its own chrome — so it renders directly,
- * not inside a filled background chip the way the old plain triangle needed
- * to read at this size. */
+/* The wolf-head mark renders directly on the rail surface, with no filled
+ * background chip — same as the window/scanline mark it replaced on 2026-08-03,
+ * and as the old plain triangle before that needed. A solid silhouette holds up
+ * at 22px without one.
+ *
+ * Filled with --ink rather than --accent so it matches the website's own
+ * wordmark, which draws the identical path with fill="currentColor" over plain
+ * ink. That also makes it flip with the theme for free, which a copy of the
+ * favicon's hardcoded #8AA2E8-on-#0C1115 tile would not. */
 .brand .mark { display:grid; place-items:center; flex:none; }
 .brand .mark svg { width:22px; height:22px; overflow:visible; }
-.mk-win { fill:none; stroke:var(--ink); stroke-width:1.6; stroke-linejoin:round; }
-.mk-dot { fill:var(--ink-2); }
-.mk-scan { stroke:var(--accent); stroke-width:1.7; stroke-linecap:round; }
-.mk-node { fill:var(--accent); }
+.mk-wolf { fill:var(--ink); }
 .brand b { font-size:15px; letter-spacing:-.02em; }
 .brand .env {
   font-family:var(--mono); font-size:10px; color:var(--ink-2);

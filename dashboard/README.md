@@ -97,22 +97,44 @@ Which of the server's three `WOVYR_AUTH_MODE`s you run against changes what's re
    `apikey`/`jwt` mode, paste a credential), then go to **Agent Studio** and click
    **Run ▸** to stream a live agent run.
 
-## Cross-origin deployment (RM-GA-P4 OBS-805)
+## Deployment: same-origin only (RM-GA-P4 OBS-805)
 
-When the dashboard is served from a different origin than `wovyr-server` (e.g. the
-static build below, hosted separately), the server's CORS layer (Phase-1 SEC-204,
-already fully implemented — `crates/wovyr-server/src/config.rs`'s `cors_layer`) needs
-the dashboard's real origin in its allow-list:
+**This SPA can only be deployed on the same origin as `wovyr-server`.** That is a
+property of the client, not a server limitation, and it holds two ways:
 
-```bash
-WOVYR_CORS_ALLOWED_ORIGINS=https://dashboard.example.com cargo run -p wovyr-cli -- dev
-```
+- Every request is a **relative** path (`/api/v1/...`). There is no configurable
+  API base URL — no `environments/` directory, no `apiBase` token, nothing to
+  point at another host.
+- [`core/tenant.interceptor.ts`](src/app/core/tenant.interceptor.ts) attaches the
+  `X-Wovyr-Tenant`/`X-Wovyr-Principal`/`Authorization` headers **only** to URLs
+  beginning `/api/`. So even after patching in an absolute base URL, every request
+  would go out unauthenticated and fail the server's default-deny RBAC.
 
-No server-side code changes are needed — `cors_layer` already allows the
-`X-Wovyr-Tenant`/`X-Wovyr-Principal`/`Authorization`/`Idempotency-Key`/`If-Match`
-headers this dashboard sends and exposes `X-Request-Id`/`ETag`; an unconfigured
-`WOVYR_CORS_ALLOWED_ORIGINS` means no CORS headers at all (same-origin only), never a
-wildcard.
+The fix is a reverse proxy putting the SPA and the API behind one origin, which is
+already how development works — [`proxy.conf.json`](proxy.conf.json) forwards
+`/api`, `/metrics` and `/healthz` to `http://127.0.0.1:8080` under `ng serve`. For a
+built deployment, the packaged image does the same thing with nginx (see **Build**
+below), configured by two env vars:
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `WOVYR_UPSTREAM` | `wovyr:8080` | Where `/api/`, `/healthz`, `/metrics` are proxied. |
+| `WOVYR_LISTEN` | `80` | nginx `listen` value; use `127.0.0.1:8081` for a host-network run. |
+
+Beyond removing the CORS question entirely, same-origin also means an
+HTTPS-terminated dashboard never triggers browser mixed-content blocking against a
+plaintext API, and no bearer credential has to be embedded in a publicly-served
+bundle to reach a remote server.
+
+**On CORS:** the server's CORS layer (Phase-1 SEC-204,
+`crates/wovyr-server/src/config.rs`'s `cors_layer`) is fully implemented and
+correct — it allows the headers this dashboard sends, exposes `X-Request-Id`/`ETag`,
+and treats an unconfigured `WOVYR_CORS_ALLOWED_ORIGINS` as *no CORS headers at all*
+rather than a wildcard. It is simply **not sufficient** to make this SPA work
+cross-origin, because of the two client-side facts above. Earlier revisions of this
+section recommended `WOVYR_CORS_ALLOWED_ORIGINS=https://dashboard.example.com` as a
+complete cross-origin recipe; it is not one. Use it for a *different* client you
+write against the API, not for this one.
 
 ## Build
 
@@ -120,18 +142,44 @@ wildcard.
 npm run build        # ng build (production) → dist/dashboard/browser/
 ```
 
-A Docker build stage producing a static image of this output is at
-[`deployment/docker/dashboard.Dockerfile`](../deployment/docker/dashboard.Dockerfile)
-(nginx serving the SPA, with client-side routing fallback to `index.html`):
+A Docker build producing a servable image of this output is at
+[`deployment/docker/dashboard.Dockerfile`](../deployment/docker/dashboard.Dockerfile):
+nginx serving the SPA with client-side routing fallback to `index.html`, **plus the
+same-origin API proxy** described above
+([`dashboard-nginx.conf.template`](../deployment/docker/dashboard-nginx.conf.template),
+rendered at container start by the nginx image's `envsubst` entrypoint). Build from
+the **repo root**, not from `dashboard/` — the build context needs `sdks/ui-react`
+alongside `dashboard/` for the `prebuild` hook above to resolve:
 
 ```bash
 docker build -f deployment/docker/dashboard.Dockerfile -t wovyr-dashboard:dev .
-docker run --rm -p 8081:80 wovyr-dashboard:dev
+```
+
+Against a `wovyr` container on the same Docker network (the default upstream):
+
+```bash
+docker run --rm -p 8081:80 --network <net> wovyr-dashboard:dev
+```
+
+Against a host-network `wovyr dev` — the single-node appliance shape, reachable over
+an SSH tunnel and not off-box:
+
+```bash
+docker run --rm --network host \
+  -e WOVYR_UPSTREAM=127.0.0.1:8080 -e WOVYR_LISTEN=127.0.0.1:8081 \
+  wovyr-dashboard:dev
+curl http://127.0.0.1:8081/healthz     # proxied through to the server
 ```
 
 It is a separate image from `deployment/docker/Dockerfile` (the Rust `wovyr` binary)
-and is **not** wired into `deployment/docker-compose.yml` as a running service yet —
-see that Dockerfile's own header comment for what's proven vs. not.
+and is **not** wired into `deployment/docker-compose.yml` as a running service yet.
+Proven vs. not, precisely: the proxy configuration was validated against a real
+running server (an EC2 single-node deployment, 2026-08-03) with the SPA, `/healthz`,
+`/api/v1/*` and the SSE streaming path all served from one origin, and the
+Monitoring, Workflow Builder, Memory Explorer and Surfaces panels reading live data
+through it — but that used a hand-assembled nginx container with this same config,
+**not** this image. The image itself has not yet been built or run; see the
+Dockerfile's own header comment.
 
 ## Layout
 

@@ -1,0 +1,64 @@
+# nginx site config for the Wovyr dashboard image (deployment/docker/dashboard.Dockerfile).
+#
+# Rendered at *container start*, not build time: the official nginx image's
+# entrypoint runs every /etc/nginx/templates/*.template through `envsubst` and
+# writes the result into /etc/nginx/conf.d/. That's what lets one image serve a
+# compose stack (`wovyr:8080`), a host-network run (`127.0.0.1:8080`), and a
+# Kubernetes Service (`wovyr.default.svc:8080`) without a rebuild.
+#
+# `NGINX_ENVSUBST_FILTER=^WOVYR_` is set in the Dockerfile so substitution is
+# restricted to WOVYR_* names — nginx's own $uri/$host/$scheme must survive the
+# pass untouched.
+#
+# Because envsubst bakes a literal address into proxy_pass, nginx resolves the
+# upstream once at startup and needs no `resolver` directive. The trade-off is
+# that an unresolvable upstream makes nginx exit at boot ("host not found in
+# upstream") rather than 502 per-request — order the dashboard after the server
+# (compose `depends_on`, or a restart policy) so a cold start settles itself.
+
+server {
+    listen ${WOVYR_LISTEN};
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Same-origin API proxy — the load-bearing part of this file.
+    #
+    # The dashboard issues *relative* requests (`/api/v1/...`; there is no
+    # configurable API base URL), and `dashboard/src/app/core/tenant.interceptor.ts`
+    # only attaches the X-Wovyr-Tenant/X-Wovyr-Principal/Authorization headers to
+    # URLs beginning `/api/`. So the SPA can only ever talk to its own origin, and
+    # a genuinely cross-origin deployment would send unauthenticated requests to
+    # the wrong host. This proxy is what makes the origin serving the SPA also
+    # serve the platform API — which additionally means no CORS allow-list is
+    # needed, and an HTTPS-terminated dashboard never triggers mixed-content
+    # blocking against a plaintext API.
+    location /api/ {
+        proxy_pass http://${WOVYR_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # `POST /api/v1/agents:stream` is Server-Sent Events. With the defaults,
+        # response buffering withholds every frame until the run completes (the
+        # streaming console appears to hang), and the 60s read timeout severs a
+        # long agent tool-loop mid-stream.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+    }
+
+    # The two endpoints the auth middleware deliberately leaves unauthenticated,
+    # both scraped by the Monitoring panel.
+    location = /healthz { proxy_pass http://${WOVYR_UPSTREAM}; }
+    location = /metrics { proxy_pass http://${WOVYR_UPSTREAM}; }
+
+    # SPA fallback: any path that isn't a real static file serves index.html so
+    # Angular's client-side router (app.routes.ts) handles it, instead of nginx
+    # 404ing a deep link like /workflows or a reload on /surfaces.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

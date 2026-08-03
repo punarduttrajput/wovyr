@@ -1,5 +1,10 @@
 # Keep the build context small and the image clean.
 /target
+# Node trees are rebuilt inside the image. Copying a host `node_modules` in would
+# also break the dashboard build outright from a Windows/macOS checkout, since
+# esbuild and the Angular CLI install platform-specific binaries.
+**/node_modules
+**/dist
 .git
 .github
 docs
