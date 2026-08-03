@@ -29,12 +29,25 @@
         <textarea id="surfaces-message" [(ngModel)]="message" rows="3"
           placeholder="Refund $42.00 to order #A1017?"></textarea>
       </div>
+      <!-- The label used to read "GRD-201 blocks this by default — try it", which
+           was misleading on a stock deployment: with no tenant policy configured,
+           `hosted_floor` (GRD-207) denies *every* interactive frame before the
+           destructive-action rule is ever consulted, so ticking the box changed
+           nothing observable. Verified live 2026-08-03. Reaching GRD-201 needs a
+           policy to exist at all — a minimal one suffices, since
+           `allow_destructive_actions` already defaults to false. -->
       <div class="field checkbox-field">
         <label>
           <input type="checkbox" [(ngModel)]="includeDestructive" />
-          Include a destructive action (GRD-201 blocks this by default — try it)
+          Include a destructive action (blocked by <code>destructive_action</code>)
         </label>
       </div>
+      <p class="hint">Needs a UI policy for this tenant at
+        <code>~/.wovyr/ui/policies/&lt;tenant&gt;.yaml</code>. Without one, the
+        <code>hosted_floor</code> default denies every interactive frame — checked or
+        not — and you'll see that rule instead. A two-line policy
+        (<code>name</code>, <code>version</code>) is enough to lift the floor while
+        still denying destructive actions.</p>
       <button class="btn pri" [disabled]="busy()" (click)="present()">
         {{ busy() ? 'Presenting…' : 'Present frame' }}
       </button>

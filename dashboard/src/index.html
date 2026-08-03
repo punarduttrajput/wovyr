@@ -6,7 +6,13 @@
   <base href="/">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <!-- The real Wovyr mark, copied from website/public/favicon.svg (the source of
+       truth — website/landing/DESIGN-system.md §4). The `favicon.ico` still in
+       public/ is the stock Angular CLI icon, never replaced; it is deliberately
+       no longer linked, since declaring it as a fallback means any browser
+       lacking SVG-favicon support renders the Angular logo in an operator
+       console. Regenerate it from this SVG if a raster fallback is ever needed. -->
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
 </head>
 <body>
   <app-root></app-root>

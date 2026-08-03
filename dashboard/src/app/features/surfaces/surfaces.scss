@@ -21,6 +21,18 @@
 .checkbox-field label { display:flex; align-items:center; gap:8px; font-weight:500; }
 .checkbox-field input[type='checkbox'] { width:auto; }
 
+/* Explains which trust-layer rule actually fires, since on a stock deployment
+ * `hosted_floor` denies interactive frames before the destructive-action rule is
+ * reached. Component styles are scoped, so this can't borrow the identically
+ * named rule in playground.scss. */
+.hint {
+  margin:6px 0 12px; font-size:12px; line-height:1.5; color:var(--ink-3);
+}
+.hint code {
+  font-family:var(--mono); font-size:11px; background:var(--neutral-bg);
+  padding:1px 5px; border-radius:4px;
+}
+
 .sub-btn { padding:4px 10px; font-size:12px; }
 
 .frame-meta {
