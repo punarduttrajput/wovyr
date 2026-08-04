@@ -41,13 +41,30 @@ test.describe('dashboard shell (no backend)', () => {
     await expect(scope).toHaveAttribute('href', '/login');
   });
 
-  test('DSY-106: the rail brand mark is the unified window/scanline mark', async ({ page }) => {
+  // Updated 2026-08-04: this asserted the window/scanline mark DSY-106 unified on,
+  // which the 2026-07-31 identity redesign superseded with the wolf head — the rail
+  // had simply never been updated to match. Pins the path geometry rather than only
+  // the class, since a `.mk-wolf` element drawing the wrong `d` would still pass a
+  // class-presence check while showing a different mark, and guards against
+  // regression to *both* retired marks now, not just the pre-DSY-106 triangle.
+  const WOLF_PATH =
+    'M50 26 L34 30 L18 6 L22 38 L12 52 L22 60 L16 72 L30 74 L36 64 L40 86 L44 94 ' +
+    'L50 97 L56 94 L60 86 L64 64 L70 74 L84 72 L78 60 L88 52 L78 38 L82 6 L66 30 Z';
+
+  test('the rail brand mark is the wolf head, not either retired mark', async ({ page }) => {
     await page.goto('/');
     const mark = page.locator('.brand .mark svg');
-    await expect(mark.locator('.mk-win')).toHaveCount(1);
-    await expect(mark.locator('.mk-scan')).toHaveCount(1);
+    await expect(mark.locator('.mk-wolf')).toHaveCount(1);
+    // Identical geometry to website/public/favicon.svg and the Starlight
+    // logo-{light,dark}.svg assets — the mark is only *the* Wovyr mark if it
+    // draws the same path those do.
+    await expect(mark.locator('.mk-wolf')).toHaveAttribute('d', WOLF_PATH);
+    // The pre-DSY-106 plain triangle.
     const html = await page.content();
     expect(html).not.toContain('M12 3L21 19H3L12 3Z');
+    // The window/scanline mark that replaced it and was in turn superseded.
+    await expect(mark.locator('.mk-win')).toHaveCount(0);
+    await expect(mark.locator('.mk-scan')).toHaveCount(0);
   });
 
   test('app shell has no detectable axe violations', async ({ page }) => {
