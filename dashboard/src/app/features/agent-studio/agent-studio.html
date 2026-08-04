@@ -148,7 +148,7 @@
           <span class="t">Test Console</span>
         </div>
         <div class="console-b">
-          @for (e of steps(); track $index) {
+          @for (e of timeline(); track $index) {
             <div class="ln" [class]="e.kind">
               @switch (e.kind) {
                 @case ('start') {
@@ -192,7 +192,7 @@
           @if (answer()) {
             <div class="answer">{{ answer() }}<span class="caret" [class.on]="running()">▌</span></div>
           }
-          @if (!steps().length && !answer() && !reasoning() && !running()) {
+          @if (!timeline().length && !answer() && !reasoning() && !running()) {
             <div class="placeholder-line">Run the agent to stream its planner, tool calls, and answer here.</div>
           }
         </div>
@@ -200,7 +200,7 @@
           <div class="est">
             <div><div class="k">Tokens</div><div class="v tnum">{{ usage()?.total_tokens ?? 0 }}</div></div>
             <div><div class="k">Cost</div><div class="v tnum">${{ (usage()?.cost_usd ?? 0).toFixed(4) }}</div></div>
-            <div><div class="k">Steps</div><div class="v tnum">{{ steps().length }}</div></div>
+            <div><div class="k">Steps</div><div class="v tnum">{{ stepCount() }}</div></div>
           </div>
         }
       </div>

@@ -1769,6 +1769,63 @@ async fn agent_mutations_are_audited() {
     assert!(actions.contains(&"agent.delete"), "actions: {actions:?}");
 }
 
+/// A run over `agents:stream` must leave the same `agent.run` audit entry a run
+/// over `agents:run` does. It did not until 2026-08-04: only `run_definition`
+/// (the `:run` endpoints) and the `Prefer: respond-async` path audited, so the
+/// same logical action was recorded or not purely according to transport. The
+/// dashboard's Agent Studio and Playground both stream, which meant every run an
+/// operator performed through the UI was missing from the tamper-evident trail —
+/// noticed as a live audit log sitting hours stale during active use.
+///
+/// Asserted as *parity* rather than "stream audits", so the two paths cannot
+/// drift apart again without failing: whatever `:run` records, `:stream` must too.
+#[tokio::test]
+async fn streamed_and_non_streamed_runs_are_audited_identically() {
+    use wovyr_audit::{AuditFilter, AuditLog};
+
+    // Drive each transport against its own server so the counts can't cross-talk.
+    async fn audited_run_count(uri: &str) -> usize {
+        let manifest = "metadata:\n  name: hello\nspec:\n  instructions: Be friendly.\n";
+        let body = json!({ "manifest": manifest, "input": { "message": "hi" } }).to_string();
+        let state = Arc::new(AppState::for_test().await.with_audit(AuditLog::in_memory()));
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri} did not return 200");
+        // The SSE path only audits once the spawned run task finishes, which happens
+        // after the response head is returned — so drain the body before reading the log.
+        let _ = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
+        state
+            .audit
+            .query(&AuditFilter::default())
+            .expect("audit query")
+            .into_iter()
+            .filter(|e| e.event.action == "agent.run")
+            .count()
+    }
+
+    let non_streamed = audited_run_count("/api/v1/agents:run").await;
+    let streamed = audited_run_count("/api/v1/agents:stream").await;
+
+    assert_eq!(
+        non_streamed, 1,
+        "the non-streaming run path stopped auditing agent.run"
+    );
+    assert_eq!(
+        streamed, non_streamed,
+        "agents:stream audited {streamed} agent.run entries but agents:run audited \
+         {non_streamed} — the two transports have diverged again"
+    );
+}
+
 #[tokio::test]
 async fn kms_tenant_key_mutations_are_audited() {
     use wovyr_audit::AuditLog;

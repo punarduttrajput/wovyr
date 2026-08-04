@@ -380,6 +380,18 @@ pub(crate) async fn run_stream_handler(
         opts = opts.with_max_steps(n);
     }
 
+    // A run id, audited and emitted exactly as the non-streaming paths do. This
+    // handler used to do neither: `run_definition` (the `:run` endpoints) and the
+    // `Prefer: respond-async` path both audit `agent.run` and emit
+    // `agent.run.completed`/`.failed`, but `agents:stream` recorded nothing at all —
+    // so the same logical action left evidence or not depending purely on which
+    // transport the caller chose. That mattered more than it sounds: the dashboard's
+    // Agent Studio and Playground both stream (`dashboard/src/app/features/
+    // agent-studio/agent.service.ts`), so *every* run an operator performed through
+    // the UI was absent from the tamper-evident trail, and the audit page's own
+    // "every state-changing API call" claim was false. Found 2026-08-04 by noticing
+    // a live audit log that was hours stale despite active UI use.
+    let run_id = format!("run_{}", state.run_counter.fetch_add(1, Ordering::SeqCst));
     let (tx, rx) = futures::channel::mpsc::unbounded::<Event>();
     tokio::spawn(async move {
         let _permit = permit;
@@ -401,12 +413,27 @@ pub(crate) async fn run_stream_handler(
                     out.usage.cost_usd,
                     u64::from(out.usage.total_tokens),
                 );
+                crate::audit::audit(&state, &headers, &tenant, "agent.run", "agent", &run_id);
+                webhooks::emit(
+                    &state,
+                    "agent.run.completed",
+                    &tenant,
+                    json!({ "run_id": run_id, "total_tokens": out.usage.total_tokens }),
+                );
                 Event::default().event("result").data(
                     json!({ "status": "succeeded", "output": { "message": out.text }, "steps": out.steps })
                         .to_string(),
                 )
             }
-            Err(e) => Event::default().event("error").data(e.to_string()),
+            Err(e) => {
+                webhooks::emit(
+                    &state,
+                    "agent.run.failed",
+                    &tenant,
+                    json!({ "error": e.to_string() }),
+                );
+                Event::default().event("error").data(e.to_string())
+            }
         };
         let _ = tx.unbounded_send(frame);
         // `tx` (and the sink's clone) drop here, closing the SSE stream.
