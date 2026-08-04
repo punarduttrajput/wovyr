@@ -36,14 +36,30 @@ FROM node:20-slim AS build
 
 WORKDIR /src
 
-# The dashboard depends on `@wovyr/ui-react` via `file:../sdks/ui-react`, and its
-# `prebuild` hook (dashboard/scripts/ensure-ui-react-built.js) resolves that SDK
-# as a sibling of the repo root, building it on demand. Both trees must therefore
-# be present *before* `npm ci`, with the working directory one level in — copying
-# `dashboard/` alone (as this file did until 2026-08-03) leaves the dependency
-# unresolvable and the prebuild hook exits 1 with
-# "expected sdks/ui-react at /sdks/ui-react, not found".
+# The dashboard reaches outside its own tree in exactly three places, by three
+# different mechanisms — all of them silent until a build actually runs, and each
+# resolved relative to the repo root, which is why the working directory has to
+# sit one level in rather than at `/src`:
+#
+#   1. `@wovyr/ui-react` — an npm `file:../sdks/ui-react` dependency
+#      (dashboard/package.json). Its `prebuild` hook
+#      (dashboard/scripts/ensure-ui-react-built.js) also *builds* that package on
+#      demand, so it must be present before `npm ci`, not just before `ng build`.
+#   2. `@wovyr/sdk-types` — a TypeScript path mapping to
+#      `../sdks/typescript/src/types` (dashboard/tsconfig.json). Not an npm
+#      dependency at all, so nothing in package.json hints that it is needed.
+#   3. `../packages/tokens/wovyr-tokens.css` — a global stylesheet listed in
+#      angular.json's `styles` array (in both the build and test configurations).
+#
+# Copying `dashboard/` alone (as this file did until 2026-08-03) fails on all
+# three; copying only `sdks/ui-react` (until 2026-08-04) still failed on the
+# other two, with four TS2307/unresolved-import errors that named the missing
+# module rather than the missing directory. If a fourth such reference is ever
+# added, `container-scan`'s dashboard leg in .github/workflows/ci.yml is what
+# catches it.
 COPY sdks/ui-react ./sdks/ui-react
+COPY sdks/typescript ./sdks/typescript
+COPY packages/tokens ./packages/tokens
 
 # Manifests before sources, so the install layer caches across source-only edits.
 COPY dashboard/package.json dashboard/package-lock.json* ./dashboard/
