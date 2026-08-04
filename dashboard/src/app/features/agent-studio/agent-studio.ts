@@ -62,8 +62,23 @@ export class AgentStudio implements OnInit, OnDestroy {
   readonly status = signal('');
   readonly showDsl = signal(false);
 
-  /** Steps shown in the console feed = every non-delta event. */
-  readonly steps = computed(() => this.events().filter((e) => e.kind !== 'delta'));
+  /** The console feed: every non-delta event, in arrival order. */
+  readonly timeline = computed(() => this.events().filter((e) => e.kind !== 'delta'));
+
+  /**
+   * The run's real model/tool iteration count, taken from the terminal `result`
+   * event — which is what the "Max steps" cap above the console actually bounds.
+   *
+   * This was previously rendered as `timeline().length` under a "Steps" label
+   * (the signal was itself called `steps`), so the stat box counted *stream
+   * frames*: a one-iteration run reported 3, because `start`/`done`/`result` are
+   * three events. Misleading precisely where it matters, since an operator tuning
+   * `max_steps` reads this number to decide whether the cap is close to binding.
+   * Renamed the feed to `timeline` so the collision can't recur.
+   */
+  readonly stepCount = computed(
+    () => this.timeline().find((e) => e.kind === 'result')?.steps ?? 0,
+  );
 
   private sub?: Subscription;
 
