@@ -77,6 +77,18 @@ pub struct Gateway {
     /// attaching an embedding-capable provider here. `None` = embeddings use
     /// the primary provider, as before.
     embedding_provider: Option<Box<dyn AIProvider>>,
+    /// Explicit embedding-model id override, consulted by
+    /// [`resolve_embedding_model`](Self::resolve_embedding_model) when the caller
+    /// pins nothing. `None` = the per-provider default.
+    ///
+    /// This exists because the provider-name match in `resolve_embedding_model`
+    /// fundamentally cannot distinguish OpenAI-compatible backends from each
+    /// other: Groq, Gemini's compat layer, OpenRouter, Ollama and a
+    /// local vLLM all arrive as [`OpenAiProvider`] and all report
+    /// `name() == "openai"`, so they all resolved to `text-embedding-3-small` —
+    /// a model only OpenAI itself serves. Adding more match arms could not fix
+    /// that; only an explicit override can.
+    embedding_model: Option<String>,
     hedge_cfg: HedgeConfig,
     cost: Option<Arc<dyn CostObserver>>,
     start: Instant,
@@ -110,6 +122,7 @@ impl Gateway {
             cache: Mutex::new(ExactCache::new(CacheConfig::default().max_entries)),
             semantic_cache: Box::new(InMemorySemanticCache::new()),
             embedding_provider: None,
+            embedding_model: None,
             hedge_cfg: HedgeConfig::default(),
             cost: None,
             start: Instant::now(),
@@ -125,16 +138,63 @@ impl Gateway {
     /// PRV-201); otherwise falls back to the offline [`MockProvider`] so local
     /// runs work with no setup.
     pub fn from_env() -> Self {
-        if let Ok(p) = OpenAiProvider::from_env() {
+        let gw = if let Ok(p) = OpenAiProvider::from_env() {
             tracing::info!("llm gateway: using openai-compatible provider");
-            return Self::new(Box::new(p));
-        }
-        if let Ok(p) = AnthropicProvider::from_env() {
+            Self::new(Box::new(p))
+        } else if let Ok(p) = AnthropicProvider::from_env() {
             tracing::info!("llm gateway: using anthropic provider");
-            return Self::new(Box::new(p));
+            Self::new(Box::new(p))
+        } else {
+            tracing::info!("llm gateway: no API key set, using mock provider");
+            Self::new(Box::new(MockProvider::new()))
+        };
+        gw.with_embeddings_from_env()
+    }
+
+    /// Apply the embedding-side environment overrides, independently of the chat
+    /// chain above:
+    ///
+    /// - `WOVYR_EMBEDDING_BASE_URL` (+ optional `WOVYR_EMBEDDING_API_KEY`) attaches
+    ///   a **dedicated** OpenAI-compatible embedding provider. This is what lets a
+    ///   deployment keep an embedding-less chat provider — Groq and Anthropic have
+    ///   no embeddings endpoint at all — and still serve memory/RAG, by pointing
+    ///   embeddings at something that does (a local Ollama, OpenAI proper, Gemini's
+    ///   compat layer). The key is optional because a local embedder typically
+    ///   doesn't check `Authorization`.
+    /// - `WOVYR_EMBEDDING_MODEL` pins the model id.
+    ///
+    /// Both are no-ops when unset, so existing deployments are unaffected.
+    fn with_embeddings_from_env(self) -> Self {
+        self.with_embeddings_from_parts(
+            std::env::var("WOVYR_EMBEDDING_BASE_URL").ok(),
+            std::env::var("WOVYR_EMBEDDING_API_KEY").ok(),
+            std::env::var("WOVYR_EMBEDDING_MODEL").ok(),
+        )
+    }
+
+    /// The pure half of [`with_embeddings_from_env`], taking the three values
+    /// rather than reading them — so the precedence can be unit-tested without
+    /// mutating process-global environment, which no parallel test can safely do
+    /// (the `build_kms_inner` pattern used elsewhere in this workspace).
+    fn with_embeddings_from_parts(
+        mut self,
+        base_url: Option<String>,
+        api_key: Option<String>,
+        model: Option<String>,
+    ) -> Self {
+        if let Some(base) = base_url {
+            tracing::info!(
+                base_url = %base,
+                "llm gateway: dedicated embedding provider attached"
+            );
+            let provider = OpenAiProvider::new(base, api_key.unwrap_or_default());
+            self = self.with_embedding_provider(Box::new(provider));
         }
-        tracing::info!("llm gateway: no API key set, using mock provider");
-        Self::new(Box::new(MockProvider::new()))
+        if let Some(model) = model {
+            tracing::info!(model = %model, "llm gateway: embedding model pinned");
+            self = self.with_embedding_model(model);
+        }
+        self
     }
 
     /// Override the retry policy.
@@ -243,6 +303,18 @@ impl Gateway {
         self
     }
 
+    /// Pin the embedding-model id, overriding the per-provider default.
+    ///
+    /// Needed by every OpenAI-compatible backend that isn't OpenAI, since they
+    /// share a provider name and therefore shared its default of
+    /// `text-embedding-3-small`. Set this to whatever the endpoint actually
+    /// serves — `nomic-embed-text` for Ollama, `text-embedding-004` for Gemini's
+    /// compat layer, `mistral-embed` for Mistral.
+    pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
+        self.embedding_model = Some(model.into());
+        self
+    }
+
     /// The provider [`embed`](Self::embed) will route to: the dedicated
     /// embedding provider if one is attached, else the primary.
     fn embed_provider(&self) -> Option<&dyn AIProvider> {
@@ -289,9 +361,16 @@ impl Gateway {
     /// actually routes to (the dedicated embedding provider if attached, else
     /// the primary), so a distinct embedder picks its own model id rather than
     /// the chat provider's.
+    ///
+    /// Precedence: a caller-pinned id, then
+    /// [`with_embedding_model`](Self::with_embedding_model) /
+    /// `WOVYR_EMBEDDING_MODEL`, then the per-provider default.
     pub fn resolve_embedding_model(&self, pinned: Option<&str>) -> String {
         if let Some(model) = pinned {
             return model.to_string();
+        }
+        if let Some(model) = &self.embedding_model {
+            return model.clone();
         }
         let name = self.embed_provider().map(|p| p.name()).unwrap_or("none");
         match name {
@@ -789,6 +868,76 @@ mod tests {
         let gw = Gateway::new(Box::new(MockProvider::new()));
         assert_eq!(gw.resolve_embedding_model(None), "mock-embeddings");
         assert_eq!(gw.resolve_embedding_model(Some("custom")), "custom");
+    }
+
+    // --- configurable embeddings ---------------------------------------------
+    //
+    // Every OpenAI-compatible backend reports `name() == "openai"`, so Groq,
+    // Gemini's compat layer, OpenRouter and Ollama all resolved to
+    // `text-embedding-3-small` — a model only OpenAI serves. Memory/RAG therefore
+    // failed with a 404 on all of them, with no way to correct it short of
+    // patching the match arm.
+
+    /// The unconfigured default, pinned so the fix can't silently change it for
+    /// deployments that were already working.
+    #[test]
+    fn openai_compatible_provider_still_defaults_to_the_openai_embedding_model() {
+        let gw = Gateway::new(Box::new(OpenAiProvider::new("http://localhost/v1", "k")));
+        assert_eq!(gw.resolve_embedding_model(None), "text-embedding-3-small");
+    }
+
+    #[test]
+    fn embedding_model_override_replaces_the_provider_default() {
+        let gw = Gateway::new(Box::new(OpenAiProvider::new("http://localhost/v1", "k")))
+            .with_embedding_model("nomic-embed-text");
+        assert_eq!(gw.resolve_embedding_model(None), "nomic-embed-text");
+    }
+
+    /// A caller-pinned id still outranks the configured override — the override is
+    /// a deployment default, not a ceiling.
+    #[test]
+    fn a_pinned_model_outranks_the_embedding_model_override() {
+        let gw = Gateway::new(Box::new(OpenAiProvider::new("http://localhost/v1", "k")))
+            .with_embedding_model("nomic-embed-text");
+        assert_eq!(
+            gw.resolve_embedding_model(Some("mistral-embed")),
+            "mistral-embed"
+        );
+    }
+
+    /// The combination that unblocks a Groq/Anthropic deployment: chat stays on a
+    /// provider with no embeddings endpoint, embeddings route to a dedicated one,
+    /// and the model id follows the embedder rather than the chat provider.
+    #[test]
+    fn a_dedicated_embedder_and_a_pinned_model_compose() {
+        let gw = Gateway::new(Box::new(AnthropicProvider::new("http://localhost", "k")));
+        assert!(
+            !gw.supports_embeddings(),
+            "anthropic alone should not claim embedding support"
+        );
+
+        let gw = gw.with_embeddings_from_parts(
+            Some("http://127.0.0.1:11434/v1".to_string()),
+            None, // a local embedder typically ignores Authorization
+            Some("nomic-embed-text".to_string()),
+        );
+        assert!(
+            gw.supports_embeddings(),
+            "the dedicated embedder should enable it"
+        );
+        assert_eq!(gw.resolve_embedding_model(None), "nomic-embed-text");
+        // Chat is untouched by the embedding-side configuration.
+        assert_eq!(gw.provider_name(), "anthropic");
+    }
+
+    /// Absent configuration, nothing changes — the no-op guarantee that keeps this
+    /// safe for existing deployments.
+    #[test]
+    fn no_embedding_configuration_leaves_the_gateway_untouched() {
+        let gw = Gateway::new(Box::new(OpenAiProvider::new("http://localhost/v1", "k")))
+            .with_embeddings_from_parts(None, None, None);
+        assert_eq!(gw.resolve_embedding_model(None), "text-embedding-3-small");
+        assert_eq!(gw.provider_name(), "openai");
     }
 
     // --- RM-AR-P1 AIC-301: embedding-capability detection --------------------
