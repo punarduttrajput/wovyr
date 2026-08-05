@@ -38,10 +38,16 @@ spec:
         prompt: "You are a support agent. Draft a short, friendly reply to the customer."
         text: "${input.message}"
 
+    # `${draftReply.message}`, not `.reply`: an `ai` activity's output is
+    # `{message, __usage}` (crates/wovyr-runtime/src/lib.rs's `ai` branch). This
+    # read `.reply` until 2026-08-05, which resolved to nothing — the workflow
+    # still completed green and `sendEmail` still reported success, it just
+    # carried an empty body. Silent, and in the one example a reader is most
+    # likely to copy for `ai` -> `tool` data flow.
     - id: sendEmail
       type: tool
       name: echo
-      inputs: { action: send_email, to: "${input.customerId}", body: "${draftReply.reply}" }
+      inputs: { action: send_email, to: "${input.customerId}", body: "${draftReply.message}" }
 
   transitions:
     # High-value refunds need a human; small refunds are issued directly.
