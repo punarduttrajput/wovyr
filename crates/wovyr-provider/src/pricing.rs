@@ -21,8 +21,8 @@
 //! the computation itself is pure/deterministic; only construction reads config).
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 
 use wovyr_common::Usage;
 
@@ -65,9 +65,16 @@ pub struct PriceBook {
     prices: BTreeMap<String, ModelPrice>,
     /// Fallback price applied to any model with no exact/prefix match.
     default: Option<ModelPrice>,
-    /// Set once we've warned about an unknown, undefaulted model, so the warning
-    /// isn't emitted on every single call for the same model.
-    warned: std::sync::Arc<AtomicBool>,
+    /// Models we've already warned about, so the warning isn't emitted on every
+    /// call for the same model.
+    ///
+    /// Was a single `AtomicBool` for the whole book until 2026-08-05, which meant
+    /// the *first* unknown model silenced the warning for every subsequent one. A
+    /// multi-model workflow pinning two unpriced models reported one warning and
+    /// two $0 costs, so the second was invisible — and `cost_usd` feeds the
+    /// per-project `llm_cost_per_day_usd` quota, making an unpriced model consume
+    /// budget without incrementing spend.
+    warned: std::sync::Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl PriceBook {
@@ -242,10 +249,19 @@ impl PriceBook {
         match self.price(model) {
             Some(p) => p.cost(usage.prompt_tokens, usage.completion_tokens),
             None => {
-                if !self.warned.swap(true, Ordering::Relaxed) {
+                // Per model, not per book: see the `warned` field's comment.
+                // A poisoned lock must not stop cost accounting, so fall back to
+                // warning rather than propagating.
+                let first_time = self
+                    .warned
+                    .lock()
+                    .map(|mut seen| seen.insert(model.to_string()))
+                    .unwrap_or(true);
+                if first_time {
                     tracing::warn!(target: "wovyr.pricing", model = %model,
                         "no price for model and no default configured; cost recorded as \
-                         $0 (set {ENV_INLINE} or {ENV_FILE} to price it)");
+                         $0 (set {ENV_INLINE} or {ENV_FILE} to price it, or a \"default\" \
+                         key in either to price every unmatched model)");
                 }
                 0.0
             }
@@ -264,6 +280,45 @@ mod tests {
         let usage = Usage::new(1_000_000, 1_000_000, 0.0);
         let cost = book.cost("gpt-4o-mini", &usage);
         assert!((cost - 0.75).abs() < 1e-9, "got {cost}");
+    }
+
+    /// The dedup key is the model, not the book. Previously one shared `AtomicBool`
+    /// meant the first unknown model silenced every later one — so a workflow
+    /// pinning two unpriced models produced one warning and two silent $0 costs.
+    /// Asserted on the recorded set rather than on log output, which a unit test
+    /// can't observe.
+    #[test]
+    fn each_unknown_model_is_warned_about_separately() {
+        let book = PriceBook::with_defaults();
+        let usage = Usage::new(100, 100, 0.0);
+
+        assert_eq!(book.cost("some-unpriced-model", &usage), 0.0);
+        assert_eq!(book.cost("another-unpriced-model", &usage), 0.0);
+        // Repeat of the first must not re-record.
+        assert_eq!(book.cost("some-unpriced-model", &usage), 0.0);
+
+        let seen = book.warned.lock().unwrap();
+        assert!(seen.contains("some-unpriced-model"), "seen: {seen:?}");
+        assert!(seen.contains("another-unpriced-model"), "seen: {seen:?}");
+        assert_eq!(seen.len(), 2, "one entry per distinct model: {seen:?}");
+    }
+
+    /// The escape hatch for the multi-model case: one `"default"` key prices every
+    /// model that matches nothing, so a mixed-provider workflow can't silently
+    /// under-report. Already supported by `merge_json`; previously undocumented.
+    #[test]
+    fn a_default_price_covers_models_that_match_nothing() {
+        let book = PriceBook::with_defaults().with_default_price(ModelPrice::per_1m(1.0, 2.0));
+        // 1M in + 1M out at $1/$2 = $3, and no warning path is taken at all.
+        let cost = book.cost(
+            "totally-unknown-model",
+            &Usage::new(1_000_000, 1_000_000, 0.0),
+        );
+        assert!((cost - 3.0).abs() < 1e-9, "got {cost}");
+        assert!(
+            book.warned.lock().unwrap().is_empty(),
+            "a defaulted model is priced, so nothing should be warned about"
+        );
     }
 
     #[test]

@@ -130,7 +130,9 @@ export class WorkflowService {
    * Serialize a visual [`WorkflowDraft`] to the workflow-engine YAML DSL, so a user never
    * has to write YAML. Field mapping per activity `type`:
    * - `function` → `name` is the tool id, `inputs` its params.
-   * - `ai`       → `name` is the system prompt (instructions), `inputs.message` the input.
+   * - `ai`       → `name` is the system prompt, emitted as `inputs.prompt` (where the
+   *   runtime reads it); `inputs.message`/`inputs.text` the user turn. An explicit
+   *   `prompt` in the inputs JSON wins over the form field.
    * - `agent`    → `name` is a *stored* agent id (registered via `POST /api/v1/agents`),
    *   `inputs.message` its run input — runs the full model/tool loop, not a bare chat call.
    * - `wait`     → suspends on an event named by `name` (`inputs: { event: <name> }`).
@@ -155,6 +157,22 @@ export class WorkflowService {
       const out: Record<string, unknown> = { id, type: a.type };
       if (a.type === 'wait') {
         out['inputs'] = { event: a.name.trim() || id };
+      } else if (a.type === 'ai') {
+        // The instructions belong in `inputs.prompt`, which is where the runtime
+        // reads the system message (crates/wovyr-runtime/src/lib.rs's `ai` branch).
+        // They were emitted as the activity's `name` until 2026-08-05 — the
+        // pre-HLTH-901 server convention, which that ticket replaced with the CLI's
+        // `inputs.prompt`. Nothing read `name` for an `ai` step any more, so
+        // everything typed into the instructions box was silently discarded and the
+        // step ran with the runtime's default "You are a helpful assistant."
+        // An explicit `prompt` in the inputs JSON wins, so the raw editor stays
+        // authoritative over the form field.
+        const inputs = parseInputs(a.inputs) ?? {};
+        const instructions = a.name.trim();
+        if (instructions && (inputs as Record<string, unknown>)['prompt'] === undefined) {
+          (inputs as Record<string, unknown>)['prompt'] = instructions;
+        }
+        if (Object.keys(inputs as Record<string, unknown>).length) out['inputs'] = inputs;
       } else {
         if (a.name.trim()) out['name'] = a.name.trim();
         const inputs = parseInputs(a.inputs);

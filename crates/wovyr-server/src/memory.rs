@@ -78,7 +78,7 @@ pub(crate) fn default_engine(
         None => Arc::new(InMemoryStore::new()),
     };
     let store: Arc<dyn MemoryStore> = Arc::new(EncryptingMemoryStore::new(inner, kms));
-    let engine = MemoryEngine::try_new(Gateway::from_env(), store.clone())?;
+    let engine = MemoryEngine::try_new(Gateway::from_env(), store.clone())?.with_rrf_k_from_env();
     Ok((engine, store))
 }
 

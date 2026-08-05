@@ -1068,31 +1068,58 @@ jobs:
       # current `v`-prefixed release; `image-ref`/`severity`/`exit-code`/
       # `ignore-unfixed` are unchanged, and it is a composite (not Node) action,
       # so it is unaffected by the Node 20 runner deprecation.
+      # `image-ref` must follow the matrix: it was hardcoded to `wovyr:ci` when this
+      # job became a matrix on 2026-08-03, so the dashboard leg asked Trivy to scan
+      # an image that leg never built. Trivy failed to resolve it, exited 1, and the
+      # diagnostic step below failed the same way — producing two bare
+      # "Process completed with exit code 1" annotations and no findings at all,
+      # which is precisely the undiagnosable state that step exists to prevent.
       - name: Scan image for vulnerabilities (Trivy)
         uses: aquasecurity/trivy-action@v0.33.1
         with:
-          image-ref: wovyr:ci
+          image-ref: ${{ matrix.image }}:ci
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
 
-      # The step above only reports "Process completed with exit code 1" through
-      # the API, and the raw job log needs a token even on a public repo — so a
-      # failing scan was undiagnosable without signing in. Re-run it non-fatally
-      # with a Go template that emits each finding as a `::error::` workflow
-      # command, which lands in the check-run annotations (readable
-      # unauthenticated). Purely diagnostic: `exit-code: "0"` so it never decides
-      # the job's outcome, and it only runs when the real gate above already failed.
-      - name: Surface Trivy findings as annotations
+      # The gate above only reports "Process completed with exit code 1" through the
+      # API, and the raw job log needs a token even on a public repo — so a failing
+      # scan is undiagnosable without signing in. Re-run it non-fatally to JSON and
+      # emit each finding as a `::error::` workflow command, which lands in the
+      # check-run annotations (readable unauthenticated).
+      #
+      # JSON + jq rather than the previous inline Go template: the template's context
+      # shape is an implementation detail of the action, so a silently-mismatched
+      # template yields zero output and looks identical to "no findings". A parsed
+      # document can be inspected, and the fallback branch below distinguishes the two.
+      - name: Re-scan to JSON for diagnosis
         if: failure()
         uses: aquasecurity/trivy-action@v0.33.1
         with:
-          image-ref: wovyr:ci
+          image-ref: ${{ matrix.image }}:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "0"
-          format: template
-          template: '{{ range . }}{{ range .Vulnerabilities }}::error::{{ .VulnerabilityID }} {{ .Severity }} in {{ .PkgName }} {{ .InstalledVersion }} — fixed in {{ .FixedVersion }}{{ println }}{{ end }}{{ end }}'
+          format: json
+          output: trivy-${{ matrix.image }}.json
+
+      - name: Surface Trivy findings as annotations
+        if: failure()
+        run: |
+          set -uo pipefail
+          report="trivy-${{ matrix.image }}.json"
+          if [ ! -s "$report" ]; then
+            echo "::error::Trivy produced no report for ${{ matrix.image }}:ci — the scan itself failed (image missing, registry/DB unreachable), not a vulnerability finding."
+            exit 0
+          fi
+          count=$(jq '[.Results[]? | (.Vulnerabilities // [])[]] | length' "$report")
+          if [ "$count" -eq 0 ]; then
+            echo "::error::Trivy reported 0 HIGH/CRITICAL findings for ${{ matrix.image }}:ci, yet the gate failed — the failure is not a vulnerability. Check the scan step's own output."
+            exit 0
+          fi
+          echo "::notice::Trivy found $count HIGH/CRITICAL fixable finding(s) in ${{ matrix.image }}:ci"
+          jq -r '.Results[]? | .Target as $t | (.Vulnerabilities // [])[]
+                 | "::error::\($t): \(.VulnerabilityID) \(.Severity) in \(.PkgName) \(.InstalledVersion) — fixed in \(.FixedVersion // "unknown")"' "$report"
 
   systemd-install:
     name: systemd install smoke test (DEP-301)

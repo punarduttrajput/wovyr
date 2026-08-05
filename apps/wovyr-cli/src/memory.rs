@@ -29,7 +29,9 @@ async fn engine() -> wovyr_common::Result<MemoryEngine> {
     // AIC-301: fail loud with an actionable message when no embedding provider
     // is configured (e.g. Anthropic-only, no OPENAI_API_KEY), rather than
     // erroring deep inside the first put/query or memory-grounded agent run.
-    MemoryEngine::try_new(Gateway::from_env(), store)
+    // `with_rrf_k_from_env` so the CLI and the server agree on hybrid fusion
+    // tuning; a corpus small enough to need a lower `k` needs it on both paths.
+    Ok(MemoryEngine::try_new(Gateway::from_env(), store)?.with_rrf_k_from_env())
 }
 
 /// The local JSON-lines file store under `~/.wovyr/memory`.
