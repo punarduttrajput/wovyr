@@ -11,14 +11,16 @@
 #   - packed SDK artifacts: an npm tarball for `@wovyr/sdk` and a wheel+sdist for
 #     `wovyr-sdk`, attached to the release so a consumer can install a pinned
 #     artifact even before/without a registry publish,
+#   - every publishable workspace crate pushed to crates.io — the registry behind
+#     the README's own first quickstart command, `cargo install wovyr-cli`,
 #   - a GitHub Release whose body is this version's section of CHANGELOG.md.
 #
 # Registry publishes are deliberately *gated, optional* steps: `npm publish`
 # requires a granular NPM_TOKEN secret (the org enforces 2FA — see
-# sdks/typescript/README.md's publish note) and PyPI requires PYPI_API_TOKEN;
-# when a secret is absent the corresponding publish step is skipped rather than
-# failing the whole release, because the packed artifacts above are still produced
-# and attached either way.
+# sdks/typescript/README.md's publish note), PyPI requires PYPI_API_TOKEN, and
+# crates.io requires CARGO_REGISTRY_TOKEN; when a secret is absent the
+# corresponding publish step is skipped rather than failing the whole release,
+# because the packed artifacts above are still produced and attached either way.
 #
 # `workflow_dispatch` is the dry-run path (acceptance criterion): it runs every
 # build/pack job identically but pushes nothing — no image push, no registry
@@ -215,27 +217,171 @@ jobs:
 
       # Registry publishes: optional, gated on secrets being configured. Skipping
       # them never fails the release — the packed artifacts above ship regardless.
+      #
+      # The token check lives *inside* each script, deliberately. These two steps
+      # used to read `if: env.IS_RELEASE == 'true' && env.NODE_AUTH_TOKEN != ''`
+      # with the secret bound in the same step's `env:` — which can never be true.
+      # Per GitHub's own docs, "Secrets cannot be directly referenced in `if:`
+      # conditionals"; a step's own `env:` is not populated at the time its `if:`
+      # is evaluated. The result was a silent no-op: both steps reported `skipped`
+      # on every release run that has ever existed (v0.3.1, v0.3.2, v0.4.0), the
+      # job and the whole workflow still went green, and every version live on npm
+      # and PyPI was in fact published by hand. GitHub suggests hoisting the secret
+      # to job-level `env`, but that exposes it to every step in the job; checking
+      # in-script keeps it step-scoped and, unlike a false `if:`, leaves a log line
+      # saying why it skipped. Don't move these conditions back into `if:`.
       - name: Publish to npm (if NPM_TOKEN configured)
-        if: env.IS_RELEASE == 'true' && env.NODE_AUTH_TOKEN != ''
+        if: env.IS_RELEASE == 'true'
+        shell: bash
         working-directory: sdks/typescript
-        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "NPM_TOKEN is not configured — skipping the npm publish."
+            exit 0
+          fi
+          # npm has no --skip-existing; re-publishing a version is a hard 403.
+          # Check first so re-running a release is safe.
+          version="$(node -p 'require("./package.json").version')"
+          if npm view "@wovyr/sdk@${version}" version >/dev/null 2>&1; then
+            echo "@wovyr/sdk@${version} is already on npm — nothing to publish."
+            exit 0
+          fi
+          npm publish --access public
 
       - name: Publish to PyPI (if PYPI_API_TOKEN configured)
-        if: env.IS_RELEASE == 'true' && env.TWINE_PASSWORD != ''
+        if: env.IS_RELEASE == 'true'
+        shell: bash
         working-directory: sdks/python
-        run: |
-          python -m pip install --upgrade twine
-          python -m twine upload ../dist-python/*
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TWINE_PASSWORD:-}" ]]; then
+            echo "PYPI_API_TOKEN is not configured — skipping the PyPI publish."
+            exit 0
+          fi
+          python -m pip install --upgrade twine
+          # --skip-existing makes a re-run idempotent rather than a 400.
+          python -m twine upload --skip-existing ../dist-python/*
+
+  crates:
+    name: publish to crates.io
+    runs-on: ubuntu-latest
+    # 22 crates, each verified by a real build before upload.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # A re-run has to be safe. A partial publish is the likely failure mode at
+      # this size — one network hiccup two thirds of the way through leaves the
+      # release half-shipped, and a naive re-run would die immediately on "crate
+      # version already exists" for the very first crate, forcing a hand-driven
+      # recovery across whatever remains. Excluding what the index already
+      # carries makes recovery just "re-run the job".
+      #
+      # The sparse index (not the crates.io API) is the check: no rate limit, no
+      # User-Agent requirement, and it's the same source cargo itself resolves
+      # against. Versions come from `cargo metadata` per package rather than from
+      # the tag, so this stays correct even if a crate ever leaves the DX-101
+      # workspace-version lockstep.
+      - name: Determine which crates still need publishing
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Resolve the member list up front and assert it's non-empty. If this
+          # silently produced nothing, `pending` would be 0, the publish step's
+          # own `if` would skip it, and the release would report success having
+          # shipped nothing at all — the one failure mode here that wouldn't be
+          # obvious from a green run.
+          mapfile -t members < <(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.publish == null) | "\(.name) \(.version)"'
+          )
+          if [[ ${#members[@]} -eq 0 ]]; then
+            echo "::error::cargo metadata returned no publishable packages"
+            exit 1
+          fi
+
+          excludes=()
+          pending=0
+          for entry in "${members[@]}"; do
+            read -r name version <<<"$entry"
+            # Sparse-index paths bucket by name length; every crate here is >=4
+            # chars, so only the two-level form is implemented. Fail loudly
+            # rather than silently mis-checking if that ever stops being true.
+            if [[ ${#name} -lt 4 ]]; then
+              echo "::error::sparse-index path for short crate name '$name' is not handled"
+              exit 1
+            fi
+            index="https://index.crates.io/${name:0:2}/${name:2:2}/${name}"
+            # The index serves newline-delimited JSON, one object per version.
+            # A 404 (never published) or a transient failure both fall to the
+            # else branch: worst case we re-attempt a publish that then fails
+            # loudly on "already exists", rather than skipping one silently.
+            if curl -sfL "$index" | jq -e --arg v "$version" 'select(.vers == $v)' >/dev/null 2>&1; then
+              echo "already published: ${name} ${version}"
+              excludes+=(--exclude "$name")
+            else
+              echo "to publish:        ${name} ${version}"
+              pending=$((pending + 1))
+            fi
+          done
+
+          echo "pending=${pending}" >> "$GITHUB_OUTPUT"
+          echo "excludes=${excludes[*]:-}" >> "$GITHUB_OUTPUT"
+          echo "${pending} of ${#members[@]} crate(s) pending publish."
+
+      # The dry-run path for `workflow_dispatch`: packages and verifies every
+      # member exactly as a real publish would, but uploads nothing.
+      - name: Publish (dry run)
+        if: env.IS_RELEASE != 'true'
+        run: cargo publish --workspace --dry-run
+
+      # `--workspace` (Cargo 1.90+) derives the publish order from the dependency
+      # graph and verifies each member against the other *local* members, so all
+      # 22 go up in the right order with no hand-maintained list to drift out of
+      # date. `publish = false` members (wovyr-eval) are skipped automatically.
+      #
+      # The token check lives in the script rather than in `if:` so the skip
+      # leaves an explanatory line in the log instead of a silently grey step.
+      - name: Publish to crates.io (if CARGO_REGISTRY_TOKEN configured)
+        if: env.IS_RELEASE == 'true' && steps.plan.outputs.pending != '0'
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          # Via env rather than interpolated straight into the script: the value
+          # is repo-derived and trusted, but `${{ }}` into a shell body is the
+          # injection shape, and there's no reason to write it here.
+          EXCLUDES: ${{ steps.plan.outputs.excludes }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "CARGO_REGISTRY_TOKEN is not configured — skipping the crates.io publish."
+            echo "The packed artifacts and the GitHub Release still ship."
+            exit 0
+          fi
+          # Unquoted on purpose — the list must word-split into separate flags.
+          cargo publish --workspace ${EXCLUDES}
 
   release:
     name: GitHub release
     # A dry run stops after building everything; only a real tag mints a release.
     if: startsWith(github.ref, 'refs/tags/v')
+    # Deliberately *not* gated on `crates`: a crates.io outage shouldn't withhold
+    # the binaries and release notes, which are independently useful. A failed
+    # publish still turns the run red, so it can't pass unnoticed.
     needs: [binaries, image, sdks]
     runs-on: ubuntu-latest
     steps:
