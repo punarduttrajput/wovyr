@@ -4,7 +4,7 @@
 > platform written in Rust
 
 Version: **1.19.0**
-Status: **Active** — released `v0.4.0`. Roadmap milestones v0.1–v0.3, v1.0
+Status: **Active** — released `v0.4.1`. Roadmap milestones v0.1–v0.3, v1.0
 (engineering scope), v1.1, v1.2, v1.3, v1.5, and v1.6 are complete. **Still
 open:** v1.0's Tier-A validation track (GA-001…GA-005) and v1.4, which is 11 of
 20 tickets done — see the [roadmap index](18-roadmap/index.md). Milestone names

@@ -5,6 +5,14 @@ The SDK's version tracks the platform release it targets: same major.minor as
 fixes. `health()` warns (once per client) when it detects a server whose
 major.minor differs.
 
+## 0.4.1 — 2026-08-05
+
+- Version-only bump to stay in lockstep with the platform's 0.4.1 release. No
+  SDK code change — that release fixes the release pipeline itself, including
+  the PyPI publish step, which had never once run: it gated on a secret from
+  within `if:`, which cannot work, so every `wovyr-sdk` version on PyPI to date
+  was published by hand. 0.4.1 is the first version this pipeline publishes.
+
 ## 0.4.0 — 2026-08-01
 
 - Version-only bump to stay in lockstep with the platform's 0.4.0 release. No

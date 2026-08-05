@@ -10,7 +10,7 @@ CI regenerates and diffs this file, so drift fails the build (DX-304).
 
 **Document ID:** CLI-003  
 **File Path:** `docs/11-cli/commands.md`  
-**Version:** generated from `wovyr 0.4.0`  
+**Version:** generated from `wovyr 0.4.1`  
 **Status:** Generated (from the clap command tree)  
 **Owner:** AI Platform Team
 

@@ -12,7 +12,7 @@ import re
 from importlib import metadata
 from typing import Optional
 
-_FALLBACK_VERSION = "0.4.0"
+_FALLBACK_VERSION = "0.4.1"
 
 
 def sdk_version() -> str:

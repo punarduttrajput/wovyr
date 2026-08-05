@@ -11,6 +11,40 @@ each release links its own.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-08-05
+
+A patch release covering the release pipeline itself. No library, server, or
+CLI behavior changed.
+
+### Fixed
+
+- **Releases publish to crates.io.** The release workflow had no `cargo publish`
+  step at all, so the registry behind the README's own first quickstart command
+  (`cargo install wovyr-cli`) only ever advanced when somebody ran it by hand —
+  it sat at `0.3.2` while the repo, the README badge, and `/healthz` all
+  reported `0.4.0`. A new `crates` job publishes every publishable workspace
+  member with `cargo publish --workspace`, which derives the upload order from
+  the dependency graph rather than a hand-maintained list, behind a
+  sparse-index pre-flight that excludes anything already published at its
+  current version — so a partial run is recovered by re-running the job instead
+  of by hand.
+- **The npm and PyPI publish steps can run at all.** Both bound their token to
+  the step's own `env:` and then tested it in that same step's `if:` — a
+  condition that can never be true, since secrets cannot be referenced from
+  `if:` and a step's `env:` is not populated when its `if:` is evaluated. Both
+  steps reported `skipped` on every release run that has ever existed (v0.3.1,
+  v0.3.2, v0.4.0) while the job and the workflow still went green, which is why
+  every version currently live on npm and PyPI was in fact published manually.
+  The token check moved inside each script, where a skip leaves an explanatory
+  log line, and both publishes are now idempotent
+  (`twine upload --skip-existing`, plus an `npm view` pre-check since npm has no
+  equivalent flag).
+- **`@wovyr/angular`'s version tests no longer assert the wrong generation.**
+  They hardcoded `0.3.x` as the matching series and `0.4.0` as a mismatch, so
+  both inverted and began failing the moment `TARGET_SERVER_VERSION` moved to
+  `0.4.x` — undetected, because that package has no CI job. The fixtures now
+  derive from `TARGET_SERVER_VERSION`, so they stay correct across future bumps.
+
 ## [0.4.0] — 2026-08-01
 
 A minor bump rather than a patch: the Wasmtime upgrade below changes the
@@ -592,7 +626,8 @@ The runnable foundation slice ([docs/18-roadmap/v0.1.md](docs/18-roadmap/v0.1.md
 - The `docs/` specification tree (product → architecture → per-subsystem specs →
   ADRs → roadmap) that the codebase implements spec-first.
 
-[Unreleased]: https://github.com/punarduttrajput/wovyr/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/punarduttrajput/wovyr/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.4.1
 [0.4.0]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.4.0
 [0.3.2]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.2
 [0.3.1]: https://github.com/punarduttrajput/wovyr/releases/tag/v0.3.1

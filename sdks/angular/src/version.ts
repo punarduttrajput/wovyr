@@ -2,7 +2,8 @@
  *
  * The SDK's version tracks the platform release it was written against.
  * `@wovyr/angular` is a new client package (its own 0.1.x lineage) but is
- * written against **wovyr-server 0.3.x** — so the version handshake compares
+ * written against the platform release named by `TARGET_SERVER_VERSION`
+ * below — so the version handshake compares
  * the *server's* reported version against `TARGET_SERVER_VERSION`, not against
  * this package's own `SDK_VERSION` (which would be 0.1.x and would always
  * falsely warn). `SDK_VERSION` is kept in lockstep with `package.json` by the
@@ -11,7 +12,7 @@ export const SDK_VERSION = "0.1.0";
 
 /** The platform (`wovyr-server`) release this SDK targets. Same major.minor as
  * the server means the same API surface (DX-303). */
-export const TARGET_SERVER_VERSION = "0.4.0";
+export const TARGET_SERVER_VERSION = "0.4.1";
 
 /** Human-readable warning when the SDK and server disagree on major.minor —
  * `null` when they agree (patch-level differences are compatible by policy)

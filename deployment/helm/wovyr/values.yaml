@@ -8,7 +8,7 @@ wovyr:
     # FEATURES=tiered-memory,postgres to match the values below. Override for a
     # locally-built image (e.g. repository: wovyr, tag: dev).
     repository: ghcr.io/punarduttrajput/wovyr
-    tag: 0.4.0
+    tag: 0.4.1
     pullPolicy: IfNotPresent
   # Fixed at 1: wovyr's durable state (~/.wovyr/{tenancy,kms,secrets,webhooks,
   # workflows,memory,audit}) is local files on a PVC, not shared/replicated —
