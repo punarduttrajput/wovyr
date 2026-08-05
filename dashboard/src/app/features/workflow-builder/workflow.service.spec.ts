@@ -71,14 +71,38 @@ describe('WorkflowService.toWorkflowManifest', () => {
       name: 'http_get',
       inputs: { url: 'https://x' },
     });
-    // ai → instructions in name; empty `{}` inputs dropped
-    expect(summarize).toEqual({ id: 'summarize', type: 'ai', name: 'Summarize the page.' });
+    // ai → instructions become `inputs.prompt`, which is where the runtime reads the
+    // system message. This asserted `name: 'Summarize the page.'` until 2026-08-05,
+    // pinning a mapping nothing consumed: HLTH-901 moved the runtime onto
+    // `inputs.prompt`, so an `ai` step's instructions were silently discarded and it
+    // ran with the default "You are a helpful assistant."
+    expect(summarize).toEqual({
+      id: 'summarize',
+      type: 'ai',
+      inputs: { prompt: 'Summarize the page.' },
+    });
     expect(review).toEqual({
       id: 'review',
       type: 'agent',
       name: 'reviewer',
       inputs: { message: 'go' },
     });
+    // An explicit `prompt` in the raw inputs JSON outranks the form field, so the
+    // YAML/inputs editor stays authoritative over the designer.
+    const explicit = emit(
+      draft({
+        activities: [
+          { id: 'a', type: 'ai', name: 'from the form', inputs: '{"prompt":"from the editor"}', x: 0, y: 0 },
+        ],
+        transitions: [],
+      }),
+    );
+    expect(explicit.spec.activities[0]).toEqual({
+      id: 'a',
+      type: 'ai',
+      inputs: { prompt: 'from the editor' },
+    });
+
     // human → bare
     expect(gate).toEqual({ id: 'gate', type: 'human' });
     // wait → inputs: { event: <name> }
@@ -92,12 +116,25 @@ describe('WorkflowService.toWorkflowManifest', () => {
 
   it('round-trips names containing quotes/backslashes intact', () => {
     const hostile = 'Say "hi" c:\\path';
-    const m = emit(
+
+    // `function` keeps its instructions in `name`...
+    const asName = emit(
+      draft({
+        activities: [{ id: 'a', type: 'function', name: hostile, inputs: '', x: 0, y: 0 }],
+      }),
+    );
+    expect(asName.spec.activities[0]['name']).toBe(hostile);
+
+    // ...while `ai` routes them to `inputs.prompt`. Escaping has to hold on both
+    // paths, so assert both rather than only whichever one the mapping currently uses.
+    const asPrompt = emit(
       draft({
         activities: [{ id: 'a', type: 'ai', name: hostile, inputs: '', x: 0, y: 0 }],
       }),
     );
-    expect(m.spec.activities[0]['name']).toBe(hostile);
+    expect((asPrompt.spec.activities[0]['inputs'] as Record<string, unknown>)['prompt']).toBe(
+      hostile,
+    );
   });
 
   it('drops empty/`{}`/invalid inputs instead of emitting broken YAML', () => {

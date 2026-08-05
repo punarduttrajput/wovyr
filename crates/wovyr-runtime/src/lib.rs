@@ -382,13 +382,38 @@ impl ActivityExecutor for PlatformActivityExecutor {
                     request.response_format = Some(parsed);
                 }
                 match self.gateway.chat(request).await {
-                    Ok(resp) => Ok(json!({
-                        "message": resp.message.content.unwrap_or_default(),
-                        // RES-601: report this step's model usage so a `for_each`
-                        // wrapping it can enforce an aggregate budget. Additive —
-                        // `${activity.message}` references are unaffected.
-                        wovyr_workflow::USAGE_OUTPUT_KEY: usage_json(&resp.usage),
-                    })),
+                    Ok(resp) => {
+                        let message = resp.message.content.unwrap_or_default();
+                        // Empty content while the model still billed completion
+                        // tokens is the signature of a reasoning model whose
+                        // `max_tokens` was spent before it emitted anything visible.
+                        // The activity genuinely succeeded, so this stays a warning
+                        // rather than an error — but without it the run is
+                        // indistinguishable from success: state `completed`, usage
+                        // normal, and any downstream `${activity.message}` silently
+                        // interpolates an empty string. Observed 2026-08-05 with
+                        // `openai/gpt-oss-120b` at max_tokens=60, which returned ""
+                        // and 196 tokens; at 400 the same call answered correctly.
+                        if message.trim().is_empty() && resp.usage.completion_tokens > 0 {
+                            tracing::warn!(
+                                target: "wovyr.runtime.ai",
+                                activity = %ctx.id,
+                                model = %resp.model,
+                                completion_tokens = resp.usage.completion_tokens,
+                                "ai activity produced no visible content despite billed \
+                                 completion tokens — a reasoning model may have spent its \
+                                 max_tokens budget before emitting output; downstream \
+                                 ${{...}} references will resolve to an empty string"
+                            );
+                        }
+                        Ok(json!({
+                            "message": message,
+                            // RES-601: report this step's model usage so a `for_each`
+                            // wrapping it can enforce an aggregate budget. Additive —
+                            // `${activity.message}` references are unaffected.
+                            wovyr_workflow::USAGE_OUTPUT_KEY: usage_json(&resp.usage),
+                        }))
+                    }
                     Err(e) => Err(classify_gateway_error(e)),
                 }
             }

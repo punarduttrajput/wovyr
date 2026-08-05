@@ -230,22 +230,51 @@ export class WorkflowBuilder implements OnInit, OnDestroy {
   }
 
   // ── nodes ─────────────────────────────────────────────────────────────────────
+  /**
+   * Insert a step that is **runnable as inserted**, then wire it to the end of the
+   * current chain.
+   *
+   * Both halves used to be missing: a new step arrived with `inputs: '{}'` and no
+   * transition, so an `ai`/`agent` step had no prompt and no live inbound edge. The
+   * engine marks such a step `Skipped`, `Validate` still reports `Valid ✓` (the DAG
+   * is structurally legal), and the workflow completes green having never run it —
+   * which made "no YAML required" true only for tool steps.
+   *
+   * The seeded inputs are deliberately valid-but-obvious placeholders: they run, and
+   * they read as something to edit rather than as a finished step.
+   */
   addNode(type: WfActivityType): void {
     const n = this.draft.activities.length + 1;
+    const id = `step-${n}`;
     const defaultName =
       type === 'function'
         ? (this.toolCatalog()[0]?.id ?? 'echo')
         : type === 'agent'
           ? (this.agentCatalog()[0] ?? '')
-          : '';
+          : type === 'ai'
+            ? 'You are a helpful assistant. Answer concisely.'
+            : type === 'wait'
+              ? `${id}-signal`
+              : '';
+    // `${input.<field>}` references the run input, so these resolve against the
+    // Input JSON box without further editing.
+    const defaultInputs =
+      type === 'ai' || type === 'agent'
+        ? '{\n  "message": "${input.message}"\n}'
+        : '{}';
+
+    const previous = this.draft.activities.at(-1)?.id;
     this.draft.activities.push({
-      id: `step-${n}`,
+      id,
       type,
       name: defaultName,
-      inputs: '{}',
+      inputs: defaultInputs,
       x: 80 + ((n * 30) % 240),
       y: 60 + ((n * 40) % 200),
     });
+    // Chain onto the end so the step is reachable. A user rewiring the graph just
+    // deletes the edge — cheaper than discovering later that the step never ran.
+    if (previous) this.draft.transitions.push({ from: previous, to: id, when: '' });
     this.selected.set(this.draft.activities.length - 1);
   }
 

@@ -112,6 +112,39 @@ impl MemoryEngine {
         self
     }
 
+    /// Apply `WOVYR_MEMORY_RRF_K` if set, leaving the default otherwise.
+    ///
+    /// `k = 60` comes from the original RRF paper, tuned for TREC-scale candidate
+    /// pools. On a **small** corpus it is actively harmful: fusion scores are
+    /// `1/(k + rank)`, so over six documents the raw values span `1/61 … 1/66` and
+    /// normalise to a ~0.08 spread. All magnitude is discarded and only rank
+    /// survives — which means a document the keyword branch ranks first on a weak
+    /// lexical match outranks one the vector branch ranks first by a wide margin.
+    /// Measured 2026-08-05 on a six-record corpus: `vector` ranked the correct
+    /// answer first with a 0.08 margin, while `hybrid` put a spurious match first
+    /// and compressed everything into 0.954–1.000.
+    ///
+    /// A malformed or negative value is a warn-and-ignore rather than a failure —
+    /// a typo in a tuning knob shouldn't stop the memory engine starting.
+    pub fn with_rrf_k_from_env(self) -> Self {
+        match std::env::var("WOVYR_MEMORY_RRF_K") {
+            Ok(raw) => match raw.trim().parse::<f32>() {
+                Ok(k) if k >= 0.0 => {
+                    tracing::info!(target: "wovyr.memory", rrf_k = k, "RRF k overridden");
+                    self.with_rrf_k(k)
+                }
+                _ => {
+                    tracing::warn!(
+                        target: "wovyr.memory", value = %raw,
+                        "ignoring malformed WOVYR_MEMORY_RRF_K (want a non-negative number)"
+                    );
+                    self
+                }
+            },
+            Err(_) => self,
+        }
+    }
+
     /// Embed `content` and store it as a (public) memory; returns the new record id.
     pub async fn remember(
         &self,
