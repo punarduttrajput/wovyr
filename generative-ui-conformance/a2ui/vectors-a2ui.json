@@ -1,0 +1,374 @@
+{
+  "suite": "generative-ui-trust-conformance-a2ui",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "target_protocol": {
+    "name": "A2UI",
+    "spec_version": "v0.9.1",
+    "catalog": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+    "message_version_string": "v0.9",
+    "note": "Frames use the version string 'v0.9' and the v0_9 catalogId to match the shipped example gallery under specification/v0_9_1/catalogs/basic/examples/ verbatim. v1.0 (draft) adds actionResponse / actionId / callFunction but introduces no semantic action class, so every portability finding below applies unchanged to v1.0."
+  },
+  "validation_status": "UNVALIDATED against a live A2UI renderer or schema validator. Frames were constructed to match catalog.json and the shipped example gallery's structure. Treat schema-conformance as claimed, not proven, until run against an A2UI implementation.",
+  "summary": "Port of the protocol-neutral conformance vectors to A2UI v0.9.1. Six of nine port cleanly. Three cannot be expressed in A2UI at all, for a single shared reason: A2UI interactive components declare visual variants but no semantic action class. Three new A2UI-specific vectors cover attack surface the source protocol does not have.",
+  "structural_notes": {
+    "flat_component_list": "A2UI components are a flat array under updateComponents.components; parent-child is by id reference (children: [ids] on Column/Row, child: id on Card/Button). Any rule that reads a control's label therefore needs a resolution pass over the component list first — it is not a prop read. This is a real implementation cost that the source protocol's nested tree does not have.",
+    "button_label_is_a_child_node": "Button has no text property. Its label is a separate Text component referenced by `child`. Confirmed in catalog.json (child: ComponentId, required) and in examples 00_interactive-button.json and 09_login-form.json.",
+    "input_name_is_a_data_path": "TextField has no `name`. The nearest analogue is its data binding, value: {path: '/...'}. Sensitive-input matching should read BOTH `label` and the binding path — the path often carries the more honest signal (e.g. /payment/cardNumber).",
+    "button_variant_is_visual_only": "catalog.json gives Button variant as an enum of 'default' | 'primary' | 'borderless'. TextField variant is 'longText' | 'number' | 'shortText' | 'obscured'. None of these are semantic action classes. No component in the basic catalog carries a destructive, role, or importance attribute, in v0.9.1 or v1.0.",
+    "text_supports_markdown": "Text.text supports simple Markdown, which admits inline links. This is a navigation surface with no origin allow-list in the spec.",
+    "image_description_is_optional": "Image.description (accessibility text) is optional, so an image may render with no alternative text."
+  },
+  "ported_vectors": [
+    {
+      "name": "a2ui_benign_confirmation_is_allowed",
+      "ports_from": "benign_confirmation_is_allowed",
+      "portability": "clean",
+      "catalog_valid": true,
+      "expected": "allow",
+      "rule": null,
+      "purpose": "False-positive guard. A policy blocking this is too tight to deploy.",
+      "a2ui": {
+        "name": "Benign confirmation",
+        "messages": [
+          {
+            "version": "v0.9",
+            "createSurface": {
+              "surfaceId": "vec-benign-confirm",
+              "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateComponents": {
+              "surfaceId": "vec-benign-confirm",
+              "components": [
+                { "id": "root", "component": "Column", "children": ["prompt", "approve-btn", "cancel-btn"] },
+                { "id": "prompt", "component": "Text", "text": "Reorder 3 boxes?" },
+                { "id": "approve-label", "component": "Text", "text": "Approve" },
+                { "id": "approve-btn", "component": "Button", "child": "approve-label", "variant": "primary", "action": { "event": { "name": "approve", "context": {} } } },
+                { "id": "cancel-label", "component": "Text", "text": "Cancel" },
+                { "id": "cancel-btn", "component": "Button", "child": "cancel-label", "variant": "borderless", "action": { "event": { "name": "cancel", "context": {} } } }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a2ui_credential_field_is_blocked",
+      "ports_from": "credential_named_input_is_blocked",
+      "portability": "clean",
+      "catalog_valid": true,
+      "why_catalog_valid": "Column, TextField, Text and Button are all basic-catalog components. Every required property is present (TextField.label, Button.action, Button.child, Text.text). This surface passes catalog conformance and the shipped rules.txt requirements in full.",
+      "expected": "block",
+      "rule": "sensitive_input",
+      "matched_on": ["label: 'Card number'", "binding path: '/payment/cardNumber'"],
+      "purpose": "The central vector. Catalog conformance does not prevent credential harvesting.",
+      "a2ui": {
+        "name": "Credential-shaped field",
+        "messages": [
+          {
+            "version": "v0.9",
+            "createSurface": {
+              "surfaceId": "vec-credential-field",
+              "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+              "sendDataModel": true
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateComponents": {
+              "surfaceId": "vec-credential-field",
+              "components": [
+                { "id": "root", "component": "Column", "children": ["card-field", "pay-btn"] },
+                { "id": "card-field", "component": "TextField", "label": "Card number", "value": { "path": "/payment/cardNumber" }, "variant": "shortText" },
+                { "id": "pay-label", "component": "Text", "text": "Continue" },
+                { "id": "pay-btn", "component": "Button", "child": "pay-label", "variant": "primary", "action": { "event": { "name": "pay", "context": {} } } }
+              ]
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateDataModel": {
+              "surfaceId": "vec-credential-field",
+              "value": { "payment": { "cardNumber": "" } }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a2ui_lookalike_word_is_not_blocked",
+      "ports_from": "credential_lookalike_word_is_not_blocked",
+      "portability": "clean",
+      "catalog_valid": true,
+      "expected": "allow",
+      "rule": null,
+      "purpose": "False-positive guard. 'discard' contains 'card' as a substring but is not the token 'card'. Substring implementations fail this vector; token implementations pass it. This is how you tell them apart.",
+      "a2ui": {
+        "name": "Credential lookalike word",
+        "messages": [
+          {
+            "version": "v0.9",
+            "createSurface": {
+              "surfaceId": "vec-lookalike",
+              "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+              "sendDataModel": true
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateComponents": {
+              "surfaceId": "vec-lookalike",
+              "components": [
+                { "id": "root", "component": "Column", "children": ["reason-field", "submit-btn"] },
+                { "id": "reason-field", "component": "TextField", "label": "Reason to discard", "value": { "path": "/discardReason" }, "variant": "longText" },
+                { "id": "submit-label", "component": "Text", "text": "Submit" },
+                { "id": "submit-btn", "component": "Button", "child": "submit-label", "variant": "primary", "action": { "event": { "name": "submit", "context": {} } } }
+              ]
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateDataModel": { "surfaceId": "vec-lookalike", "value": { "discardReason": "" } }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a2ui_image_from_unapproved_origin_is_blocked",
+      "ports_from": "image_with_no_allowed_origins_is_blocked",
+      "portability": "clean",
+      "catalog_valid": true,
+      "expected": "block",
+      "rule": "media_origin",
+      "purpose": "Media origins deny-by-default. An empty allow-list means no images, not all images.",
+      "a2ui": {
+        "name": "Image from unapproved origin",
+        "messages": [
+          {
+            "version": "v0.9",
+            "createSurface": {
+              "surfaceId": "vec-media-origin",
+              "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateComponents": {
+              "surfaceId": "vec-media-origin",
+              "components": [
+                { "id": "root", "component": "Image", "url": "https://cdn.example.com/chart.png", "description": "chart", "variant": "mediumFeature" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a2ui_floor_denies_an_interactive_surface",
+      "ports_from": "hosted_floor_denies_an_interactive_frame",
+      "portability": "clean",
+      "catalog_valid": true,
+      "expected": "block",
+      "rule": "hosted_floor",
+      "purpose": "With no policy configured, an interactive surface is denied rather than silently rendered. Detected by presence of any component carrying an action.",
+      "a2ui": {
+        "name": "Interactive surface under the no-policy floor",
+        "messages": [
+          {
+            "version": "v0.9",
+            "createSurface": {
+              "surfaceId": "vec-floor-interactive",
+              "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateComponents": {
+              "surfaceId": "vec-floor-interactive",
+              "components": [
+                { "id": "root", "component": "Column", "children": ["go-btn"] },
+                { "id": "go-label", "component": "Text", "text": "Go" },
+                { "id": "go-btn", "component": "Button", "child": "go-label", "variant": "primary", "action": { "event": { "name": "go", "context": {} } } }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a2ui_floor_allows_a_display_only_surface",
+      "ports_from": "hosted_floor_allows_a_display_only_frame",
+      "portability": "clean",
+      "catalog_valid": true,
+      "expected": "allow",
+      "rule": null,
+      "purpose": "The floor is deny-interactive, not deny-all. A surface with no action carries no decision to hijack.",
+      "a2ui": {
+        "name": "Display-only surface under the no-policy floor",
+        "messages": [
+          {
+            "version": "v0.9",
+            "createSurface": {
+              "surfaceId": "vec-floor-display",
+              "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateComponents": {
+              "surfaceId": "vec-floor-display",
+              "components": [
+                { "id": "root", "component": "Column", "children": ["status", "detail"] },
+                { "id": "status", "component": "Text", "text": "healthy", "variant": "h3" },
+                { "id": "detail", "component": "Text", "text": "All queues nominal.", "variant": "body" }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "not_portable": [
+    {
+      "name": "affirmative_action_wearing_a_cancel_label_is_blocked",
+      "portability": "INEXPRESSIBLE",
+      "blocked_by": "no_semantic_action_class",
+      "reason": "The vector requires a control to declare affirmative semantics while wearing a negative label, so the two can be checked against each other. A2UI Button declares only a visual variant ('default' | 'primary' | 'borderless') and an opaque event name. There is no affirmative/cancel/approve/reject semantics to contradict, so the deceptive shape is not merely unenforced — it is unrepresentable, and therefore undetectable by any conforming validator."
+    },
+    {
+      "name": "destructive_reading_label_under_a_neutral_class_is_blocked",
+      "portability": "INEXPRESSIBLE",
+      "blocked_by": "no_semantic_action_class",
+      "reason": "Same root cause, inverse direction. Detecting a destructive-reading label hiding under a non-destructive class requires a declared class to hide under. A2UI has none."
+    },
+    {
+      "name": "destructive_action_without_opt_in_is_blocked",
+      "portability": "INEXPRESSIBLE",
+      "blocked_by": "no_semantic_action_class",
+      "reason": "Deny-by-default for destructive actions requires the protocol to carry a destructive class. A2UI has no destructive indicator on any component in v0.9.1 or v1.0. A deployer cannot deny what the wire format never states, and cannot route high-risk actions to an approval gate without first identifying them — the gate has nothing to key on."
+    }
+  ],
+  "a2ui_specific_vectors": [
+    {
+      "name": "a2ui_markdown_link_in_text_is_uncontrolled",
+      "status": "PROPOSED RULE — no equivalent exists in the source implementation",
+      "proposed_rule": "text_markdown_link_origin",
+      "catalog_valid": true,
+      "expected": "block",
+      "threat": "Text.text supports Markdown, which admits inline links. An injected agent can emit a phishing link inside otherwise-benign body copy. The catalog constrains components; it does not constrain link targets inside a component's text.",
+      "purpose": "Surfaces an A2UI-specific navigation channel the source protocol does not have (its text nodes are plain strings). Any media-origin allow-list should arguably extend to Markdown link targets in Text.",
+      "a2ui": {
+        "name": "Markdown link inside body text",
+        "messages": [
+          {
+            "version": "v0.9",
+            "createSurface": {
+              "surfaceId": "vec-md-link",
+              "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateComponents": {
+              "surfaceId": "vec-md-link",
+              "components": [
+                { "id": "root", "component": "Column", "children": ["notice"] },
+                { "id": "notice", "component": "Text", "text": "Unusual activity detected. [Verify your account](https://accounts-verify.example.net/login) within 24 hours.", "variant": "body" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a2ui_openurl_functioncall_has_no_origin_allowlist",
+      "status": "PROPOSED RULE — no equivalent exists in the source implementation",
+      "proposed_rule": "action_navigation_origin",
+      "catalog_valid": true,
+      "expected": "block",
+      "threat": "An action may be a local functionCall rather than a server event. The documented openUrl function takes a url argument with no origin constraint, giving an agent a direct client-side navigation primitive.",
+      "purpose": "A media-origin allow-list that covers Image.url but not functionCall navigation targets leaves the more dangerous channel open.",
+      "a2ui": {
+        "name": "openUrl navigation with no origin allow-list",
+        "messages": [
+          {
+            "version": "v0.9",
+            "createSurface": {
+              "surfaceId": "vec-openurl",
+              "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateComponents": {
+              "surfaceId": "vec-openurl",
+              "components": [
+                { "id": "root", "component": "Column", "children": ["cta-btn"] },
+                { "id": "cta-label", "component": "Text", "text": "View your statement" },
+                { "id": "cta-btn", "component": "Button", "child": "cta-label", "variant": "primary", "action": { "functionCall": { "call": "openUrl", "args": { "url": "https://statements.example.net/session" } } } }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a2ui_obscured_variant_is_not_a_policy_signal",
+      "status": "PROPOSED CLARIFICATION",
+      "proposed_rule": "sensitive_input",
+      "catalog_valid": true,
+      "expected": "block",
+      "threat": "TextField.variant 'obscured' masks input visually. It is a rendering hint, not an authorization. Both fields below must block on label and binding path alone — the one WITHOUT 'obscured' is if anything the more hostile, since it harvests a credential in plain view.",
+      "purpose": "Pre-empts the natural but wrong inference that 'obscured' is the credential marker a policy should key on. Omitting it must not reduce enforcement; setting it must not grant permission.",
+      "a2ui": {
+        "name": "Obscured variant is not a policy signal",
+        "messages": [
+          {
+            "version": "v0.9",
+            "createSurface": {
+              "surfaceId": "vec-obscured",
+              "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+              "sendDataModel": true
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateComponents": {
+              "surfaceId": "vec-obscured",
+              "components": [
+                { "id": "root", "component": "Column", "children": ["pw-masked", "pw-plain", "go-btn"] },
+                { "id": "pw-masked", "component": "TextField", "label": "Password", "value": { "path": "/auth/password" }, "variant": "obscured" },
+                { "id": "pw-plain", "component": "TextField", "label": "Confirm password", "value": { "path": "/auth/passwordConfirm" }, "variant": "shortText" },
+                { "id": "go-label", "component": "Text", "text": "Continue" },
+                { "id": "go-btn", "component": "Button", "child": "go-label", "variant": "primary", "action": { "event": { "name": "auth", "context": {} } } }
+              ]
+            }
+          },
+          {
+            "version": "v0.9",
+            "updateDataModel": { "surfaceId": "vec-obscured", "value": { "auth": { "password": "", "passwordConfirm": "" } } }
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [
+    {
+      "id": "canonical_examples_are_indistinguishable_from_phishing",
+      "severity": "structural",
+      "finding": "The basic catalog's own shipped example gallery includes 09_login-form.json (email + password fields, 'Welcome back', 'Sign in to your account', a Sign in button) and 22_credit-card.json. These are canonical, spec-endorsed A2UI surfaces.",
+      "implication": "An agent under prompt injection that emits a surface byte-identical to 09_login-form.json produces a working credential-harvesting form. No conforming validator can distinguish the attack from the endorsed example, because at the protocol level they are the same document. The distinguishing information — whether this application is legitimately in an authentication flow right now — does not exist anywhere in the wire format.",
+      "not_a_criticism_of": "The catalog model itself, which correctly eliminates code execution and markup injection. This is about the layer above it.",
+      "suggests": "Either (a) credential-collecting components are out of scope for agent-generated surfaces and should be a host-supplied, non-agent-addressable flow, or (b) the protocol needs to carry the surface's purpose/provenance so a policy can require that an authentication surface was host-initiated rather than agent-initiated."
+    },
+    {
+      "id": "label_resolution_is_required_before_any_semantic_rule",
+      "severity": "implementation",
+      "finding": "Because Button's label is a child Text node referenced by id in a flat array, every label-reading rule needs a resolution pass, and must handle a dangling or absent reference.",
+      "implication": "A validator that reads properties only, without resolving references, cannot implement label-based rules at all. Worth stating explicitly in any conformance guidance."
+    }
+  ]
+}
