@@ -1,0 +1,15 @@
+{
+  "name": "a2ui-conformance-validate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Validate the A2UI conformance vectors against A2UI's official JSON Schemas.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "schemas": "node fetch-schemas.js",
+    "test": "node validate.js && node negative-control.js"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1"
+  }
+}

@@ -9,7 +9,14 @@
     "message_version_string": "v0.9",
     "note": "Frames use the version string 'v0.9' and the v0_9 catalogId to match the shipped example gallery under specification/v0_9_1/catalogs/basic/examples/ verbatim. v1.0 (draft) adds actionResponse / actionId / callFunction but introduces no semantic action class, so every portability finding below applies unchanged to v1.0."
   },
-  "validation_status": "UNVALIDATED against a live A2UI renderer or schema validator. Frames were constructed to match catalog.json and the shipped example gallery's structure. Treat schema-conformance as claimed, not proven, until run against an A2UI implementation.",
+  "validation_status": {
+    "state": "VALIDATED against the official A2UI JSON Schemas",
+    "date": "2026-08-07",
+    "method": "All 9 surfaces (21 messages) validated against specification/v0_9_1/json/server_to_client.json, with specification/v0_9_1/catalogs/basic/catalog.json registered under the id its $ref resolves to. Validator: ajv 8.20.0 (JSON Schema draft 2020-12) -- the same validator A2UI's own conformance harness (specification/v0_9_1/test/run_tests.py) invokes via ajv-cli.",
+    "result": "9/9 surfaces pass, 21/21 messages pass.",
+    "negative_control": "11 deliberately malformed surfaces (unknown component type, Button missing action, variant outside enum, Text missing text, TextField missing label, Image missing url, unknown property, bad version, empty components array, two message keys, createSurface missing catalogId) were all correctly rejected, 0 leaked -- so the positive result is not vacuous.",
+    "remaining_caveat": "This proves schema conformance, not visual rendering. The surfaces have not been displayed in a renderer; that is a separate and weaker claim, since the schema is the normative artifact."
+  },
   "summary": "Port of the protocol-neutral conformance vectors to A2UI v0.9.1. Six of nine port cleanly. Three cannot be expressed in A2UI at all, for a single shared reason: A2UI interactive components declare visual variants but no semantic action class. Three new A2UI-specific vectors cover attack surface the source protocol does not have.",
   "structural_notes": {
     "flat_component_list": "A2UI components are a flat array under updateComponents.components; parent-child is by id reference (children: [ids] on Column/Row, child: id on Card/Button). Any rule that reads a control's label therefore needs a resolution pass over the component list first — it is not a prop read. This is a real implementation cost that the source protocol's nested tree does not have.",
@@ -363,6 +370,13 @@
       "implication": "An agent under prompt injection that emits a surface byte-identical to 09_login-form.json produces a working credential-harvesting form. No conforming validator can distinguish the attack from the endorsed example, because at the protocol level they are the same document. The distinguishing information — whether this application is legitimately in an authentication flow right now — does not exist anywhere in the wire format.",
       "not_a_criticism_of": "The catalog model itself, which correctly eliminates code execution and markup injection. This is about the layer above it.",
       "suggests": "Either (a) credential-collecting components are out of scope for agent-generated surfaces and should be a host-supplied, non-agent-addressable flow, or (b) the protocol needs to carry the surface's purpose/provenance so a policy can require that an authentication surface was host-initiated rather than agent-initiated."
+    },
+    {
+      "id": "semantic_class_cannot_be_added_as_a_private_extension",
+      "severity": "structural",
+      "finding": "The basic catalog's component schema uses `unevaluatedProperties`, so any property not declared by the component's own definition is rejected. Verified with ajv against catalog.json#/$defs/anyComponent: {\"id\":\"t\",\"component\":\"Text\",\"text\":\"hi\",\"role\":\"destructive\"} fails with `must NOT have unevaluated properties {unevaluatedProperty: \"role\"}`, while the same component without `role` validates.",
+      "implication": "A deployer cannot add a semantic action class as a private or vendor extension while staying schema-conformant. The only conforming options today are to fork the catalog -- losing the portability that motivates a framework-agnostic spec -- or to go without. This is why the proposal has to land in the spec rather than being solved downstream.",
+      "verified_by": "generative-ui-conformance validation run, 2026-08-07"
     },
     {
       "id": "label_resolution_is_required_before_any_semantic_rule",

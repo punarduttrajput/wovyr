@@ -34,6 +34,25 @@ AG-UI/A2UI](https://kenhuangus.substack.com/p/ag-ui-and-a2ui-protocols-explained
 names as Layer 7 *"UI Confusion / Deceptive Interfaces"*, with the example of a
 `"View Details"` button that triggers deletion.
 
+### And it can't be fixed downstream
+
+The catalog's component schema uses **`unevaluatedProperties`**, so a property the
+component's own definition doesn't declare is rejected outright. Verified with `ajv`
+against `catalog.json#/$defs/anyComponent`:
+
+```
+{"id":"t","component":"Text","text":"hi","role":"destructive"}
+  -> INVALID: must NOT have unevaluated properties {"unevaluatedProperty": "role"}
+
+{"id":"t","component":"Text","text":"hi"}
+  -> VALID
+```
+
+So a deployer **cannot** add a semantic action class as a private or vendor extension and
+stay schema-conformant. The only conforming options today are to fork the catalog — losing
+exactly the portability a framework-agnostic spec exists to provide — or to go without.
+That is why this has to land in the spec rather than being solved by each host downstream.
+
 ---
 
 ## The structural observation
@@ -102,15 +121,25 @@ needs cycle handling.
 
 ---
 
-## Status and caveats
+## Validation status
 
-**These vectors have not been run against a live A2UI renderer or schema validator.** They
-were constructed against `catalog.json` and the shipped example gallery's structure, and
-schema conformance is therefore *claimed, not proven*. Anyone with an A2UI implementation
-to hand who runs them and finds a frame that does not validate — please say so, that is a
-bug in this file, not in the argument.
+**All 9 surfaces validate against A2UI's official JSON Schemas.** Verified 2026-08-07:
+
+| | |
+|---|---|
+| Schema | `specification/v0_9_1/json/server_to_client.json`, with `catalogs/basic/catalog.json` registered under the id its `$ref` resolves to |
+| Validator | `ajv` 8.20.0, JSON Schema draft 2020-12 — the same validator A2UI's own conformance harness (`specification/v0_9_1/test/run_tests.py`) drives via `ajv-cli` |
+| Result | **9/9 surfaces pass, 21/21 messages pass** |
+| Negative control | 11 deliberately malformed surfaces — unknown component type, `Button` missing `action`, variant outside enum, missing required props, unknown property, bad version, empty `components`, two message keys, `createSurface` missing `catalogId` — **all 11 correctly rejected, 0 leaked** |
+
+The negative control matters: a validator that passes everything proves nothing. These
+surfaces pass a validator demonstrated to reject malformed input.
+
+**What this does not prove:** the surfaces have not been *displayed* in a renderer. That is
+a separate and weaker claim — the schema is the normative artifact, and a renderer's
+acceptance is an implementation detail on top of it.
 
 Frames use version string `"v0.9"` and the `v0_9` `catalogId` to match the shipped examples
-verbatim.
+verbatim; the schema's `version` enum accepts `"v0.9"` and `"v0.9.1"`.
 
 Apache-2.0, same as A2UI. Lift freely.
