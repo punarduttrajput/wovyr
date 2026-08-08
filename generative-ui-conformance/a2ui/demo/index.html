@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What a missing action class costs — A2UI trust layer demo</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1c1b19; --muted: #6b6864; --line: #e2e0dc;
+    --card: #fff; --accent: #2f5fd0; --block: #b3261e; --allow: #1d7a45;
+    --code: #f4f3f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a; --fg: #e8e6e3; --muted: #9a968f; --line: #2c2c33;
+      --card: #1e1e23; --accent: #7aa2f7; --block: #f2777a; --allow: #6ec48e;
+      --code: #23232a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 32px 24px 20px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 8px; font-size: 22px; letter-spacing: -.01em; }
+  header p { margin: 0; color: var(--muted); max-width: 70ch; }
+  main { display: grid; grid-template-columns: 260px 1fr 1fr; gap: 0; min-height: 60vh; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  nav { border-right: 1px solid var(--line); padding: 16px 0; }
+  nav h2, section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 8px; padding: 0 16px; font-weight: 600; }
+  nav h2:not(:first-child) { margin-top: 20px; }
+  .case { display: block; width: 100%; text-align: left; background: none; border: 0; border-left: 3px solid transparent; padding: 8px 16px; color: var(--fg); font: inherit; font-size: 13.5px; cursor: pointer; }
+  .case:hover { background: var(--code); }
+  .case[aria-current="true"] { border-left-color: var(--accent); background: var(--code); font-weight: 600; }
+  section { padding: 16px 20px; border-right: 1px solid var(--line); overflow: auto; }
+  section:last-child { border-right: 0; }
+  pre { background: var(--code); padding: 12px; border-radius: 6px; overflow-x: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0 0 16px; }
+  .verdict { display: inline-block; padding: 4px 10px; border-radius: 999px; font-weight: 700; font-size: 13px; letter-spacing: .02em; }
+  .verdict.block { background: color-mix(in srgb, var(--block) 15%, transparent); color: var(--block); }
+  .verdict.allow { background: color-mix(in srgb, var(--allow) 15%, transparent); color: var(--allow); }
+  .rule { font: 12px ui-monospace, monospace; color: var(--muted); margin-left: 8px; }
+  .reason { color: var(--muted); font-size: 13.5px; margin: 10px 0 16px; }
+  .notes li { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .cmp { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 16px; background: var(--card); }
+  .cmp div { margin-bottom: 6px; font-size: 13.5px; }
+  .cmp .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  /* naive A2UI render */
+  .surface { border: 1px solid var(--line); border-radius: 8px; padding: 16px; background: var(--card); margin-bottom: 16px; }
+  .surface .col { display: flex; flex-direction: column; gap: 10px; }
+  .surface .row { display: flex; gap: 10px; align-items: center; }
+  .surface button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--code); color: var(--fg); cursor: default; }
+  .surface button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  .surface label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+  .surface input { font: inherit; padding: 6px 8px; width: 100%; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--fg); }
+  .surface hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+  .banner { padding: 10px 14px; border-radius: 6px; font-size: 13.5px; margin-bottom: 16px; }
+  .banner.warn { background: color-mix(in srgb, var(--block) 12%, transparent); color: var(--block); }
+  footer { padding: 20px 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>What a missing action class costs</h1>
+  <p>The <a href="https://github.com/punarduttrajput/wovyr/tree/main/generative-ui-conformance">wovyr generative-UI trust layer</a>,
+  compiled to WebAssembly, evaluating real <a href="https://github.com/a2ui-project/a2ui">A2UI</a> surfaces in your browser.
+  Every surface below is schema-valid and catalog-conformant. Watch what policy can and cannot say about them.
+  Context: <a href="https://github.com/a2ui-project/a2ui/issues/2197">a2ui-project/a2ui#2197</a>.</p>
+</header>
+
+<main>
+  <nav id="nav"></nav>
+  <section>
+    <h2>The surface, as a user sees it</h2>
+    <div id="render" class="surface"></div>
+    <h2>A2UI messages</h2>
+    <pre id="src"></pre>
+  </section>
+  <section>
+    <h2>Trust layer verdict</h2>
+    <div id="banner"></div>
+    <div id="verdict"></div>
+    <div class="reason" id="reason"></div>
+    <div id="cmp"></div>
+    <h2>Adapter notes — what was lost in translation</h2>
+    <ul class="notes" id="notes"></ul>
+  </section>
+</main>
+
+<footer>
+  Apache-2.0. The wasm module has <strong>zero imports</strong> — no wasm-bindgen, no framework, no backend.
+  Policy runs entirely client-side.
+</footer>
+
+<script type="module">
+// ---- 20-line shim over the raw wasm: JSON in, JSON out ----
+const wasm = await WebAssembly.instantiateStreaming(fetch('./a2ui_trust_demo.wasm'), {});
+const x = wasm.instance.exports;
+const enc = new TextEncoder(), dec = new TextDecoder();
+function evaluate(messages, policy = 'default') {
+  const buf = enc.encode(JSON.stringify({ messages, policy }));
+  const p = x.alloc(buf.length);
+  new Uint8Array(x.memory.buffer, p, buf.length).set(buf);
+  const packed = BigInt(x.evaluate_a2ui(p, buf.length));
+  x.dealloc(p, buf.length);
+  const ptr = Number(packed >> 32n), len = Number(packed & 0xffffffffn);
+  return JSON.parse(dec.decode(new Uint8Array(x.memory.buffer, ptr, len)));
+}
+
+// ---- fixtures ----
+const inex = await (await fetch('./inexpressible.json')).json();
+const vecs = await (await fetch('../vectors-a2ui.json')).json();
+
+const groups = [
+  { label: 'Inexpressible in A2UI', items: inex.cases.map(c => ({
+      name: c.name, messages: c.messages, blurb: c.what_it_is,
+      wovyr: c.in_wovyr, a2ui: c.in_a2ui, policy: 'default' })) },
+  { label: 'Ported conformance vectors', items: [...vecs.ported_vectors, ...vecs.a2ui_specific_vectors]
+      .map(v => ({ name: v.name, messages: v.a2ui.messages, blurb: v.purpose || v.threat || '',
+        policy: v.rule === 'hosted_floor' ? 'floor' : 'default' })) },
+];
+
+// ---- naive A2UI renderer (display only; nothing is clickable) ----
+function byId(messages) {
+  const m = new Map();
+  for (const msg of messages)
+    for (const c of (msg.updateComponents?.components ?? [])) m.set(c.id, c);
+  return m;
+}
+function dyn(v, data) {
+  if (typeof v === 'string') return v;
+  if (v && v.path) {
+    let cur = data;
+    for (const s of v.path.split('/').filter(Boolean)) cur = cur?.[s];
+    return typeof cur === 'string' ? cur : '';
+  }
+  return '';
+}
+function dataOf(messages) {
+  let d = {};
+  for (const m of messages) if (m.updateDataModel?.value) d = { ...d, ...m.updateDataModel.value };
+  return d;
+}
+function render(c, map, data, depth = 0) {
+  if (!c || depth > 32) return document.createTextNode('');
+  const kids = (c.children ?? []).map(id => render(map.get(id), map, data, depth + 1));
+  const el = (t, cls) => { const e = document.createElement(t); if (cls) e.className = cls; return e; };
+  switch (c.component) {
+    case 'Column': case 'List': { const d = el('div', 'col'); kids.forEach(k => d.append(k)); return d; }
+    case 'Row': { const d = el('div', 'row'); kids.forEach(k => d.append(k)); return d; }
+    case 'Card': { const d = el('div', 'col'); d.append(render(map.get(c.child), map, data, depth + 1)); return d; }
+    case 'Divider': return el('hr');
+    case 'Text': {
+      const t = dyn(c.text, data);
+      const d = el('div');
+      if (/^h[1-5]$/.test(c.variant ?? '')) { d.style.fontWeight = '700'; d.style.fontSize = '17px'; }
+      // render markdown links as links, which is the point of that vector
+      d.innerHTML = t.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, a, b) => `<a href="${b}" onclick="return false">${a}</a>`);
+      return d;
+    }
+    case 'Image': { const i = el('img'); i.src = dyn(c.url, data); i.alt = dyn(c.description, data);
+      i.style.maxWidth = '100%'; i.style.borderRadius = '6px'; return i; }
+    case 'TextField': { const w = el('div');
+      const l = el('label'); l.textContent = dyn(c.label, data); w.append(l);
+      const i = el('input'); i.type = c.variant === 'obscured' ? 'password' : 'text';
+      i.placeholder = ''; i.disabled = true; w.append(i); return w; }
+    case 'Button': { const b = el('button', c.variant === 'primary' ? 'primary' : '');
+      b.textContent = dyn(map.get(c.child)?.text, data); return b; }
+    default: { const d = el('div'); d.textContent = `[${c.component}]`; return d; }
+  }
+}
+
+// ---- UI ----
+const nav = document.getElementById('nav');
+let current = null;
+for (const g of groups) {
+  const h = document.createElement('h2'); h.textContent = g.label; nav.append(h);
+  for (const item of g.items) {
+    const b = document.createElement('button');
+    b.className = 'case'; b.textContent = item.name.replace(/_/g, ' ');
+    b.onclick = () => select(item, b);
+    nav.append(b);
+  }
+}
+
+function select(item, btn) {
+  document.querySelectorAll('.case').forEach(b => b.removeAttribute('aria-current'));
+  btn.setAttribute('aria-current', 'true');
+  current = item;
+
+  const map = byId(item.messages), data = dataOf(item.messages);
+  const host = document.getElementById('render');
+  host.replaceChildren(render(map.get('root'), map, data));
+  document.getElementById('src').textContent = JSON.stringify(item.messages, null, 2);
+
+  const r = evaluate(item.messages, item.policy);
+  const v = document.getElementById('verdict');
+  const cls = r.verdict === 'block' ? 'block' : 'allow';
+  v.innerHTML = `<span class="verdict ${cls}">${r.verdict.toUpperCase()}</span>` +
+    (r.rule ? `<span class="rule">${r.rule}</span>` : '');
+  document.getElementById('reason').textContent = r.reason ?? item.blurb ?? '';
+
+  const banner = document.getElementById('banner');
+  banner.className = ''; banner.textContent = '';
+  if (item.wovyr && r.verdict === 'allow') {
+    banner.className = 'banner warn';
+    banner.textContent = 'This surface passes policy through A2UI — but the same intent, declared in a protocol that carries an action class, is blocked.';
+  }
+
+  const cmp = document.getElementById('cmp');
+  cmp.replaceChildren();
+  if (item.wovyr) {
+    const box = document.createElement('div'); box.className = 'cmp';
+    box.innerHTML = `<div class="k">With a declared action class</div><div>${item.wovyr}</div>` +
+      `<div class="k" style="margin-top:10px">Through A2UI today</div><div>${item.a2ui}</div>`;
+    cmp.append(box);
+  }
+
+  const notes = document.getElementById('notes');
+  notes.replaceChildren();
+  for (const n of (r.adapter_notes ?? [])) {
+    const li = document.createElement('li'); li.textContent = n; notes.append(li);
+  }
+  if (!(r.adapter_notes ?? []).length) {
+    const li = document.createElement('li'); li.textContent = 'None — this surface translated without loss.';
+    notes.append(li);
+  }
+}
+
+document.querySelector('.case').click();
+</script>
+</body>
+</html>
