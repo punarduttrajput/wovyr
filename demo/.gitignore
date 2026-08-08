@@ -1,0 +1,17 @@
+# Scratch from a run. The real outputs (demo.cast, transcript.json,
+# player.html) are committed on purpose — they are the deliverable.
+out/run.log
+
+# A --fast run is a correctness gate, not a take. Its outputs exist only to be
+# inspected when the gate fails.
+out/fast-*
+
+# Rendered media and inspection frames: regenerate with cast2video rather than
+# carrying megabytes of binaries in git history.
+out/demo.mp4
+out/demo.gif
+out/frames/
+out/check/
+
+# Rust build output for the renderer.
+cast2video/target/
