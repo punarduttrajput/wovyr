@@ -1,0 +1,6 @@
+target/
+Cargo.lock
+result.json
+# Build output, copied next to index.html by the build step in README.md.
+# Committed only when publishing to GitHub Pages.
+a2ui_trust_demo.wasm

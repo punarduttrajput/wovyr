@@ -1,0 +1,71 @@
+{
+  "title": "What the missing action class costs",
+  "description": "The three conformance vectors that could not be ported to A2UI, written anyway as valid A2UI surfaces. They are perfectly expressible as *pictures* -- what cannot be expressed is the control's declared intent, which is what policy needs. Each is schema-valid and catalog-conformant. Run them and watch policy have nothing to say.",
+  "note": "These are deliberately NOT in vectors-a2ui.json. A conformance vector asserts an expected verdict; there is nothing to conform to here, because the information a rule would evaluate does not exist in the wire format.",
+  "cases": [
+    {
+      "name": "affirmative_action_wearing_a_cancel_label",
+      "source_vector": "affirmative_action_wearing_a_cancel_label_is_blocked",
+      "what_it_is": "A button labelled \"Cancel\" that actually confirms a purchase. The user believes they are backing out.",
+      "in_wovyr": "BLOCKED (intent_mismatch) -- the control declares class `confirm` while its label reads as backing out, and the two contradict.",
+      "in_a2ui": "ALLOWED. There is no class to contradict. `variant` is visual only, and the event name `confirm_purchase` is an opaque string the agent chose -- policy cannot treat it as a declaration.",
+      "messages": [
+        { "version": "v0.9", "createSurface": { "surfaceId": "inex-cancel-label", "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json" } },
+        { "version": "v0.9", "updateComponents": { "surfaceId": "inex-cancel-label", "components": [
+          { "id": "root", "component": "Column", "children": ["prompt", "btn"] },
+          { "id": "prompt", "component": "Text", "text": "Complete your order?" },
+          { "id": "btn-label", "component": "Text", "text": "Cancel" },
+          { "id": "btn", "component": "Button", "child": "btn-label", "variant": "borderless", "action": { "event": { "name": "confirm_purchase", "context": {} } } }
+        ] } }
+      ]
+    },
+    {
+      "name": "destructive_action_without_opt_in",
+      "source_vector": "destructive_action_without_opt_in_is_blocked",
+      "what_it_is": "An irreversible action presented with no approval gate.",
+      "in_wovyr": "BLOCKED (destructive_action) -- the control declares class `destructive`, which policy denies unless explicitly opted in.",
+      "in_a2ui": "ALLOWED unless the label happens to contain an English destructive word. Nothing is ever *declared* destructive, so deny-by-default has no signal to key on and an approval gate has nothing to trigger on.",
+      "messages": [
+        { "version": "v0.9", "createSurface": { "surfaceId": "inex-destructive", "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json" } },
+        { "version": "v0.9", "updateComponents": { "surfaceId": "inex-destructive", "components": [
+          { "id": "root", "component": "Column", "children": ["warn", "btn"] },
+          { "id": "warn", "component": "Text", "text": "This cannot be undone." },
+          { "id": "btn-label", "component": "Text", "text": "Proceed" },
+          { "id": "btn", "component": "Button", "child": "btn-label", "variant": "primary", "action": { "event": { "name": "purge_all_records", "context": {} } } }
+        ] } }
+      ]
+    },
+    {
+      "name": "destructive_reading_label_under_a_neutral_class",
+      "source_vector": "destructive_reading_label_under_a_neutral_class_is_blocked",
+      "what_it_is": "A destructive effect wearing a benign label -- the MAESTRO Layer 7 example, a \"View Details\" button that deletes.",
+      "in_wovyr": "Also NOT caught, and honestly so. wovyr inspects the label against the declared class; here both are benign. The lie is in the action's server-side effect, outside the frame entirely. Documented as a known gap.",
+      "in_a2ui": "ALLOWED, for the same reason plus a second one: there is no class to check against even if the label were suspicious.",
+      "messages": [
+        { "version": "v0.9", "createSurface": { "surfaceId": "inex-benign-label", "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json" } },
+        { "version": "v0.9", "updateComponents": { "surfaceId": "inex-benign-label", "components": [
+          { "id": "root", "component": "Column", "children": ["title", "btn"] },
+          { "id": "title", "component": "Text", "text": "Account summary" },
+          { "id": "btn-label", "component": "Text", "text": "View Details" },
+          { "id": "btn", "component": "Button", "child": "btn-label", "variant": "primary", "action": { "event": { "name": "account.delete", "context": {} } } }
+        ] } }
+      ]
+    },
+    {
+      "name": "control_case_the_label_heuristic_that_does_fire",
+      "source_vector": null,
+      "what_it_is": "A legitimate delete button, honestly labelled. Included as the control that shows why label heuristics are not a substitute for a declared class.",
+      "in_wovyr": "ALLOWED if it declares class `destructive` and policy opts in -- the declaration is what makes it legible.",
+      "in_a2ui": "BLOCKED (intent_mismatch) -- and this is a FALSE POSITIVE. The adapter must force every button to `neutral`, so an honest destructive label looks like a class-downgrade evasion. Without a declared class the only options are to block every destructive-sounding label including legitimate ones, or to catch none of them.",
+      "messages": [
+        { "version": "v0.9", "createSurface": { "surfaceId": "inex-honest-delete", "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json" } },
+        { "version": "v0.9", "updateComponents": { "surfaceId": "inex-honest-delete", "components": [
+          { "id": "root", "component": "Column", "children": ["title", "btn"] },
+          { "id": "title", "component": "Text", "text": "Remove this saved address?" },
+          { "id": "btn-label", "component": "Text", "text": "Delete address" },
+          { "id": "btn", "component": "Button", "child": "btn-label", "variant": "primary", "action": { "event": { "name": "address.remove", "context": {} } } }
+        ] } }
+      ]
+    }
+  ]
+}

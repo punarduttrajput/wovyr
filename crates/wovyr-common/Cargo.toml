@@ -8,7 +8,12 @@ repository.workspace = true
 description = "Shared types, errors, and primitives for the Wovyr AI Platform."
 
 [dependencies]
-fs2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+# `fs2` backs `fs::FileLock` (flock/LockFileEx) and does not build for
+# wasm32-unknown-unknown, which has no filesystem to lock. The whole `fs`
+# module is gated out on that target in lib.rs, so nothing references it there.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fs2.workspace = true
