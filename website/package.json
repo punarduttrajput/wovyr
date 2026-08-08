@@ -6,8 +6,9 @@
   "scripts": {
     "sync": "node scripts/sync-docs.mjs",
     "og": "node scripts/generate-og-image.mjs",
-    "dev": "npm run sync && npm run og && astro dev",
-    "build": "npm run sync && npm run og && astro build",
+    "demo": "node scripts/sync-demo.mjs",
+    "dev": "npm run sync && npm run og && npm run demo && astro dev",
+    "build": "npm run sync && npm run og && npm run demo && astro build",
     "preview": "astro preview"
   },
   "dependencies": {

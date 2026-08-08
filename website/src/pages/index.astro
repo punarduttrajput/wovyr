@@ -11,6 +11,20 @@
 // Preload the three faces actually used above the fold (Archivo variable, and
 // IBM Plex Mono 400/500) so the display face isn't waiting on CSSOM discovery —
 // the same reasoning as the retired page's JetBrains Mono preload.
+// WEB-305: the face declarations are imported HERE, not via
+// `@import "../styles/landing-fonts.css"` inside the <style is:global> block
+// below, which is where they used to live. Vite does not resolve a
+// node_modules stylesheet's own relative `url(./files/…)` when it is reached
+// through a CSS @import chain nested in an Astro component style — the built
+// bundle kept the literal `files/archivo-latin-wght-normal.woff2`, which
+// resolves against /_astro/ and 404s. Every @font-face on the page failed, so
+// the whole plate-atlas identity (DESIGN-system.md §3) silently rendered in
+// system-ui and a system mono, on production, while the hashed font files sat
+// in /_astro/ unreferenced. As a frontmatter import it is a real Vite entry
+// and the URLs are rewritten to the hashed emitted assets — the same reason
+// the docs' fonts.css works through Starlight's `customCss`.
+import '../styles/landing-fonts.css';
+
 import archivoUrl from '@fontsource-variable/archivo/files/archivo-latin-wght-normal.woff2?url';
 import monoRegularUrl from '@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2?url';
 import monoMediumUrl from '@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-500-normal.woff2?url';
@@ -20,9 +34,13 @@ const CONTACT = 'contact@wovyr.com';
 const SITE = 'https://wovyr.com';
 const REPO = 'https://github.com/punarduttrajput/wovyr';
 const OG_IMAGE = `${SITE}/og.png`;
-const TITLE = 'Wovyr — The trust layer for AI-generated interfaces';
+// The <h1> stays the figurative line the whole design system is built on; the
+// title and description are the surfaces a reader meets *without* the page —
+// a search result, a shared link, an answer engine's summary — so they carry
+// the plain claim instead. Same product, stated from the buyer's side.
+const TITLE = 'Wovyr — Policy and an audit trail for AI-generated interfaces';
 const DESCRIPTION =
-  'Wovyr checks every interface an AI agent generates against policy, cuts what fails before it renders, records what was shown in a tamper-evident chain, and holds the work until a human decides. Apache-2.0, self-hosted, one Rust binary.';
+  'Wovyr checks every interface your AI agents generate against policy before it renders, refuses what fails, and records the exact frame the user saw in a tamper-evident hash chain — then holds the work until a human decides. Watch it cut a credential form and survive a kill -9 in the 90-second demo. Apache-2.0, self-hosted, one Rust binary.';
 
 /**
  * GEO-103: the FAQ is the source for both the rendered section and the
@@ -45,6 +63,10 @@ const FAQ = [
   {
     q: 'Why do AI-generated interfaces need a trust layer?',
     a: 'Because the assumption that a person reviewed the screen no longer holds. A model can compose a convincing payment form or a mislabelled confirm button for one user, once, and nobody reviewed it. Prompt injection does not have to change the answer to be dangerous — it only has to change the button. And when a user later says the interface told them to approve something, you need the exact frame they saw, which is only possible if something kept it.',
+  },
+  {
+    q: 'Can I watch Wovyr block something before I install it?',
+    a: 'Yes. The repository ships a 90-second recorded run with five beats: a poisoned agent composes a checkout frame asking for a card number and policy cuts it; the safe variant presents, is content-hashed and pends on a human; the server is killed mid-flight and resumes on the same frame; an action the frame never declared is refused; and the whole session is re-read from the audit chain and verified link by link. The replay is a self-contained page on this site, and the driver that produced it is also a test — every beat is asserted, so a green run is evidence rather than narration. Reproduce it yourself with node demo/killer-demo.mjs.',
   },
   {
     q: 'How is Wovyr different from an LLM guardrail or content filter?',
@@ -81,7 +103,9 @@ const FAQ = [
   <link rel="preload" href={archivoUrl} as="font" type="font/woff2" crossorigin />
   <link rel="preload" href={monoRegularUrl} as="font" type="font/woff2" crossorigin />
   <link rel="preload" href={monoMediumUrl} as="font" type="font/woff2" crossorigin />
-  <title>Wovyr — The trust layer for AI-generated interfaces</title>
+  {/* The same TITLE the og:/twitter: tags use — it was a duplicated literal
+      here, which is exactly how a title and its share card drift apart. */}
+  <title>{TITLE}</title>
   <meta name="description" content={DESCRIPTION} />
   <link rel="canonical" href={`${SITE}/`} />
   <link rel="sitemap" href="/sitemap-index.xml" />
@@ -140,7 +164,8 @@ const FAQ = [
   </script>
 
 <style is:global>
-  @import "../styles/landing-fonts.css";
+  /* landing-fonts.css is imported from the frontmatter instead — see the note
+     there. Reaching it through an @import here breaks every @font-face. */
 
   /* ================================================================ TOKENS
      Scoped to this page. The canonical cross-surface token file
@@ -231,7 +256,10 @@ const FAQ = [
     border:1px solid var(--warp-2); background:none; color:var(--ink-2); font-size:12px}
   .tg:hover{color:var(--indigo); border-color:var(--indigo)}
   @media(pointer:coarse){ .tg{width:44px; height:44px} }
-  @media(max-width:820px){ .nl a:not(.keep){display:none} }
+  /* WEB-305 raised this from 820px: the bar gained "Demo" and "Partners", and
+     at nine items the row starts colliding with the wordmark before the old
+     breakpoint ever fires. Collapse earlier rather than let it overlap. */
+  @media(max-width:940px){ .nl a:not(.keep){display:none} }
 
   /* ================================================================== HERO */
   .hero{min-height:min(90svh,900px); display:flex; align-items:center;
@@ -241,6 +269,13 @@ const FAQ = [
   @media(max-width:900px){ .hero-g{grid-template-columns:1fr} }
   .plate-no{display:flex; align-items:center; gap:12px; margin-bottom:24px}
   .plate-no::after{content:""; flex:1; height:1px; background:var(--warp-2)}
+  /* The plain sentence above the figurative headline. A reader who has never
+     heard of the product should not have to parse a metaphor to learn what it
+     is — but the metaphor is the identity, so this sits *before* it rather
+     than replacing it. Deliberately not `.ann`: mono caps at .13em tracking is
+     a draftsman's mark, and an 82-character sentence set that way is unreadable. */
+  .claim{max-width:54ch; color:var(--ink-2); font-size:.94rem;
+    line-height:1.55; margin-bottom:18px}
   .hero h1{font-size:clamp(2.2rem,5vw,3.7rem); margin-bottom:22px}
   .hero h1 span{color:var(--indigo)}
   .hero p.sub{max-width:50ch; color:var(--ink-2);
@@ -313,6 +348,15 @@ const FAQ = [
   .reg .nm{font-weight:600; font-size:1.02rem}
   .reg .ds{color:var(--ink-2); font-size:.93rem}
   @media(max-width:680px){ .reg > div{grid-template-columns:36px 1fr} .reg .ds{grid-column:2} }
+
+  /* Verdict mark on a register row (Plate 05's beats). Madder appears here on
+     exactly the two beats where policy cut something, which is the one use §2
+     reserves it for — beat 03 kills a process and beat 05 reports an earlier
+     block, and neither is itself a cut, so both are indigo. */
+  .vd{font-family:var(--mono); font-size:10.5px; letter-spacing:.13em;
+    text-transform:uppercase; font-weight:500; white-space:nowrap; margin-left:10px}
+  .vd.cut{color:var(--madder)}
+  .vd.snd{color:var(--indigo)}
 
   .candor{margin-top:22px; background:var(--paper-2); border-left:3px solid var(--madder);
     padding:16px 18px; color:var(--ink-2); font-size:.93rem}
@@ -488,8 +532,9 @@ const FAQ = [
     <svg viewBox="0 0 100 100" aria-hidden="true"><path fill="currentColor" d="M50 26 L34 30 L18 6 L22 38 L12 52 L22 60 L16 72 L30 74 L36 64 L40 86 L44 94 L50 97 L56 94 L60 86 L64 64 L70 74 L84 72 L78 60 L88 52 L78 38 L82 6 L66 30 Z"/></svg>
     wovyr</a>
   <nav class="nl" aria-label="Primary">
-    <a href="#shuttle">The shuttle</a><a href="#loom">The loom</a>
-    <a href="#open">Open source</a><a href="#faq">FAQ</a>
+    <a href="#shuttle">The shuttle</a><a href="#demo">Demo</a>
+    <a href="#loom">The loom</a><a href="#open">Open source</a>
+    <a href="#partners">Partners</a><a href="#faq">FAQ</a>
     <a href="/00-executive/vision/">Docs</a>
     <a href="https://github.com/punarduttrajput/wovyr">GitHub</a>
     <a class="keep" href="#start">Start</a>
@@ -502,6 +547,8 @@ const FAQ = [
   <div class="hero-g">
     <div class="sel">
       <div class="plate-no"><span class="ann">Plate 01 — Wovyr</span></div>
+      <p class="claim">Policy checks and a tamper-evident record for every screen your AI
+        agents generate.</p>
       <h1>Something is weaving your interfaces. <span>Something should be checking every thread.</span></h1>
       <p class="sub">Your agents compose screens at runtime — thread by thread, for one
         person, reviewed by nobody. Wovyr is the loom: it checks each thread against
@@ -509,7 +556,11 @@ const FAQ = [
         can prove, and holds the work until a human decides.</p>
       <div class="acts">
         <a class="b b-fill" href="#start">Run it in 5 minutes</a>
-        <a class="b b-line" href="#shuttle">See the pass</a>
+        {/* Was "See the pass" → #shuttle, the diagram of the four checks. The
+            recorded run is the stronger second click: it is the same four
+            checks, but as something that visibly happened rather than
+            something claimed. The diagram is still the next section down. */}
+        <a class="b b-line" href="#demo">Watch it cut a frame</a>
       </div>
     </div>
     <div class="figure">
@@ -589,8 +640,55 @@ const FAQ = [
   </div>
 </div></section>
 
+{/* WEB-305. The recorded run already existed in `demo/` and was reachable only
+    by cloning the repository — the one artefact on the whole project that shows
+    the product working rather than describing it. This plate is where it
+    surfaces. `/demo/player.html` is copied into `public/` at build time by
+    scripts/sync-demo.mjs; the file is self-contained (fonts and capture
+    inlined, no network), so it is a static asset here and nothing more. */}
+<section class="plate" id="demo" aria-labelledby="demo-h"><div class="w rv">
+  <div class="p-head"><span class="ann">Plate 05 — On the record</span></div>
+  <div class="cols">
+    <div>
+      <h2 id="demo-h">Ninety seconds, five beats, <span>every one of them asserted.</span></h2>
+      <p class="lede">Not a screen recording of a happy path. The driver that produced this
+        run is also a test: if the credential frame ever becomes pullable, if the frame id
+        or hash drifts across the restart, if an undeclared action stops being refused, or
+        if any link in the chain fails to match its predecessor, it exits non-zero and says
+        which claim broke. A green run is therefore evidence, not narration.</p>
+      <div class="acts" style="margin-top:26px">
+        <a class="b b-fill" href="/demo/player.html">Watch the run</a>
+        <a class="b b-line" href="#start">Reproduce it yourself</a>
+      </div>
+      <div class="next" style="margin-top:24px">
+        <a href="https://github.com/punarduttrajput/wovyr/tree/main/demo">The driver</a>
+        <a href="/demo/demo.cast">asciicast v2</a>
+        <a href="/01-product/prd-generative-ui-runtime/">The acceptance narrative</a>
+      </div>
+    </div>
+    <div>
+      <div class="reg" style="margin-top:0">
+        <div><span class="no tnum">01</span><span class="nm">Poisoned frame</span>
+          <span class="ds">An agent composes a checkout frame asking for a card number. <span class="vd cut">cut</span></span></div>
+        <div><span class="no tnum">02</span><span class="nm">Safe variant</span>
+          <span class="ds">Presents, content-hashed, and pends on a human decision. <span class="vd snd">sound</span></span></div>
+        <div><span class="no tnum">03</span><span class="nm">kill -9</span>
+          <span class="ds">The server dies mid-flight and resumes on the same frame. <span class="vd snd">sound</span></span></div>
+        <div><span class="no tnum">04</span><span class="nm">Undeclared action</span>
+          <span class="ds">An action the frame never declared is refused; the real approval lands. <span class="vd cut">cut</span></span></div>
+        <div><span class="no tnum">05</span><span class="nm">Chain replay</span>
+          <span class="ds">The session is re-read from the audit chain and verified link by link. <span class="vd snd">sound</span></span></div>
+      </div>
+      <div class="candor"><b>Two beats cut, and the recording says so.</b> Beat 03 kills a
+        process and beat 05 reports an earlier block — neither is itself a cut, so the run
+        declares each outcome rather than letting a viewer infer it from a glyph. Madder
+        marks only what policy actually refused.</div>
+    </div>
+  </div>
+</div></section>
+
 <section class="plate" id="loom" aria-labelledby="loom-h"><div class="w rv">
-  <div class="p-head"><span class="ann">Plate 05 — The loom</span></div>
+  <div class="p-head"><span class="ann">Plate 06 — The loom</span></div>
   <h2 id="loom-h">Eight engines, <span>one Rust binary.</span></h2>
   <p class="lede">The trust layer is not a wrapper around someone else's stack. It runs on a
     complete agent operating system — and you deploy all of it as a single file.</p>
@@ -613,7 +711,7 @@ const FAQ = [
 </div></section>
 
 <section class="plate" id="start" aria-labelledby="start-h"><div class="w rv">
-  <div class="p-head"><span class="ann">Plate 06 — Threading up</span></div>
+  <div class="p-head"><span class="ann">Plate 07 — Threading up</span></div>
   <h2 id="start-h">Running in five minutes, <span>fully offline.</span></h2>
   <p class="lede">No API key. A deterministic mock provider answers, so you can watch the
     whole loop before wiring a real model to it.</p>
@@ -642,7 +740,7 @@ wovyr agents run --local -f examples/agents/hello.yaml \
 </div></section>
 
 <section class="plate" id="open" aria-labelledby="open-h"><div class="w rv">
-  <div class="p-head"><span class="ann">Plate 07 — In the open</span></div>
+  <div class="p-head"><span class="ann">Plate 08 — In the open</span></div>
   <div class="cols">
     <div>
       <h2 id="open-h">Every engine on this page is <span>in the repo.</span></h2>
@@ -687,7 +785,7 @@ wovyr agents run --local -f examples/agents/hello.yaml \
 </div></section>
 
 <section class="plate" id="faq" aria-labelledby="faq-h"><div class="w rv">
-  <div class="p-head"><span class="ann">Plate 08 — Questions</span></div>
+  <div class="p-head"><span class="ann">Plate 09 — Questions</span></div>
   <h2 id="faq-h">The questions people actually <span>ask first.</span></h2>
   <p class="lede">Answered here rather than buried in the specs — and answered to
     the same standard as the rest of the page, which means the "not yet" is stated
@@ -705,13 +803,49 @@ wovyr agents run --local -f examples/agents/hello.yaml \
   </div>
 </div></section>
 
+{/* WEB-305. The design-partner ask used to be a clause inside the closing
+    paragraph's mailto — the single thing the project most needs from a reader,
+    set as an aside. It is its own plate now. No pricing appears here because
+    there is none: Apache-2.0 with no paid edition is stated three plates up,
+    and inventing a commercial tier the repository does not have would break
+    the candour §7 makes a pillar. */}
+<section class="plate" id="partners" aria-labelledby="partners-h"><div class="w rv">
+  <div class="p-head"><span class="ann">Plate 10 — Design partners</span></div>
+  <div class="cols">
+    <div>
+      <h2 id="partners-h">We are taking on a small number of <span>design partners.</span></h2>
+      <p class="lede">If your agents generate interfaces for real users, we would rather hear
+        what breaks in your stack than guess. A design partner gets the work done alongside
+        them and decides what ships next; Wovyr stays Apache-2.0 either way, so this is a
+        conversation about the roadmap, not a sales call.</p>
+      <div class="acts" style="margin-top:26px">
+        <a class="b b-fill" href={`mailto:${CONTACT}?subject=Design%20partner`}>Talk to us</a>
+        <a class="b b-line" href="/01-product/design-partner-onboarding/">What that involves</a>
+      </div>
+    </div>
+    <div class="notes">
+      <div><h3>Bring a real deployment, not a pilot</h3>
+        <p>Agents composing screens for people who are not you. That is the only prerequisite.</p></div>
+      <div><h3>Your constraints set the priorities</h3>
+        <p>Air-gapped, on-prem, a regulator to answer to — the harder the environment, the more useful it is here.</p></div>
+      <div><h3>Nothing is held back for you</h3>
+        <p>Whatever we build for a partner lands in the same public repository. There is no partner-only edition.</p></div>
+      <div><h3>Security reports welcome on the same address</h3>
+        <p>Or through <a href="https://github.com/punarduttrajput/wovyr/blob/main/SECURITY.md"
+          style="color:var(--indigo);border-bottom:1px solid var(--warp-2)">SECURITY.md</a>, which is the route for anything sensitive.</p></div>
+    </div>
+  </div>
+</div></section>
+
 <section class="plate" style="border-bottom:0" aria-labelledby="cta-h"><div class="w rv">
   <div class="cols" style="align-items:center">
     <div>
       <h2 id="cta-h">Put a loom between your agents <span>and your users.</span></h2>
+      {/* The design-partner ask moved up to Plate 10 and is no longer buried
+          here; this line keeps the general contact route only. */}
       <p class="lede" style="margin-bottom:26px">Apache-2.0, all the way down — clone it,
-        fork it, run it on your own hardware. Questions, security reports or
-        design-partner enquiries — <a href={`mailto:${CONTACT}`}
+        fork it, run it on your own hardware. Questions or security reports —
+        <a href={`mailto:${CONTACT}`}
         style="color:var(--indigo);border-bottom:1px solid var(--warp-2)">{CONTACT}</a>.</p>
       <div class="acts">
         <a class="b b-fill" href="/00-executive/vision/">Read the documentation</a>
@@ -737,8 +871,9 @@ wovyr agents run --local -f examples/agents/hello.yaml \
     </div>
     <nav aria-label="Product"><span class="ann">Product</span>
       <a href="#cloth">The cloth</a><a href="#shuttle">The shuttle</a>
+      <a href="/demo/player.html">The 90-second run</a>
       <a href="#loom">The loom</a><a href="#start">Start</a>
-      <a href="#faq">FAQ</a></nav>
+      <a href="#partners">Design partners</a><a href="#faq">FAQ</a></nav>
     <nav aria-label="Docs"><span class="ann">Docs</span>
       <a href="/00-executive/vision/">Vision</a><a href="/02-architecture/c4-context/">Architecture</a>
       <a href="/09-api/">API &amp; SDKs</a><a href="/18-roadmap/">Roadmap</a></nav>
