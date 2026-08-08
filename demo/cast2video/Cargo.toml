@@ -1,0 +1,31 @@
+# Its own workspace root, deliberately. An empty [workspace] table stops cargo
+# walking up into the product workspace, so this demo tool stays out of
+# `cargo build --workspace`, out of CI's lint/test matrix, and out of the
+# dependency graph the v1.4 scope freeze drew a line around. Promote it to a
+# real workspace member only if it stops being a demo tool.
+[workspace]
+
+[package]
+name = "cast2video"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rasterise an asciinema v2 cast into a real video, with a from-scratch TrueType renderer."
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "cast2video"
+path = "src/main.rs"
+
+[dependencies]
+# Deliberately tiny, and every one of these is already in the local registry
+# cache — the host forces `[net] offline = true`, so an uncached dependency is
+# not a slow build, it is a build that cannot happen.
+serde_json = "1"
+png = "0.17"          # PNG frame sequence — the no-ffmpeg output path
+gif = "0.14"          # animated GIF, also ffmpeg-free
+color_quant = "1.1"   # palette reduction for the GIF path
+
+[profile.release]
+opt-level = 3

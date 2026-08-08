@@ -1,0 +1,478 @@
+{
+  "duration_s": 88.861,
+  "recorded_at": "2026-08-06T15:06:55.494Z",
+  "acts": [
+    {
+      "n": 1,
+      "title": "The agent is poisoned. It asks for a card number.",
+      "outcome": "cut",
+      "t": 5.642
+    },
+    {
+      "n": 2,
+      "title": "Take two: the safe frame. It presents, with a content hash.",
+      "outcome": "sound",
+      "t": 32.585
+    },
+    {
+      "n": 3,
+      "title": "Now break it. SIGKILL the server before anyone decides.",
+      "outcome": "sound",
+      "t": 45.9
+    },
+    {
+      "n": 4,
+      "title": "The human decides. Only inside the vocabulary the frame declared.",
+      "outcome": "cut",
+      "t": 64.984
+    },
+    {
+      "n": 5,
+      "title": "Prove it. The whole story, hash-linked, in order.",
+      "outcome": "sound",
+      "t": 82.394
+    }
+  ],
+  "lines": [
+    {
+      "t": 0.011,
+      "text": "\n"
+    },
+    {
+      "t": 0.082,
+      "text": "\u001b[1m  Wovyr — the trust layer for AI-generated interfaces\u001b[0m\n"
+    },
+    {
+      "t": 0.145,
+      "text": "\u001b[90m  A procurement agent reorders lab supplies. Two takes.\u001b[0m\n"
+    },
+    {
+      "t": 0.207,
+      "text": "\n"
+    },
+    {
+      "t": 0.271,
+      "text": "  \u001b[90mbinary   .\\target\\debug\\wovyr.exe\u001b[0m\n"
+    },
+    {
+      "t": 0.333,
+      "text": "  \u001b[90mpolicy   examples/policies/default-ui-policy.yaml\u001b[0m\n"
+    },
+    {
+      "t": 0.395,
+      "text": "  \u001b[90mstate    C:\\Users\\Punar\\AppData\\Local\\Temp\\wovyr-demo-vLt1Sh\u001b[0m\n"
+    },
+    {
+      "t": 0.458,
+      "text": "  \u001b[90m         \u001b[2ma scratch HOME — the real ~/.wovyr is never touched\u001b[0m\u001b[0m\n"
+    },
+    {
+      "t": 2.066,
+      "text": "  \u001b[32m✓\u001b[0m server up — pid 42824, healthz {\"status\":\"ok\",\"version\":\"0.4.1\"}\n"
+    },
+    {
+      "t": 5.642,
+      "text": "\n"
+    },
+    {
+      "t": 5.704,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 5.765,
+      "text": "\u001b[1m\u001b[35m ACT 1\u001b[0m\u001b[1m  The agent is poisoned. It asks for a card number.\u001b[0m\n"
+    },
+    {
+      "t": 5.828,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 5.891,
+      "text": "\u001b[36m▸\u001b[0m A compromised vendor page steers the model into composing this frame:\n"
+    },
+    {
+      "t": 5.954,
+      "text": "  \u001b[90m│\u001b[0m \u001b[33mtext_input\u001b[0m  name: \u001b[31mcard_number\u001b[0m   label: \"Card number\"\n"
+    },
+    {
+      "t": 6.015,
+      "text": "  \u001b[90m│\u001b[0m \u001b[33mbutton\u001b[0m      action: pay        label: \"Continue\"\n"
+    },
+    {
+      "t": 11.555,
+      "text": "  \u001b[2m\u001b[34mPOST /api/v1/workflows   (examples/workflows/ui-checkout-block.yaml)\u001b[0m\n"
+    },
+    {
+      "t": 14.426,
+      "text": "  \u001b[31m✗\u001b[0m execution \u001b[1mfailed\u001b[0m — the trust layer refused the frame\n"
+    },
+    {
+      "t": 18.005,
+      "text": "\u001b[36m▸\u001b[0m Was it ever visible to a human? Ask the only route a renderer can pull from:\n"
+    },
+    {
+      "t": 18.067,
+      "text": "  \u001b[2m\u001b[34mGET /api/v1/ui/frames\u001b[0m\n"
+    },
+    {
+      "t": 18.14,
+      "text": "  \u001b[32m✓\u001b[0m 0 frames. It was blocked \u001b[1mbefore\u001b[0m becoming visible — not filtered after.\n"
+    },
+    {
+      "t": 18.208,
+      "text": "  \u001b[90mThere is no raw-HTML node and no credential-input component in the protocol\u001b[0m\n"
+    },
+    {
+      "t": 18.271,
+      "text": "  \u001b[90mat all, so this is a structural guarantee, not a blocklist that can be evaded.\u001b[0m\n"
+    },
+    {
+      "t": 24.191,
+      "text": "\u001b[36m▸\u001b[0m The refusal is not just a log line. It's in the tamper-evident chain:\n"
+    },
+    {
+      "t": 24.266,
+      "text": "  \u001b[31m│\u001b[0m action   \u001b[1mui.frame.block\u001b[0m\n"
+    },
+    {
+      "t": 24.33,
+      "text": "  \u001b[31m│\u001b[0m outcome  denied\n"
+    },
+    {
+      "t": 24.393,
+      "text": "  \u001b[31m│\u001b[0m \u001b[31mreason   policy `default@v1` rule `sensitive_input`: input `card_number` is\u001b[0m\n"
+    },
+    {
+      "t": 24.456,
+      "text": "  \u001b[31m│\u001b[0m \u001b[31m         named/labelled like a credential or PII prompt (matched token `card`);\u001b[0m\n"
+    },
+    {
+      "t": 24.519,
+      "text": "  \u001b[31m│\u001b[0m \u001b[31m         generated frames must never collect credentials (policy `default@v1`)\u001b[0m\n"
+    },
+    {
+      "t": 24.583,
+      "text": "  \u001b[31m│\u001b[0m actor    wovyr-ui\n"
+    },
+    {
+      "t": 24.647,
+      "text": "  \u001b[31m│\u001b[0m seq 1   hash cdaa4ea8d12e…   prev e3af956634c7…\n"
+    },
+    {
+      "t": 24.708,
+      "text": "  \u001b[32m✓\u001b[0m the rule that fired is named in the record — an auditor can reconstruct why\n"
+    },
+    {
+      "t": 32.585,
+      "text": "\n"
+    },
+    {
+      "t": 32.647,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 32.71,
+      "text": "\u001b[1m\u001b[35m ACT 2\u001b[0m\u001b[1m  Take two: the safe frame. It presents, with a content hash.\u001b[0m\n"
+    },
+    {
+      "t": 32.774,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 32.837,
+      "text": "  \u001b[2m\u001b[34mPOST /api/v1/workflows   (examples/workflows/ui-checkout-approve.yaml)\u001b[0m\n"
+    },
+    {
+      "t": 33.096,
+      "text": "  \u001b[32m✓\u001b[0m frame presented — activity \u001b[1mconfirm\u001b[0m\n"
+    },
+    {
+      "t": 33.163,
+      "text": "  \u001b[32m│\u001b[0m frame_id    \u001b[1muif-312ea719291448d8\u001b[0m\n"
+    },
+    {
+      "t": 33.225,
+      "text": "  \u001b[32m│\u001b[0m frame_hash  \u001b[1m9caabdbdab09fb7035a662b04feadf519e94095c9288ffbc35c39ef99e173786\u001b[0m\n"
+    },
+    {
+      "t": 36.818,
+      "text": "\u001b[36m▸\u001b[0m What the human will actually see (a constrained vocabulary, nothing else):\n"
+    },
+    {
+      "t": 36.874,
+      "text": "  \u001b[32m│\u001b[0m \u001b[1mConfirm order\u001b[0m\n"
+    },
+    {
+      "t": 36.937,
+      "text": "  \u001b[32m│\u001b[0m Reorder 3 boxes of pipette tips from LabSupply Co?\n"
+    },
+    {
+      "t": 37,
+      "text": "  \u001b[32m│\u001b[0m \u001b[90mVendor\u001b[0m  LabSupply Co\n"
+    },
+    {
+      "t": 37.062,
+      "text": "  \u001b[32m│\u001b[0m \u001b[90mTotal \u001b[0m  $412.80\n"
+    },
+    {
+      "t": 37.125,
+      "text": "  \u001b[32m│\u001b[0m PO number  \u001b[2m[________]\u001b[0m \u001b[90m(required)\u001b[0m\n"
+    },
+    {
+      "t": 37.188,
+      "text": "  \u001b[32m│\u001b[0m \u001b[32m[ Approve ]\u001b[0m  \u001b[90m[ Cancel ]\u001b[0m\n"
+    },
+    {
+      "t": 37.251,
+      "text": "  \u001b[90mthe execution is now suspended, durably, waiting on a human\u001b[0m\n"
+    },
+    {
+      "t": 45.9,
+      "text": "\n"
+    },
+    {
+      "t": 45.962,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 46.024,
+      "text": "\u001b[1m\u001b[35m ACT 3\u001b[0m\u001b[1m  Now break it. SIGKILL the server before anyone decides.\u001b[0m\n"
+    },
+    {
+      "t": 46.086,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 46.149,
+      "text": "  \u001b[31m✗\u001b[0m kill -9 42824   \u001b[90m(no graceful shutdown, no drain, no flush)\u001b[0m\n"
+    },
+    {
+      "t": 46.215,
+      "text": "  \u001b[32m✓\u001b[0m server is gone — the port refuses connections\n"
+    },
+    {
+      "t": 51.349,
+      "text": "\u001b[36m▸\u001b[0m Restart it. Same state directory, brand-new process:\n"
+    },
+    {
+      "t": 52.885,
+      "text": "  \u001b[32m✓\u001b[0m server back up — pid 57140, healthz {\"status\":\"ok\",\"version\":\"0.4.1\"}\n"
+    },
+    {
+      "t": 56.86,
+      "text": "  \u001b[2m\u001b[34mGET /api/v1/ui/frames\u001b[0m\n"
+    },
+    {
+      "t": 56.929,
+      "text": "  \u001b[32m│\u001b[0m frame_id    uif-312ea719291448d8\n"
+    },
+    {
+      "t": 56.984,
+      "text": "  \u001b[32m│\u001b[0m frame_hash  9caabdbdab09fb7035a662b04feadf519e94095c9288ffbc35c39ef99e173786\n"
+    },
+    {
+      "t": 57.047,
+      "text": "  \u001b[32m✓\u001b[0m \u001b[1midentical\u001b[0m to before the kill — id and hash, byte for byte\n"
+    },
+    {
+      "t": 57.11,
+      "text": "  \u001b[32m✓\u001b[0m the pending decision survived a termination it could not catch\n"
+    },
+    {
+      "t": 64.984,
+      "text": "\n"
+    },
+    {
+      "t": 65.046,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 65.109,
+      "text": "\u001b[1m\u001b[35m ACT 4\u001b[0m\u001b[1m  The human decides. Only inside the vocabulary the frame declared.\u001b[0m\n"
+    },
+    {
+      "t": 65.173,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 65.235,
+      "text": "\u001b[36m▸\u001b[0m First, something the frame never offered — action \"launch\":\n"
+    },
+    {
+      "t": 65.297,
+      "text": "  \u001b[2m\u001b[34mPOST /api/v1/ui/decisions/uif-312ea719291448d8\u001b[0m\n"
+    },
+    {
+      "t": 65.359,
+      "text": "  \u001b[2m\u001b[34m     {\"action\":\"launch\"}\u001b[0m\n"
+    },
+    {
+      "t": 65.43,
+      "text": "  \u001b[31m✗\u001b[0m 400 validation_failed — refused at the boundary, never reached the workflow\n"
+    },
+    {
+      "t": 70.96,
+      "text": "\u001b[36m▸\u001b[0m Now the real approval, with the PO number the frame required:\n"
+    },
+    {
+      "t": 71.023,
+      "text": "  \u001b[2m\u001b[34mPOST /api/v1/ui/decisions/uif-312ea719291448d8\u001b[0m\n"
+    },
+    {
+      "t": 71.085,
+      "text": "  \u001b[2m\u001b[34m     {\"action\":\"approve\",\"values\":{\"po_number\":\"PO-4471\"}}\u001b[0m\n"
+    },
+    {
+      "t": 71.197,
+      "text": "  \u001b[32m✓\u001b[0m decided — the workflow resumes\n"
+    },
+    {
+      "t": 71.268,
+      "text": "  \u001b[32m✓\u001b[0m execution \u001b[1m\u001b[32mcompleted\u001b[0m\n"
+    },
+    {
+      "t": 74.08,
+      "text": "\u001b[36m▸\u001b[0m The decision is now part of the execution's durable event log, not a side note:\n"
+    },
+    {
+      "t": 74.155,
+      "text": "  \u001b[32m│\u001b[0m \u001b[2mactivity_completed\u001b[0m  id: confirm\n"
+    },
+    {
+      "t": 74.221,
+      "text": "  \u001b[32m│\u001b[0m action        \u001b[1mapprove\u001b[0m\n"
+    },
+    {
+      "t": 74.284,
+      "text": "  \u001b[32m│\u001b[0m values        {\"po_number\":\"PO-4471\"}\n"
+    },
+    {
+      "t": 74.345,
+      "text": "  \u001b[32m│\u001b[0m decided_by    \u001b[1mprocurement-admin\u001b[0m   \u001b[90m(the verified principal, not a client claim)\u001b[0m\n"
+    },
+    {
+      "t": 74.408,
+      "text": "  \u001b[32m│\u001b[0m decided_at_ms 1786028797790\n"
+    },
+    {
+      "t": 74.47,
+      "text": "  \u001b[32m│\u001b[0m frame_hash    9caabdbdab09fb7035a662b0…   \u001b[90m(binds the decision to exactly what was shown)\u001b[0m\n"
+    },
+    {
+      "t": 74.531,
+      "text": "  \u001b[32m✓\u001b[0m you cannot claim a human approved something other than what they saw\n"
+    },
+    {
+      "t": 82.394,
+      "text": "\n"
+    },
+    {
+      "t": 82.457,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 82.52,
+      "text": "\u001b[1m\u001b[35m ACT 5\u001b[0m\u001b[1m  Prove it. The whole story, hash-linked, in order.\u001b[0m\n"
+    },
+    {
+      "t": 82.584,
+      "text": "\u001b[1m\u001b[35m──────────────────────────────────────────────────────────────────────────\u001b[0m\n"
+    },
+    {
+      "t": 82.646,
+      "text": "\u001b[36m▸\u001b[0m Every record the server wrote for this session — nothing filtered out:\n"
+    },
+    {
+      "t": 82.717,
+      "text": "  \u001b[32m✓\u001b[0m \u001b[2mseq   0\u001b[0m  \u001b[2mworkflow.execution.submit \u001b[0m\u001b[90mdemo-poisoned-1786028726  \u001b[0m\u001b[2mprev  → e3af9566…\u001b[0m\n"
+    },
+    {
+      "t": 82.786,
+      "text": "  \u001b[31m✗\u001b[0m \u001b[2mseq   1\u001b[0m  \u001b[1mui.frame.block            \u001b[0m\u001b[90muif-ffb833a180ec02ca      \u001b[0m\u001b[2mprev e3af9566… → cdaa4ea8…\u001b[0m\n"
+    },
+    {
+      "t": 82.848,
+      "text": "  \u001b[32m✓\u001b[0m \u001b[2mseq   2\u001b[0m  \u001b[2mworkflow.execution.submit \u001b[0m\u001b[90mdemo-checkout-1786028726  \u001b[0m\u001b[2mprev cdaa4ea8… → 245cda8a…\u001b[0m\n"
+    },
+    {
+      "t": 82.911,
+      "text": "  \u001b[32m✓\u001b[0m \u001b[2mseq   3\u001b[0m  \u001b[1mui.frame.present          \u001b[0m\u001b[90muif-312ea719291448d8:9ca  \u001b[0m\u001b[2mprev 245cda8a… → 40f7ab69…\u001b[0m\n"
+    },
+    {
+      "t": 82.974,
+      "text": "  \u001b[32m✓\u001b[0m \u001b[2mseq   4\u001b[0m  \u001b[1mui.decision.submit        \u001b[0m\u001b[90muif-312ea719291448d8:9ca  \u001b[0m\u001b[2mprev 40f7ab69… → d57c1023…\u001b[0m\n"
+    },
+    {
+      "t": 83.036,
+      "text": "\n"
+    },
+    {
+      "t": 83.099,
+      "text": "  \u001b[32m✓\u001b[0m chain verified client-side: 5 entries, 4/4 prev_hash values match their predecessor\n"
+    },
+    {
+      "t": 83.163,
+      "text": "  \u001b[90meach hash is a keyed HMAC, so an attacker with full write access to the log\u001b[0m\n"
+    },
+    {
+      "t": 83.226,
+      "text": "  \u001b[90mcan neither forge an interior entry (no key) nor truncate the tail undetected\u001b[0m\n"
+    },
+    {
+      "t": 83.289,
+      "text": "  \u001b[90m(a monotonic head anchor is written separately on every append).\u001b[0m\n"
+    },
+    {
+      "t": 88.042,
+      "text": "\n"
+    },
+    {
+      "t": 88.103,
+      "text": "\u001b[1m\u001b[32m══════════════════════════════════════════════════════════════════════════\u001b[0m\n"
+    },
+    {
+      "t": 88.166,
+      "text": "\u001b[1m  What just happened, in one line each:\u001b[0m\n"
+    },
+    {
+      "t": 88.23,
+      "text": "  \u001b[31m✗\u001b[0m a credential input never reached a human — structurally impossible\n"
+    },
+    {
+      "t": 88.293,
+      "text": "  \u001b[32m✓\u001b[0m a legitimate frame rendered, hashed, and pended durably\n"
+    },
+    {
+      "t": 88.357,
+      "text": "  \u001b[32m✓\u001b[0m kill -9 changed nothing: same frame_id, same frame_hash\n"
+    },
+    {
+      "t": 88.419,
+      "text": "  \u001b[31m✗\u001b[0m an undeclared action was refused before the workflow saw it\n"
+    },
+    {
+      "t": 88.482,
+      "text": "  \u001b[32m✓\u001b[0m every step is provable to an auditor, in order, tamper-evident\n"
+    },
+    {
+      "t": 88.545,
+      "text": "\u001b[1m\u001b[32m══════════════════════════════════════════════════════════════════════════\u001b[0m\n"
+    },
+    {
+      "t": 88.609,
+      "text": "\n"
+    },
+    {
+      "t": 88.672,
+      "text": "  \u001b[90mSelf-hosted. One Rust binary. Runs air-gapped.\u001b[0m\n"
+    },
+    {
+      "t": 88.735,
+      "text": "  \u001b[1mwovyr.com\u001b[0m   \u001b[90m·   cargo install wovyr-cli\u001b[0m\n"
+    },
+    {
+      "t": 88.797,
+      "text": "\n"
+    }
+  ]
+}
